@@ -11,3 +11,4 @@ webui/node_modules/
 webui/dist/
 webui/tsconfig.tsbuildinfo
 .*
+*.egg-info

@@ -27,6 +27,8 @@ import time
 import uuid
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from ..core.types import (
     AudioConfig,
     AudioEncoding,
@@ -34,6 +36,7 @@ from ..core.types import (
     InputMode,
     SessionConfig,
 )
+from ..core.timing import ServerTimingAccumulator
 from ..interface import (
     OutputPipeline,
     SessionStartRequest,
@@ -46,6 +49,12 @@ from ..interface import (
     serialize_stream_event,
     to_core_output_policy,
     to_core_timing_context,
+)
+from ..interface.vad import (
+    TTSVADConfig,
+    VADMode,
+    create_vad_processor,
+    vad_config_from_dict,
 )
 from . import tts_pb2, tts_pb2_grpc
 
@@ -82,13 +91,45 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
     ) -> str:
         session_id = session_id or str(uuid.uuid4())
         config = start_request.config
+
+        # Create server timing accumulator for cross-thread observability
+        timing_acc = ServerTimingAccumulator()
+        timing_acc.request_received_epoch_ms = int(round(time.time() * 1000.0))
+        timing_acc.session_created_epoch_ms = timing_acc.request_received_epoch_ms
+        timing_acc.vad_policy = config.output_policy.vad.strategy or "disabled"
+        timing_acc.text_input_mode = config.input_mode.value
+
+        # Store accumulator reference in timing extra for engine thread access
+        config.timing.extra["_server_timing_accumulator"] = timing_acc
+
         pipeline = OutputPipeline(
             start_request,
             request_received_monotonic=time.monotonic(),
+            timing_accumulator=timing_acc,
         )
 
+        # Create per-session VAD processor from config
+        vad_config = _build_vad_config(config)
+        vad_processor = create_vad_processor(vad_config, sample_rate=ENGINE_SAMPLE_RATE)
+
         async def on_audio(sid, data):
-            frame = pipeline.convert_audio_chunk(data)
+            # Apply VAD filtering before output pipeline
+            raw = np.frombuffer(data, dtype=np.float32)
+            if raw.size == 0:
+                return
+            # Convert to int16 for VAD processing
+            audio_int16 = np.clip(raw, -1.0, 1.0)
+            audio_int16 = (audio_int16 * 32767.0).astype(np.int16)
+
+            filtered_int16 = vad_processor.process_chunk(audio_int16)
+            if filtered_int16.size == 0:
+                return
+
+            # Convert back to float32 bytes for OutputPipeline
+            filtered_f32 = (filtered_int16.astype(np.float32) / 32767.0)
+            filtered_bytes = filtered_f32.tobytes()
+
+            frame = pipeline.convert_audio_chunk(filtered_bytes)
             await audio_queue.put(("audio", _make_audio_response(frame.pcm_bytes, frame.audio, meta=frame.meta)))
 
         async def on_event(sid, event: dict):
@@ -100,6 +141,16 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             ))
 
         async def on_done(sid, metrics):
+            # Flush any remaining audio from VAD
+            final_int16 = vad_processor.flush()
+            if final_int16.size > 0:
+                final_f32 = (final_int16.astype(np.float32) / 32767.0)
+                final_bytes = final_f32.tobytes()
+                frame = pipeline.convert_audio_chunk(final_bytes)
+                await audio_queue.put(("audio", _make_audio_response(frame.pcm_bytes, frame.audio, meta=frame.meta)))
+
+            # Inject VAD observability into metrics
+            _inject_vad_metrics(vad_processor, pipeline, metrics)
             await audio_queue.put((
                 "event",
                 _make_event_response_from_contract(build_done_event(sid, metrics, pipeline)),
@@ -727,3 +778,62 @@ def _validate_audio_config(audio: AudioConfig) -> None:
 def _convert_audio_chunk(pcm_bytes: bytes, audio_config: AudioConfig) -> bytes:
     start_request = SessionStartRequest(session_id="", config=SessionConfig(audio=audio_config))
     return OutputPipeline(start_request).convert_audio_chunk(pcm_bytes).pcm_bytes
+
+
+def _build_vad_config(session_config: SessionConfig) -> TTSVADConfig:
+    """Build TTSVADConfig from SessionConfig's output_policy.vad."""
+    vad = session_config.output_policy.vad
+    if not vad.enabled or vad.strategy == "disabled":
+        return TTSVADConfig(mode=VADMode.DISABLED)
+
+    mode_str = vad.strategy.strip().lower()
+    try:
+        mode = VADMode(mode_str)
+    except ValueError:
+        logger.warning("Unsupported VAD strategy '%s', disabling VAD", mode_str)
+        return TTSVADConfig(mode=VADMode.DISABLED)
+
+    return TTSVADConfig(
+        mode=mode,
+        chunk_ms=vad.chunk_ms,
+        begin_threshold=vad.begin_threshold,
+        begin_count=vad.begin_count,
+        end_threshold=vad.end_threshold,
+        end_count=vad.end_count,
+        start_margin_ms=vad.start_margin_ms,
+        # Pass through any extra config from the config dict
+        **{
+            k: v for k, v in vad.config.items()
+            if k in ("preemphasis", "tenvad_hop_size", "tenvad_threshold")
+        },
+    )
+
+
+def _inject_vad_metrics(
+    vad_processor: "TTSVADProcessor",
+    pipeline: OutputPipeline,
+    metrics: dict,
+) -> None:
+    """Inject VAD observability into done_meta metrics and OutputPipeline."""
+    m = vad_processor.metrics
+    sr = ENGINE_SAMPLE_RATE
+
+    if not vad_processor.config.enabled:
+        return
+
+    prefix_trimmed_ms = m.prefix_trimmed_samples / sr * 1000.0
+    tail_trimmed_ms = m.tail_trimmed_samples / sr * 1000.0
+    original_audio_ms = m.original_audio_samples / sr * 1000.0
+    effective_audio_ms = m.effective_audio_samples / sr * 1000.0
+
+    metrics["vad_mode"] = vad_processor.config.mode.value
+    metrics["vad_prefix_trimmed_ms"] = f"{prefix_trimmed_ms:.3f}"
+    metrics["vad_tail_trimmed_ms"] = f"{tail_trimmed_ms:.3f}"
+    metrics["vad_original_audio_ms"] = f"{original_audio_ms:.3f}"
+    metrics["vad_effective_audio_ms"] = f"{effective_audio_ms:.3f}"
+    metrics["vad_begin_count"] = str(m.begin_trigger_count)
+    metrics["vad_end_count"] = str(m.end_trigger_count)
+
+    # Record prefix trim in OutputPipeline for first-effective-audio tracking
+    if m.first_effective_audio_found and m.prefix_trimmed_samples > 0:
+        pipeline.record_prefix_trim(m.prefix_trimmed_samples, sr)

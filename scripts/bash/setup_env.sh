@@ -208,6 +208,10 @@ install_dependencies() {
     # Serving / protocol test deps used by the standalone engine gateway and
     # the unified endpoint test tools.
     pip_install aiohttp grpcio grpcio-tools requests "tritonclient[grpc]"
+
+    # TenVad: ONNX-based VAD for TTS output gating (optional — energy VAD
+    # is always available as fallback).  Non-fatal if install fails.
+    install_ten_vad
 }
 
 # ---- Step 4: Model download ----------------------------------------------

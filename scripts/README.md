@@ -15,21 +15,34 @@ Open-source users need a small number of clear entry points, while maintainers s
 | --- | --- | --- |
 | `scripts/bash/` | lifecycle and operator workflows | users deploying or packaging the project |
 | `scripts/bash/lib/` | shared shell library code | maintainers extending shell flows |
-| `scripts/export/` | model export implementation | maintainers working on ONNX / TRT export |
+| `scripts/export/` | model export implementation (01–09) | maintainers working on ONNX / TRT export |
 | `scripts/python/qwen3tts_tools/` | shared Python helper layer for tooling | maintainers adding or refactoring CLIs |
-| `scripts/python/` | thin CLIs, analysis helpers, and compatibility wrappers | advanced developers and maintainers |
+| `scripts/python/` | build/config/manifest tools (9 scripts) | advanced developers and maintainers |
 | `scripts/compose/` | container entrypoints and compose support | deployment maintainers |
 | `scripts/demo/` | demo launchers | demo users |
+
+## Current scripts/python/ Inventory
+
+| Script | Purpose |
+|--------|---------|
+| `audit_tooling_surface.py` | Governance audit for scripts/ + tests/ surface |
+| `build_talker_code2wav_fused_trt_host.py` | Build fused TRT engine on host |
+| `codec_embedding_sum.py` | Codec embedding sum utility |
+| `generate_triton_configs.py` | Generate Triton model repository configs |
+| `raw_websocket.py` | Minimal RFC6455 WebSocket client helpers |
+| `triton_manifest_io.py` | Read/write triton_manifest.json |
+| `trt_fused_io_formats.py` | Fused TRT engine I/O format utilities |
+| `trt_fused_talk_c2w_profiles.py` | Fused Talker + Code2Wav TRT profiles |
+| `update_triton_manifest_profile.py` | Update manifest with engine profile |
 
 ## Governance Rules
 
 - A new user-facing validation or benchmark tool should live in `tests/tools/`, not `scripts/python/`.
 - A new build, export, deployment, or packaging helper belongs in `scripts/`.
-- If two Python entry points need the same repo-path, endpoint, CSV parsing, or WAV-writing logic, move it into `scripts/python/qwen3tts_tools/`.
+- If two Python entry points need the same repo-path, endpoint, CSV parsing, or WAV-writing logic, move it into `qwen3_tts_protocol` (for types/schemas) or `scripts/python/qwen3tts_tools/` (for repo-internal helpers).
 - If two shell entry points need the same behavior, add it under `scripts/bash/lib/` and source it through `scripts/bash/tools.sh`.
 - Keep `scripts/python/` entry points thin. The file should mainly parse args, call shared code, and render results.
 - Compatibility wrappers are acceptable when an older command path is already in docs or teammate muscle memory, but the wrapper should delegate to the canonical implementation.
-- Generated caches such as `__pycache__/` should never be treated as source.
 
 ## Audit Workflow
 
@@ -46,14 +59,3 @@ The report highlights:
 - how many standalone Python entry points now exist
 - where `sys.path` bootstrap code is still duplicated
 - which function/class names are duplicated enough to consider extracting
-
-## Migration Direction
-
-The first shared layer intentionally stays small:
-
-- repo/workspace constants
-- serving endpoint defaults
-- common CLI parsing helpers
-- WAV writing helpers
-
-That keeps the governance layer useful without turning it into another monolith. Export/model-specific logic can move later once the thin-entrypoint pattern is stable.

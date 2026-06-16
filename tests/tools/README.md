@@ -2,9 +2,10 @@
 
 `tests/tools/` contains scripts that are useful for validation, benchmarking, audio inspection, and debugging, but are not pytest tests.
 
-Shared cross-tool helper code should live in `scripts/python/qwen3tts_tools/` once more than one manual tool needs it. Keep files in `tests/tools/` focused on test intent and CLI behavior.
-
-When a manual tool and a pytest suite need the same standalone-engine helper logic, put that shared layer in `tests/support/` instead of importing a `tests/e2e/test_*.py` module.
+Shared cross-tool helper code should live in `qwen3_tts_protocol` (types/schemas) or
+`scripts/python/qwen3tts_tools/` (repo-internal helpers like path constants).
+When a manual tool and a pytest suite need the same standalone-engine helper logic,
+put that shared layer in `tests/support/` instead of importing a `tests/e2e/test_*.py` module.
 
 ## Primary Tool
 
@@ -27,14 +28,6 @@ mamba run -n qwen3-tts python tests/tools/serving_endpoints.py \
   --ttft-samples 30
 ```
 
-The TTFT report includes:
-
-- sample count and warmup count
-- mean, sample variance, population variance, standard deviation, coefficient of variation
-- min, p50, p90, p95, max, range
-- one fluctuation bar per measured sample, centered on the mean
-- JSON details when `--json` is used
-
 ## Tool Groups
 
 Serving and endpoint checks:
@@ -52,6 +45,7 @@ Audio comparison and listening:
 - `generate_audio_compare.py`
 - `gen_reference_audio.py`
 - `gen_engine_audio.py`
+- `gen_audio.py`
 - `long_streaming_listen_ab.py`
 - `run_engine_long_case.py`
 
@@ -70,14 +64,31 @@ Export, ONNX, and TensorRT verification:
 - `verify_prototype_parity.py`
 - `verify_speech_tokenizer_encoder.py`
 - `verify_trt_talker.py`
+- `verify_onnx_autoregressive.py`
 - `assemble_model_repo_check.sh`
 - `dockerfile_triton_check.sh`
 - `pad_tolerance_experiment.py`
 - `greedy_baseline.py`
 
+Prefill and rollout comparison (migrated from scripts/python/):
+
+- `compare_live_vs_exported_prefill.py`
+- `compare_prefill_paths.py`
+- `official_prefill.py`
+- `official_vs_manual_rollout.py`
+- `pytorch_streaming_baseline.py`
+
+Code predictor and parity tools (migrated from scripts/python/):
+
+- `cp_sampled_parity.py`
+- `greedy_punish_mode_matrix.py`
+- `greedy_punish_parity.py`
+- `greedy_punish_stagewise_compare.py`
+- `suggest_engine_profile.py`
+
 ## Maintenance
 
-Before adding a new tool here, check whether a close neighbor already exists and whether the shared logic belongs in `scripts/python/qwen3tts_tools/`. For a project-wide surface report, run:
+Before adding a new tool here, check whether a close neighbor already exists and whether the shared logic belongs in `qwen3_tts_protocol` or `scripts/python/qwen3tts_tools/`. For a project-wide surface report, run:
 
 ```bash
 python scripts/python/audit_tooling_surface.py

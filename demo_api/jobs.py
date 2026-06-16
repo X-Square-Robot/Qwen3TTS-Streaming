@@ -8,8 +8,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .audio_store import AudioStore
-from .schemas import summarize_ttft
-from .triton_client import TtsRequest, TritonUnavailable, measure_once
+from qwen3_tts_protocol.schemas import summarize_ttft
+from qwen3_tts_protocol.triton_types import TtsRequest
+from .triton_client import TritonUnavailable, measure_once
 
 
 @dataclass

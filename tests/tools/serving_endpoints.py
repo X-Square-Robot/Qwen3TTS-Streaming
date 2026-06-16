@@ -51,7 +51,7 @@ from qwen3tts_tools.common import (
     split_csv_arg,
     story_path,
 )
-from tests.token_streaming import (
+from tests.support.token_streaming import (
     DEFAULT_TOKEN_STREAM_TEXT,
     TokenChunkingUnavailable,
     build_token_text_chunks,

@@ -33,6 +33,7 @@ class OutputPipeline:
         native_sample_rate: int = ENGINE_SAMPLE_RATE,
         request_received_monotonic: float | None = None,
         request_received_epoch_ms: int | None = None,
+        timing_accumulator: Any = None,
     ) -> None:
         self._start_request = start_request
         self._audio = start_request.config.audio
@@ -47,8 +48,19 @@ class OutputPipeline:
             if request_received_epoch_ms is not None
             else int(round(time.time() * 1000.0))
         )
-        self._first_audio_epoch_ms: int | None = None
+        self._first_raw_audio_epoch_ms: int | None = None
+        self._first_effective_audio_epoch_ms: int | None = None
+        self._first_raw_audio_monotonic: float | None = None
+        self._first_effective_audio_monotonic: float | None = None
         self._chunk_index = 0
+
+        # Prefix trim / output gating observability (set when gating lands)
+        self._prefix_trim_applied: bool = False
+        self._prefix_trimmed_samples: int = 0
+        self._prefix_trimmed_ms: float = 0.0
+
+        # Cross-thread timing accumulator (optional, set by gateway)
+        self._timing_accumulator = timing_accumulator
 
     @property
     def start_request(self) -> SessionStartRequest:
@@ -61,6 +73,12 @@ class OutputPipeline:
     @property
     def chunk_count(self) -> int:
         return self._chunk_index
+
+    def record_prefix_trim(self, trimmed_samples: int, sample_rate: int) -> None:
+        """Record prefix trim observability when output gating removes samples."""
+        self._prefix_trim_applied = True
+        self._prefix_trimmed_samples = trimmed_samples
+        self._prefix_trimmed_ms = (trimmed_samples / sample_rate) * 1000.0
 
     def convert_audio_chunk(self, pcm_bytes: bytes) -> AudioFrame:
         audio = np.frombuffer(pcm_bytes, dtype=np.float32)
@@ -76,14 +94,31 @@ class OutputPipeline:
         self._chunk_index += 1
         first_chunk = chunk_index == 0
         now_epoch_ms = int(round(time.time() * 1000.0))
+        now_monotonic = time.monotonic()
         meta = {
             "chunk_index": str(chunk_index),
             "timing_contract": TIMING_CONTRACT,
         }
         if first_chunk:
-            self._first_audio_epoch_ms = now_epoch_ms
+            # Raw audio = audio arriving from engine, before any output gating.
+            # Effective audio = audio after gating (same as raw when no gating).
+            self._first_raw_audio_epoch_ms = now_epoch_ms
+            self._first_raw_audio_monotonic = now_monotonic
+            self._first_effective_audio_epoch_ms = now_epoch_ms
+            self._first_effective_audio_monotonic = now_monotonic
+
             meta["first_audio_chunk"] = "true"
-            meta["server_ttft_ms"] = f"{(time.monotonic() - self._request_received_monotonic) * 1000.0:.3f}"
+
+            # Semantic metric names (canonical)
+            raw_ttft = (now_monotonic - self._request_received_monotonic) * 1000.0
+            meta["server_ttft_raw_ms"] = f"{raw_ttft:.3f}"
+            meta["server_ttft_effective_ms"] = f"{raw_ttft:.3f}"
+            meta["server_session_create_to_first_raw_audio_ms"] = f"{raw_ttft:.3f}"
+            meta["server_first_raw_audio_epoch_ms"] = str(now_epoch_ms)
+            meta["server_first_effective_audio_epoch_ms"] = str(now_epoch_ms)
+
+            # Deprecated aliases (same value, matches old behavior)
+            meta["server_ttft_ms"] = f"{raw_ttft:.3f}"
             meta["server_first_audio_epoch_ms"] = str(now_epoch_ms)
 
         return AudioFrame(
@@ -103,6 +138,40 @@ class OutputPipeline:
             "server_total_latency_ms": f"{(time.monotonic() - self._request_received_monotonic) * 1000.0:.3f}",
             "audio_chunk_count": str(self._chunk_index),
         }
+
+        # Raw / effective audio timestamps
+        if self._first_raw_audio_epoch_ms is not None:
+            meta["server_first_raw_audio_epoch_ms"] = str(self._first_raw_audio_epoch_ms)
+        if self._first_effective_audio_epoch_ms is not None:
+            meta["server_first_effective_audio_epoch_ms"] = str(self._first_effective_audio_epoch_ms)
+
+        # Derived raw-to-effective latency (gating delay)
+        if (
+            self._first_raw_audio_monotonic is not None
+            and self._first_effective_audio_monotonic is not None
+        ):
+            gating_ms = (self._first_effective_audio_monotonic - self._first_raw_audio_monotonic) * 1000.0
+            meta["server_first_raw_to_first_effective_audio_ms"] = f"{gating_ms:.3f}"
+
+        # Prefix trim / output gating
+        if self._prefix_trim_applied:
+            meta["server_prefix_trim_applied"] = "true"
+            meta["server_prefix_trimmed_ms"] = f"{self._prefix_trimmed_ms:.3f}"
+        else:
+            meta["server_prefix_trim_applied"] = "false"
+
+        # ServerTimingAccumulator data (cross-thread lifecycle timestamps)
+        if self._timing_accumulator is not None:
+            acc_meta = self._timing_accumulator.to_meta_dict()
+            # Merge accumulator data (don't overwrite existing pipeline data)
+            for key, value in acc_meta.items():
+                if key not in meta:
+                    meta[key] = value
+
+        # Deprecated aliases for backward compatibility
+        if self._first_effective_audio_epoch_ms is not None:
+            meta["server_first_audio_epoch_ms"] = str(self._first_effective_audio_epoch_ms)
+
         timing = self._start_request.timing
         if timing.request_id:
             meta["request_id"] = timing.request_id
@@ -115,9 +184,9 @@ class OutputPipeline:
         if timing.client_end_ts_ms > 0:
             meta["client_end_ts_ms"] = str(timing.client_end_ts_ms)
         for key, value in dict(timing.extra or {}).items():
+            if key.startswith("_"):
+                continue  # skip internal keys (e.g. _server_timing_accumulator)
             meta[str(key)] = str(value)
-        if self._first_audio_epoch_ms is not None:
-            meta["server_first_audio_epoch_ms"] = str(self._first_audio_epoch_ms)
         if isinstance(metrics, dict):
             for key, value in metrics.items():
                 if key == "error":

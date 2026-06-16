@@ -1,4 +1,14 @@
-"""Shared Triton streaming helpers for tests/tools."""
+"""Shared Triton streaming helpers for tests/tools.
+
+.. deprecated::
+   Types and payload builders have moved to ``qwen3_tts_protocol``.
+   This module re-exports them for backward compatibility and keeps the
+   synchronous ``infer_stream`` / ``infer_stream_sequence`` /
+   ``infer_text_stream`` helpers that depend on the live Triton gRPC
+   client (not part of the protocol layer).
+
+   New code should import from ``qwen3_tts_protocol`` directly.
+"""
 
 from __future__ import annotations
 
@@ -12,125 +22,29 @@ from typing import Any, Sequence
 
 import numpy as np
 
-SAMPLE_RATE = 24000
+# ---- Re-exports from the protocol layer ----
+from qwen3_tts_protocol.audio import (  # noqa: F401
+    DEFAULT_SAMPLE_RATE as SAMPLE_RATE,
+    StreamResult,
+    decode_audio_bytes,
+    decode_obj,
+    save_wav,
+)
+from qwen3_tts_protocol.triton_types import (  # noqa: F401
+    build_request_payload,
+    build_text_stream_requests,
+    build_variant_request_payload,
+)
+from qwen3_tts_protocol.triton_types import build_request_payload as _build_request_payload
+
+# ---- Constants kept locally (Triton-specific) ----
 REQUEST_MODEL_NAME = "tts_orchestrator"
 
 
-@dataclass
-class StreamResult:
-    text: str
-    session_id: str = ""
-    first_chunk_ms: float | None = None
-    total_ms: float = 0.0
-    num_chunks: int = 0
-    total_samples: int = 0
-    error: str | None = None
-    warnings: list[str] = field(default_factory=list)
-    audio: np.ndarray | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+# ---- Synchronous stream helpers (require live tritonclient) ----
 
-    @property
-    def duration_sec(self) -> float:
-        return self.total_samples / SAMPLE_RATE if self.total_samples > 0 else 0.0
-
-    @property
-    def rtf(self) -> float:
-        if self.duration_sec <= 0 or self.total_ms <= 0:
-            return 0.0
-        return (self.total_ms / 1000) / self.duration_sec
-
-
-def decode_obj(value: Any) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8")
-    return str(value)
-
-
-def decode_audio_bytes(raw: bytes, audio_format: dict[str, Any]) -> np.ndarray:
-    if (audio_format.get("encoding") or "pcm_f32") == "pcm_s16le":
-        return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
-    return np.frombuffer(raw, dtype=np.float32)
-
-
-def save_wav(audio: np.ndarray, path: str | Path, sample_rate: int = SAMPLE_RATE) -> Path:
-    out_path = Path(path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    pcm16 = np.clip(audio, -1.0, 1.0)
-    pcm16 = (pcm16 * 32767).astype(np.int16)
-    with wave.open(str(out_path), "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm16.tobytes())
-    return out_path
-
-
-def build_request_payload(
-    *,
-    text: str,
-    task_type: str = "",
-    language: str = "auto",
-    speaker: str = "",
-    instruct: str = "",
-    action: str = "",
-    session_id: str = "",
-    extra: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "text": text,
-        "language": language,
-    }
-    if task_type:
-        payload["task_type"] = task_type
-    if speaker:
-        payload["speaker"] = speaker
-    if instruct:
-        payload["instruct"] = instruct
-    if action:
-        payload["action"] = action
-    if session_id:
-        payload["session_id"] = session_id
-    if extra:
-        payload.update(extra)
-    return payload
-
-
-def build_variant_request_payload(
-    *,
-    variant: str,
-    text: str,
-    language: str = "auto",
-    speaker: str = "",
-    instruct: str = "",
-    extra: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    normalized = variant.lower()
-    if normalized.startswith("design"):
-        return build_request_payload(
-            text=text,
-            task_type="voice_design",
-            language=language,
-            instruct=instruct,
-            extra=extra,
-        )
-    if normalized.startswith("custom"):
-        return build_request_payload(
-            text=text,
-            task_type="custom_voice",
-            language=language,
-            speaker=speaker,
-            instruct=instruct,
-            extra=extra,
-        )
-    raise ValueError(
-        f"Variant {variant!r} is not supported by this helper; use custom-* or design-*."
-    )
-
-
-def build_stream_request(
-    grpcclient,
-    req_dict: dict[str, Any],
-):
+def build_stream_request(grpcclient, req_dict: dict[str, Any]):
+    """Build a Triton InferInput from a request dict."""
     req_json = json.dumps(req_dict)
     req_input = grpcclient.InferInput("request", [1], "BYTES")
     req_input.set_data_from_numpy(np.array([req_json], dtype=object))
@@ -138,38 +52,13 @@ def build_stream_request(
 
 
 def build_stream_outputs(grpcclient) -> list[Any]:
+    """Build the standard set of Triton output tensors."""
     return [
         grpcclient.InferRequestedOutput("audio_chunk"),
         grpcclient.InferRequestedOutput("event_type"),
         grpcclient.InferRequestedOutput("event_json"),
         grpcclient.InferRequestedOutput("is_final"),
     ]
-
-
-def build_text_stream_requests(
-    init_req: dict[str, Any],
-    text_chunks: Sequence[str],
-) -> list[dict[str, Any]]:
-    session_id = init_req.get("session_id")
-    if not session_id:
-        raise ValueError("init_req must include a session_id for streaming text input")
-
-    requests = [dict(init_req)]
-    requests.extend(
-        {
-            "action": "append_text",
-            "session_id": session_id,
-            "text": chunk_text,
-        }
-        for chunk_text in text_chunks
-    )
-    requests.append(
-        {
-            "action": "text_complete",
-            "session_id": session_id,
-        }
-    )
-    return requests
 
 
 def infer_stream_sequence(
@@ -182,6 +71,7 @@ def infer_stream_sequence(
     result_text: str | None = None,
     session_id: str | None = None,
 ) -> StreamResult:
+    """Execute a sequence of Triton streaming requests and collect results."""
     if not requests:
         raise ValueError("at least one Triton request is required")
 
@@ -267,6 +157,7 @@ def infer_stream(
     *,
     timeout: float = 120.0,
 ) -> StreamResult:
+    """Execute a single Triton streaming request and collect results."""
     return infer_stream_sequence(client, grpcclient, [req_dict], timeout=timeout)
 
 
@@ -279,6 +170,7 @@ def infer_text_stream(
     chunk_delay_ms: float = 50.0,
     timeout: float = 120.0,
 ) -> StreamResult:
+    """Execute a streaming text TTS request with incremental text chunks."""
     chunks = list(text_chunks)
     session_id = init_req.get("session_id", "stream-unknown")
     client = grpcclient.InferenceServerClient(url=triton_url)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.token_streaming import (
+from tests.support.token_streaming import (
     _build_reencodable_text_chunks,
     validate_token_text_chunks,
 )

@@ -9,12 +9,18 @@ external session lifecycle APIs.
 from __future__ import annotations
 
 import asyncio
+import time
+import logging
 from typing import List
 
+from ..core.lifecycle import LifecycleLogger
 from ..core.session import Session, SegmentOrderMeta
+from ..core.timing import ServerTimingAccumulator
 from ..core.types import EngineRequest, RequestPriority, RequestType
 from .spliter import SegmentAction
 from .spliter.driver import ActionType
+
+logger = logging.getLogger(__name__)
 
 
 class Dispatcher:
@@ -26,7 +32,7 @@ class Dispatcher:
     async def submit_new_session(self, session: Session) -> None:
         """Register a new session with the backend engine thread."""
         config = session.config
-        await self._engine_inbox.put(EngineRequest(
+        req = EngineRequest(
             type=RequestType.NEW_SESSION,
             session_id=session.session_id,
             session_config=config,
@@ -34,19 +40,25 @@ class Dispatcher:
             task_type=config.task_type,
             ref_audio=config.ref_audio,
             result_queue=session.result_queue,
-        ))
+            enqueued_at=time.monotonic(),
+        )
+        await self._engine_inbox.put(req)
 
     async def submit_cancel(self, session_id: str) -> None:
-        await self._engine_inbox.put(EngineRequest(
+        req = EngineRequest(
             type=RequestType.CANCEL_SESSION,
             session_id=session_id,
-        ))
+            enqueued_at=time.monotonic(),
+        )
+        await self._engine_inbox.put(req)
 
     async def submit_session_tokens_done(self, session_id: str) -> None:
-        await self._engine_inbox.put(EngineRequest(
+        req = EngineRequest(
             type=RequestType.SESSION_TOKENS_DONE,
             session_id=session_id,
-        ))
+            enqueued_at=time.monotonic(),
+        )
+        await self._engine_inbox.put(req)
 
     async def dispatch_segment_actions(
         self,
@@ -67,31 +79,57 @@ class Dispatcher:
             if action.type == ActionType.PREFILL:
                 session.segments_submitted += 1
                 session.segment_order[seg_idx] = order_meta
-                await self._engine_inbox.put(EngineRequest(
+
+                now = time.monotonic()
+                # Record first text enqueue timestamp on session
+                if session.first_text_enqueued_at is None:
+                    session.first_text_enqueued_at = now
+                    # Write to ServerTimingAccumulator if present
+                    acc = session.config.timing.extra.get("_server_timing_accumulator")
+                    if isinstance(acc, ServerTimingAccumulator):
+                        acc.first_text_enqueued_monotonic = now
+                    # Emit lifecycle event
+                    LifecycleLogger.emit(
+                        session_id=session.session_id,
+                        phase="text.first_enqueued",
+                        segment_idx=seg_idx,
+                        request_id=session.config.timing.request_id or None,
+                        turn_id=session.config.timing.turn_id or None,
+                        monotonic_ts=now,
+                        queue_depth=self._engine_inbox.qsize(),
+                    )
+
+                req = EngineRequest(
                     type=RequestType.START_TOKENS,
                     session_id=session.session_id,
                     segment_idx=seg_idx,
                     priority=priority,
                     token_ids=[action.token],
                     result_queue=session.result_queue,
-                ))
+                    enqueued_at=now,
+                )
+                await self._engine_inbox.put(req)
 
             elif action.type == ActionType.DECODE:
-                await self._engine_inbox.put(EngineRequest(
+                req = EngineRequest(
                     type=RequestType.APPEND_TOKENS,
                     session_id=session.session_id,
                     segment_idx=seg_idx,
                     priority=priority,
                     token_ids=[action.token],
-                ))
+                    enqueued_at=time.monotonic(),
+                )
+                await self._engine_inbox.put(req)
 
             elif action.type in (ActionType.FLUSH_EOS, ActionType.FLUSH_NOP):
-                await self._engine_inbox.put(EngineRequest(
+                req = EngineRequest(
                     type=RequestType.SEGMENT_TOKENS_DONE,
                     session_id=session.session_id,
                     segment_idx=seg_idx,
                     append_eos=(action.type == ActionType.FLUSH_EOS),
-                ))
+                    enqueued_at=time.monotonic(),
+                )
+                await self._engine_inbox.put(req)
 
     async def maybe_send_session_tokens_done(self, session: Session) -> None:
         """Signal session-level token completion when no more groups remain."""

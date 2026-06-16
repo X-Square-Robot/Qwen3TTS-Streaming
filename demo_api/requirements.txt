@@ -1,4 +1,3 @@
 aiohttp>=3.9
 numpy>=1.24
-tritonclient[grpc]>=2.44
-
+qwen3-tts-client[all]

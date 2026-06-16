@@ -1,3 +1,11 @@
+"""Demo API Triton client — thin adapter using the protocol layer.
+
+Types (TtsRequest, build_payload, build_action_payload) and schemas
+(TraceEvent, RunResult, …) are now defined in ``qwen3_tts_protocol``.
+This module only keeps the demo-specific ``stream_once`` and
+``measure_once`` async helpers.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -5,12 +13,17 @@ import json
 import os
 import time
 import uuid
-from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 import numpy as np
 
-from .schemas import RunMetrics, RunResult, TraceEvent
+from qwen3_tts_protocol.schemas import RunMetrics, RunResult, TraceEvent
+from qwen3_tts_protocol.triton_types import (
+    TtsRequest,
+    build_action_payload,
+    build_payload,
+)
+from qwen3_tts_protocol.audio import decode_obj
 
 
 DEFAULT_TRITON_GRPC = os.environ.get("QWEN_DEMO_TRITON_GRPC", "localhost:8001")
@@ -21,92 +34,12 @@ class TritonUnavailable(RuntimeError):
     pass
 
 
-@dataclass
-class TtsRequest:
-    text: str
-    speaker: str = "Serena"
-    language: str = "auto"
-    cache_mode: str = "hit"
-    task_type: str = "custom_voice"
-    audio_encoding: str = "pcm_f32"
-    sample_rate: int = 24000
-    input_mode: str | None = None
-    group_policy: str | None = None
-
-
-def _decode_obj(value: Any) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8")
-    return str(value)
-
-
 def _load_triton_client():
     try:
         import tritonclient.grpc as grpcclient
     except Exception as exc:  # pragma: no cover - depends on optional package
         raise TritonUnavailable("tritonclient[grpc] is not installed") from exc
     return grpcclient
-
-
-def build_payload(request: TtsRequest) -> dict[str, Any]:
-    payload = {
-        "text": request.text,
-        "task_type": request.task_type,
-        "speaker": request.speaker,
-        "language": request.language,
-        "cache_mode": request.cache_mode,
-        "audio": {
-            "encoding": request.audio_encoding,
-            "sample_rate": request.sample_rate,
-            "channels": 1,
-        },
-    }
-    if request.input_mode:
-        payload["input_mode"] = request.input_mode
-    if request.group_policy:
-        payload["group_policy"] = request.group_policy
-    return payload
-
-
-def build_action_payload(
-    action: str,
-    session_id: str,
-    *,
-    text: str = "",
-    request: TtsRequest | None = None,
-) -> dict[str, Any]:
-    """Build a payload for one tts_orchestrator action.
-
-    `init` / `synthesize` carry the full session config (speaker, language,
-    audio format). `append_text` carries `session_id` + `text`.
-    `text_complete` and `cancel` only carry `session_id`.
-    """
-    payload: dict[str, Any] = {"action": action, "session_id": session_id}
-    if action in ("init", "start", "synthesize"):
-        if request is None:
-            raise ValueError(f"action {action!r} requires a TtsRequest")
-        payload.update(
-            {
-                "task_type": request.task_type,
-                "speaker": request.speaker,
-                "language": request.language,
-                "cache_mode": request.cache_mode,
-                "audio": {
-                    "encoding": request.audio_encoding,
-                    "sample_rate": request.sample_rate,
-                    "channels": 1,
-                },
-            }
-        )
-        if request.input_mode:
-            payload["input_mode"] = request.input_mode
-        if request.group_policy:
-            payload["group_policy"] = request.group_policy
-        if action == "synthesize":
-            payload["text"] = text or request.text
-    elif action in ("append_text", "append"):
-        payload["text"] = text
-    return payload
 
 
 def probe_ready(endpoint: str = DEFAULT_TRITON_GRPC, model_name: str = DEFAULT_TRITON_MODEL) -> bool:
@@ -248,13 +181,13 @@ async def stream_once(
             audio_arr = result.as_numpy("audio_chunk")
             is_final_arr = result.as_numpy("is_final")
             event_type = (
-                _decode_obj(event_type_arr.flatten()[0])
+                decode_obj(event_type_arr.flatten()[0])
                 if event_type_arr is not None and event_type_arr.size
                 else ""
             )
             payload: dict[str, Any] = {}
             if event_json_arr is not None and event_json_arr.size:
-                raw = _decode_obj(event_json_arr.flatten()[0])
+                raw = decode_obj(event_json_arr.flatten()[0])
                 if raw:
                     parsed = json.loads(raw)
                     if isinstance(parsed, dict):

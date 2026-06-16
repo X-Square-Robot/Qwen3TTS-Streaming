@@ -10,15 +10,14 @@ from typing import Any
 
 import numpy as np
 
-from .schemas import RunMetrics, RunResult, TraceEvent
+from qwen3_tts_protocol.schemas import RunMetrics, RunResult, TraceEvent
+from qwen3_tts_protocol.triton_types import TtsRequest, build_action_payload
+from qwen3_tts_protocol.audio import decode_obj
 from .triton_client import (
     DEFAULT_TRITON_GRPC,
     DEFAULT_TRITON_MODEL,
     TritonUnavailable,
-    TtsRequest,
-    _decode_obj,
     _load_triton_client,
-    build_action_payload,
 )
 
 
@@ -190,9 +189,9 @@ async def _run_pk(
             is_final_arr = result.as_numpy("is_final")
 
             if event_type_arr is not None and event_type_arr.size:
-                event_type = _decode_obj(event_type_arr.flatten()[0])
+                event_type = decode_obj(event_type_arr.flatten()[0])
             if event_json_arr is not None and event_json_arr.size:
-                raw = _decode_obj(event_json_arr.flatten()[0])
+                raw = decode_obj(event_json_arr.flatten()[0])
                 if raw:
                     parsed = json.loads(raw)
                     if isinstance(parsed, dict):

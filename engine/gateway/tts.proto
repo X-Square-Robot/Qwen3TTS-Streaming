@@ -2,6 +2,48 @@ syntax = "proto3";
 
 package tts;
 
+// ---------------------------------------------------------------------------
+// Canonical server timing meta keys (used in AudioChunk.meta and StreamEvent.meta)
+//
+// Epoch timestamps (int64 ms):
+//   server_request_received_epoch_ms   - Gateway received request
+//   server_session_created_epoch_ms    - Session created
+//   server_first_text_received_epoch_ms - First text arrived at gateway
+//   server_first_text_enqueued_epoch_ms - First text enqueued to engine
+//   server_first_text_dequeued_epoch_ms - First text dequeued by engine
+//   server_prefill_started_epoch_ms    - Prefill started
+//   server_prefill_completed_epoch_ms  - Prefill completed
+//   server_first_raw_audio_epoch_ms    - First raw audio produced
+//   server_first_effective_audio_epoch_ms - First effective audio published
+//   server_done_epoch_ms               - Session completed
+//
+// Derived durations (float ms, formatted as string):
+//   server_session_create_to_first_raw_audio_ms
+//   server_session_create_to_first_effective_audio_ms
+//   server_first_text_enqueue_to_first_raw_audio_ms
+//   server_first_text_enqueue_to_first_effective_audio_ms
+//   server_first_text_dequeue_to_first_raw_audio_ms
+//   server_first_text_dequeue_to_first_effective_audio_ms
+//   server_engine_queue_wait_ms
+//   server_engine_prefill_ms
+//   server_first_raw_to_first_effective_audio_ms
+//   server_total_latency_ms
+//
+// Policy / result fields:
+//   server_prefix_trim_applied         - "true" / "false"
+//   server_prefix_trimmed_ms           - Prefix trim duration
+//   server_vad_policy                  - VAD strategy name
+//   server_cache_hit                   - "true" / "false"
+//   server_cache_tokens_reused         - KV cache tokens reused count
+//
+// Segment-level fields (in segment_end events):
+//   segment_id, segment_text_preview, segment_prefill_ms,
+//   segment_decode_steps, segment_audio_ms, segment_cache_hit
+//
+// Error fields (in error events):
+//   error_phase, error_type, error_message, segments_completed
+// ---------------------------------------------------------------------------
+
 service TTSService {
   // Query the currently loaded standalone engine capabilities.
   rpc GetCapabilities (GetCapabilitiesRequest) returns (GetCapabilitiesResponse);

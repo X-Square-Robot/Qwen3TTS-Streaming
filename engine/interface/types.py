@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ..core.types import AudioConfig, SessionConfig
-from qwen3_tts_protocol.types import (
+from qwen3_tts_protocol import (
     OutputPolicy,
     SessionEndRequest,
     StreamCancelRequest,

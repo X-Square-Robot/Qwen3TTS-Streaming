@@ -76,6 +76,7 @@ from ..core.types import (
     RequestType,
     ResultType,
 )
+from ..core.lifecycle import LifecycleLogger
 from .executor import Executor, StepOutput
 from .kv_cache_pool import KVCachePool, SlotKVState
 from .prefix_cache import PrefixKVCache
@@ -97,6 +98,12 @@ class EngineSegment:
         "mlfq_meta",
         "pending_token_ids",
         "eos_trailing_added",
+        "first_raw_audio_sent",
+        "dequeued_at",
+        "prefill_started_at",
+        "prefill_completed_at",
+        "cache_hit",
+        "cache_tokens_reused",
     )
 
     def __init__(
@@ -116,6 +123,12 @@ class EngineSegment:
         self.mlfq_meta: MLFQMeta = MLFQMeta()
         self.pending_token_ids: list[int] = []
         self.eos_trailing_added: bool = False
+        self.first_raw_audio_sent: bool = False
+        self.dequeued_at: Optional[float] = None
+        self.prefill_started_at: Optional[float] = None
+        self.prefill_completed_at: Optional[float] = None
+        self.cache_hit: bool = False
+        self.cache_tokens_reused: int = 0
 
 
 class EngineSessionGroup:
@@ -124,6 +137,7 @@ class EngineSessionGroup:
         "session_id", "request", "result_queue",
         "segments", "input_complete_all", "created_at",
         "overflow_token_ids",
+        "first_text_dequeued_at",
     )
 
     def __init__(self, session_id: str, request: EngineRequest):
@@ -134,6 +148,7 @@ class EngineSessionGroup:
         self.input_complete_all: bool = False
         self.created_at: float = time.monotonic()
         self.overflow_token_ids: list[int] = []
+        self.first_text_dequeued_at: Optional[float] = None
 
     @property
     def active_slot_count(self) -> int:
@@ -301,15 +316,43 @@ class EngineLoop:
 
     def _drain_inbox(self) -> None:
         drained = 0
+        queue_depth = 0
         while True:
             try:
                 req: EngineRequest = self._inbox.get_nowait()
             except queue.Empty:
                 break
+            # Record dequeued timestamp
+            now = time.monotonic()
+            req.dequeued_at = now
+            # Emit lifecycle event for first text dequeue (START_TOKENS only)
+            if req.type == RequestType.START_TOKENS:
+                wait_ms = 0.0
+                if req.enqueued_at is not None:
+                    wait_ms = (now - req.enqueued_at) * 1000.0
+                group = self._groups.get(req.session_id)
+                if group is not None and group.first_text_dequeued_at is None:
+                    group.first_text_dequeued_at = now
+                    # Write to ServerTimingAccumulator if available
+                    acc = self._get_timing_accumulator(req)
+                    if acc is not None:
+                        acc.first_text_dequeued_monotonic = now
+                    LifecycleLogger.emit(
+                        session_id=req.session_id,
+                        phase="text.first_dequeued",
+                        segment_idx=req.segment_idx,
+                        request_id=(
+                            req.session_config.timing.request_id
+                            if req.session_config else None
+                        ) or None,
+                        monotonic_ts=now,
+                        wait_ms=round(wait_ms),
+                        queue_depth_at_dequeue=self._inbox.qsize(),
+                    )
             self._handle_request(req)
             drained += 1
         if drained > 0:
-            logger.debug("Drained %d requests", drained)
+            logger.debug("Drained %d requests (queue_depth=%d)", drained, queue_depth)
 
     def _handle_request(self, req: EngineRequest) -> None:
         if req.type == RequestType.NEW_SESSION:
@@ -348,6 +391,7 @@ class EngineLoop:
             seg = EngineSegment(
                 req.session_id, req.segment_idx, req.priority,
             )
+            seg.dequeued_at = req.dequeued_at
             if group.overflow_token_ids:
                 seg.pending_token_ids.extend(group.overflow_token_ids)
                 seg.text_tokens_consumed += len(group.overflow_token_ids)
@@ -530,6 +574,8 @@ class EngineLoop:
                 self._remove_session(best.session_id)
                 return False
             prefill_metrics = self._prefill_metrics(task_type, req_cfg)
+            # Record prefill start time
+            best.prefill_started_at = time.monotonic()
             # Non-ICL tasks can check cache before building the full plan. ICL
             # needs the plan first because its request suffix includes ref
             # codec frames plus target text.
@@ -556,6 +602,8 @@ class EngineLoop:
 
             if task_type != TaskType.VOICE_CLONE_ICL and cached is not None and best.pending_token_ids:
                 # ── Cache HIT: restore prefix KV and let decode consume first text token ──
+                best.cache_hit = True
+                best.cache_tokens_reused = cached.prefix_len
                 req_embeds, trailing = (
                     self._prefill_builder.build_suffix_from_ids(
                         best.pending_token_ids,
@@ -685,6 +733,7 @@ class EngineLoop:
                     best.eos_trailing_added = best.input_complete
         else:
             prefill_metrics = {}
+            best.prefill_started_at = time.monotonic()
             prefill_audio, prefill_eos = self._executor.prefill(slot, torch.zeros(
                 1,
                 1,
@@ -696,6 +745,53 @@ class EngineLoop:
         best.state = "active"
         best.decode_start_frame = slot.frame_idx
         self._total_prefills += 1
+
+        # -- Prefill timing observability --
+        prefill_end = time.monotonic()
+        best.prefill_completed_at = prefill_end
+        if best.prefill_started_at is not None:
+            prefill_duration_ms = (prefill_end - best.prefill_started_at) * 1000.0
+        else:
+            prefill_duration_ms = 0.0
+
+        # Determine cache hit status
+        cache_hit = slot.prefill_source == "prefix_cache_hit" if hasattr(slot, 'prefill_source') else False
+        best.cache_hit = cache_hit
+
+        # Write to ServerTimingAccumulator if available
+        acc = self._get_group_timing_accumulator(best_group)
+        if acc is not None:
+            if acc.prefill_started_monotonic is None and best.prefill_started_at is not None:
+                acc.prefill_started_monotonic = best.prefill_started_at
+            acc.prefill_completed_monotonic = prefill_end
+            acc.cache_hit = cache_hit
+            acc.cache_tokens_reused = best.cache_tokens_reused
+
+        # Emit prefill completed lifecycle event
+        LifecycleLogger.emit(
+            session_id=best.session_id,
+            phase="engine.prefill.completed",
+            segment_idx=best.segment_idx,
+            request_id=(
+                best_group.request.session_config.timing.request_id
+                if best_group.request.session_config else None
+            ) or None,
+            monotonic_ts=prefill_end,
+            prefill_duration_ms=round(prefill_duration_ms, 3),
+            cache_hit=cache_hit,
+            cache_tokens_reused=best.cache_tokens_reused,
+        )
+
+        # Add timing to prefill_metrics
+        if best.prefill_started_at is not None:
+            prefill_metrics["prefill_started_at"] = str(best.prefill_started_at)
+        prefill_metrics["prefill_completed_at"] = str(prefill_end)
+        prefill_metrics["prefill_duration_ms"] = f"{prefill_duration_ms:.3f}"
+        prefill_metrics["cache_hit"] = "true" if cache_hit else "false"
+        if best.cache_tokens_reused > 0:
+            prefill_metrics["cache_tokens_reused"] = str(best.cache_tokens_reused)
+        if best.dequeued_at is not None:
+            prefill_metrics["first_text_dequeued_at"] = str(best.dequeued_at)
         if any(
             key in prefill_metrics
             for key in (
@@ -1149,11 +1245,35 @@ class EngineLoop:
                             continue
 
                 if audio is not None and len(audio) > 0:
+                    # -- First raw audio observability --
+                    audio_metrics: dict = {}
+                    if not seg.first_raw_audio_sent:
+                        seg.first_raw_audio_sent = True
+                        now_mono = time.monotonic()
+                        # Write to ServerTimingAccumulator if available
+                        group_acc = self._get_group_timing_accumulator(group)
+                        if group_acc is not None and group_acc.first_raw_audio_monotonic is None:
+                            group_acc.first_raw_audio_monotonic = now_mono
+                        LifecycleLogger.emit(
+                            session_id=seg.session_id,
+                            phase="engine.audio.first_raw",
+                            segment_idx=seg.segment_idx,
+                            request_id=(
+                                group.request.session_config.timing.request_id
+                                if group.request.session_config else None
+                            ) or None,
+                            monotonic_ts=now_mono,
+                        )
+                        audio_metrics["first_raw_audio_at"] = str(now_mono)
+                        if seg.dequeued_at is not None:
+                            audio_metrics["first_text_dequeued_at"] = str(seg.dequeued_at)
+
                     self._send_result(group, EngineResult(
                         type=ResultType.AUDIO_CHUNK,
                         session_id=seg.session_id,
                         segment_idx=seg.segment_idx,
                         audio_bytes=audio,
+                        metrics=audio_metrics,
                     ))
 
     @staticmethod
@@ -1392,6 +1512,27 @@ class EngineLoop:
             ))
             self._remove_session(sid)
             logger.warning("Session %s timed out", sid)
+
+    # ------------------------------------------------------------------
+    # ServerTimingAccumulator helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_timing_accumulator(req: EngineRequest):
+        """Get the ServerTimingAccumulator from an EngineRequest, if present."""
+        if req.session_config is None:
+            return None
+        extra = req.session_config.timing.extra
+        if not isinstance(extra, dict):
+            return None
+        acc = extra.get("_server_timing_accumulator")
+        if acc is not None and hasattr(acc, "to_meta_dict"):
+            return acc
+        return None
+
+    def _get_group_timing_accumulator(self, group: EngineSessionGroup):
+        """Get the ServerTimingAccumulator from an EngineSessionGroup."""
+        return self._get_timing_accumulator(group.request)
 
     # ------------------------------------------------------------------
     # Health / metrics (thread-safe read)

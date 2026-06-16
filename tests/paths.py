@@ -1,5 +1,4 @@
-"""
-Shared path setup and variant auto-discovery for all tests.
+"""Shared path setup and variant auto-discovery for all tests.
 
 Variant resolution order:
   1. TEST_VARIANT env var (explicit override)
@@ -8,10 +7,17 @@ Variant resolution order:
 Usage:
     from tests.paths import TOKENIZER_DIR, WEIGHTS_DIR, VARIANT
 """
+
 import os
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+# Re-export REPO_ROOT from the canonical source (qwen3tts_tools.common).
+# For environments where qwen3tts_tools is not on sys.path (e.g. bare pytest),
+# fall back to a relative computation.
+try:
+    from qwen3tts_tools.common import REPO_ROOT
+except ImportError:
+    REPO_ROOT = Path(__file__).resolve().parents[1]
 
 EXPORTED_DIR = REPO_ROOT / "workspace" / "exported"
 MODELS_DIR = REPO_ROOT / "workspace" / "models"

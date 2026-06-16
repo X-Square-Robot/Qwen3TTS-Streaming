@@ -65,3 +65,54 @@ More details:
 
 - project manual: `docs/zh/client_sdk.md`
 - public API docs live in `qwen3_tts_client.__init__`
+
+## Protocol Layer
+
+The SDK includes `qwen3_tts_protocol`, a shared protocol package that defines
+wire-format types (AudioFormat, SynthesisConfig, StreamEvent, …) and
+Triton-specific types (TtsRequest, build_payload, TraceEvent, RunResult, …).
+Both the client SDK and other project components (demo_api, tests/tools) import
+from this single source of truth.
+
+```python
+from qwen3_tts_protocol import AudioFormat, SynthesisConfig
+from qwen3_tts_protocol.schemas import TraceEvent, RunResult
+from qwen3_tts_protocol.triton_types import TtsRequest, build_payload
+from qwen3_tts_protocol.audio import save_wav, StreamResult
+```
+
+## Realtime Audio Stream
+
+When consuming audio for real-time playback (e.g. feeding a WebRTC media
+track or a local audio device), the engine's irregular output rhythm can
+cause underruns.  `RealtimeAudioStream` wraps a streaming session and
+produces an isochronous (wall-clock aligned) audio flow, automatically
+inserting silence frames to cover gaps:
+
+```python
+from qwen3_tts_client import TTSClient, RealtimeAudioStream, SessionStartRequest, SynthesisConfig
+
+client = TTSClient.connect("localhost")
+session = client.open_stream(
+    SessionStartRequest(
+        session_id="webrtc-feed",
+        config=SynthesisConfig(task_type="custom_voice"),
+    )
+)
+session.send_text("你好，欢迎使用实时语音合成。")
+session.end()
+
+# 20 ms frames, silence-filled — ready for WebRTC / local playback
+for frame in RealtimeAudioStream(session):
+    if frame.is_silence:
+        continue  # or handle silence explicitly
+    webrtc_track.write(frame.data)
+```
+
+Key parameters:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `fill_silence` | `True` | Insert silence when the engine is late; `False` = passthrough |
+| `chunk_s` | `0.02` | Output granularity in seconds (20 ms = WebRTC Opus frame) |
+| `sample_rate` | `24000` | Audio sample rate in Hz |

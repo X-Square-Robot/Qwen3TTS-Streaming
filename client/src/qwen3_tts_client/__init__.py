@@ -35,6 +35,11 @@ from .exceptions import (
     TransportNotSupportedError,
     TransportProbeError,
 )
+from .analyzers import LatencyAnalyzer, TimelineReconstructor
+from .error_report import ErrorTimingReport
+from .realtime import RealtimeAudioStream, TimedAudio
+from .segment_timing import SegmentTimingReport
+from .timing import ServerTimingReport
 
 __all__ = (
     "ArrayResult",
@@ -45,8 +50,13 @@ __all__ = (
     "Capabilities",
     "DependencyMissingError",
     "DetectedTransport",
+    "ErrorTimingReport",
+    "LatencyAnalyzer",
     "OutputPolicy",
     "ProtocolError",
+    "RealtimeAudioStream",
+    "SegmentTimingReport",
+    "ServerTimingReport",
     "SessionEndRequest",
     "SessionStartRequest",
     "StreamCancelRequest",
@@ -54,8 +64,10 @@ __all__ = (
     "StreamEvent",
     "StreamTextChunk",
     "SynthesisConfig",
+    "TimedAudio",
     "TTSClient",
     "TTSClientError",
+    "TimelineReconstructor",
     "TimingContext",
     "TransportNotSupportedError",
     "TransportProbeError",

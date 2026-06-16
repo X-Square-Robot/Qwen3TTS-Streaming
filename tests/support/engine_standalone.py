@@ -25,7 +25,7 @@ from qwen3tts_tools.common import (
     parse_host_port,
     story_path as default_story_path,
 )
-from tests.token_streaming import (
+from tests.support.token_streaming import (
     DEFAULT_TOKEN_STREAM_TEXT,
     TokenChunkingUnavailable,
     build_token_text_chunks,

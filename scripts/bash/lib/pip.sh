@@ -5,7 +5,7 @@
 #  Functions: pip_install, pip_install_requirements, install_torch_cuda,
 #             install_flash_attn, install_qwen3_tts,
 #             install_safetensors, install_onnx_export_deps,
-#             validate_python_env
+#             install_ten_vad, validate_python_env
 #  Depends:   lib/logging.sh, lib/prerequisites.sh, lib/network.sh
 # ===========================================================================
 
@@ -441,6 +441,32 @@ install_tensorrt_for_standalone_engine() {
 }
 
 # ---------------------------------------------------------------------------
+#  install_ten_vad
+#  Installs the ten_vad ONNX-based VAD library for TTS output gating.
+#  Optional — if not installed, the engine falls back to energy-based VAD.
+#  Override with TEN_VAD_PIP_VERSION.
+# ---------------------------------------------------------------------------
+install_ten_vad() {
+    if python3 -c "import ten_vad" 2>/dev/null; then
+        local ver
+        ver=$(python3 -c "import ten_vad; print(ten_vad.__version__)" 2>/dev/null || echo "unknown")
+        log_info "ten_vad ($ver) already installed, skipping"
+        return 0
+    fi
+
+    local want="${TEN_VAD_PIP_VERSION:-}"
+    local pip_args=(ten-vad)
+    if [ -n "$want" ]; then
+        pip_args=("ten-vad==${want}")
+    fi
+
+    log_step "Installing ten_vad (ONNX VAD for TTS output gating)..."
+    python3 -m pip install --upgrade "${pip_args[@]}" \
+        || { log_warn "ten_vad install failed (non-fatal, will fall back to energy VAD mode)"; return 0; }
+    log_info "ten_vad installed"
+}
+
+# ---------------------------------------------------------------------------
 #  validate_python_env
 #  Quick smoke-test: imports the core packages and reports versions.
 # ---------------------------------------------------------------------------
@@ -464,6 +490,7 @@ optional = {
     "aiohttp":      "aiohttp",
     "grpc":         "grpcio",
     "requests":     "requests",
+    "ten_vad":      "ten-vad",
 }
 
 ok, fail = 0, 0

@@ -28,6 +28,8 @@ import os
 import uuid
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+
 from ..core.types import (
     AudioConfig,
     AudioEncoding,
@@ -35,6 +37,7 @@ from ..core.types import (
     InputMode,
     SessionConfig,
 )
+from ..core.timing import ServerTimingAccumulator
 from ..interface import (
     OutputPipeline,
     SessionStartRequest,
@@ -48,6 +51,12 @@ from ..interface import (
     to_core_output_policy,
     to_core_timing_context,
 )
+from ..interface.vad import (
+    TTSVADConfig,
+    VADMode,
+    create_vad_processor,
+)
+from .grpc_server import _build_vad_config, _inject_vad_metrics
 
 if TYPE_CHECKING:
     from ..server import TTSEngine
@@ -250,10 +259,41 @@ class WebSocketGateway:
     ) -> str:
         session_id = str(session_id or uuid.uuid4())
         config = start_request.config
-        pipeline = OutputPipeline(start_request)
+
+        # Create server timing accumulator for cross-thread observability
+        import time as _time
+        timing_acc = ServerTimingAccumulator()
+        timing_acc.request_received_epoch_ms = int(round(_time.time() * 1000.0))
+        timing_acc.session_created_epoch_ms = timing_acc.request_received_epoch_ms
+        timing_acc.vad_policy = config.output_policy.vad.strategy or "disabled"
+        timing_acc.text_input_mode = config.input_mode.value
+
+        # Store accumulator reference in timing extra for engine thread access
+        config.timing.extra["_server_timing_accumulator"] = timing_acc
+
+        pipeline = OutputPipeline(start_request, timing_accumulator=timing_acc)
+
+        # Create per-session VAD processor from config
+        from .grpc_server import ENGINE_SAMPLE_RATE
+        vad_config = _build_vad_config(config)
+        vad_processor = create_vad_processor(vad_config, sample_rate=ENGINE_SAMPLE_RATE)
 
         async def on_audio(sid: str, data: bytes) -> None:
-            frame = pipeline.convert_audio_chunk(data)
+            # Apply VAD filtering before output pipeline
+            raw = np.frombuffer(data, dtype=np.float32)
+            if raw.size == 0:
+                return
+            audio_int16 = np.clip(raw, -1.0, 1.0)
+            audio_int16 = (audio_int16 * 32767.0).astype(np.int16)
+
+            filtered_int16 = vad_processor.process_chunk(audio_int16)
+            if filtered_int16.size == 0:
+                return
+
+            filtered_f32 = (filtered_int16.astype(np.float32) / 32767.0)
+            filtered_bytes = filtered_f32.tobytes()
+
+            frame = pipeline.convert_audio_chunk(filtered_bytes)
             await outbound_queue.put(
                 _make_audio_frame(frame.pcm_bytes, frame.audio, meta=frame.meta)
             )
@@ -264,6 +304,18 @@ class WebSocketGateway:
             )
 
         async def on_done(sid: str, metrics: dict) -> None:
+            # Flush any remaining audio from VAD
+            final_int16 = vad_processor.flush()
+            if final_int16.size > 0:
+                final_f32 = (final_int16.astype(np.float32) / 32767.0)
+                final_bytes = final_f32.tobytes()
+                frame = pipeline.convert_audio_chunk(final_bytes)
+                await outbound_queue.put(
+                    _make_audio_frame(frame.pcm_bytes, frame.audio, meta=frame.meta)
+                )
+
+            # Inject VAD observability into metrics
+            _inject_vad_metrics(vad_processor, pipeline, metrics)
             await outbound_queue.put(
                 _make_event_frame_from_contract(build_done_event(sid, metrics, pipeline))
             )

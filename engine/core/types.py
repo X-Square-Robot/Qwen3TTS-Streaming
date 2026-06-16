@@ -55,9 +55,16 @@ class AudioConfig:
 @dataclass
 class VADConfig:
     enabled: bool = False
-    strategy: str = "disabled"
+    strategy: str = "disabled"   # "disabled" | "energy" | "tenvad"
     implementation: str = ""
     config: dict[str, Any] = field(default_factory=dict)
+    # Direct VAD parameters (populated from protocol layer)
+    chunk_ms: int = 16
+    begin_threshold: float = 0.6
+    begin_count: int = 5
+    end_threshold: float = 0.35
+    end_count: int = 31
+    start_margin_ms: int = 20
 
 
 @dataclass
@@ -163,6 +170,10 @@ class EngineRequest:
     append_eos: bool = True
     # back-reference so engine thread can push results to the right queue
     result_queue: Optional[asyncio.Queue] = None
+
+    # -- Lifecycle timestamps (monotonic clock) --
+    enqueued_at: Optional[float] = None   # set by Dispatcher before put()
+    dequeued_at: Optional[float] = None   # set by EngineLoop after get()
 
 
 # ---------------------------------------------------------------------------

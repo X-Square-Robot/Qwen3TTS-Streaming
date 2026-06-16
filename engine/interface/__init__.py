@@ -26,9 +26,21 @@ from .types import (
     TimingContext,
     VADPolicy,
 )
+from .vad import (
+    TTSVADConfig,
+    TTSVADProcessor,
+    VADMode,
+    create_vad_processor,
+    vad_config_from_dict,
+    EnergyVADProcessor,
+    TenVADProcessor,
+    DisabledVADProcessor,
+)
 
 __all__ = (
     "AudioFrame",
+    "DisabledVADProcessor",
+    "EnergyVADProcessor",
     "OutputPipeline",
     "OutputPolicy",
     "PROTOCOL_VERSION",
@@ -40,11 +52,16 @@ __all__ = (
     "StreamCancelRequest",
     "StreamEvent",
     "StreamTextChunk",
+    "TENVADProcessor",
+    "TTSVADConfig",
+    "TTSVADProcessor",
     "TimingContext",
+    "VADMode",
     "VADPolicy",
     "build_done_event",
     "build_forward_event",
     "build_start_event",
+    "create_vad_processor",
     "normalize_capabilities",
     "parse_output_policy",
     "parse_timing_context",
@@ -53,4 +70,5 @@ __all__ = (
     "serialize_timing_context",
     "to_core_output_policy",
     "to_core_timing_context",
+    "vad_config_from_dict",
 )

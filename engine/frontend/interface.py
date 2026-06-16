@@ -27,6 +27,8 @@ from ..core.types import (
     SessionState,
     TokenizedText,
 )
+from ..core.lifecycle import LifecycleLogger
+from ..core.timing import ServerTimingAccumulator
 from ..text_normalization import strip_emoji
 from .dispatcher import Dispatcher
 from .spliter import Spliter
@@ -144,6 +146,30 @@ class FrontendInterface:
         session.event_callback = on_event
         self._sessions[session_id] = session
 
+        # Emit lifecycle events
+        LifecycleLogger.emit(
+            session_id=session_id,
+            phase="session.config.validated",
+            request_id=config.timing.request_id or None,
+            turn_id=config.timing.turn_id or None,
+            input_mode=config.input_mode.value,
+            vad_strategy=config.output_policy.vad.strategy or "disabled",
+            protocol_version=str(config.timing.extra.get("client_protocol_version", "")),
+        )
+        LifecycleLogger.emit(
+            session_id=session_id,
+            phase="session.created",
+            request_id=config.timing.request_id or None,
+            turn_id=config.timing.turn_id or None,
+            monotonic_ts=session.created_at,
+            speaker_id=config.speaker,
+        )
+
+        # Set session_created on ServerTimingAccumulator if present
+        acc = config.timing.extra.get("_server_timing_accumulator")
+        if isinstance(acc, ServerTimingAccumulator):
+            acc.session_created_monotonic = session.created_at
+
         task = asyncio.create_task(
             self._consume_results(session, on_audio=on_audio, on_done=on_done, on_event=on_event)
         )
@@ -251,6 +277,13 @@ class FrontendInterface:
                     audio = result.audio_bytes or b""
                     session.total_audio_bytes += len(audio)
 
+                    # Propagate raw audio timestamp from engine thread
+                    if result.metrics and "first_raw_audio_at" in result.metrics:
+                        try:
+                            session.first_raw_audio_at = float(result.metrics["first_raw_audio_at"])
+                        except (ValueError, TypeError):
+                            pass
+
                     reorder = session.reorder
                     meta = session.segment_order.get(
                         result.segment_idx,
@@ -262,6 +295,24 @@ class FrontendInterface:
                             await on_audio(session.session_id, chunk)
 
                 elif result.type == ResultType.PREFILL_DONE:
+                    # Propagate prefill timing from engine thread
+                    if result.metrics:
+                        if "prefill_started_at" in result.metrics and session.prefill_started_at is None:
+                            try:
+                                session.prefill_started_at = float(result.metrics["prefill_started_at"])
+                            except (ValueError, TypeError):
+                                pass
+                        if "prefill_completed_at" in result.metrics and session.prefill_completed_at is None:
+                            try:
+                                session.prefill_completed_at = float(result.metrics["prefill_completed_at"])
+                            except (ValueError, TypeError):
+                                pass
+                        if "first_text_dequeued_at" in result.metrics and session.first_text_dequeued_at is None:
+                            try:
+                                session.first_text_dequeued_at = float(result.metrics["first_text_dequeued_at"])
+                            except (ValueError, TypeError):
+                                pass
+
                     if on_event:
                         await on_event(
                             session.session_id,
@@ -306,6 +357,19 @@ class FrontendInterface:
                             str(k): str(v) for k, v in (result.metrics or {}).items()
                         }
                         segment_text = session.segment_texts.pop(seg_idx, "")
+                        # Add segment-level timing observability
+                        metrics["segment_id"] = str(seg_idx)
+                        if segment_text:
+                            preview = segment_text[:64] + "..." if len(segment_text) > 64 else segment_text
+                            metrics["segment_text_preview"] = preview
+                        if "audio_steps" in (result.metrics or {}):
+                            metrics["segment_decode_steps"] = str(result.metrics["audio_steps"])
+                        if "text_tokens" in (result.metrics or {}):
+                            metrics["segment_text_tokens"] = str(result.metrics["text_tokens"])
+                        if "cache_hit" in (result.metrics or {}):
+                            metrics["segment_cache_hit"] = str(result.metrics["cache_hit"])
+                        if "prefill_duration_ms" in (result.metrics or {}):
+                            metrics["segment_prefill_ms"] = str(result.metrics["prefill_duration_ms"])
                         session.segment_token_emitted_count.pop(seg_idx, None)
                         session.text_boundary_emitted.discard(seg_idx)
                         await on_event(
@@ -349,8 +413,24 @@ class FrontendInterface:
                     logger.error("Session %s error: %s",
                                  session.session_id, result.error_msg)
                     session.state = SessionState.DONE
+                    # Emit structured error lifecycle event
+                    LifecycleLogger.emit(
+                        session_id=session.session_id,
+                        phase="session.error",
+                        request_id=session.config.timing.request_id or None,
+                        error_type="engine_error",
+                        error_message=result.error_msg or "",
+                        current_phase=session.state.value,
+                        segments_completed=session.segments_done,
+                    )
+                    error_meta = {
+                        "error_phase": session.state.value,
+                        "error_type": "engine_error",
+                        "error_message": str(result.error_msg or ""),
+                        "segments_completed": str(session.segments_done),
+                    }
                     if on_done:
-                        await on_done(session.session_id, {"error": result.error_msg})
+                        await on_done(session.session_id, {"error": result.error_msg, **error_meta})
                     break
 
         except asyncio.CancelledError:
@@ -362,13 +442,52 @@ class FrontendInterface:
         session = self._sessions.pop(session_id, None)
         self._consumer_tasks.pop(session_id, None)
         if session:
-            latency = session.first_audio_latency_ms
+            # Compute structured summary metrics
+            summary: dict[str, Any] = {
+                "session_id": session_id,
+                "segments_done": session.segments_done,
+                "segments_submitted": session.segments_submitted,
+                "total_audio_bytes": session.total_audio_bytes,
+            }
+
+            # Derived timing metrics
+            if session.session_create_to_first_raw_audio_ms is not None:
+                summary["session_create_to_first_raw_audio_ms"] = round(
+                    session.session_create_to_first_raw_audio_ms, 3
+                )
+            if session.first_raw_audio_at is not None and session.first_text_enqueued_at is not None:
+                summary["first_text_enqueue_to_first_raw_audio_ms"] = round(
+                    (session.first_raw_audio_at - session.first_text_enqueued_at) * 1000, 3
+                )
+            if session.first_raw_audio_at is not None and session.first_text_dequeued_at is not None:
+                summary["first_text_dequeue_to_first_raw_audio_ms"] = round(
+                    (session.first_raw_audio_at - session.first_text_dequeued_at) * 1000, 3
+                )
+            if session.prefill_completed_at is not None and session.prefill_started_at is not None:
+                summary["engine_prefill_ms"] = round(
+                    (session.prefill_completed_at - session.prefill_started_at) * 1000, 3
+                )
+            if session.first_raw_audio_at is not None and session.first_text_dequeued_at is not None:
+                summary["first_raw_to_first_effective_audio_ms"] = 0.0  # will be updated by output pipeline
+
+            # Emit session.completed lifecycle event
+            LifecycleLogger.emit(
+                session_id=session_id,
+                phase="session.completed",
+                request_id=session.config.timing.request_id or None,
+                turn_id=session.config.timing.turn_id or None,
+                **summary,
+            )
+
+            # Also log a human-readable summary
+            latency = session.session_create_to_first_raw_audio_ms
             logger.info(
-                "Session %s cleaned up (first_audio=%.1fms, segments=%d/%d)",
+                "Session %s cleaned up (session_create_to_first_raw_audio_ms=%.1fms, segments=%d/%d, summary=%s)",
                 session_id,
                 latency or -1,
                 session.segments_done,
                 session.segments_submitted,
+                json.dumps(summary, ensure_ascii=False),
             )
 
     async def _dispatch_segment_actions(

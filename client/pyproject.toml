@@ -51,10 +51,10 @@ Documentation = "https://github.com/user/Qwen3-TTS-Triton/blob/main/docs/zh/clie
 
 [tool.setuptools]
 include-package-data = true
-package-dir = {"" = "src", "qwen3_tts_protocol" = "../qwen3_tts_protocol"}
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
-where = ["src", ".."]
+where = ["src"]
 include = [
   "qwen3_tts_client",
   "qwen3_tts_client.*",

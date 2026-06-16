@@ -1,7 +1,7 @@
 """Generate WAV audio samples via Triton TTS for listening evaluation.
 
 Usage:
-    python tests/gen_audio.py
+    python tests/tools/gen_audio.py
 
 Requires:
     - Triton server running: bash scripts/bash/deploy.sh run --gateway triton
@@ -9,8 +9,7 @@ Requires:
 
 Outputs WAV files to workspace/audio_samples/
 """
-import json
-import struct
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -18,7 +17,9 @@ from qwen3tts_tools.common import REPO_ROOT, bootstrap_project_imports
 
 bootstrap_project_imports("repo", "scripts_python")
 
-from tests.support.triton_streaming import build_request_payload, infer_stream
+from qwen3_tts_protocol.triton_types import build_request_payload
+from qwen3_tts_protocol.audio import save_wav
+from tests.support.triton_streaming import infer_stream
 
 OUTPUT_DIR = REPO_ROOT / "workspace" / "audio_samples"
 SAMPLE_RATE = 24000
@@ -53,21 +54,6 @@ SAMPLES = [
         "speaker": "zhitian",
     },
 ]
-
-
-def make_wav(samples_f32: np.ndarray, sr: int = SAMPLE_RATE) -> bytes:
-    """Convert float32 samples to 16-bit PCM WAV bytes."""
-    pcm16 = np.clip(samples_f32 * 32767, -32768, 32767).astype(np.int16)
-    n = pcm16.size
-    buf = bytearray()
-    buf += b"RIFF"
-    buf += struct.pack("<I", 36 + n * 2)
-    buf += b"WAVEfmt "
-    buf += struct.pack("<IHHIIHH", 16, 1, 1, sr, sr * 2, 2, 16)
-    buf += b"data"
-    buf += struct.pack("<I", n * 2)
-    buf += pcm16.tobytes()
-    return bytes(buf)
 
 
 def stream_tts(client, text: str, speaker: str, timeout: float = 60.0):
@@ -121,7 +107,7 @@ def main():
         audio = np.concatenate(chunks)
         duration = audio.size / SAMPLE_RATE
         wav_path = OUTPUT_DIR / f"{name}.wav"
-        wav_path.write_bytes(make_wav(audio))
+        save_wav(audio, wav_path, sample_rate=SAMPLE_RATE)
 
         print(f"    → {wav_path.name}  "
               f"duration={duration:.2f}s  "

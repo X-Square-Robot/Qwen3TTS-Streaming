@@ -38,8 +38,30 @@ class Session:
     config: SessionConfig = field(default_factory=SessionConfig)
 
     state: SessionState = SessionState.PENDING
+
+    # -- Lifecycle timestamps (monotonic clock) --
+    # Each field corresponds to a canonical lifecycle phase from timing_semantics.py.
+
     created_at: float = field(default_factory=time.monotonic)
-    first_audio_at: Optional[float] = None
+    """Monotonic timestamp for phase ``session.created``."""
+
+    first_text_enqueued_at: Optional[float] = None
+    """Monotonic timestamp for phase ``text.first_enqueued``."""
+
+    first_text_dequeued_at: Optional[float] = None
+    """Monotonic timestamp for phase ``text.first_dequeued``."""
+
+    prefill_started_at: Optional[float] = None
+    """Monotonic timestamp for phase ``engine.prefill.started``."""
+
+    prefill_completed_at: Optional[float] = None
+    """Monotonic timestamp for phase ``engine.prefill.completed``."""
+
+    first_raw_audio_at: Optional[float] = None
+    """Monotonic timestamp for phase ``engine.audio.first_raw``."""
+
+    first_effective_audio_at: Optional[float] = None
+    """Monotonic timestamp for phase ``output.audio.first_effective``."""
 
     # Spliter (text segmentation orchestrator) — set by Dispatcher
     spliter: Any = None
@@ -92,8 +114,25 @@ class Session:
         return self._input_complete
 
     def record_first_audio(self) -> None:
-        if self.first_audio_at is None:
-            self.first_audio_at = time.monotonic()
+        """Record the first raw audio arrival (phase ``engine.audio.first_raw``)."""
+        if self.first_raw_audio_at is None:
+            self.first_raw_audio_at = time.monotonic()
+
+    @property
+    def first_audio_at(self) -> Optional[float]:
+        """Deprecated: use ``first_raw_audio_at`` instead."""
+        import warnings
+        warnings.warn(
+            "Session.first_audio_at is deprecated; use first_raw_audio_at",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.first_raw_audio_at
+
+    @first_audio_at.setter
+    def first_audio_at(self, value: Optional[float]) -> None:
+        """Deprecated setter: forwards to ``first_raw_audio_at``."""
+        self.first_raw_audio_at = value
 
     @property
     def speaker_key(self) -> Optional[str]:
@@ -104,7 +143,20 @@ class Session:
         return self.config.task_type
 
     @property
-    def first_audio_latency_ms(self) -> Optional[float]:
-        if self.first_audio_at is None:
+    def session_create_to_first_raw_audio_ms(self) -> Optional[float]:
+        """Derived metric: session.created → engine.audio.first_raw (ms)."""
+        if self.first_raw_audio_at is None:
             return None
-        return (self.first_audio_at - self.created_at) * 1000
+        return (self.first_raw_audio_at - self.created_at) * 1000
+
+    @property
+    def first_audio_latency_ms(self) -> Optional[float]:
+        """Deprecated: use ``session_create_to_first_raw_audio_ms`` instead."""
+        import warnings
+        warnings.warn(
+            "Session.first_audio_latency_ms is deprecated; "
+            "use session_create_to_first_raw_audio_ms",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.session_create_to_first_raw_audio_ms

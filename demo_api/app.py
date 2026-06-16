@@ -14,9 +14,10 @@ from .audio_assets import attach_audio_to_result
 from .audio_store import AudioStore
 from . import llm_pk
 from .jobs import ConcurrencyJobManager
-from .schemas import TraceEvent
+from qwen3_tts_protocol.schemas import TraceEvent
 from .trace_store import TraceStore
-from .triton_client import TtsRequest, probe_ready, stream_once
+from qwen3_tts_protocol.triton_types import TtsRequest
+from .triton_client import probe_ready, stream_once
 
 
 DEFAULT_TEXT = "你好，今天天气不错，我们来聊聊最近你看过的书，有没有什么推荐的？"
