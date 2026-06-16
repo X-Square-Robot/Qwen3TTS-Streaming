@@ -11,23 +11,32 @@ Usage:
 import argparse
 import json
 import os
-import struct
 import sys
 import time
-import wave
 
 import numpy as np
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+bootstrap_tool_imports()
+from tests.support.triton_streaming import (
+    StreamResult,
+    build_request_payload,
+    infer_stream,
+    save_wav,
+)
 
 TRITON_MODEL_VERSION = os.environ.get("TRITON_MODEL_VERSION", "1")
 
 
 def _build_request(text: str, task_type: str, language: str) -> str:
-    payload = {
-        "text": text,
-        "language": language,
-    }
-    if task_type:
-        payload["task_type"] = task_type
+    payload = build_request_payload(
+        text=text,
+        task_type=task_type,
+        language=language,
+    )
     return json.dumps(payload)
 
 
@@ -110,102 +119,22 @@ def test_grpc_streaming(
     print(f"  Text: {text}")
     print(f"  Task type: {task_type or '<auto>'}")
 
-    req_json = _build_request(text=text, task_type=task_type, language=language)
+    payload = build_request_payload(text=text, task_type=task_type, language=language)
+    stream = infer_stream(client, grpcclient, payload, timeout=120)
 
-    req_input = grpcclient.InferInput("request", [1], "BYTES")
-    req_input.set_data_from_numpy(np.array([req_json], dtype=object))
-
-    audio_output = grpcclient.InferRequestedOutput("audio_chunk")
-    event_type_output = grpcclient.InferRequestedOutput("event_type")
-    event_json_output = grpcclient.InferRequestedOutput("event_json")
-    final_output = grpcclient.InferRequestedOutput("is_final")
-
-    audio_chunks = []
-    text_tokens = []
-    errors = []
-    done = False
-    audio_format = {"encoding": "pcm_f32", "sample_rate": 24000}
-
-    def _decode_obj(value):
-        if isinstance(value, bytes):
-            return value.decode("utf-8")
-        return str(value)
-
-    def _chunk_to_f32(raw: bytes) -> np.ndarray:
-        if audio_format.get("encoding") == "pcm_s16le":
-            return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
-        return np.frombuffer(raw, dtype=np.float32)
-
-    def callback(result, error):
-        nonlocal done
-        if error:
-            errors.append(str(error))
-            done = True
-            return
-
-        event_type = result.as_numpy("event_type")
-        event_json = result.as_numpy("event_json")
-        audio = result.as_numpy("audio_chunk")
-        is_final = result.as_numpy("is_final")
-        et = _decode_obj(event_type.flatten()[0]) if event_type is not None and event_type.size else ""
-        payload = {}
-        if event_json is not None and event_json.size:
-            raw_json = _decode_obj(event_json.flatten()[0])
-            if raw_json:
-                payload = json.loads(raw_json)
-        if et == "start":
-            audio_format.update(payload.get("audio_format", {}) or {})
-            print(f"  Start: format={audio_format}")
-        elif et == "audio" and audio is not None and audio.size:
-            chunk = _chunk_to_f32(audio.flatten()[0])
-            audio_chunks.append(chunk)
-            print(f"  Chunk {len(audio_chunks)}: {chunk.shape} samples, "
-                  f"final={is_final.flatten()[0]}")
-        elif et == "text_token":
-            token_text = payload.get("text", "")
-            text_tokens.append(token_text)
-            print(f"  Text token #{payload.get('meta', {}).get('token_idx', '?')}: {token_text!r}")
-        elif et == "text_boundary_commit":
-            print(f"  Text boundary commit: {payload.get('text', '')}")
-        elif et == "segment_end":
-            print(f"  Segment end: {payload.get('text', '')}")
-        elif et == "error":
-            errors.append(payload.get("message", "unknown error"))
-            done = True
-            return
-        if is_final.flatten()[0]:
-            done = True
-
-    t0 = time.time()
-    client.start_stream(callback=callback)
-    client.async_stream_infer(
-        model_name="tts_orchestrator",
-        inputs=[req_input],
-        outputs=[audio_output, event_type_output, event_json_output, final_output],
-    )
-
-    timeout = 120
-    while not done and (time.time() - t0) < timeout:
-        time.sleep(0.1)
-
-    client.stop_stream()
-    elapsed = time.time() - t0
-
-    if errors:
-        print(f"\n  Errors: {errors}")
+    if stream.error:
+        print(f"\n  Errors: {[stream.error]}")
         return False
 
-    if not audio_chunks:
-        print(f"\n  No audio chunks received ({elapsed:.2f}s)")
+    if stream.audio is None or stream.audio.size == 0:
+        print(f"\n  No audio chunks received ({stream.total_ms/1000.0:.2f}s)")
         return False
 
-    all_audio = np.concatenate(audio_chunks)
-    sample_rate = int(audio_format.get("sample_rate", 24000) or 24000)
+    all_audio = stream.audio
+    sample_rate = int(stream.metadata.get("audio_format", {}).get("sample_rate", 24000) or 24000)
     print(f"\n  Total audio: {len(all_audio)} samples ({len(all_audio)/sample_rate:.2f}s at {sample_rate}Hz)")
-    print(f"  Latency: {elapsed:.2f}s")
+    print(f"  Latency: {stream.total_ms/1000.0:.2f}s")
     print(f"  Audio range: [{all_audio.min():.4f}, {all_audio.max():.4f}]")
-    if text_tokens:
-        print(f"  Token player text: {''.join(text_tokens)}")
 
     if np.all(all_audio == 0):
         print("  WARNING: Audio is all zeros!")
@@ -213,18 +142,6 @@ def test_grpc_streaming(
     save_wav(all_audio, output_path, sample_rate=sample_rate)
     print(f"  Saved: {output_path}")
     return True
-
-
-def save_wav(audio: np.ndarray, path: str, sample_rate: int = 24000):
-    """Save float32 audio as 16-bit WAV."""
-    audio = np.clip(audio, -1.0, 1.0)
-    audio_int16 = (audio * 32767).astype(np.int16)
-
-    with wave.open(path, "w") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(audio_int16.tobytes())
 
 
 def main():

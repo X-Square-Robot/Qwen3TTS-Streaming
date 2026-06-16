@@ -1,0 +1,56 @@
+"""Canonical external session/interface contract helpers."""
+
+from .output import OutputPipeline, build_done_event, build_forward_event, build_start_event
+from .protocol import (
+    PROTOCOL_VERSION,
+    SUPPORTED_OUTPUT_POLICY_FEATURES,
+    SUPPORTED_TIMING_FIELDS,
+    SUPPORTED_VAD_STRATEGIES,
+    normalize_capabilities,
+    parse_output_policy,
+    parse_timing_context,
+    serialize_output_policy,
+    serialize_stream_event,
+    serialize_timing_context,
+    to_core_output_policy,
+    to_core_timing_context,
+)
+from .types import (
+    AudioFrame,
+    OutputPolicy,
+    SessionEndRequest,
+    SessionStartRequest,
+    StreamCancelRequest,
+    StreamEvent,
+    StreamTextChunk,
+    TimingContext,
+    VADPolicy,
+)
+
+__all__ = (
+    "AudioFrame",
+    "OutputPipeline",
+    "OutputPolicy",
+    "PROTOCOL_VERSION",
+    "SUPPORTED_OUTPUT_POLICY_FEATURES",
+    "SUPPORTED_TIMING_FIELDS",
+    "SUPPORTED_VAD_STRATEGIES",
+    "SessionEndRequest",
+    "SessionStartRequest",
+    "StreamCancelRequest",
+    "StreamEvent",
+    "StreamTextChunk",
+    "TimingContext",
+    "VADPolicy",
+    "build_done_event",
+    "build_forward_event",
+    "build_start_event",
+    "normalize_capabilities",
+    "parse_output_policy",
+    "parse_timing_context",
+    "serialize_output_policy",
+    "serialize_stream_event",
+    "serialize_timing_context",
+    "to_core_output_policy",
+    "to_core_timing_context",
+)

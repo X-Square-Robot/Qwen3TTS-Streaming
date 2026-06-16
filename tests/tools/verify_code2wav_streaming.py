@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -30,12 +29,16 @@ try:
 except ImportError:
     _HAS_SOUNDFILE = False
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-# Prefer export utils (has load_speech_tokenizer + decoder RoPE patch)
-sys.path.insert(0, str(REPO_ROOT / "scripts" / "export"))
-sys.path.insert(0, str(REPO_ROOT / "scripts" / "python"))
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
-sys.path.insert(0, str(REPO_ROOT / "third_party" / "Qwen3-TTS"))
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+bootstrap_tool_imports()
+from qwen3tts_tools.common import REPO_ROOT, bootstrap_project_imports
+
+# Prefer export utils (has load_speech_tokenizer + decoder RoPE patch).
+bootstrap_project_imports("scripts_export", "scripts_python", "scripts", "third_party_qwen")
 
 from utils import (
     setup_logging,

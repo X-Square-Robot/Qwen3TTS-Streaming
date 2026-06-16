@@ -4,14 +4,13 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
-import sys
 from pathlib import Path
 
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "third_party" / "Qwen3-TTS"))
-sys.path.insert(0, str(REPO_ROOT))
+from qwen3tts_tools.common import REPO_ROOT, bootstrap_project_imports
+
+bootstrap_project_imports("repo", "third_party_qwen")
 
 from qwen_tts.core.models.modeling_qwen3_tts import Qwen3TTSForConditionalGeneration
 from engine.frontend.spliter.tokenizer import load_lightweight_tokenizer

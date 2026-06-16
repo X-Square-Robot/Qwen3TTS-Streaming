@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip("torch")
+
 import engine.server as server_module
 from engine.backend.ref_audio_processor import ReferenceAudioSupport
 from engine.config import EngineConfig, EngineProfileConfig, ModelArchConfig
@@ -630,6 +632,10 @@ def test_describe_capabilities_reports_loaded_model_contract():
     assert cap["supported_input_modes"] == ["token", "clause", "long_segment", "full_text"]
     assert cap["supported_group_policies"] == ["none", "auto"]
     assert cap["ref_audio_available"] is False
+    assert cap["protocol_version"] == "tts-session-v2alpha1"
+    assert "vad_policy" in cap["supported_output_policy_features"]
+    assert cap["supported_vad_strategies"] == ["disabled", "prefix_trim", "tail_guard", "hybrid"]
+    assert "server_ttft_ms" in cap["supported_timing_fields"]
 
 
 def test_describe_capabilities_reports_missing_icl_codec():

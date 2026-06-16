@@ -57,6 +57,7 @@ from .runtime.fingerprint import (
 )
 from .core.mlfq import MLFQConfig
 from .core.types import SessionConfig
+from .interface import normalize_capabilities
 from .frontend.interface import FrontendInterface
 from .frontend.spliter.tokenizer import LightQwen3TTSTokenizer
 from .backend.engine_loop import EngineLoop
@@ -421,7 +422,7 @@ class TTSEngine:
         """Return static standalone capability metadata for clients."""
         ref_caps = self._reference_capabilities()
 
-        return {
+        return normalize_capabilities({
             "variant": self._model_arch.variant,
             "loaded_model_type": self._loaded_model_type(),
             "declared_supported_task_types": list(self._model_arch.supported_task_types or ()),
@@ -441,7 +442,7 @@ class TTSEngine:
                 "engine_dtype": self._model_arch.engine_profile.engine_dtype,
                 "triton_io_float_dtype": self._model_arch.engine_profile.triton_io_float_dtype,
             },
-        }
+        })
 
     def _reference_capabilities(self) -> dict:
         support = self._ref_audio_processor.support if self._ref_audio_processor is not None else None

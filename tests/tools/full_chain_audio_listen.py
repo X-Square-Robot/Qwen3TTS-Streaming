@@ -35,21 +35,22 @@ import argparse
 import json
 import logging
 import re
-import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 import soundfile as sf
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-_SCRIPTS_PY = REPO_ROOT / "scripts" / "python"
-sys.path.insert(0, str(_SCRIPTS_PY))
-sys.path.insert(0, str(REPO_ROOT / "scripts" / "export"))
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
-sys.path.insert(0, str(REPO_ROOT / "third_party" / "Qwen3-TTS"))
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+bootstrap_tool_imports()
+from qwen3tts_tools.common import REPO_ROOT, bootstrap_project_imports
+
+bootstrap_project_imports("repo", "scripts_python", "scripts_export", "scripts", "third_party_qwen")
+from tests.support.triton_streaming import build_variant_request_payload, infer_stream
 
 from official_prefill import build_prefill_like_official
 from utils import (
@@ -79,99 +80,6 @@ def _slug(s: str, max_len: int = 40) -> str:
     s = re.sub(r"\s+", "_", s.strip())
     s = re.sub(r"[^\w\u4e00-\u9fff_-]", "", s)
     return (s[:max_len] if s else "run").strip("_") or "run"
-
-
-def _build_triton_request(
-    variant: str, text: str, language: str, speaker: str, instruct: str
-) -> dict:
-    v = variant.lower()
-    if v.startswith("design"):
-        return {
-            "text": text,
-            "task_type": "voice_design",
-            "language": language,
-            "instruct": instruct,
-        }
-    if v.startswith("custom"):
-        return {
-            "text": text,
-            "task_type": "custom_voice",
-            "language": language,
-            "speaker": speaker,
-            "instruct": instruct,
-        }
-    raise ValueError(
-        f"Variant '{variant}' not supported (use custom-* or design-* for this script)."
-    )
-
-
-def _stream_orchestrator(client, req_dict: dict, timeout: float = 180.0):
-    import tritonclient.grpc as grpcclient
-
-    req_json = json.dumps(req_dict)
-    req_input = grpcclient.InferInput("request", [1], "BYTES")
-    req_input.set_data_from_numpy(np.array([req_json], dtype=object))
-    audio_out = grpcclient.InferRequestedOutput("audio_chunk")
-    event_type_out = grpcclient.InferRequestedOutput("event_type")
-    event_json_out = grpcclient.InferRequestedOutput("event_json")
-    final_out = grpcclient.InferRequestedOutput("is_final")
-
-    chunks: list[np.ndarray] = []
-    errors: list[str] = []
-    done = False
-    audio_format = {"encoding": "pcm_f32", "sample_rate": 24000}
-
-    def _decode_obj(value):
-        if isinstance(value, bytes):
-            return value.decode("utf-8")
-        return str(value)
-
-    def callback(result, error):
-        nonlocal done
-        if error:
-            errors.append(str(error))
-            done = True
-            return
-        event_type = result.as_numpy("event_type")
-        event_json = result.as_numpy("event_json")
-        audio = result.as_numpy("audio_chunk")
-        et = _decode_obj(event_type.flatten()[0]) if event_type is not None and event_type.size else ""
-        payload = {}
-        if event_json is not None and event_json.size:
-            raw_json = _decode_obj(event_json.flatten()[0])
-            if raw_json:
-                payload = json.loads(raw_json)
-        if et == "start":
-            audio_format.update(payload.get("audio_format", {}) or {})
-        elif et == "audio" and audio is not None and audio.size:
-            raw = audio.flatten()[0]
-            if audio_format.get("encoding") == "pcm_s16le":
-                chunks.append(np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0)
-            else:
-                chunks.append(np.frombuffer(raw, dtype=np.float32))
-        elif et == "error":
-            errors.append(payload.get("message", "unknown error"))
-            done = True
-            return
-        fin = result.as_numpy("is_final")
-        if fin is not None and fin.size and bool(fin.flatten()[0]):
-            done = True
-
-    t0 = time.perf_counter()
-    client.start_stream(callback=callback)
-    client.async_stream_infer(
-        model_name="tts_orchestrator",
-        inputs=[req_input],
-        outputs=[audio_out, event_type_out, event_json_out, final_out],
-    )
-    while not done and (time.perf_counter() - t0) < timeout:
-        time.sleep(0.05)
-    client.stop_stream()
-    if errors:
-        raise RuntimeError(errors[0])
-    if not chunks:
-        raise RuntimeError("No audio from tts_orchestrator")
-    return np.concatenate(chunks).astype(np.float32), time.perf_counter() - t0
 
 
 def main() -> None:
@@ -406,15 +314,26 @@ def main() -> None:
         sf.write(str(out_dir / "fused_triton_direct.wav"), wav_fused_triton, sr)
         logger.info("Wrote fused_triton_direct.wav (%.2fs)", len(wav_fused_triton) / sr)
 
-        req = _build_triton_request(
-            args.variant, text, args.language, args.speaker, args.instruct
+        req = build_variant_request_payload(
+            variant=args.variant,
+            text=text,
+            language=args.language,
+            speaker=args.speaker,
+            instruct=args.instruct,
         )
         logger.info("Orchestrator request: %s", json.dumps(req, ensure_ascii=False))
-        wav_orch, elapsed = _stream_orchestrator(client, req)
-        sf.write(str(out_dir / "orchestrator.wav"), wav_orch, sr)
+        stream = infer_stream(client, grpcclient, req, timeout=180)
+        if stream.error:
+            raise RuntimeError(stream.error)
+        if stream.audio is None or stream.audio.size == 0:
+            raise RuntimeError("No audio from tts_orchestrator")
+        wav_orch = stream.audio
+        elapsed = stream.total_ms / 1000.0
+        orchestrator_sr = int(stream.metadata.get("audio_format", {}).get("sample_rate", sr) or sr)
+        sf.write(str(out_dir / "orchestrator.wav"), wav_orch, orchestrator_sr)
         logger.info(
             "Wrote orchestrator.wav (%.2fs, wall=%.2fs)",
-            len(wav_orch) / sr,
+            len(wav_orch) / orchestrator_sr,
             elapsed,
         )
         readme_lines.append(f"orchestrator wall time: {elapsed:.2f}s")

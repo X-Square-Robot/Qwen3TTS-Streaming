@@ -23,20 +23,29 @@ Usage (host, conda activate qwen3-tts):
 import argparse
 import json
 import logging
-import sys
-import time
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "scripts" / "python"))
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
-sys.path.insert(0, str(REPO_ROOT / "scripts" / "export"))
-sys.path.insert(0, str(REPO_ROOT / "third_party" / "Qwen3-TTS"))
-sys.path.insert(0, str(REPO_ROOT / "tests" / "integration"))
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+bootstrap_tool_imports()
+from qwen3tts_tools.common import REPO_ROOT, bootstrap_project_imports
+
+bootstrap_project_imports(
+    "repo",
+    "scripts_python",
+    "scripts",
+    "scripts_export",
+    "third_party_qwen",
+    "tests_integration",
+)
+from tests.support.triton_streaming import build_variant_request_payload, infer_stream
 
 from utils import (
     setup_logging,
@@ -403,86 +412,22 @@ def main():
             triton_client = grpcclient.InferenceServerClient(url=args.triton_url)
             if not triton_client.is_server_ready():
                 raise RuntimeError(f"Triton not ready at {args.triton_url}")
-            if "design" in args.variant.lower():
-                req_dict = {
-                    "text": args.text,
-                    "task_type": "voice_design",
-                    "language": language,
-                    "instruct": args.instruct or "",
-                }
-            elif "custom" in args.variant.lower():
-                req_dict = {
-                    "text": args.text,
-                    "task_type": "custom_voice",
-                    "language": language,
-                    "speaker": speaker or "serena",
-                }
-            else:
-                logger.warning(
-                    "Triton A/B: variant %s not mapped (use design-* or custom-*); skipping TRT",
-                    args.variant,
-                )
-                raise RuntimeError("unsupported variant for auto task_type")
-            req_input = grpcclient.InferInput("request", [1], "BYTES")
-            req_input.set_data_from_numpy(np.array([json.dumps(req_dict)], dtype=object))
-            audio_out = grpcclient.InferRequestedOutput("audio_chunk")
-            event_type_out = grpcclient.InferRequestedOutput("event_type")
-            event_json_out = grpcclient.InferRequestedOutput("event_json")
-            final_out = grpcclient.InferRequestedOutput("is_final")
-            chunks = []
-            errors = []
-            done = [False]
-            audio_format = {"encoding": "pcm_f32", "sample_rate": 24000}
-            def _decode_obj(value):
-                if isinstance(value, bytes):
-                    return value.decode("utf-8")
-                return str(value)
-            def _stream_cb(result, error):
-                if error:
-                    errors.append(str(error))
-                    done[0] = True
-                    return
-                event_type = result.as_numpy("event_type")
-                event_json = result.as_numpy("event_json")
-                chunk = result.as_numpy("audio_chunk")
-                et = _decode_obj(event_type.flatten()[0]) if event_type is not None and event_type.size else ""
-                payload = {}
-                if event_json is not None and event_json.size:
-                    raw_json = _decode_obj(event_json.flatten()[0])
-                    if raw_json:
-                        payload = json.loads(raw_json)
-                if et == "start":
-                    audio_format.update(payload.get("audio_format", {}) or {})
-                elif et == "audio" and chunk is not None and chunk.size > 0:
-                    raw = chunk.flatten()[0]
-                    if audio_format.get("encoding") == "pcm_s16le":
-                        chunks.append(np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0)
-                    else:
-                        chunks.append(np.frombuffer(raw, dtype=np.float32))
-                elif et == "error":
-                    errors.append(payload.get("message", "unknown error"))
-                    done[0] = True
-                    return
-                fin = result.as_numpy("is_final")
-                if fin is not None and fin.size and fin.flatten()[0]:
-                    done[0] = True
-            t0 = time.perf_counter()
-            triton_client.start_stream(callback=_stream_cb)
-            triton_client.async_stream_infer(
-                model_name="tts_orchestrator",
-                inputs=[req_input],
-                outputs=[audio_out, event_type_out, event_json_out, final_out],
+            req_dict = build_variant_request_payload(
+                variant=args.variant,
+                text=args.text,
+                language=language,
+                speaker=speaker or "serena",
+                instruct=args.instruct or "",
             )
-            while not done[0] and (time.perf_counter() - t0) < 120:
-                time.sleep(0.05)
-            triton_client.stop_stream()
-            elapsed = time.perf_counter() - t0
-            if errors:
-                raise RuntimeError(f"Orchestrator stream error: {errors[0]}")
-            if chunks:
-                wav_trt = np.concatenate(chunks).astype(np.float32)
+            stream = infer_stream(triton_client, grpcclient, req_dict, timeout=120)
+            elapsed = stream.total_ms / 1000.0
+            if stream.error:
+                raise RuntimeError(f"Orchestrator stream error: {stream.error}")
+            if stream.audio is not None and stream.audio.size:
+                wav_trt = stream.audio.astype(np.float32)
+                sample_rate = int(stream.metadata.get("audio_format", {}).get("sample_rate", sr) or sr)
                 logger.info("  TRT (orchestrator): %d samples (%.2f s), elapsed=%.2fs",
-                            len(wav_trt), len(wav_trt) / sr, elapsed)
+                            len(wav_trt), len(wav_trt) / sample_rate, elapsed)
             else:
                 logger.warning("  TRT: no audio chunks received")
         except Exception as e:

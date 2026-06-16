@@ -14,16 +14,19 @@ import argparse
 import json
 import logging
 import sys
-from pathlib import Path
 
 import numpy as np
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "scripts" / "python"))
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
-sys.path.insert(0, str(REPO_ROOT / "scripts" / "export"))
-sys.path.insert(0, str(REPO_ROOT / "third_party" / "Qwen3-TTS"))
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+REPO_ROOT = bootstrap_tool_imports()
+from qwen3tts_tools.common import bootstrap_project_imports
+
+bootstrap_project_imports("scripts_python", "scripts", "scripts_export", "third_party_qwen")
 
 from utils import (
     setup_logging,
@@ -226,13 +229,10 @@ def main():
 
     # Prefer tokenizer from model dir (vocab.json + merges.txt); fallback to dedicated tokenizer dir
     tokenizer_dir = str(path)  # model path has vocab.json + merges.txt for TTS models
-    sys.path.insert(0, str(REPO_ROOT))
-    try:
-        from engine.backend.prefill import EmbeddingWeights, PrefillBuilder
-        from engine.backend.prefill import TaskType
-        from engine.frontend.spliter.tokenizer import load_lightweight_tokenizer
-    finally:
-        sys.path.pop(0)
+    bootstrap_project_imports("repo")
+    from engine.backend.prefill import EmbeddingWeights, PrefillBuilder
+    from engine.backend.prefill import TaskType
+    from engine.frontend.spliter.tokenizer import load_lightweight_tokenizer
 
     tokenizer = load_lightweight_tokenizer(tokenizer_dir)
     if tokenizer is None:

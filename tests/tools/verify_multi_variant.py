@@ -21,16 +21,21 @@ import logging
 import os
 import sys
 import time
-from pathlib import Path
 from itertools import combinations
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "scripts" / "export"))
-sys.path.insert(0, str(REPO_ROOT / "third_party" / "Qwen3-TTS"))
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+bootstrap_tool_imports()
+from qwen3tts_tools.common import bootstrap_project_imports
+
+bootstrap_project_imports("scripts_export", "third_party_qwen")
 
 from utils import (
     setup_logging,

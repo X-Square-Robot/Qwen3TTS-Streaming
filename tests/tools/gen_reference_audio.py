@@ -8,16 +8,21 @@ Usage (conda activate qwen3-tts):
   python tests/tools/gen_reference_audio.py
 """
 
-import sys
 import time
-from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "third_party" / "Qwen3-TTS"))
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+bootstrap_tool_imports()
+from qwen3tts_tools.common import REPO_ROOT, bootstrap_project_imports
+
+bootstrap_project_imports("third_party_qwen")
 
 TEXTS = {
     "test1": "你好，这是单路测试。",

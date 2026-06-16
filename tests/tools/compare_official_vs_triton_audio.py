@@ -29,17 +29,20 @@ import argparse
 import json
 import logging
 import sys
-import time
-from pathlib import Path
 
-import numpy as np
 import soundfile as sf
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "scripts" / "export"))
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
-sys.path.insert(0, str(REPO_ROOT / "third_party" / "Qwen3-TTS"))
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+bootstrap_tool_imports()
+from qwen3tts_tools.common import REPO_ROOT, bootstrap_project_imports
+
+bootstrap_project_imports("repo", "scripts_export", "scripts", "third_party_qwen")
+from tests.support.triton_streaming import build_variant_request_payload, infer_stream
 
 from utils import (
     setup_logging,
@@ -54,104 +57,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("compare_official_triton")
-
-
-def _build_triton_request(
-    variant: str,
-    text: str,
-    language: str,
-    speaker: str,
-    instruct: str,
-) -> dict:
-    v = variant.lower()
-    if v.startswith("design"):
-        return {
-            "text": text,
-            "task_type": "voice_design",
-            "language": language,
-            "instruct": instruct,
-        }
-    if v.startswith("custom"):
-        return {
-            "text": text,
-            "task_type": "custom_voice",
-            "language": language,
-            "speaker": speaker,
-            "instruct": instruct,
-        }
-    raise ValueError(
-        f"Variant '{variant}' not supported here (add voice_clone + ref_audio separately). "
-        "Use custom-* or design-*."
-    )
-
-
-def _stream_tts_triton(client, req_dict: dict, timeout: float = 120.0):
-    import tritonclient.grpc as grpcclient
-
-    req_json = json.dumps(req_dict)
-    req_input = grpcclient.InferInput("request", [1], "BYTES")
-    req_input.set_data_from_numpy(np.array([req_json], dtype=object))
-    audio_out = grpcclient.InferRequestedOutput("audio_chunk")
-    event_type_out = grpcclient.InferRequestedOutput("event_type")
-    event_json_out = grpcclient.InferRequestedOutput("event_json")
-    final_out = grpcclient.InferRequestedOutput("is_final")
-
-    chunks = []
-    errors: list[str] = []
-    done = False
-    audio_format = {"encoding": "pcm_f32", "sample_rate": 24000}
-
-    def _decode_obj(value):
-        if isinstance(value, bytes):
-            return value.decode("utf-8")
-        return str(value)
-
-    def callback(result, error):
-        nonlocal done
-        if error:
-            errors.append(str(error))
-            done = True
-            return
-        event_type = result.as_numpy("event_type")
-        event_json = result.as_numpy("event_json")
-        audio = result.as_numpy("audio_chunk")
-        et = _decode_obj(event_type.flatten()[0]) if event_type is not None and event_type.size else ""
-        payload = {}
-        if event_json is not None and event_json.size:
-            raw_json = _decode_obj(event_json.flatten()[0])
-            if raw_json:
-                payload = json.loads(raw_json)
-        if et == "start":
-            audio_format.update(payload.get("audio_format", {}) or {})
-        elif et == "audio" and audio is not None and audio.size:
-            raw = audio.flatten()[0]
-            if audio_format.get("encoding") == "pcm_s16le":
-                chunks.append(np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0)
-            else:
-                chunks.append(np.frombuffer(raw, dtype=np.float32))
-        elif et == "error":
-            errors.append(payload.get("message", "unknown error"))
-            done = True
-            return
-        fin = result.as_numpy("is_final")
-        if fin is not None and fin.size and bool(fin.flatten()[0]):
-            done = True
-
-    t0 = time.perf_counter()
-    client.start_stream(callback=callback)
-    client.async_stream_infer(
-        model_name="tts_orchestrator",
-        inputs=[req_input],
-        outputs=[audio_out, event_type_out, event_json_out, final_out],
-    )
-    while not done and (time.perf_counter() - t0) < timeout:
-        time.sleep(0.05)
-    client.stop_stream()
-    if errors:
-        raise RuntimeError(errors[0])
-    if not chunks:
-        raise RuntimeError("No audio from Triton")
-    return np.concatenate(chunks).astype(np.float32), time.perf_counter() - t0
 
 
 def main():
@@ -229,8 +134,12 @@ def main():
         logger.error("Install: pip install tritonclient[grpc]")
         sys.exit(1)
 
-    req = _build_triton_request(
-        args.variant, args.text, args.language, args.speaker, args.instruct
+    req = build_variant_request_payload(
+        variant=args.variant,
+        text=args.text,
+        language=args.language,
+        speaker=args.speaker,
+        instruct=args.instruct,
     )
     logger.info("Triton request: %s", json.dumps(req, ensure_ascii=False))
     client = grpcclient.InferenceServerClient(url=args.triton_url)
@@ -238,14 +147,21 @@ def main():
         logger.error("Triton not ready at %s", args.triton_url)
         sys.exit(1)
 
-    wav_triton, elapsed = _stream_tts_triton(client, req)
+    stream = infer_stream(client, grpcclient, req, timeout=120)
+    if stream.error:
+        raise RuntimeError(stream.error)
+    if stream.audio is None or stream.audio.size == 0:
+        raise RuntimeError("No audio from Triton")
+    sample_rate = int(stream.metadata.get("audio_format", {}).get("sample_rate", sr) or sr)
+    wav_triton = stream.audio
+    elapsed = stream.total_ms / 1000.0
     # Orchestrator outputs float32 mono at model sample rate (typically 24kHz)
-    sf.write(str(out_dir / "triton.wav"), wav_triton, sr)
+    sf.write(str(out_dir / "triton.wav"), wav_triton, sample_rate)
     logger.info(
         "Wrote %s (Triton orchestrator, %d samples, %.2fs, elapsed=%.2fs)",
         out_dir / "triton.wav",
         len(wav_triton),
-        len(wav_triton) / sr,
+        len(wav_triton) / sample_rate,
         elapsed,
     )
 

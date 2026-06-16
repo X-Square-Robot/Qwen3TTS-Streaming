@@ -18,17 +18,19 @@ Usage:
 """
 
 import argparse
-import json
-import os
 import sys
 import time
-import wave
-import threading
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import torch
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+bootstrap_tool_imports()
+from tests.support.triton_streaming import build_request_payload, infer_stream, save_wav
 
 SAMPLE_RATE = 24000
 
@@ -68,18 +70,6 @@ TEST_CASES = {
         "创造一个更加美好的未来。"
     ),
 }
-
-
-def save_wav(audio: np.ndarray, path: str, sr: int = SAMPLE_RATE):
-    audio = np.clip(audio, -1.0, 1.0)
-    audio_int16 = (audio * 32767).astype(np.int16)
-    with wave.open(path, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sr)
-        wf.writeframes(audio_int16.tobytes())
-
-
 def analyze_silence(audio: np.ndarray, sr: int = SAMPLE_RATE,
                     threshold: float = 0.005, min_dur_ms: float = 200) -> list:
     """Detect silence segments longer than min_dur_ms."""
@@ -136,7 +126,7 @@ def run_official_greedy(model_path: str, output_dir: Path):
         duration = len(audio) / sr
 
         out_path = str(output_dir / f"official_greedy_{name}.wav")
-        save_wav(audio, out_path, sr)
+        save_wav(audio, out_path, sample_rate=sr)
 
         silences = analyze_silence(audio, sr)
         total_silence = sum(s[2] for s in silences)
@@ -170,7 +160,7 @@ def run_official_greedy(model_path: str, output_dir: Path):
         duration = len(audio) / sr
 
         out_path = str(output_dir / f"official_sampling_{name}.wav")
-        save_wav(audio, out_path, sr)
+        save_wav(audio, out_path, sample_rate=sr)
 
         silences = analyze_silence(audio, sr)
         total_silence = sum(s[2] for s in silences)
@@ -209,95 +199,33 @@ def run_triton_greedy(triton_url: str, output_dir: Path):
         print(f"\n  --- {name} ({len(text)} chars) ---")
 
         client = grpcclient.InferenceServerClient(url=triton_url)
-        req_dict = {
-            "text": text,
-            "task_type": "custom_voice",
-            "speaker": SPEAKER,
-            "language": LANGUAGE,
-            "action": "synthesize",
-            "session_id": f"greedy-baseline-{name}",
-        }
-        req_json = json.dumps(req_dict)
-        req_input = grpcclient.InferInput("request", [1], "BYTES")
-        req_input.set_data_from_numpy(np.array([req_json], dtype=object))
-        audio_out = grpcclient.InferRequestedOutput("audio_chunk")
-        event_type_out = grpcclient.InferRequestedOutput("event_type")
-        event_json_out = grpcclient.InferRequestedOutput("event_json")
-        final_out = grpcclient.InferRequestedOutput("is_final")
-
-        chunks = []
-        errors = []
-        warnings = []
-        done = threading.Event()
-        audio_format = {"encoding": "pcm_f32", "sample_rate": SAMPLE_RATE}
-
-        def _decode_obj(value):
-            if isinstance(value, bytes):
-                return value.decode("utf-8")
-            return str(value)
-
-        def callback(result=None, error=None):
-            if error:
-                err_str = str(error)
-                errors.append(err_str)
-                done.set()
-                return
-            if result is None:
-                return
-            event_type = result.as_numpy("event_type")
-            event_json = result.as_numpy("event_json")
-            audio = result.as_numpy("audio_chunk")
-            is_final = result.as_numpy("is_final")
-            et = _decode_obj(event_type.flatten()[0]) if event_type is not None and event_type.size else ""
-            payload = {}
-            if event_json is not None and event_json.size:
-                raw_json = _decode_obj(event_json.flatten()[0])
-                if raw_json:
-                    payload = json.loads(raw_json)
-            if et == "start":
-                audio_format.update(payload.get("audio_format", {}) or {})
-            elif et == "warning":
-                warnings.append(payload.get("message", ""))
-            elif et == "audio" and audio is not None and audio.size:
-                raw = audio.flatten()[0]
-                if audio_format.get("encoding") == "pcm_s16le":
-                    chunks.append(np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0)
-                else:
-                    chunks.append(np.frombuffer(raw, dtype=np.float32))
-            elif et == "error":
-                errors.append(payload.get("message", "unknown error"))
-                done.set()
-                return
-            final = bool(is_final.flatten()[0]) if is_final is not None and is_final.size else False
-            if final:
-                done.set()
-
-        t0 = time.time()
-        client.start_stream(callback=callback)
-        client.async_stream_infer(
-            model_name="tts_orchestrator",
-            inputs=[req_input],
-            outputs=[audio_out, event_type_out, event_json_out, final_out],
+        req_dict = build_request_payload(
+            text=text,
+            task_type="custom_voice",
+            speaker=SPEAKER,
+            language=LANGUAGE,
+            action="synthesize",
+            session_id=f"greedy-baseline-{name}",
         )
-        done.wait(timeout=300)
-        client.stop_stream()
-        elapsed = time.time() - t0
+        stream = infer_stream(client, grpcclient, req_dict, timeout=300)
+        elapsed = stream.total_ms / 1000.0
 
-        if errors:
-            print(f"  ERROR: {errors[0][:200]}")
-            results[name] = {"error": errors[0]}
+        if stream.error:
+            print(f"  ERROR: {stream.error[:200]}")
+            results[name] = {"error": stream.error}
             continue
-        if warnings:
-            for w in warnings:
+        if stream.warnings:
+            for w in stream.warnings:
                 print(f"  WARNING: {w}")
 
-        audio = np.concatenate(chunks) if chunks else np.array([], dtype=np.float32)
-        duration = len(audio) / SAMPLE_RATE
+        audio = stream.audio if stream.audio is not None else np.array([], dtype=np.float32)
+        sample_rate = int(stream.metadata.get("audio_format", {}).get("sample_rate", SAMPLE_RATE) or SAMPLE_RATE)
+        duration = len(audio) / sample_rate
 
         out_path = str(output_dir / f"triton_argmax_{name}.wav")
-        save_wav(audio, out_path)
+        save_wav(audio, out_path, sample_rate=sample_rate)
 
-        silences = analyze_silence(audio)
+        silences = analyze_silence(audio, sample_rate)
         total_silence = sum(s[2] for s in silences)
 
         print(f"  Duration: {duration:.2f}s  Time: {elapsed:.1f}s  "

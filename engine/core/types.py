@@ -53,6 +53,33 @@ class AudioConfig:
 
 
 @dataclass
+class VADConfig:
+    enabled: bool = False
+    strategy: str = "disabled"
+    implementation: str = ""
+    config: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class OutputPolicyConfig:
+    vad: VADConfig = field(default_factory=VADConfig)
+    chunk_ms: int = 0
+    packet_format: str = "raw_pcm"
+    emit_text_events: bool = True
+    config: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TimingConfig:
+    request_id: str = ""
+    turn_id: str = ""
+    client_request_ts_ms: int = 0
+    client_text_ts_ms: int = 0
+    client_end_ts_ms: int = 0
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class TokenizedText:
     """Canonical text payload: normalized text plus its token IDs."""
     text: str = ""
@@ -95,6 +122,8 @@ class SessionConfig:
     input_mode: InputMode = InputMode.LONG_SEGMENT
     group_policy: GroupPolicy = GroupPolicy.AUTO
     audio: AudioConfig = field(default_factory=AudioConfig)
+    output_policy: OutputPolicyConfig = field(default_factory=OutputPolicyConfig)
+    timing: TimingConfig = field(default_factory=TimingConfig)
 
 
 # ---------------------------------------------------------------------------

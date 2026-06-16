@@ -19,16 +19,24 @@ The gateway is a protocol adapter only.
 
 - Accept `start -> text* -> end/cancel`
 - Validate and normalize `SessionConfig`
-- Convert outgoing audio to the requested output format
+- Parse canonical `OutputPolicy`, `VADPolicy`, and `TimingContext`
+- Convert outgoing audio to the requested output format through a shared output pipeline
 - Do not infer offline/streaming behavior from chunk timing
+- Do not own transport-specific protocol branches beyond wire compatibility shims
 
 ### Interface
 
-The interface is the external session facade for gateway/triton adapters.
+The interface is the transport-agnostic external session facade for gateway/triton adapters.
 
+- Lives in `engine/interface/*`
+- Owns canonical request/session/event contracts:
+  `SessionStartRequest`, `StreamTextChunk`, `SessionEndRequest`,
+  `StreamCancelRequest`, `OutputPolicy`, `VADPolicy`, `TimingContext`,
+  `StreamEvent`, `AudioFrame`
 - Owns session lifecycle and callback wiring
 - Owns text/token ingestion and `input_mode`-based routing
 - Owns ordered audio emission back to the caller
+- Owns timing normalization and output metadata emission
 - Does not construct backend requests directly beyond delegating to dispatcher
 
 ### Dispatcher
@@ -59,6 +67,33 @@ The backend owns synthesis state.
 
 ## Session Protocol
 
+### Canonical Contract
+
+All external transports now map into a single canonical session contract:
+
+- `SessionStartRequest`
+- `StreamTextChunk`
+- `SessionEndRequest`
+- `StreamCancelRequest`
+- `OutputPolicy`
+- `VADPolicy`
+- `TimingContext`
+- `StreamEvent`
+- `AudioFrame`
+
+The interface contract version is:
+
+- `protocol_version = tts-session-v2alpha1`
+
+Current transports remain backward compatible:
+
+- gRPC legacy `init/text_complete`
+- WebSocket `start/text/end/cancel/oneshot`
+- Triton legacy JSON request fields
+- remote worker top-level compatibility fields
+
+Missing new fields always default to the existing behavior.
+
 ### Capabilities
 
 Before opening a synthesis session, a client may call `GetCapabilities`.
@@ -74,6 +109,27 @@ This returns the standalone engine's loaded contract:
   `speaker_encoder_available`, `ref_codec_available`, `icl_available`,
   `ref_audio_max_duration_sec`, `ref_c2w_warm_state_available`,
   `ref_codec_reason`
+- interface contract metadata:
+  `protocol_version`,
+  `supported_output_policy_features`,
+  `supported_vad_strategies`,
+  `supported_timing_fields`
+
+Current canonical capability feature flags are:
+
+- `supported_output_policy_features`
+  - `request_context`
+  - `timing_context`
+  - `vad_policy`
+- `supported_vad_strategies`
+  - `disabled`
+  - `prefix_trim`
+  - `tail_guard`
+  - `hybrid`
+- `supported_timing_fields`
+  - client-provided timestamps such as `client_request_ts_ms`
+  - server-normalized timestamps such as `server_first_audio_epoch_ms`
+  - derived latency metrics such as `server_ttft_ms`
 
 The loaded model type is chosen when the engine is started. Runtime requests do
 not switch models; they can only confirm that the client and server are using
@@ -103,6 +159,33 @@ Important fields:
 - `input_mode`
 - `group_policy`
 - `audio`
+- `output_policy`
+- `timing`
+- `protocol_version`
+
+Canonical `OutputPolicy` fields:
+
+- `vad_policy`
+- `chunk_ms`
+- `packet_format`
+- `emit_text_events`
+- `config`
+
+Canonical `VADPolicy` fields:
+
+- `enabled`
+- `strategy`
+- `implementation`
+- `config`
+
+Canonical `TimingContext` fields:
+
+- `request_id`
+- `turn_id`
+- `client_request_ts_ms`
+- `client_text_ts_ms`
+- `client_end_ts_ms`
+- `extra`
 
 `task_type` is no longer the runtime model selector. The standalone engine binds
 requests to the already loaded model type from the manifest. Clients may omit
@@ -206,11 +289,16 @@ ref_preprocess_runtime=trt
 `TextChunk` carries text only. Its transport arrival pattern must not change
 session semantics.
 
+It may also carry optional timing metadata such as `client_timestamp_ms`, which
+is recorded as context and does not change synthesis behavior.
+
 ### End
 
 `EndRequest` means no more text will arrive for this session.
 
 It must not be used to infer whether a session is "offline" or "streaming".
+
+It may carry optional `client_timestamp_ms` for timing analysis.
 
 ## Input Modes
 
@@ -252,12 +340,99 @@ It must not be used to infer whether a session is "offline" or "streaming".
 ## Audio Output Contract
 
 Gateway accepts an `AudioFormat` request and converts engine output from native
-`PCM_F32@24kHz` into the requested wire format.
+`PCM_F32@24kHz` into the requested wire format through the shared
+`engine.interface.output.OutputPipeline`.
 
 Current implementation supports:
 
 - `PCM_F32`, mono, `24000` or `16000`
 - `PCM_S16LE`, mono, `24000` or `16000`
+
+The output pipeline is also responsible for:
+
+- chunk indexing
+- first-chunk markers
+- start/done event normalization
+- canonical timing metadata
+- shared `protocol_version` and `output_policy_json` / `timing_context_json`
+- transport-independent VAD policy exposure
+
+Current timing contract:
+
+- `timing_contract = server_monotonic_v1`
+
+The server is the source of truth for strong timing metrics:
+
+- `server_request_received_epoch_ms`
+- `server_first_audio_epoch_ms`
+- `server_done_epoch_ms`
+- `server_ttft_ms`
+- `server_total_latency_ms`
+
+Client timestamps are optional context only:
+
+- they are recorded and echoed where possible
+- they may be used later for network-delay estimation
+- they are not treated as strong consistency metrics
+
+## VAD Contract
+
+This phase does not implement actual output gating in the canonical interface.
+Instead, it reserves a stable policy contract so future implementations can be
+plugged in without changing transport semantics.
+
+Supported semantic policy modes:
+
+- `disabled`
+- `prefix_trim`
+  - intended for trimming leading silence only
+- `tail_guard`
+  - intended for cutting off hallucinated non-speech tails
+- `hybrid`
+  - intended for combining prefix trim and tail guard
+
+Important design rule:
+
+- `vad_policy` describes *when* output-stream gating should happen
+- it does not hardcode *how* the detection is implemented
+
+That keeps future implementations compatible:
+
+- energy-based prefix trim
+- mel/log-energy prefix trim
+- TenVad tail guard
+- hybrid combinations
+
+In v1:
+
+- default is `vad_policy.enabled=false`
+- no actual gating is performed by the standalone engine contract
+- enabling a policy only changes metadata / contract fields unless a later
+  implementation explicitly consumes it
+
+## Transport Mapping
+
+All external adapters should now be thin shells over the canonical interface:
+
+- gRPC
+  - maps proto fields to canonical session contract
+  - preserves legacy `init/text_complete`
+- WebSocket
+  - maps JSON messages to canonical session contract
+  - preserves binary audio frames for compatibility
+- Triton
+  - preserves `audio_chunk`, `event_type`, `event_json`, `is_final`
+  - emits canonical metadata inside `event_json.meta`
+- remote worker
+  - forwards canonical `output_policy` / `timing_context`
+  - keeps existing query/turn compatibility fields
+
+The transport layer should not duplicate:
+
+- audio conversion logic
+- timing normalization logic
+- protocol-version negotiation
+- future VAD contract wiring
 
 Unsupported combinations should fail explicitly instead of silently degrading.
 

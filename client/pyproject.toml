@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qwen3-tts-client"
+version = "0.1.0"
+description = "Lightweight Python client SDK for Qwen3-TTS standalone engine and Triton endpoints."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+  {name = "Qwen3-TTS Triton Contributors"}
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+  "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+grpc = [
+  "grpcio>=1.67.1",
+  "protobuf>=5.29.6,<7",
+]
+triton = [
+  "tritonclient[grpc,http]>=2.54.0",
+]
+audio = [
+  "numpy>=1.26.0",
+]
+all = [
+  "grpcio>=1.67.1",
+  "protobuf>=5.29.6,<7",
+  "tritonclient[grpc,http]>=2.54.0",
+  "numpy>=1.26.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/user/Qwen3-TTS-Triton"
+Documentation = "https://github.com/user/Qwen3-TTS-Triton/blob/main/docs/zh/client_sdk.md"
+
+[tool.setuptools]
+include-package-data = true
+package-dir = {"" = "src", "qwen3_tts_protocol" = "../qwen3_tts_protocol"}
+
+[tool.setuptools.packages.find]
+where = ["src", ".."]
+include = [
+  "qwen3_tts_client",
+  "qwen3_tts_client.*",
+  "qwen3_tts_protocol",
+  "qwen3_tts_protocol.*",
+]

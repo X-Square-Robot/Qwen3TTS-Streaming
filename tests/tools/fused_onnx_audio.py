@@ -14,15 +14,19 @@ import json
 import logging
 import sys
 import time
-import wave
-from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT))
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+bootstrap_tool_imports()
+from qwen3tts_tools.audio import save_wav
+from qwen3tts_tools.common import REPO_ROOT
 
 from engine.backend.prefill import EmbeddingWeights, PrefillBuilder, TaskType
 from engine.frontend.spliter.tokenizer import load_lightweight_tokenizer
@@ -37,18 +41,6 @@ logger = logging.getLogger("fused_ort_test")
 DEFAULT_TEXT = "其实我真的有发现，我是一个特别善于观察别人情绪的人。"
 SAMPLE_RATE = 24000
 SLIDING_WINDOW = 72
-
-
-def save_wav(audio: np.ndarray, path: str, sr: int = SAMPLE_RATE):
-    audio = np.clip(audio, -1.0, 1.0)
-    audio_int16 = (audio * 32767).astype(np.int16)
-    with wave.open(path, "w") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sr)
-        wf.writeframes(audio_int16.tobytes())
-
-
 def main():
     parser = argparse.ArgumentParser(description="Test fused ONNX model audio output")
     parser.add_argument("--variant", default="custom-1.7b")
@@ -246,7 +238,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "fused_ort.wav"
     if full_wav.size > 0:
-        save_wav(full_wav, str(out_path))
+        save_wav(full_wav, out_path, sample_rate=SAMPLE_RATE)
 
     logger.info("=== RESULTS ===")
     logger.info("Text: %s", args.text)

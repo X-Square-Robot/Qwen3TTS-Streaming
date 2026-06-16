@@ -59,6 +59,14 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+bootstrap_tool_imports()
+from qwen3tts_tools.common import bootstrap_project_imports
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("verify_cp_trt")
 
@@ -238,8 +246,7 @@ def _optional_pytorch_ref(
     cfg = wdir / "config.json"
     if not cfg.is_file():
         return None
-    sys.path.insert(0, str(repo_root / "scripts" / "export"))
-    sys.path.insert(0, str(repo_root / "third_party" / "Qwen3-TTS"))
+    bootstrap_project_imports("scripts_export", "third_party_qwen")
     try:
         import torch
         from utils import CodePredictorUnrolled, load_tts_model, resolve_model_path

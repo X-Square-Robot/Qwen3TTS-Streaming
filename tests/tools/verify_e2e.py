@@ -25,7 +25,6 @@ import copy
 import json
 import logging
 import os
-import sys
 import time
 from pathlib import Path
 
@@ -33,10 +32,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
-sys.path.insert(0, str(REPO_ROOT / "scripts" / "export"))
-sys.path.insert(0, str(REPO_ROOT / "third_party" / "Qwen3-TTS"))
+from qwen3tts_tools.common import REPO_ROOT, bootstrap_project_imports
+
+bootstrap_project_imports("scripts", "scripts_export", "third_party_qwen")
 
 from python.codec_embedding_sum import CodecEmbeddingSum, codec_sum_naive, benchmark as codec_sum_benchmark
 

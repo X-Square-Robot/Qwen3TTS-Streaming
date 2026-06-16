@@ -23,10 +23,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import uuid
 from typing import TYPE_CHECKING
-
-import numpy as np
 
 from ..core.types import (
     AudioConfig,
@@ -34,6 +33,19 @@ from ..core.types import (
     GroupPolicy,
     InputMode,
     SessionConfig,
+)
+from ..interface import (
+    OutputPipeline,
+    SessionStartRequest,
+    build_done_event,
+    build_forward_event,
+    build_start_event,
+    normalize_capabilities,
+    parse_output_policy,
+    parse_timing_context,
+    serialize_stream_event,
+    to_core_output_policy,
+    to_core_timing_context,
 )
 from . import tts_pb2, tts_pb2_grpc
 
@@ -57,44 +69,41 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
         self._engine = engine
 
     async def GetCapabilities(self, request, context):
-        return _make_capabilities_response(self._engine.describe_capabilities())
+        return _make_capabilities_response(
+            normalize_capabilities(self._engine.describe_capabilities())
+        )
 
     async def _create_session(
         self,
         session_id: str | None,
         *,
-        config: SessionConfig,
+        start_request: SessionStartRequest,
         audio_queue: asyncio.Queue,
     ) -> str:
         session_id = session_id or str(uuid.uuid4())
+        config = start_request.config
+        pipeline = OutputPipeline(
+            start_request,
+            request_received_monotonic=time.monotonic(),
+        )
 
         async def on_audio(sid, data):
-            converted = _convert_audio_chunk(data, config.audio)
-            await audio_queue.put(("audio", _make_audio_response(converted, config.audio)))
+            frame = pipeline.convert_audio_chunk(data)
+            await audio_queue.put(("audio", _make_audio_response(frame.pcm_bytes, frame.audio, meta=frame.meta)))
 
         async def on_event(sid, event: dict):
-            await audio_queue.put(("event", _make_event_response(
-                event_type=str(event.get("type", "") or ""),
-                session_id=sid,
-                segment_id=int(event.get("segment_idx", -1)),
-                text=str(event.get("text", "") or ""),
-                message=str(event.get("message", "") or ""),
-                audio_format=config.audio if event.get("type") == "start" else None,
-                meta={str(k): str(v) for k, v in (event.get("meta", {}) or {}).items()},
-            )))
+            await audio_queue.put((
+                "event",
+                _make_event_response_from_contract(
+                    build_forward_event(sid, event, start_request)
+                ),
+            ))
 
         async def on_done(sid, metrics):
-            event_type = "error" if isinstance(metrics, dict) and metrics.get("error") else "done"
-            await audio_queue.put(("event", _make_event_response(
-                event_type=event_type,
-                session_id=sid,
-                message=str(metrics.get("error", "") if isinstance(metrics, dict) else ""),
-                meta={
-                    str(k): str(v)
-                    for k, v in (metrics or {}).items()
-                    if k != "error"
-                } if isinstance(metrics, dict) else {},
-            )))
+            await audio_queue.put((
+                "event",
+                _make_event_response_from_contract(build_done_event(sid, metrics, pipeline)),
+            ))
 
         await self._engine.start_session(
             session_id,
@@ -103,16 +112,10 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             on_done=on_done,
             on_event=on_event,
         )
-        await audio_queue.put(("event", _make_event_response(
-            event_type="start",
-            session_id=session_id,
-            audio_format=config.audio,
-            meta={
-                "input_mode": config.input_mode.value,
-                "group_policy": config.group_policy.value,
-                "task_type": config.task_type or "",
-            },
-        )))
+        await audio_queue.put((
+            "event",
+            _make_event_response_from_contract(build_start_event(session_id, start_request)),
+        ))
         logger.info("gRPC session started: %s", session_id)
         return session_id
 
@@ -165,10 +168,10 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
         audio_queue: asyncio.Queue = asyncio.Queue(maxsize=_GRPC_AUDIO_QUEUE_MAXSIZE)
 
         try:
-            config = _session_config_from_oneshot_request(request)
+            start_request = _start_request_from_oneshot_request(request)
             session_id = await self._create_session(
                 request.session_id,
-                config=config,
+                start_request=start_request,
                 audio_queue=audio_queue,
             )
             await self._engine.push_text_input(session_id, request.text)
@@ -202,6 +205,7 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
         got_done = False
         got_cancel = False
         input_eof = False
+        start_request: SessionStartRequest | None = None
         request_task: asyncio.Task | None = None
         audio_task: asyncio.Task | None = None
         pump_task = asyncio.create_task(self._pump_requests(request_iterator, request_queue))
@@ -236,20 +240,24 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                         msg_type = request.WhichOneof("request")
 
                         if msg_type in {"start", "init"}:
-                            config = _session_config_from_stream_request(request)
+                            start_request = _start_request_from_stream_request(request)
                             start_req = request.start if msg_type == "start" else request.init
                             session_id = await self._create_session(
                                 start_req.session_id,
-                                config=config,
+                                start_request=start_request,
                                 audio_queue=audio_queue,
                             )
 
                         elif msg_type == "text":
                             if session_id:
+                                if start_request is not None and request.text.client_timestamp_ms > 0:
+                                    start_request.timing.client_text_ts_ms = int(request.text.client_timestamp_ms)
                                 await self._engine.push_text_input(session_id, request.text.text)
 
                         elif msg_type in {"end", "done"}:
                             if session_id:
+                                if start_request is not None and msg_type == "end" and request.end.client_timestamp_ms > 0:
+                                    start_request.timing.client_end_ts_ms = int(request.end.client_timestamp_ms)
                                 await self._engine.mark_input_complete(session_id)
                             got_done = True
 
@@ -299,6 +307,8 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
 def _make_audio_response(
     pcm_bytes: bytes,
     audio_config: AudioConfig,
+    *,
+    meta: dict[str, str] | None = None,
 ) -> tts_pb2.SynthesizeResponse:
     return tts_pb2.SynthesizeResponse(
         audio=tts_pb2.AudioChunk(
@@ -306,6 +316,7 @@ def _make_audio_response(
             sample_rate=audio_config.sample_rate,
             encoding=_audio_encoding_to_proto(audio_config.encoding),
             channels=audio_config.channels,
+            meta=meta or {},
         )
     )
 
@@ -339,6 +350,28 @@ def _make_event_response(
     )
 
 
+def _make_event_response_from_contract(event) -> tts_pb2.SynthesizeResponse:
+    payload = serialize_stream_event(event)
+    audio = payload.get("audio")
+    return _make_event_response(
+        event_type=payload["type"],
+        session_id=payload["session_id"],
+        segment_id=int(payload["segment_id"]),
+        text=payload["text"],
+        message=payload["message"],
+        audio_format=(
+            AudioConfig(
+                encoding=_audio_encoding_from_name(str(audio.get("encoding", ""))),
+                sample_rate=int(audio.get("sample_rate", ENGINE_SAMPLE_RATE)),
+                channels=int(audio.get("channels", 1)),
+            )
+            if isinstance(audio, dict)
+            else None
+        ),
+        meta={str(k): str(v) for k, v in (payload.get("meta", {}) or {}).items()},
+    )
+
+
 def _make_status_response(event: str, message: str = "") -> tts_pb2.SynthesizeResponse:
     return tts_pb2.SynthesizeResponse(
         status=tts_pb2.StatusUpdate(
@@ -349,6 +382,7 @@ def _make_status_response(event: str, message: str = "") -> tts_pb2.SynthesizeRe
 
 
 def _make_capabilities_response(cap: dict) -> tts_pb2.GetCapabilitiesResponse:
+    cap = normalize_capabilities(cap)
     return tts_pb2.GetCapabilitiesResponse(
         variant=str(cap.get("variant", "") or ""),
         loaded_model_type=str(cap.get("loaded_model_type", "") or ""),
@@ -375,6 +409,16 @@ def _make_capabilities_response(cap: dict) -> tts_pb2.GetCapabilitiesResponse:
         ref_audio_max_duration_sec=float(cap.get("ref_audio_max_duration_sec", 0.0) or 0.0),
         ref_c2w_warm_state_available=bool(cap.get("ref_c2w_warm_state_available", False)),
         ref_codec_reason=str(cap.get("ref_codec_reason", "") or ""),
+        protocol_version=str(cap.get("protocol_version", "") or ""),
+        supported_output_policy_features=[
+            str(value) for value in cap.get("supported_output_policy_features", ()) or ()
+        ],
+        supported_vad_strategies=[
+            str(value) for value in cap.get("supported_vad_strategies", ()) or ()
+        ],
+        supported_timing_fields=[
+            str(value) for value in cap.get("supported_timing_fields", ()) or ()
+        ],
     )
 
 
@@ -424,10 +468,23 @@ async def serve(engine: TTSEngine, port: int = 50051, *, stop_event: asyncio.Eve
 
 
 def _session_config_from_stream_request(request) -> SessionConfig:
+    return _start_request_from_stream_request(request).config
+
+
+def _start_request_from_stream_request(request) -> SessionStartRequest:
     if request.WhichOneof("request") == "start":
-        return _session_config_from_proto(request.start.config, default_mode=InputMode.LONG_SEGMENT)
+        cfg, output_policy, timing = _session_contract_from_proto(
+            request.start.config,
+            default_mode=InputMode.LONG_SEGMENT,
+        )
+        return SessionStartRequest(
+            session_id=request.start.session_id,
+            config=cfg,
+            output_policy=output_policy,
+            timing=timing,
+        )
     init = request.init
-    return _session_config_from_legacy_fields(
+    cfg, output_policy, timing = _session_contract_from_legacy_fields(
         task_type=init.task_type,
         language=init.language,
         speaker=init.speaker,
@@ -440,16 +497,30 @@ def _session_config_from_stream_request(request) -> SessionConfig:
         audio=getattr(init, "audio", None),
         default_mode=InputMode.LONG_SEGMENT,
     )
+    return SessionStartRequest(session_id=init.session_id, config=cfg, output_policy=output_policy, timing=timing)
 
 
 def _session_config_from_oneshot_request(request) -> SessionConfig:
+    return _start_request_from_oneshot_request(request).config
+
+
+def _start_request_from_oneshot_request(request) -> SessionStartRequest:
     if request.HasField("config"):
-        cfg = _session_config_from_proto(request.config, default_mode=InputMode.FULL_TEXT)
+        cfg, output_policy, timing = _session_contract_from_proto(
+            request.config,
+            default_mode=InputMode.FULL_TEXT,
+        )
         cfg.input_mode = InputMode.FULL_TEXT
         if cfg.group_policy == GroupPolicy.NONE:
             cfg.group_policy = GroupPolicy.AUTO
-        return cfg
-    return _session_config_from_legacy_fields(
+        return SessionStartRequest(
+            session_id=request.session_id,
+            config=cfg,
+            output_policy=output_policy,
+            timing=timing,
+            initial_text=request.text,
+        )
+    cfg, output_policy, timing = _session_contract_from_legacy_fields(
         task_type=request.task_type,
         language=request.language,
         speaker=request.speaker,
@@ -462,9 +533,16 @@ def _session_config_from_oneshot_request(request) -> SessionConfig:
         audio=None,
         default_mode=InputMode.FULL_TEXT,
     )
+    return SessionStartRequest(
+        session_id=request.session_id,
+        config=cfg,
+        output_policy=output_policy,
+        timing=timing,
+        initial_text=request.text,
+    )
 
 
-def _session_config_from_legacy_fields(
+def _session_contract_from_legacy_fields(
     *,
     task_type: str,
     language: str,
@@ -477,7 +555,9 @@ def _session_config_from_legacy_fields(
     group_policy,
     audio,
     default_mode: InputMode,
-) -> SessionConfig:
+) -> tuple[SessionConfig, object, object]:
+    output_policy = parse_output_policy({})
+    timing = parse_timing_context({})
     cfg = SessionConfig(
         task_type=task_type or "",
         language=language or "auto",
@@ -489,12 +569,23 @@ def _session_config_from_legacy_fields(
         input_mode=_input_mode_from_proto(input_mode, default_mode=default_mode),
         group_policy=_group_policy_from_proto(group_policy),
         audio=_audio_config_from_proto(audio),
+        output_policy=to_core_output_policy(output_policy),
+        timing=to_core_timing_context(timing),
     )
     _validate_audio_config(cfg.audio)
-    return cfg
+    return cfg, output_policy, timing
 
 
-def _session_config_from_proto(proto_cfg, *, default_mode: InputMode) -> SessionConfig:
+def _session_config_from_legacy_fields(**kwargs) -> SessionConfig:
+    return _session_contract_from_legacy_fields(**kwargs)[0]
+
+
+def _session_contract_from_proto(proto_cfg, *, default_mode: InputMode) -> tuple[SessionConfig, object, object]:
+    output_policy = _output_policy_from_proto(proto_cfg.output_policy if proto_cfg.HasField("output_policy") else None)
+    timing = _timing_context_from_proto(proto_cfg.timing if proto_cfg.HasField("timing") else None)
+    protocol_version = str(getattr(proto_cfg, "protocol_version", "") or "").strip()
+    if protocol_version and "client_protocol_version" not in timing.extra:
+        timing.extra["client_protocol_version"] = protocol_version
     cfg = SessionConfig(
         task_type=proto_cfg.task_type or "",
         language=proto_cfg.language or "auto",
@@ -506,9 +597,15 @@ def _session_config_from_proto(proto_cfg, *, default_mode: InputMode) -> Session
         input_mode=_input_mode_from_proto(proto_cfg.input_mode, default_mode=default_mode),
         group_policy=_group_policy_from_proto(proto_cfg.group_policy),
         audio=_audio_config_from_proto(proto_cfg.audio if proto_cfg.HasField("audio") else None),
+        output_policy=to_core_output_policy(output_policy),
+        timing=to_core_timing_context(timing),
     )
     _validate_audio_config(cfg.audio)
-    return cfg
+    return cfg, output_policy, timing
+
+
+def _session_config_from_proto(proto_cfg, *, default_mode: InputMode) -> SessionConfig:
+    return _session_contract_from_proto(proto_cfg, default_mode=default_mode)[0]
 
 
 def _input_mode_from_proto(value, *, default_mode: InputMode) -> InputMode:
@@ -563,6 +660,49 @@ def _audio_config_from_proto(audio_msg) -> AudioConfig:
     return AudioConfig(sample_rate=sample_rate, encoding=encoding, channels=channels)
 
 
+def _proto_map_to_dict(raw_map) -> dict[str, str]:
+    if raw_map is None:
+        return {}
+    return {str(key): str(value) for key, value in dict(raw_map).items()}
+
+
+def _output_policy_from_proto(proto_policy) -> object:
+    if proto_policy is None:
+        return parse_output_policy({})
+    emit_text_events = True
+    if proto_policy.HasField("emit_text_events"):
+        emit_text_events = bool(proto_policy.emit_text_events)
+    return parse_output_policy(
+        {
+            "vad_policy": {
+                "enabled": bool(proto_policy.vad_policy.enabled),
+                "strategy": str(proto_policy.vad_policy.strategy or "disabled"),
+                "implementation": str(proto_policy.vad_policy.implementation or ""),
+                "config": _proto_map_to_dict(proto_policy.vad_policy.config),
+            },
+            "chunk_ms": int(proto_policy.chunk_ms or 0),
+            "packet_format": str(proto_policy.packet_format or "raw_pcm"),
+            "emit_text_events": emit_text_events,
+            "config": _proto_map_to_dict(proto_policy.config),
+        }
+    )
+
+
+def _timing_context_from_proto(proto_timing) -> object:
+    if proto_timing is None:
+        return parse_timing_context({})
+    return parse_timing_context(
+        {
+            "request_id": str(proto_timing.request_id or ""),
+            "turn_id": str(proto_timing.turn_id or ""),
+            "client_request_ts_ms": int(proto_timing.client_request_ts_ms or 0),
+            "client_text_ts_ms": int(proto_timing.client_text_ts_ms or 0),
+            "client_end_ts_ms": int(proto_timing.client_end_ts_ms or 0),
+            "extra": _proto_map_to_dict(proto_timing.extra),
+        }
+    )
+
+
 def _audio_encoding_to_proto(value: AudioEncoding) -> int:
     if value == AudioEncoding.PCM_S16LE:
         return tts_pb2.AUDIO_ENCODING_PCM_S16LE
@@ -585,20 +725,5 @@ def _validate_audio_config(audio: AudioConfig) -> None:
 
 
 def _convert_audio_chunk(pcm_bytes: bytes, audio_config: AudioConfig) -> bytes:
-    audio = np.frombuffer(pcm_bytes, dtype=np.float32)
-    if audio_config.sample_rate != ENGINE_SAMPLE_RATE:
-        audio = _resample_linear(audio, ENGINE_SAMPLE_RATE, audio_config.sample_rate)
-    if audio_config.encoding == AudioEncoding.PCM_S16LE:
-        audio = np.clip(audio, -1.0, 1.0)
-        return (audio * 32767.0).astype(np.int16).tobytes()
-    return audio.astype(np.float32, copy=False).tobytes()
-
-
-def _resample_linear(audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
-    if audio.size == 0 or src_sr == dst_sr:
-        return audio
-    duration = audio.shape[0] / float(src_sr)
-    dst_len = max(1, int(round(duration * dst_sr)))
-    src_x = np.linspace(0.0, duration, num=audio.shape[0], endpoint=False)
-    dst_x = np.linspace(0.0, duration, num=dst_len, endpoint=False)
-    return np.interp(dst_x, src_x, audio).astype(np.float32)
+    start_request = SessionStartRequest(session_id="", config=SessionConfig(audio=audio_config))
+    return OutputPipeline(start_request).convert_audio_chunk(pcm_bytes).pcm_bytes

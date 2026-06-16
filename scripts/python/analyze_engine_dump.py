@@ -13,17 +13,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import torch
 import torch.nn.functional as F
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "scripts" / "export"))
-sys.path.insert(0, str(REPO_ROOT / "scripts" / "python"))
-sys.path.insert(0, str(REPO_ROOT / "third_party" / "Qwen3-TTS"))
+from qwen3tts_tools.common import REPO_ROOT, bootstrap_project_imports
+
+bootstrap_project_imports("repo", "scripts_export", "scripts_python", "third_party_qwen")
 
 from code2wav_streaming import Code2WavStreamingWrapper, num_code2wav_hidden_layers
 from talker_unified_modules import build_talker_unified_fused_module

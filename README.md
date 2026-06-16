@@ -29,6 +29,8 @@ Qwen3-TTS Triton 是一个 **工程预览版** 项目：把官方 Qwen3-TTS PyTo
 
 详细 benchmark 口径见 [docs/zh/benchmark_methodology.md](docs/zh/benchmark_methodology.md)。
 
+Python Client SDK 请见 [docs/zh/client_sdk.md](docs/zh/client_sdk.md) 和 [`client/`](client) 子项目。
+
 ## 能力状态
 
 | 路径 | 当前状态 | 开源口径 |

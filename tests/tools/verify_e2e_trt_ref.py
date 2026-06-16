@@ -14,15 +14,19 @@ import argparse
 import json
 import logging
 import sys
-from pathlib import Path
 
 import numpy as np
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
-sys.path.insert(0, str(REPO_ROOT / "scripts" / "export"))
-sys.path.insert(0, str(REPO_ROOT / "third_party" / "Qwen3-TTS"))
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+REPO_ROOT = bootstrap_tool_imports()
+from qwen3tts_tools.common import bootstrap_project_imports
+
+bootstrap_project_imports("scripts", "scripts_export", "third_party_qwen")
 
 from utils import (
     setup_logging,
@@ -78,12 +82,9 @@ def main():
     trailing_list = []  # used in decode loop when built from official prefill
     if args.text:
         tokenizer_dir = str(path)  # model path has vocab.json + merges.txt
-        sys.path.insert(0, str(REPO_ROOT))
-        try:
-            from engine.frontend.spliter.tokenizer import load_lightweight_tokenizer
-            tokenizer = load_lightweight_tokenizer(tokenizer_dir)
-        finally:
-            sys.path.pop(0)
+        bootstrap_project_imports("repo")
+        from engine.frontend.spliter.tokenizer import load_lightweight_tokenizer
+        tokenizer = load_lightweight_tokenizer(tokenizer_dir)
         if tokenizer is None:
             tokenizer = load_lightweight_tokenizer(str(resolve_tokenizer_path(args.models_dir)))
         if tokenizer is None:
@@ -104,14 +105,11 @@ def main():
         n_text = input_ids.shape[1]
         text_ids = input_ids
         if getattr(model.config, "talker_config", None) is not None:
-            sys.path.insert(0, str(REPO_ROOT / "scripts" / "python"))
-            try:
-                from official_prefill import build_prefill_like_official
+            bootstrap_project_imports("scripts_python")
+            from official_prefill import build_prefill_like_official
                 inputs_embeds, trailing_list = build_prefill_like_official(
                     model, input_ids, args.language, args.speaker or "", device
                 )
-            finally:
-                sys.path.pop(0)
             logger.info("Using official-style prefill (talker_config) for prototype parity.")
         else:
             with torch.no_grad():

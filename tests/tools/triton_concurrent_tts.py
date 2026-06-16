@@ -14,45 +14,24 @@ Usage:
 """
 
 import argparse
-import json
-import os
 import sys
 import time
-import wave
-import threading
 import statistics
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
-import numpy as np
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
 
-
-SAMPLE_RATE = 24000
-
-
-@dataclass
-class TTSResult:
-    session_id: str
-    text: str
-    first_chunk_ms: Optional[float] = None
-    total_ms: float = 0.0
-    num_chunks: int = 0
-    total_samples: int = 0
-    error: Optional[str] = None
-    audio: Optional[np.ndarray] = None
-    warnings: list = field(default_factory=list)
-
-    @property
-    def duration_sec(self) -> float:
-        return self.total_samples / SAMPLE_RATE if self.total_samples > 0 else 0.0
-
-    @property
-    def rtf(self) -> float:
-        if self.duration_sec <= 0 or self.total_ms <= 0:
-            return 0.0
-        return (self.total_ms / 1000) / self.duration_sec
+bootstrap_tool_imports()
+from tests.support.triton_streaming import (
+    StreamResult as TTSResult,
+    infer_stream,
+    infer_text_stream,
+    save_wav,
+)
 
 
 def _get_client(triton_url: str):
@@ -64,95 +43,9 @@ def _get_client(triton_url: str):
     return grpcclient, grpcclient.InferenceServerClient(url=triton_url)
 
 
-def _decode_obj(value):
-    if isinstance(value, bytes):
-        return value.decode("utf-8")
-    return str(value)
-
-
-def _decode_audio_bytes(raw: bytes, audio_format: dict) -> np.ndarray:
-    if (audio_format.get("encoding") or "pcm_f32") == "pcm_s16le":
-        return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
-    return np.frombuffer(raw, dtype=np.float32)
-
-
 def _send_request(client, grpcclient, req_dict: dict, timeout: float = 120.0) -> TTSResult:
     """Send a single TTS request and collect streaming audio."""
-    session_id = req_dict.get("session_id", "unknown")
-    result = TTSResult(session_id=session_id, text=req_dict.get("text", ""))
-
-    req_json = json.dumps(req_dict)
-    req_input = grpcclient.InferInput("request", [1], "BYTES")
-    req_input.set_data_from_numpy(np.array([req_json], dtype=object))
-    audio_out = grpcclient.InferRequestedOutput("audio_chunk")
-    event_type_out = grpcclient.InferRequestedOutput("event_type")
-    event_json_out = grpcclient.InferRequestedOutput("event_json")
-    final_out = grpcclient.InferRequestedOutput("is_final")
-
-    chunks = []
-    errors = []
-    warnings = []
-    done = threading.Event()
-    first_ts = [None]
-    audio_format = {"encoding": "pcm_f32", "sample_rate": SAMPLE_RATE}
-
-    def callback(result=None, error=None):
-        if error:
-            err_str = str(error)
-            if "CAPABILITIES:" not in err_str:
-                errors.append(err_str)
-                done.set()
-            return
-        if result is None:
-            return
-        event_type = result.as_numpy("event_type")
-        event_json = result.as_numpy("event_json")
-        audio = result.as_numpy("audio_chunk")
-        is_final = result.as_numpy("is_final")
-        et = _decode_obj(event_type.flatten()[0]) if event_type is not None and event_type.size else ""
-        payload = {}
-        if event_json is not None and event_json.size:
-            raw_json = _decode_obj(event_json.flatten()[0])
-            if raw_json:
-                payload = json.loads(raw_json)
-        if et == "start":
-            audio_format.update(payload.get("audio_format", {}) or {})
-        elif et == "warning":
-            warnings.append(payload.get("message", ""))
-        elif et == "audio" and audio is not None and audio.size:
-            if first_ts[0] is None:
-                first_ts[0] = time.perf_counter()
-            chunks.append(_decode_audio_bytes(audio.flatten()[0], audio_format))
-        elif et == "error":
-            errors.append(payload.get("message", "unknown error"))
-            done.set()
-            return
-        final = bool(is_final.flatten()[0]) if is_final is not None and is_final.size else False
-        if final:
-            done.set()
-
-    t0 = time.perf_counter()
-    client.start_stream(callback=callback)
-    client.async_stream_infer(
-        model_name="tts_orchestrator",
-        inputs=[req_input],
-        outputs=[audio_out, event_type_out, event_json_out, final_out],
-    )
-    done.wait(timeout=timeout)
-    client.stop_stream()
-    elapsed = time.perf_counter() - t0
-
-    if errors:
-        result.error = errors[0]
-    result.warnings = warnings
-    result.total_ms = elapsed * 1000
-    result.first_chunk_ms = (first_ts[0] - t0) * 1000 if first_ts[0] else None
-    result.num_chunks = len(chunks)
-    if chunks:
-        result.audio = np.concatenate(chunks)
-        result.total_samples = result.audio.size
-
-    return result
+    return infer_stream(client, grpcclient, req_dict, timeout=timeout)
 
 
 def _send_streaming_request(
@@ -164,111 +57,14 @@ def _send_streaming_request(
     timeout: float = 120.0,
 ) -> TTSResult:
     """Send a streaming (init -> append_text* -> text_complete) request sequence."""
-    session_id = init_req.get("session_id", "stream-unknown")
-    result = TTSResult(session_id=session_id, text=" ".join(text_chunks))
-
-    client = grpcclient_mod.InferenceServerClient(url=triton_url)
-    audio_chunks = []
-    errors = []
-    warnings = []
-    done = threading.Event()
-    first_ts = [None]
-    audio_format = {"encoding": "pcm_f32", "sample_rate": SAMPLE_RATE}
-
-    def callback(result=None, error=None):
-        if error:
-            err_str = str(error)
-            if "CAPABILITIES:" not in err_str:
-                errors.append(err_str)
-            return
-        if result is None:
-            return
-        event_type = result.as_numpy("event_type")
-        event_json = result.as_numpy("event_json")
-        audio = result.as_numpy("audio_chunk")
-        is_final = result.as_numpy("is_final")
-        et = _decode_obj(event_type.flatten()[0]) if event_type is not None and event_type.size else ""
-        payload = {}
-        if event_json is not None and event_json.size:
-            raw_json = _decode_obj(event_json.flatten()[0])
-            if raw_json:
-                payload = json.loads(raw_json)
-        if et == "start":
-            audio_format.update(payload.get("audio_format", {}) or {})
-        elif et == "warning":
-            warnings.append(payload.get("message", ""))
-        elif et == "audio" and audio is not None and audio.size:
-            if first_ts[0] is None:
-                first_ts[0] = time.perf_counter()
-            audio_chunks.append(_decode_audio_bytes(audio.flatten()[0], audio_format))
-        elif et == "error":
-            errors.append(payload.get("message", "unknown error"))
-            done.set()
-            return
-        final = bool(is_final.flatten()[0]) if is_final is not None and is_final.size else False
-        if final:
-            done.set()
-
-    def _send_one(req_dict):
-        req_json = json.dumps(req_dict)
-        req_input = grpcclient_mod.InferInput("request", [1], "BYTES")
-        req_input.set_data_from_numpy(np.array([req_json], dtype=object))
-        audio_out = grpcclient_mod.InferRequestedOutput("audio_chunk")
-        event_type_out = grpcclient_mod.InferRequestedOutput("event_type")
-        event_json_out = grpcclient_mod.InferRequestedOutput("event_json")
-        final_out = grpcclient_mod.InferRequestedOutput("is_final")
-        client.async_stream_infer(
-            model_name="tts_orchestrator",
-            inputs=[req_input],
-            outputs=[audio_out, event_type_out, event_json_out, final_out],
-        )
-
-    t0 = time.perf_counter()
-    client.start_stream(callback=callback)
-
-    _send_one(init_req)
-
-    for chunk_text in text_chunks:
-        if chunk_delay_ms > 0:
-            time.sleep(chunk_delay_ms / 1000)
-        _send_one({
-            "action": "append_text",
-            "session_id": session_id,
-            "text": chunk_text,
-        })
-
-    if chunk_delay_ms > 0:
-        time.sleep(chunk_delay_ms / 1000)
-    _send_one({
-        "action": "text_complete",
-        "session_id": session_id,
-    })
-
-    done.wait(timeout=timeout)
-    client.stop_stream()
-    elapsed = time.perf_counter() - t0
-
-    if errors:
-        result.error = errors[0]
-    result.warnings = warnings
-    result.total_ms = elapsed * 1000
-    result.first_chunk_ms = (first_ts[0] - t0) * 1000 if first_ts[0] else None
-    result.num_chunks = len(audio_chunks)
-    if audio_chunks:
-        result.audio = np.concatenate(audio_chunks)
-        result.total_samples = result.audio.size
-
-    return result
-
-
-def _save_wav(audio: np.ndarray, path: str):
-    audio = np.clip(audio, -1.0, 1.0)
-    audio_int16 = (audio * 32767).astype(np.int16)
-    with wave.open(path, "w") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(SAMPLE_RATE)
-        wf.writeframes(audio_int16.tobytes())
+    return infer_text_stream(
+        triton_url,
+        grpcclient_mod,
+        init_req,
+        text_chunks,
+        chunk_delay_ms=chunk_delay_ms,
+        timeout=timeout,
+    )
 
 
 def _print_result(result: TTSResult, label: str = ""):
@@ -380,7 +176,7 @@ def test_single_smoke(triton_url: str, output_dir: Path):
     _print_result(result, "single")
     if result.audio is not None and result.audio.size > 0:
         out_path = str(output_dir / "test1_single_smoke.wav")
-        _save_wav(result.audio, out_path)
+        save_wav(result.audio, out_path)
         print(f"  Saved: {out_path}")
 
     return result
@@ -417,7 +213,7 @@ def test_streaming_text(triton_url: str, output_dir: Path):
     _print_result(result, "stream")
     if result.audio is not None and result.audio.size > 0:
         out_path = str(output_dir / "test2_streaming_text.wav")
-        _save_wav(result.audio, out_path)
+        save_wav(result.audio, out_path)
         print(f"  Saved: {out_path}")
 
     return result
@@ -465,7 +261,7 @@ def test_concurrent(triton_url: str, concurrency: int, output_dir: Path):
     for i, r in enumerate(results):
         if r.audio is not None and r.audio.size > 0:
             out_path = str(output_dir / f"test3_concurrent_{concurrency}x_{i}.wav")
-            _save_wav(r.audio, out_path)
+            save_wav(r.audio, out_path)
 
     return results
 
@@ -491,7 +287,7 @@ def test_long_text(triton_url: str, output_dir: Path):
     _print_result(r1, "medium-long")
     if r1.audio is not None and r1.audio.size > 0:
         out_path = str(output_dir / "test4a_long_text_medium.wav")
-        _save_wav(r1.audio, out_path)
+        save_wav(r1.audio, out_path)
         print(f"  Saved: {out_path}")
     results.append(r1)
 
@@ -507,7 +303,7 @@ def test_long_text(triton_url: str, output_dir: Path):
     _print_result(r2, "very-long")
     if r2.audio is not None and r2.audio.size > 0:
         out_path = str(output_dir / "test4b_long_text_verylong.wav")
-        _save_wav(r2.audio, out_path)
+        save_wav(r2.audio, out_path)
         print(f"  Saved: {out_path}")
         print(f"  Audio duration: {r2.duration_sec:.2f}s "
               f"(~{len(VERY_LONG_TEXT)} chars)")
@@ -532,7 +328,7 @@ def test_long_text(triton_url: str, output_dir: Path):
     _print_result(r3, "stream-long")
     if r3.audio is not None and r3.audio.size > 0:
         out_path = str(output_dir / "test4c_streaming_long.wav")
-        _save_wav(r3.audio, out_path)
+        save_wav(r3.audio, out_path)
         print(f"  Saved: {out_path}")
     results.append(r3)
 
@@ -552,7 +348,7 @@ def test_long_text(triton_url: str, output_dir: Path):
         _print_result(r4, "story")
         if r4.audio is not None and r4.audio.size > 0:
             out_path = str(output_dir / "test4d_story.wav")
-            _save_wav(r4.audio, out_path)
+            save_wav(r4.audio, out_path)
             print(f"  Saved: {out_path}")
             print(f"  Audio duration: {r4.duration_sec:.2f}s "
                   f"(~{len(story_text)} chars)")
@@ -662,7 +458,7 @@ def test_badcases(triton_url: str, output_dir: Path):
     _print_result(r, "single-char")
     if r.audio is not None and r.audio.size > 0:
         out_path = str(output_dir / "test5f_single_char.wav")
-        _save_wav(r.audio, out_path)
+        save_wav(r.audio, out_path)
     results.append(("5f_single_char", ok, r))
 
     # 5g: pure punctuation
@@ -692,7 +488,7 @@ def test_badcases(triton_url: str, output_dir: Path):
     _print_result(r, "slow-stream")
     if r.audio is not None and r.audio.size > 0:
         out_path = str(output_dir / "test5h_slow_stream.wav")
-        _save_wav(r.audio, out_path)
+        save_wav(r.audio, out_path)
     results.append(("5h_slow_stream", ok, r))
 
     # 5i: invalid speaker name (should return warning + fallback audio)
@@ -712,7 +508,7 @@ def test_badcases(triton_url: str, output_dir: Path):
     _print_result(r, "invalid-speaker")
     if r.audio is not None and r.audio.size > 0:
         out_path = str(output_dir / "test5i_invalid_speaker.wav")
-        _save_wav(r.audio, out_path)
+        save_wav(r.audio, out_path)
     results.append(("5i_invalid_speaker", ok, r))
 
     # Summary

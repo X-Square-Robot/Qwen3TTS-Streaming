@@ -35,7 +35,19 @@ from ..core.types import (
     InputMode,
     SessionConfig,
 )
-from .grpc_server import _convert_audio_chunk
+from ..interface import (
+    OutputPipeline,
+    SessionStartRequest,
+    build_done_event,
+    build_forward_event,
+    build_start_event,
+    normalize_capabilities,
+    parse_output_policy,
+    parse_timing_context,
+    serialize_stream_event,
+    to_core_output_policy,
+    to_core_timing_context,
+)
 
 if TYPE_CHECKING:
     from ..server import TTSEngine
@@ -68,7 +80,7 @@ class WebSocketGateway:
         self._engine = engine
 
     async def handle_capabilities(self, request):
-        return web.json_response(self._engine.describe_capabilities())
+        return web.json_response(normalize_capabilities(self._engine.describe_capabilities()))
 
     async def handle_websocket(self, request):
         ws = web.WebSocketResponse(heartbeat=_WEBSOCKET_HEARTBEAT_SEC)
@@ -79,6 +91,7 @@ class WebSocketGateway:
         request_queue: asyncio.Queue = asyncio.Queue(maxsize=_WEBSOCKET_REQUEST_QUEUE_MAXSIZE)
         got_cancel = False
         connection_closed = False
+        start_request: SessionStartRequest | None = None
         request_task: asyncio.Task | None = None
         outbound_task: asyncio.Task | None = None
         pump_task = asyncio.create_task(self._pump_messages(ws, request_queue))
@@ -114,7 +127,7 @@ class WebSocketGateway:
                             await ws.send_json(
                                 {
                                     "type": "capabilities",
-                                    "capabilities": self._engine.describe_capabilities(),
+                                    "capabilities": normalize_capabilities(self._engine.describe_capabilities()),
                                 }
                             )
                             continue
@@ -122,40 +135,45 @@ class WebSocketGateway:
                         if msg_type == "start":
                             if session_id is not None:
                                 raise ValueError("websocket session has already been started")
-                            config = _session_config_from_ws_message(
+                            start_request = _start_request_from_ws_message(
                                 message,
                                 default_mode=InputMode.LONG_SEGMENT,
                             )
                             session_id = await self._create_session(
                                 message.get("session_id"),
-                                config=config,
+                                start_request=start_request,
                                 outbound_queue=outbound_queue,
                             )
 
                         elif msg_type == "oneshot":
                             if session_id is not None:
                                 raise ValueError("websocket session has already been started")
-                            config = _session_config_from_ws_message(
+                            start_request = _start_request_from_ws_message(
                                 message,
                                 default_mode=InputMode.FULL_TEXT,
                             )
-                            config.input_mode = InputMode.FULL_TEXT
-                            if config.group_policy == GroupPolicy.NONE:
-                                config.group_policy = GroupPolicy.AUTO
+                            start_request.config.input_mode = InputMode.FULL_TEXT
+                            if start_request.config.group_policy == GroupPolicy.NONE:
+                                start_request.config.group_policy = GroupPolicy.AUTO
                             session_id = await self._create_session(
                                 message.get("session_id"),
-                                config=config,
+                                start_request=start_request,
                                 outbound_queue=outbound_queue,
                             )
                             text = str(message.get("text", "") or "")
                             if not text:
                                 raise ValueError("oneshot request requires non-empty 'text'")
+                            start_request.initial_text = text
                             await self._engine.push_text_input(session_id, text)
                             await self._engine.mark_input_complete(session_id)
 
                         elif msg_type == "text":
                             if not session_id:
                                 raise ValueError("received 'text' before 'start'")
+                            if start_request is not None:
+                                client_ts_ms = _coerce_ws_int(message.get("client_timestamp_ms"), 0)
+                                if client_ts_ms > 0:
+                                    start_request.timing.client_text_ts_ms = client_ts_ms
                             await self._engine.push_text_input(
                                 session_id,
                                 str(message.get("text", "") or ""),
@@ -164,6 +182,10 @@ class WebSocketGateway:
                         elif msg_type == "end":
                             if not session_id:
                                 raise ValueError("received 'end' before 'start'")
+                            if start_request is not None:
+                                client_ts_ms = _coerce_ws_int(message.get("client_timestamp_ms"), 0)
+                                if client_ts_ms > 0:
+                                    start_request.timing.client_end_ts_ms = client_ts_ms
                             await self._engine.mark_input_complete(session_id)
 
                         elif msg_type == "cancel":
@@ -223,46 +245,27 @@ class WebSocketGateway:
         self,
         session_id: str | None,
         *,
-        config: SessionConfig,
+        start_request: SessionStartRequest,
         outbound_queue: asyncio.Queue,
     ) -> str:
         session_id = str(session_id or uuid.uuid4())
+        config = start_request.config
+        pipeline = OutputPipeline(start_request)
 
         async def on_audio(sid: str, data: bytes) -> None:
-            converted = _convert_audio_chunk(data, config.audio)
+            frame = pipeline.convert_audio_chunk(data)
             await outbound_queue.put(
-                _make_audio_frame(converted, config.audio)
+                _make_audio_frame(frame.pcm_bytes, frame.audio, meta=frame.meta)
             )
 
         async def on_event(sid: str, event: dict) -> None:
             await outbound_queue.put(
-                _make_event_frame(
-                    event_type=str(event.get("type", "") or ""),
-                    session_id=sid,
-                    segment_id=int(event.get("segment_idx", -1)),
-                    text=str(event.get("text", "") or ""),
-                    message=str(event.get("message", "") or ""),
-                    audio_format=config.audio if event.get("type") == "start" else None,
-                    meta={
-                        str(k): str(v)
-                        for k, v in (event.get("meta", {}) or {}).items()
-                    },
-                )
+                _make_event_frame_from_contract(build_forward_event(sid, event, start_request))
             )
 
         async def on_done(sid: str, metrics: dict) -> None:
-            event_type = "error" if isinstance(metrics, dict) and metrics.get("error") else "done"
             await outbound_queue.put(
-                _make_event_frame(
-                    event_type=event_type,
-                    session_id=sid,
-                    message=str(metrics.get("error", "") if isinstance(metrics, dict) else ""),
-                    meta={
-                        str(k): str(v)
-                        for k, v in (metrics or {}).items()
-                        if k != "error"
-                    } if isinstance(metrics, dict) else {},
-                )
+                _make_event_frame_from_contract(build_done_event(sid, metrics, pipeline))
             )
 
         await self._engine.start_session(
@@ -273,16 +276,7 @@ class WebSocketGateway:
             on_event=on_event,
         )
         await outbound_queue.put(
-            _make_event_frame(
-                event_type="start",
-                session_id=session_id,
-                audio_format=config.audio,
-                meta={
-                    "input_mode": config.input_mode.value,
-                    "group_policy": config.group_policy.value,
-                    "task_type": config.task_type or "",
-                },
-            )
+            _make_event_frame_from_contract(build_start_event(session_id, start_request))
         )
         logger.info("WebSocket session started: %s", session_id)
         return session_id
@@ -317,7 +311,12 @@ class WebSocketGateway:
             yield outbound_queue.get_nowait()
 
 
-def _make_audio_frame(pcm_bytes: bytes, audio_config: AudioConfig) -> dict[str, Any]:
+def _make_audio_frame(
+    pcm_bytes: bytes,
+    audio_config: AudioConfig,
+    *,
+    meta: dict[str, str] | None = None,
+) -> dict[str, Any]:
     return {
         "type": "audio",
         "audio": {
@@ -325,6 +324,7 @@ def _make_audio_frame(pcm_bytes: bytes, audio_config: AudioConfig) -> dict[str, 
             "sample_rate": audio_config.sample_rate,
             "encoding": audio_config.encoding.value,
             "channels": audio_config.channels,
+            "meta": meta or {},
         },
     }
 
@@ -357,6 +357,28 @@ def _make_event_frame(
         "type": "event",
         "event": event,
     }
+
+
+def _make_event_frame_from_contract(event) -> dict[str, Any]:
+    payload = serialize_stream_event(event)
+    audio = payload.get("audio")
+    return _make_event_frame(
+        event_type=str(payload.get("type", "") or ""),
+        session_id=str(payload.get("session_id", "") or ""),
+        segment_id=int(payload.get("segment_id", -1)),
+        text=str(payload.get("text", "") or ""),
+        message=str(payload.get("message", "") or ""),
+        audio_format=(
+            AudioConfig(
+                encoding=_audio_encoding_from_ws_value(str(audio.get("encoding", "pcm_f32"))),
+                sample_rate=int(audio.get("sample_rate", 24000)),
+                channels=int(audio.get("channels", 1)),
+            )
+            if isinstance(audio, dict)
+            else None
+        ),
+        meta={str(k): str(v) for k, v in (payload.get("meta", {}) or {}).items()},
+    )
 
 
 async def _send_frame(ws, frame: dict[str, Any]) -> None:
@@ -411,7 +433,20 @@ def _session_config_from_ws_message(
     *,
     default_mode: InputMode,
 ) -> SessionConfig:
+    return _start_request_from_ws_message(message, default_mode=default_mode).config
+
+
+def _start_request_from_ws_message(
+    message: dict[str, Any],
+    *,
+    default_mode: InputMode,
+) -> SessionStartRequest:
     raw = _extract_ws_config_payload(message)
+    output_policy = parse_output_policy(_extract_ws_output_policy(raw))
+    timing = parse_timing_context(raw.get("timing") or raw.get("timing_context"))
+    protocol_version = str(raw.get("protocol_version") or "").strip()
+    if protocol_version and "client_protocol_version" not in timing.extra:
+        timing.extra["client_protocol_version"] = protocol_version
     cfg = SessionConfig(
         task_type=str(raw.get("task_type", "") or ""),
         language=str(raw.get("language", "auto") or "auto"),
@@ -423,9 +458,28 @@ def _session_config_from_ws_message(
         input_mode=_input_mode_from_ws_value(raw.get("input_mode"), default_mode=default_mode),
         group_policy=_group_policy_from_ws_value(raw.get("group_policy")),
         audio=_audio_config_from_ws_value(raw.get("audio")),
+        output_policy=to_core_output_policy(output_policy),
+        timing=to_core_timing_context(timing),
     )
     _validate_audio_config(cfg.audio)
-    return cfg
+    return SessionStartRequest(
+        session_id=str(message.get("session_id", "") or ""),
+        config=cfg,
+        output_policy=output_policy,
+        timing=timing,
+        initial_text=str(message.get("text", "") or ""),
+    )
+
+
+def _extract_ws_output_policy(raw: dict[str, Any]) -> dict[str, Any]:
+    value = raw.get("output_policy")
+    policy = dict(value) if isinstance(value, dict) else {}
+    if "vad_policy" not in policy:
+        if isinstance(raw.get("vad_policy"), dict):
+            policy["vad_policy"] = raw["vad_policy"]
+        elif isinstance(raw.get("vad"), dict):
+            policy["vad_policy"] = raw["vad"]
+    return policy
 
 
 def _extract_ws_config_payload(message: dict[str, Any]) -> dict[str, Any]:
@@ -450,6 +504,11 @@ def _extract_ws_config_payload(message: dict[str, Any]) -> dict[str, Any]:
         "input_mode",
         "group_policy",
         "audio",
+        "output_policy",
+        "vad_policy",
+        "timing",
+        "timing_context",
+        "protocol_version",
     ):
         if field not in merged and field in message:
             merged[field] = message[field]
@@ -486,6 +545,15 @@ def _coerce_ws_bool(value: Any) -> bool:
         if normalized in {"true", "1", "yes"}:
             return True
     return bool(value)
+
+
+def _coerce_ws_int(value: Any, default: int = 0) -> int:
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _input_mode_from_ws_value(value: Any, *, default_mode: InputMode) -> InputMode:

@@ -11,16 +11,19 @@ Usage (conda activate qwen3-tts):
 
 import json
 import logging
-import sys
 import time
-import wave
-from pathlib import Path
 
 import numpy as np
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT))
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+bootstrap_tool_imports()
+from qwen3tts_tools.audio import save_wav
+from qwen3tts_tools.common import REPO_ROOT
 
 from engine.backend.executor import TRTEngine
 from engine.backend.prefill import EmbeddingWeights, PrefillBuilder, TaskType
@@ -33,18 +36,6 @@ TEXT = "其实我真的有发现，我是一个特别善于观察别人情绪的
 SAMPLE_RATE = 24000
 SLIDING_WINDOW = 72
 _DUMMY_PAST_LEN = 1
-
-
-def save_wav(audio, path, sr=SAMPLE_RATE):
-    audio = np.clip(audio, -1.0, 1.0)
-    audio_int16 = (audio * 32767).astype(np.int16)
-    with wave.open(path, "w") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sr)
-        wf.writeframes(audio_int16.tobytes())
-
-
 def main():
     variant = "custom-1.7b"
     exported_dir = REPO_ROOT / "workspace" / "exported" / variant
@@ -258,7 +249,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "trt_direct.wav"
     if full_wav.size > 0:
-        save_wav(full_wav, str(out_path))
+        save_wav(full_wav, out_path, sample_rate=SAMPLE_RATE)
 
     logger.info("=== RESULTS ===")
     logger.info("Steps: %d, EOS: %d", step, eos_step)

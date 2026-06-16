@@ -27,6 +27,25 @@ from typing import Any
 from urllib.parse import urlparse
 
 import requests
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS_PYTHON = REPO_ROOT / "scripts" / "python"
+for import_path in (SCRIPTS_PYTHON, REPO_ROOT):
+    if str(import_path) not in sys.path:
+        sys.path.insert(0, str(import_path))
+
+from qwen3tts_tools.common import (
+    DEFAULT_ENGINE_GRPC,
+    DEFAULT_ENGINE_WS,
+    DEFAULT_PROBE_TARGETS,
+    DEFAULT_TRITON_GRPC,
+    DEFAULT_TRITON_HTTP,
+    DEFAULT_TRITON_HTTP_MODEL,
+    DEFAULT_TRITON_MODEL,
+    dedupe_keep_order,
+    normalize_http_base,
+    parse_host_port,
+)
 from raw_websocket import (
     RawWebSocketError,
     RawWebSocketConnection,
@@ -37,19 +56,6 @@ from raw_websocket import (
     ws_send_frame,
     ws_send_json,
 )
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-
-DEFAULT_ENGINE_GRPC = "localhost:50051"
-DEFAULT_ENGINE_WS = "ws://localhost:50052/v1/ws"
-DEFAULT_TRITON_HTTP = "http://localhost:8000"
-DEFAULT_TRITON_GRPC = "localhost:8001"
-DEFAULT_TRITON_MODEL = "tts_orchestrator"
-DEFAULT_TRITON_HTTP_MODEL = "tts_orchestrator_http"
-
 
 @dataclass
 class ProbeResult:
@@ -64,22 +70,6 @@ class ProbeResult:
 
 class ProbeFailure(RuntimeError):
     """Expected endpoint-level probe failure."""
-
-
-def _parse_host_port(endpoint: str, *, default_port: int) -> tuple[str, int]:
-    host, sep, port_text = endpoint.strip().rpartition(":")
-    if not sep:
-        return endpoint.strip(), default_port
-    if not host:
-        raise ProbeFailure(f"invalid endpoint: {endpoint!r}")
-    try:
-        return host, int(port_text)
-    except ValueError as exc:
-        raise ProbeFailure(f"invalid port in endpoint: {endpoint!r}") from exc
-
-
-def _normalize_http_base(url: str) -> str:
-    return str(url).rstrip("/")
 
 
 def _timed(name: str, endpoint: str, fn) -> ProbeResult:
@@ -112,7 +102,10 @@ def probe_engine_grpc(endpoint: str, timeout: float) -> ProbeResult:
         import grpc
         from engine.gateway import tts_pb2, tts_pb2_grpc
 
-        host, port = _parse_host_port(endpoint, default_port=50051)
+        try:
+            host, port = parse_host_port(endpoint, default_port=50051)
+        except ValueError as exc:
+            raise ProbeFailure(str(exc)) from exc
         channel = grpc.insecure_channel(f"{host}:{port}")
         try:
             grpc.channel_ready_future(channel).result(timeout=timeout)
@@ -174,7 +167,7 @@ def probe_engine_websocket(url: str, timeout: float) -> ProbeResult:
 
 def probe_triton_http(base_url: str, model_name: str, timeout: float) -> ProbeResult:
     def _run():
-        root = _normalize_http_base(base_url)
+        root = normalize_http_base(base_url)
         live = requests.get(f"{root}/v2/health/live", timeout=timeout)
         if live.status_code != 200:
             raise ProbeFailure(f"live check failed: HTTP {live.status_code}")
@@ -240,12 +233,8 @@ def probe_triton_grpc(endpoint: str, model_name: str, timeout: float) -> ProbeRe
 
 def _selected_probes(only: list[str] | None) -> list[str]:
     if not only:
-        return ["engine-grpc", "engine-websocket", "triton-http", "triton-grpc"]
-    ordered = []
-    for name in only:
-        if name not in ordered:
-            ordered.append(name)
-    return ordered
+        return list(DEFAULT_PROBE_TARGETS)
+    return dedupe_keep_order(only)
 
 
 def _render_text(results: list[ProbeResult]) -> str:

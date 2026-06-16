@@ -17,16 +17,21 @@ Usage:
 import argparse
 import json
 import os
-import sys
 import time
-from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 import torch
 
-PROJ_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(PROJ_ROOT / "third_party" / "Qwen3-TTS"))
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+PROJ_ROOT = bootstrap_tool_imports()
+from qwen3tts_tools.common import bootstrap_project_imports
+
+bootstrap_project_imports("third_party_qwen")
 
 from qwen_tts.core.models import Qwen3TTSConfig, Qwen3TTSForConditionalGeneration
 from transformers import AutoConfig, AutoModel

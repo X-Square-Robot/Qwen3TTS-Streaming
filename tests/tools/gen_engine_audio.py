@@ -11,14 +11,18 @@ Usage:
 import sys
 import time
 import uuid
-import wave
-from pathlib import Path
 
 import grpc
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT))
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+bootstrap_tool_imports()
+from qwen3tts_tools.audio import save_wav
+from qwen3tts_tools.common import REPO_ROOT
 
 from engine.gateway import tts_pb2, tts_pb2_grpc
 
@@ -32,18 +36,6 @@ TEXTS = {
     "test3": "你好，今天天气真好。",
     "test4": "欢迎来到人工智能语音合成的世界。",
 }
-
-
-def save_wav(audio: np.ndarray, path: str):
-    audio = np.clip(audio, -1.0, 1.0)
-    audio_int16 = (audio * 32767).astype(np.int16)
-    with wave.open(path, "w") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(SAMPLE_RATE)
-        wf.writeframes(audio_int16.tobytes())
-
-
 def _audio_chunk_to_f32(audio_chunk) -> np.ndarray:
     encoding = getattr(audio_chunk, "encoding", tts_pb2.AUDIO_ENCODING_PCM_F32)
     if encoding == tts_pb2.AUDIO_ENCODING_PCM_S16LE:
@@ -135,7 +127,7 @@ def main():
         if audio is not None:
             duration = len(audio) / SAMPLE_RATE
             out_path = out_dir / f"engine_{name}.wav"
-            save_wav(audio, str(out_path))
+            save_wav(audio, out_path, sample_rate=SAMPLE_RATE)
             print(f"  -> {out_path.name}: {len(audio)} samples, {duration:.2f}s, "
                   f"{n_chunks} chunks, took {elapsed:.1f}s")
         else:

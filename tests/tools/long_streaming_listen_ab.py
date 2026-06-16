@@ -20,13 +20,18 @@ from pathlib import Path
 
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "scripts" / "export"))
-sys.path.insert(0, str(REPO_ROOT / "third_party" / "Qwen3-TTS"))
-sys.path.insert(0, str(REPO_ROOT))
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+REPO_ROOT = bootstrap_tool_imports()
+from qwen3tts_tools.common import bootstrap_project_imports
+
+bootstrap_project_imports("scripts_export", "third_party_qwen")
 
 from utils import has_model_weights, resolve_device, resolve_model_path, setup_logging
-from tests.e2e.test_engine_standalone import (
+from tests.support.engine_standalone import (
     GRPC_HOST,
     GRPC_PORT,
     LONG_TEXT,

@@ -18,25 +18,39 @@ from __future__ import annotations
 import argparse
 import base64
 import json
-import os
 import socket
 import statistics
-import sys
 import time
 import uuid
-import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-for import_path in (REPO_ROOT, REPO_ROOT / "scripts" / "python"):
-    if str(import_path) not in sys.path:
-        sys.path.insert(0, str(import_path))
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+REPO_ROOT = bootstrap_tool_imports()
 
 import numpy as np
 import requests
+from qwen3tts_tools.audio import save_wav
+from qwen3tts_tools.common import (
+    DEFAULT_ENGINE_GRPC,
+    DEFAULT_ENGINE_WS,
+    DEFAULT_SAMPLE_RATE,
+    DEFAULT_SERVING_TARGETS,
+    DEFAULT_TRITON_GRPC,
+    DEFAULT_TRITON_HTTP,
+    DEFAULT_TRITON_HTTP_MODEL,
+    DEFAULT_TRITON_MODEL,
+    DEFAULT_TRITON_MODEL_VERSION,
+    parse_host_port,
+    split_csv_arg,
+    story_path,
+)
 from tests.token_streaming import (
     DEFAULT_TOKEN_STREAM_TEXT,
     TokenChunkingUnavailable,
@@ -66,15 +80,6 @@ def _require_engine_gateway():
         raise RuntimeError(f"engine gateway protobuf import failed: {_ENGINE_GATEWAY_IMPORT_ERROR}")
     return tts_pb2, tts_pb2_grpc
 
-DEFAULT_ENGINE_GRPC = "localhost:50051"
-DEFAULT_ENGINE_WS = "ws://localhost:50052/v1/ws"
-# DEFAULT_ENGINE_WS = "ws://8.160.176.148:1181/v1/ws"
-DEFAULT_TRITON_HTTP = "http://localhost:8000"
-DEFAULT_TRITON_GRPC = "localhost:8001"
-DEFAULT_TRITON_MODEL = "tts_orchestrator"
-DEFAULT_TRITON_HTTP_MODEL = "tts_orchestrator_http"
-DEFAULT_TRITON_MODEL_VERSION = os.environ.get("TRITON_MODEL_VERSION", "1")
-DEFAULT_SAMPLE_RATE = 24000
 TRITON_EXPECTED_INPUTS = {"request"}
 TRITON_EXPECTED_OUTPUTS = {"audio_chunk", "event_type", "event_json", "is_final"}
 
@@ -442,17 +447,6 @@ def _error_text(exc: BaseException) -> str:
     return str(exc).strip() or exc.__class__.__name__
 
 
-def _save_wav(audio: np.ndarray, path: Path, sample_rate: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    audio = np.clip(audio, -1.0, 1.0)
-    pcm16 = (audio * 32767.0).astype(np.int16)
-    with wave.open(str(path), "w") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm16.tobytes())
-
-
 def _decode_audio_bytes(raw: bytes, encoding: str) -> np.ndarray:
     width = 2 if encoding == "pcm_s16le" else 4
     if len(raw) % width:
@@ -495,15 +489,6 @@ def _capture_event_meta(result: SynthesisResult, event_type: str, meta: Any) -> 
     )
     if event_type == "prefill_done":
         result.details["prefill_done"] = meta_dict
-
-
-def _parse_host_port(endpoint: str, default_port: int) -> tuple[str, int]:
-    host, sep, port_text = endpoint.strip().rpartition(":")
-    if not sep:
-        return endpoint.strip(), default_port
-    if not host:
-        raise ValueError(f"invalid endpoint: {endpoint!r}")
-    return host, int(port_text)
 
 
 def _make_engine_request_spec(args: argparse.Namespace, loaded_model_type: str = "") -> RequestSpec:
@@ -633,7 +618,7 @@ def _case_from_synth(
 ) -> CaseResult:
     ok = synthesis.error is None and synthesis.total_samples >= int(synthesis.sample_rate * min_audio_sec)
     if ok and save_path is not None and synthesis.audio is not None and synthesis.audio.size > 0:
-        _save_wav(synthesis.audio, save_path, synthesis.sample_rate)
+        save_wav(synthesis.audio, save_path, sample_rate=synthesis.sample_rate)
     summary = synthesis.to_summary()
     return CaseResult(
         target=target,
@@ -686,7 +671,7 @@ def _case_from_reference_synth(
 def _story_path(args: argparse.Namespace) -> Path:
     if args.story_path:
         return Path(args.story_path)
-    return REPO_ROOT / "tests" / "data" / "story.txt"
+    return story_path()
 
 
 def _read_story_text(args: argparse.Namespace) -> str:
@@ -701,7 +686,7 @@ class EngineGrpcTransport:
 
     def __init__(self, endpoint: str, *, ttft_connection_mode: str = "reuse"):
         self.endpoint = endpoint
-        self.host, self.port = _parse_host_port(endpoint, 50051)
+        self.host, self.port = parse_host_port(endpoint, default_port=50051)
         self.ttft_connection_mode = ttft_connection_mode
         self._ttft_channel = None
         self._ttft_stub = None
@@ -2767,7 +2752,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Unified full E2E test tool for engine and Triton endpoints.")
     parser.add_argument(
         "--targets",
-        default="engine-grpc,engine-websocket,triton-grpc,triton-http",
+        default=",".join(DEFAULT_SERVING_TARGETS),
         help="Comma-separated targets: engine-grpc,engine-websocket,triton-grpc,triton-http",
     )
     parser.add_argument("--engine-grpc", default=DEFAULT_ENGINE_GRPC)
@@ -2901,7 +2886,7 @@ def main() -> int:
         raise SystemExit("--concurrency-samples must be >= 1")
     if args.concurrency_warmup < 0:
         raise SystemExit("--concurrency-warmup must be >= 0")
-    targets = [item.strip() for item in args.targets.split(",") if item.strip()]
+    targets = split_csv_arg(args.targets)
     output_root = Path(args.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
 

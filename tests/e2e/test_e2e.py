@@ -16,6 +16,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from tests.support.triton_streaming import (
+    StreamResult,
+    build_request_payload,
+    infer_stream,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -53,74 +58,11 @@ def client():
 def _stream_tts(client, req_dict, timeout=60):
     """Send request, collect streaming audio chunks. Returns (chunks_list, first_chunk_sec, total_sec, error_msg)."""
     grpcclient = _grpc_client()
-    req_json = json.dumps(req_dict)
-    req_input = grpcclient.InferInput("request", [1], "BYTES")
-    req_input.set_data_from_numpy(np.array([req_json], dtype=object))
-    audio_out = grpcclient.InferRequestedOutput("audio_chunk")
-    event_type_out = grpcclient.InferRequestedOutput("event_type")
-    event_json_out = grpcclient.InferRequestedOutput("event_json")
-    final_out = grpcclient.InferRequestedOutput("is_final")
-
-    chunks = []
-    first_time = None
-    errors = []
-    done = False
-    audio_format = {"encoding": "pcm_f32", "sample_rate": 24000}
-
-    def _decode_obj(value):
-        if isinstance(value, bytes):
-            return value.decode("utf-8")
-        return str(value)
-
-    def _chunk_to_f32(raw: bytes) -> np.ndarray:
-        if audio_format.get("encoding") == "pcm_s16le":
-            return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
-        return np.frombuffer(raw, dtype=np.float32)
-
-    def callback(result, error):
-        nonlocal done, first_time
-        if error:
-            errors.append(str(error))
-            done = True
-            return
-        event_type = result.as_numpy("event_type")
-        event_json = result.as_numpy("event_json")
-        audio = result.as_numpy("audio_chunk")
-        is_final = result.as_numpy("is_final")
-        et = _decode_obj(event_type.flatten()[0]) if event_type is not None and event_type.size else ""
-        payload = {}
-        if event_json is not None and event_json.size:
-            raw_json = _decode_obj(event_json.flatten()[0])
-            if raw_json:
-                payload = json.loads(raw_json)
-        if et == "start":
-            audio_format.update(payload.get("audio_format", {}) or {})
-        elif et == "audio" and audio is not None and audio.size:
-            if first_time is None:
-                first_time = time.perf_counter()
-            raw = audio.flatten()[0]
-            chunks.append(_chunk_to_f32(raw))
-        elif et == "error":
-            errors.append(payload.get("message", "unknown error"))
-            done = True
-            return
-        if is_final is not None and is_final.size and is_final.flatten()[0]:
-            done = True
-
-    t0 = time.perf_counter()
-    client.start_stream(callback=callback)
-    client.async_stream_infer(
-        model_name="tts_orchestrator",
-        inputs=[req_input],
-        outputs=[audio_out, event_type_out, event_json_out, final_out],
-    )
-    while not done and (time.perf_counter() - t0) < timeout:
-        time.sleep(0.05)
-    client.stop_stream()
-    total = time.perf_counter() - t0
-    first_sec = (first_time - t0) if first_time is not None else None
-    err = errors[0] if errors else None
-    return chunks, first_sec, total, err
+    stream = infer_stream(client, grpcclient, req_dict, timeout=timeout)
+    chunks = [stream.audio] if stream.audio is not None and stream.audio.size else []
+    first_sec = (stream.first_chunk_ms / 1000.0) if stream.first_chunk_ms is not None else None
+    total = stream.total_ms / 1000.0
+    return chunks, first_sec, total, stream.error
 
 
 def _minimal_wav_base64(duration_sec=0.5, sample_rate=16000):

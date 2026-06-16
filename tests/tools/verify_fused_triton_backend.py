@@ -19,16 +19,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
-from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
 import onnxruntime as ort
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT))
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
+
+REPO_ROOT = bootstrap_tool_imports()
 
 from engine.backend.prefill import EmbeddingWeights, PrefillBuilder, TaskType
 from engine.frontend.spliter.tokenizer import load_lightweight_tokenizer

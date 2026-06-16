@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT))
+try:
+    from tests.tools._bootstrap import bootstrap_tool_imports
+except ImportError:
+    from _bootstrap import bootstrap_tool_imports
 
-from tests.e2e.test_engine_standalone import (
+REPO_ROOT = bootstrap_tool_imports()
+
+from tests.support.engine_standalone import (
     CUSTOM_VOICE_INSTRUCT_ZH,
     LONG_TEXT,
     OUTPUT_DIR,

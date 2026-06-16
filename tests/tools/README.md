@@ -2,6 +2,10 @@
 
 `tests/tools/` contains scripts that are useful for validation, benchmarking, audio inspection, and debugging, but are not pytest tests.
 
+Shared cross-tool helper code should live in `scripts/python/qwen3tts_tools/` once more than one manual tool needs it. Keep files in `tests/tools/` focused on test intent and CLI behavior.
+
+When a manual tool and a pytest suite need the same standalone-engine helper logic, put that shared layer in `tests/support/` instead of importing a `tests/e2e/test_*.py` module.
+
 ## Primary Tool
 
 `serving_endpoints.py` is the canonical full serving acceptance and benchmark entry point.
@@ -70,3 +74,11 @@ Export, ONNX, and TensorRT verification:
 - `dockerfile_triton_check.sh`
 - `pad_tolerance_experiment.py`
 - `greedy_baseline.py`
+
+## Maintenance
+
+Before adding a new tool here, check whether a close neighbor already exists and whether the shared logic belongs in `scripts/python/qwen3tts_tools/`. For a project-wide surface report, run:
+
+```bash
+python scripts/python/audit_tooling_surface.py
+```
