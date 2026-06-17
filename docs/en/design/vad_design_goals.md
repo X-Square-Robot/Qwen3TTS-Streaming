@@ -425,4 +425,4 @@ end_count 是**响应速度 vs 效果**的核心取舍：
 - `engine/interface/output.py`：OutputPipeline（VAD 可观测性集成点）
 - `engine/core/types.py`：VADConfig 定义（协议扩展点）
 - [TEN VAD GitHub](https://github.com/TEN-framework/ten-vad)：TenVAD 推理核心参考
-- [docs/streaming_hallucination_investigation.md](streaming_hallucination_investigation.md)：幻觉调查背景
+- [streaming_hallucination.md](../investigation/streaming_hallucination.md)：幻觉调查背景
