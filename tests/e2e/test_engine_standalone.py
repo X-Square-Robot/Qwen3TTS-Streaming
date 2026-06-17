@@ -17,7 +17,7 @@ Pytest usage:
     pytest tests/e2e/test_engine_standalone.py -v -s
 
 Manual benchmark usage:
-    python tests/tools/engine_standalone_benchmark.py --host localhost --port 50051
+    python tools/validation/engine_standalone_benchmark.py --host localhost --port 50051
 """
 
 from __future__ import annotations

@@ -658,7 +658,7 @@ resolve_ngc_python_version() {
 # ---------------------------------------------------------------------------
 #  build_triton_deploy_image [ngc_tag]
 #  Builds the Phase C deploy image: -py3 base + torch + tokenizers.
-#  Uses Dockerfile.triton at the repo root.
+#  Uses Dockerfile.triton at infra/docker/.
 #  Echoes the built image tag to stdout.
 # ---------------------------------------------------------------------------
 build_triton_deploy_image() {
@@ -694,14 +694,14 @@ build_triton_deploy_image() {
 
     local repo_root
     repo_root="$(cd "${_LIB_DIR}/../../.." && pwd)"
-    local dockerfile="$repo_root/Dockerfile.triton"
+    local dockerfile="$repo_root/infra/docker/Dockerfile.triton"
 
     if [ ! -f "$dockerfile" ]; then
         log_error "Dockerfile.triton not found at $dockerfile"
         return 1
     fi
 
-    # Build context must include engine/ for Dockerfile.triton COPY (see repo root Dockerfile.triton).
+    # Build context must include engine/ for Dockerfile.triton COPY.
     if ! DOCKER_BUILDKIT=1 docker build \
         --build-arg "BASE_IMAGE=$base_image" \
         --build-arg "TENSORRT_PYTHON_VERSION=$trt_python_version" \

@@ -5,7 +5,15 @@ import time
 
 import pytest
 
-from tests.tools import serving_endpoints
+import sys
+from pathlib import Path
+
+# Bootstrap tools/validation/ onto sys.path so we can import serving_endpoints
+_tools_dir = Path(__file__).resolve().parents[2] / "tools" / "validation"
+if str(_tools_dir) not in sys.path:
+    sys.path.insert(0, str(_tools_dir))
+
+import serving_endpoints
 
 
 class _FakeSocket:

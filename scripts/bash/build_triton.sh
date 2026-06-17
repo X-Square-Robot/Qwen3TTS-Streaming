@@ -96,7 +96,7 @@ EOF
 # ── Generate Dockerfile.triton ──
 # Defined early because --generate-dockerfile triggers it before subcommand parsing.
 generate_dockerfile() {
-    local dockerfile="$REPO_ROOT/Dockerfile.triton"
+    local dockerfile="$REPO_ROOT/infra/docker/Dockerfile.triton"
 
     log_step "Generating Dockerfile.triton"
 
@@ -532,7 +532,7 @@ cmd_build() {
     validate_model_repo "$MODEL_REPO_DIR" "$MODEL_VERSION" || exit 1
 
     # Generate Dockerfile if missing
-    if [ ! -f "$REPO_ROOT/Dockerfile.triton" ]; then
+    if [ ! -f "$REPO_ROOT/infra/docker/Dockerfile.triton" ]; then
         generate_dockerfile
     fi
 

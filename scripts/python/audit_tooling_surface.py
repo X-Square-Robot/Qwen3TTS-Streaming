@@ -17,7 +17,7 @@ PYTHON_ROOTS = ("scripts", "tests")
 COMMON_DUPLICATE_NAMES = {"__init__", "callback", "forward", "main", "parse_args"}
 MANAGED_SYS_PATH_BOOTSTRAPS = {
     "scripts/python/qwen3tts_tools/common.py",
-    "tests/tools/_bootstrap.py",
+    "tools/validation/_bootstrap.py",
 }
 
 
@@ -118,7 +118,7 @@ def build_report(
                 managed_sys_path_bootstraps.append(rel)
             else:
                 unmanaged_sys_path_bootstraps.append(rel)
-        if rel.startswith("tests/tools/") and "from tests.e2e.test_" in source:
+        if rel.startswith("tools/validation/") and "from tests.e2e.test_" in source:
             tools_importing_pytest_modules.append(rel)
         if rel.startswith("tests/") and not rel.startswith("tests/e2e/") and "from tests.e2e.test_" in source:
             non_e2e_imports_of_e2e_tests.append(rel)
@@ -230,7 +230,7 @@ def _render_text(report: dict[str, object]) -> str:
 
     if report["tools_importing_pytest_modules"]:
         lines.append("")
-        lines.append("tests/tools importing pytest modules:")
+        lines.append("tools/validation importing pytest modules:")
         for path in report["tools_importing_pytest_modules"]:
             lines.append(f"  - {path}")
 

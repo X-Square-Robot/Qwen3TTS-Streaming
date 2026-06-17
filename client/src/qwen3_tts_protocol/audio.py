@@ -120,7 +120,7 @@ def decode_audio_bytes(raw: bytes, audio_format: dict[str, Any] | None = None) -
 class StreamResult:
     """Lightweight result holder for a single Triton streaming inference.
 
-    This is kept in the protocol layer because tests/tools and the old
+    This is kept in the protocol layer because tools/validation and the old
     ``tests.support.triton_streaming`` module both need it.
     """
 

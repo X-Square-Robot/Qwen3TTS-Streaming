@@ -1,4 +1,4 @@
-"""Shared Triton streaming helpers for tests/tools.
+"""Shared Triton streaming helpers for tools/validation.
 
 .. deprecated::
    Types and payload builders have moved to ``qwen3_tts_protocol``.

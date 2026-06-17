@@ -1,0 +1,10 @@
+services:
+  engine:
+    volumes:
+      - ../../engine:/app/engine:ro
+      - ../../engine.yaml:/app/engine.yaml:ro
+      - ../../scripts/compose:/app/scripts/compose:ro
+
+  triton:
+    volumes:
+      - ../../engine:/opt/qwen3-tts/engine:ro

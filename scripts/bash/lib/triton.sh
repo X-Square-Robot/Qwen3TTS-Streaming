@@ -791,7 +791,7 @@ PY
 # ---------------------------------------------------------------------------
 #  build_triton_image <repo_root> <image_tag> [base_image]
 #  Builds a self-contained deployment image with all model artifacts baked in.
-#  Uses the Dockerfile at <repo_root>/Dockerfile.triton.
+#  Uses the Dockerfile at infra/docker/Dockerfile.triton.
 #
 #  For development, prefer triton_run() with volume mounts instead.
 # ---------------------------------------------------------------------------

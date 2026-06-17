@@ -475,7 +475,7 @@ engine_docker_image_matches_torch_cuda() {
 engine_build_image() {
     local repo_root="$1"
     local image_tag="${2:-$ENGINE_IMAGE}"
-    local dockerfile="$repo_root/Dockerfile.engine"
+    local dockerfile="$repo_root/infra/docker/Dockerfile.engine"
 
     if [ ! -f "$dockerfile" ]; then
         log_error "Dockerfile not found: $dockerfile"

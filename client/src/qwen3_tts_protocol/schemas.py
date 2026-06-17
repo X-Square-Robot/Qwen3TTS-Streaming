@@ -1,4 +1,4 @@
-"""Trace and benchmark schemas shared by demo_api and tests/tools.
+"""Trace and benchmark schemas shared by demo_api and tools/validation.
 
 These types describe a single TTS run's events, metrics, and result summary.
 They are intentionally pure-data (no numpy / triton / engine dependency).

@@ -168,14 +168,14 @@ for message in session.iter_messages():
 pytest tests/unit tests/integration -q
 
 # Serving 验收与 benchmark 主入口
-mamba run -n qwen3-tts python tests/tools/serving_endpoints.py --targets engine-grpc
-mamba run -n qwen3-tts python tests/tools/serving_endpoints.py --targets triton-grpc,triton-http
+mamba run -n qwen3-tts python tools/validation/serving_endpoints.py --targets engine-grpc
+mamba run -n qwen3-tts python tools/validation/serving_endpoints.py --targets triton-grpc,triton-http
 ```
 
 验证 base/icl reference resolver 与 ICL prefix cache：
 
 ```bash
-mamba run -n qwen3-tts python tests/tools/serving_endpoints.py \
+mamba run -n qwen3-tts python tools/validation/serving_endpoints.py \
   --targets engine-grpc \
   --reference-tests \
   --reference-alias vivian \
@@ -220,7 +220,7 @@ Docker Compose demo profile：
 
 ```bash
 bash scripts/bash/compose.sh up --gateway triton --variant custom-1.7b
-docker compose --profile demo up --build demo-api webui
+docker compose --profile demo -f infra/docker/compose.yaml up --build demo-api webui
 ```
 
 ## 流式协议
@@ -245,6 +245,9 @@ Qwen3-TTS-Triton/
 │   └── src/qwen3_tts_protocol/ #  共享协议层（单一真相源）
 ├── demo_api/                   # WebUI Demo API（依赖 client 包）
 ├── webui/                      # Vite/React WebUI
+├── infra/
+│   └── docker/                 # Dockerfile + compose 配置
+├── model_repository/           # Triton Python BLS 模型定义
 ├── scripts/
 │   ├── bash/                   # autorun/setup/build/deploy 生命周期
 │   ├── export/                 # PyTorch → ONNX/manifest 导出
@@ -253,21 +256,21 @@ Qwen3-TTS-Triton/
 │   ├── unit/                   # pytest 单元测试
 │   ├── integration/            # pytest 集成测试
 │   ├── e2e/                    # pytest 端到端测试
-│   ├── support/                # 测试共享代码
-│   ├── tools/                  # 手动验证与 benchmark
-│   └── data/                   # 测试数据
-├── docs/zh/                    # 中文文档
+│   └── support/                # 测试共享代码
+├── tools/
+│   ├── validation/             # 手动验证与 benchmark
+│   ├── repro/                  # 冻结的 bug 复现案例
+│   └── data/                   # 工具数据
+├── docs/
+│   ├── zh/                    # 中文用户文档（索引：docs/zh/README.md）
+│   └── en/                    # 英文开发者文档（索引：docs/en/README.md）
 └── workspace/                  # 运行时产物（gitignored）
 ```
 
-## 中文文档
+## 文档导航
 
-- [已知限制与风险](docs/zh/known_limitations.md)
-- [Benchmark 方法](docs/zh/benchmark_methodology.md)
-- [部署说明](docs/zh/deployment.md)
-- [Client SDK](docs/zh/client_sdk.md)
-- [路线图](docs/zh/roadmap.md)
-- [架构说明](docs/architecture.md)
+- 📖 [中文用户文档索引](docs/zh/README.md) — 部署、SDK、Benchmark、已知限制
+- 📖 [英文开发者文档索引](docs/en/README.md) — 架构、设计、调查、运维
 
 ## 许可证
 

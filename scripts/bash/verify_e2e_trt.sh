@@ -27,7 +27,7 @@ source "${SCRIPT_DIR}/tools.sh"
 
 EXPORTED_DIR="${REPO_ROOT}/workspace/exported"
 SCRIPTS_PY="${REPO_ROOT}/scripts/python"
-TESTS_TOOLS="${REPO_ROOT}/tests/tools"
+TOOLS_VALIDATION="${REPO_ROOT}/tools/validation"
 VARIANT=""
 N_STEPS=50
 SKIP_REF=false
@@ -90,10 +90,10 @@ run_ref_gen() {
     fi
     log_step "Generating E2E TRT reference: $VARIANT (steps=$N_STEPS)"
     if $DRY_RUN; then
-        log_info "[DRY RUN] Would run: python3 tests/tools/verify_e2e_trt_ref.py --variant $VARIANT --steps $N_STEPS"
+        log_info "[DRY RUN] Would run: python3 tools/validation/verify_e2e_trt_ref.py --variant $VARIANT --steps $N_STEPS"
         return 0
     fi
-    ( cd "${REPO_ROOT}" && python3 "${TESTS_TOOLS}/verify_e2e_trt_ref.py" --variant "$VARIANT" --steps "$N_STEPS" ) || return 1
+    ( cd "${REPO_ROOT}" && python3 "${TOOLS_VALIDATION}/verify_e2e_trt_ref.py" --variant "$VARIANT" --steps "$N_STEPS" ) || return 1
     log_info "Reference saved: $VARIANT_DIR/e2e_trt_ref.npz"
     return 0
 }
@@ -108,7 +108,7 @@ run_container_verify() {
     local docker_cmd=(
         docker run --rm --gpus "$GPU_DEVICES"
         -v "$VARIANT_DIR:/mnt/model"
-        -v "$TESTS_TOOLS:/mnt/tests:ro"
+        -v "$TOOLS_VALIDATION:/mnt/tests:ro"
         -v "$SCRIPTS_PY:/mnt/scripts:ro"
         "$NGC_IMAGE"
         bash -c "pip install -q onnxruntime 2>/dev/null; python3 /mnt/tests/verify_e2e_trt.py --model-dir /mnt/model --ref-file /mnt/model/e2e_trt_ref.npz --variant $VARIANT"

@@ -2,7 +2,7 @@
 
 These are the wire-format types for talking to the Triton orchestrator
 backend.  They live in the protocol layer so that both the demo_api and
-tests/tools can share them without depending on each other.
+tools/validation can share them without depending on each other.
 """
 
 from __future__ import annotations

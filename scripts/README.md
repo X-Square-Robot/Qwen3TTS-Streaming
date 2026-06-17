@@ -4,7 +4,7 @@
 
 - **`scripts/bash/autorun.sh`**: primary operator entry point (setup → build → package → deploy)
 - **`scripts/python/audit_tooling_surface.py`**: governance report for scripts/ + tests/ surface
-- **`tests/tools/serving_endpoints.py`**: canonical serving acceptance and benchmark tool
+- **`tools/validation/serving_endpoints.py`**: canonical serving acceptance and benchmark tool
 - **`tests/README.md`**: main map for pytest suites and manual validation tools
 
 ## Directory Roles
@@ -35,7 +35,7 @@
 
 ## Governance Rules
 
-- A new user-facing validation or benchmark tool should live in `tests/tools/`, not `scripts/python/`.
+- A new user-facing validation or benchmark tool should live in `tools/validation/`, not `scripts/python/`.
 - Shared types and schemas belong in `qwen3_tts_protocol`; repo-internal helpers in `scripts/python/qwen3tts_tools/`.
 - Keep `scripts/python/` entry points thin — parse args, call shared code, render results.
 - Before adding a new tool, check if an existing unified tool (e.g. `compare_audio.py`, `verify_engine.py`) already covers the use case.
