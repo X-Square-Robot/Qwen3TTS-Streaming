@@ -3,7 +3,7 @@
 > 分支：`refact`
 > 编写日期：2026-06-17
 > 前置：第二轮重构已完成（tests/tools 精简、scripts/bash 精简、pyproject.toml 建立、Python CLI 原型）
-> 状态：待实施
+> 状态：已实施（Phase 1-5 完成，G1 src/ 迁移跳过）
 
 ---
 
