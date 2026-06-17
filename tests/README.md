@@ -12,7 +12,7 @@ This repository keeps test entry points deliberately separated:
 | `tools/repro/` | Frozen reproduction cases for known low-level issues. | See the reproduction README |
 | `tools/data/` | Small fixtures used by tests and tools. | Imported by tests |
 
-For the cross-cutting script/test mental model, also read [scripts/README.md](../scripts/README.md) and [tooling governance](../docs/en/operations/tooling_governance.md).
+For the cross-cutting script/test mental model, also read [scripts/README.md](../scripts/README.md) and [工具治理](../docs/dev/operations/tooling_governance.md)。
 
 ## Recommended Entry Points
 

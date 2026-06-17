@@ -17,7 +17,7 @@ Qwen3-TTS Triton 是一个**工程预览版**项目：把官方 Qwen3-TTS PyTorc
 - `180ms 128-stream avg TTFT`：并发压测口径，需明确硬件、cache、输入、profile、采样参数和客户端测量方式。
 - WebUI 只在结果 source 标记为 `live_triton` 或 `live_engine_websocket` 且带 `audio` 字段时代表可回放的实时合成音频。
 
-详细 benchmark 口径见 [docs/zh/benchmark_methodology.md](docs/zh/benchmark_methodology.md)。
+详细 benchmark 口径见 [Benchmark 方法](docs/user/benchmark_methodology.md)。
 
 ## 能力状态
 
@@ -55,7 +55,7 @@ bash scripts/bash/autorun.sh deploy  -m custom-1.7b --gateway standalone --engin
 
 ## 部署方式
 
-详细参数（统一入口控制参数、Engine Profile 计算逻辑、GPU 选择、模型版本号）见 [docs/zh/deployment.md](docs/zh/deployment.md)。
+详细参数（统一入口控制参数、Engine Profile 计算逻辑、GPU 选择、模型版本号）见 [部署指南](docs/user/deployment.md)。
 
 ### Standalone
 
@@ -116,7 +116,7 @@ ENGINE_DEFAULT_BASE_REF_TEXT="参考音频对应文本" \
 bash scripts/bash/autorun.sh all -m base-1.7b --gateway standalone --engine-mode trt
 ```
 
-也可以在 `engine.yaml` 中配置 reference library 和 reference cache，详细字段语义和 ICL 预处理要求见 [docs/zh/deployment.md](docs/zh/deployment.md)。
+也可以在 `engine.yaml` 中配置 reference library 和 reference cache，详细字段语义和 ICL 预处理要求见 [部署指南](docs/user/deployment.md)。
 
 ## Client SDK
 
@@ -157,7 +157,7 @@ for message in session.iter_messages():
     print(type(message).__name__, getattr(message, "meta", {}))
 ```
 
-详细文档见 [docs/zh/client_sdk.md](docs/zh/client_sdk.md) 和 [`client/`](client) 子项目。
+详细文档见 [Client SDK](docs/user/client_sdk.md) 和 [`client/`](client) 子项目。
 
 ## 测试与验收
 
@@ -262,15 +262,15 @@ Qwen3-TTS-Triton/
 │   ├── repro/                  # 冻结的 bug 复现案例
 │   └── data/                   # 工具数据
 ├── docs/
-│   ├── zh/                    # 中文用户文档（索引：docs/zh/README.md）
-│   └── en/                    # 英文开发者文档（索引：docs/en/README.md）
+│   ├── user/                   # 用户文档（部署、SDK、Benchmark、限制）
+│   └── dev/                    # 开发者文档（架构、设计、调查、运维）
 └── workspace/                  # 运行时产物（gitignored）
 ```
 
 ## 文档导航
 
-- 📖 [中文用户文档索引](docs/zh/README.md) — 部署、SDK、Benchmark、已知限制
-- 📖 [英文开发者文档索引](docs/en/README.md) — 架构、设计、调查、运维
+- 📖 [用户文档](docs/user/README.md) — 部署、SDK、Benchmark、已知限制
+- 📖 [开发者文档](docs/dev/README.md) — 架构、设计、调查、运维
 
 ## 许可证
 

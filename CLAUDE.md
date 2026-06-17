@@ -33,13 +33,13 @@ Qwen3-TTS-Triton/
 │   ├── repro/           # 冻结的 bug 复现案例
 │   └── data/            # 工具数据
 ├── docs/
-│   ├── zh/              # 中文用户文档
-│   └── en/              # 英文开发者文档
-│       ├── architecture/ # 架构子篇
-│       ├── design/       # 设计目标
-│       ├── investigation/ # 调查报告
-│       ├── operations/   # 运维文档
-│       └── process/      # 流程/历史文档
+│   ├── user/              # 用户文档（部署、SDK、Benchmark、限制）
+│   ├── dev/               # 开发者文档（架构、设计、调查、运维）
+│   │   ├── architecture/  #   架构子篇
+│   │   ├── design/        #   设计目标
+│   │   ├── investigation/ #   调查报告
+│   │   └── operations/    #   运维文档
+│   └── process/           # 流程/历史文档
 ├── infra/
 │   └── docker/          # Dockerfile + compose 配置
 ├── proto/               # 协议定义单一源（tts.proto + 生成代码）
@@ -82,11 +82,11 @@ python -m engine.server --config engine.yaml
 
 ## 文档语言策略
 
-- `README.md`（主入口）：中文
-- `docs/zh/`：中文用户文档（部署、使用、限制）
-- `docs/en/`：英文开发者文档（架构、设计、调查、运维）
-- `client/README.md`：英文（SDK 面向国际用户）
-- 子目录 README：英文
+- 所有文档统一使用中文
+- 代码块、变量名、文件路径、命令示例保持英文
+- `docs/user/`：面向用户的文档（部署、使用、限制）
+- `docs/dev/`：面向开发者/贡献者的文档（架构、设计、调查、运维）
+- `docs/process/`：流程/历史文档（归档）
 
 ## 常见操作速查
 
