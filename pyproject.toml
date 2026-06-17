@@ -1,0 +1,65 @@
+# Qwen3-TTS Triton — dependency grouping and tool configuration.
+# This file is NOT a installable Python package definition — engine/, demo_api/,
+# and client/ are separate sub-projects with their own packaging.
+# It exists solely to:
+#   1. Declare optional dependency groups for `pip install -e ".[group]"`
+#   2. Configure pytest markers and test paths
+#   3. Register the `qwen3tts` CLI entry point
+
+[project]
+name = "qwen3-tts-triton"
+version = "0.1.0"
+description = "Qwen3-TTS Triton inference system"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+client = [
+    "qwen3-tts-client[all]",
+]
+demo = [
+    "aiohttp>=3.9",
+    "numpy>=1.24",
+    "qwen3-tts-client[all]",
+]
+export = [
+    "torch>=2.1",
+    "safetensors",
+    "transformers",
+    "onnxruntime>=1.17",
+    "numpy>=1.24",
+]
+engine = [
+    "torch>=2.1",
+    "onnxruntime>=1.17",
+    "numpy>=1.24",
+    "grpcio>=1.67.1",
+    "protobuf>=5.29.6,<7",
+    "pyyaml>=6.0",
+]
+dev = [
+    "qwen3-tts-triton[test,client,demo]",
+]
+
+[project.scripts]
+qwen3tts = "qwen3tts_cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["qwen3tts_cli"]
+package-dir = {"" = "scripts/python"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: fast tests with no external services",
+    "integration: tests requiring export artifacts",
+    "e2e: tests requiring a running service",
+]
