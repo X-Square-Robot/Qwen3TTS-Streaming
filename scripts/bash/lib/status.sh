@@ -10,6 +10,12 @@
 #
 #  Used by autorun.sh to provide an interactive status dashboard and
 #  determine which pipeline stages still need to run.
+#
+#  DEPRECATED: This module is being replaced by
+#  ``scripts/python/qwen3tts_tools/status.py``.  The Bash version
+#  remains functional during the transition period.  New code should
+#  use the Python API instead:
+#    from qwen3tts_tools.status import check_all, format_status
 # ===========================================================================
 
 [[ -n "${_LIB_STATUS_LOADED:-}" ]] && return 0

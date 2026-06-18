@@ -370,7 +370,7 @@ main() {
     echo ""
     echo "  Next steps:"
     echo "    1. Build TRT engines:      bash scripts/bash/build_engines.sh  (trtexec, NGC container)"
-    echo "    2. Deploy Triton:          bash scripts/bash/build_triton.sh run"
+    echo "    2. Deploy Triton:          bash scripts/bash/deploy.sh run --gateway triton"
     echo "    3. Or run full pipeline:   bash scripts/bash/autorun.sh all"
     echo ""
 }

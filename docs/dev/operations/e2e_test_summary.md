@@ -18,7 +18,7 @@ E2E 相关入口现在按职责分开：
 启动 Triton 后运行：
 
 ```bash
-bash scripts/bash/build_triton.sh run
+bash scripts/bash/deploy.sh run --gateway triton
 pytest tests/e2e/test_e2e.py -v -s
 ```
 

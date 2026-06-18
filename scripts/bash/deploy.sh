@@ -26,7 +26,8 @@
 #    bash scripts/bash/deploy.sh stop                               # stop service
 #    bash scripts/bash/deploy.sh status                             # show status
 #
-#  Triton-specific commands (forwarded to build_triton.sh):
+#  Triton-specific commands:
+#    assemble, pull, build-image, build — see below
 #    bash scripts/bash/deploy.sh assemble [--engine-mode onnx|trt]
 #    bash scripts/bash/deploy.sh pull
 #    bash scripts/bash/deploy.sh build-image
@@ -69,8 +70,17 @@ MAX_SESSIONS=128
 MAX_SEQ_LEN="${RUNTIME_MAX_SEQ_LEN:-}"
 FOREGROUND=false
 
-# Triton forwarding
-TRITON_ARGS=()
+# Triton-specific options (formerly build_triton.sh)
+ENGINE_MODE="${ENGINE_MODE:-trt}"
+USER_IMAGE="${TRITON_IMAGE:-}"
+BUILD_TAG=""
+HEALTH_TIMEOUT=120
+TRITON_GPU_DEVICE="${TRITON_GPU_DEVICE:-${RUNTIME_GPU_DEVICE:-auto}}"
+TRITON_MAX_BATCH_SLOTS="${TRITON_MAX_BATCH_SLOTS:-${RUNTIME_MAX_BATCH_SIZE:-}}"
+TRITON_MAX_SEQ_LEN="${TRITON_MAX_SEQ_LEN:-${RUNTIME_MAX_SEQ_LEN:-}}"
+ALLOW_FINGERPRINT_MISMATCH=false
+NO_HEALTH_CHECK=false
+CONTAINER_NAME="${CONTAINER_NAME:-qwen3-tts-triton}"
 
 # engine-docker: use --engine-image for an explicit image.  Without it, Phase C
 # derives qwen3-engine:<tag> from the model manifest's Phase B builder_image.
@@ -88,11 +98,11 @@ Commands:
   stop                   Stop the TTS service
   status                 Show service status
 
-  Triton-specific (forwarded to build_triton.sh):
+  Triton-specific commands:
     assemble             Assemble Triton model_repository
     pull                 Pull NGC Triton container image
-    build-image          Build deploy image
-    build                Build self-contained Docker image
+    build-image          Build deploy image (NGC base + torch/tokenizers, no model repo)
+    build                Build self-contained deployment Docker image
 
 Options:
   --gateway <mode>       Gateway: standalone | triton | engine-docker (default: standalone)
@@ -112,11 +122,14 @@ Options:
     --max-sessions <N>   Max concurrent sessions (default: 128)
     --foreground         Run in foreground (don't daemonize)
 
-  Triton options (forwarded to build_triton.sh):
+  Triton options:
     --engine-mode <mode> onnx | trt (default: trt)
     --image <uri>        Override NGC container image
-    --container <name>   Container name
+    --container <name>   Container name (default: qwen3-tts-triton)
+    --tag <image:tag>    Docker image tag (for 'build' command)
     --no-health-check    Skip health check
+    --allow-fingerprint-mismatch
+                           Warn instead of failing when TRT artifact fingerprint is absent/mismatched
 
 Examples:
   deploy.sh run                                  # standalone, auto-discover variant
@@ -190,19 +203,19 @@ while [[ $# -gt 0 ]]; do
         --max-sessions)   MAX_SESSIONS="$2"; shift 2 ;;
         --foreground)     FOREGROUND=true; shift ;;
 
-        # Everything else is forwarded to build_triton.sh
+        # Triton-specific options
+        --engine-mode)    ENGINE_MODE="$2"; shift 2 ;;
+        --image)          USER_IMAGE="$2"; shift 2 ;;
+        --repo-dir)       MODEL_REPO_DIR="$2"; shift 2 ;;
+        --container)      CONTAINER_NAME="$2"; shift 2 ;;
+        --tag)            BUILD_TAG="$2"; shift 2 ;;
+        --no-health-check) NO_HEALTH_CHECK=true; shift ;;
+        --allow-fingerprint-mismatch) ALLOW_FINGERPRINT_MISMATCH=true; shift ;;
+
         *)
-            TRITON_ARGS+=("$1")
-            # Options with arguments: consume next arg too
-            case "$1" in
-                --engine-mode|--image|--repo-dir|--container|--tag)
-                    if [[ $# -gt 1 ]]; then
-                        TRITON_ARGS+=("$2")
-                        shift
-                    fi
-                    ;;
-            esac
-            shift
+            log_error "Unknown option: $1"
+            usage
+            exit 1
             ;;
     esac
 done
@@ -463,14 +476,8 @@ cmd_package() {
             log_info "  Production run mounts the model package under /models."
             ;;
         triton)
-            local build_args=(
-                --variant "$VARIANT"
-                --model-version "$MODEL_VERSION"
-                --engine-mode trt
-            )
-            $DRY_RUN && build_args+=(--dry-run)
-            build_args+=("${TRITON_ARGS[@]}")
-            bash "${SCRIPT_DIR}/build_triton.sh" build "${build_args[@]}"
+            # Delegate to cmd_build for self-contained Triton image
+            cmd_build
             ;;
     esac
 }
@@ -569,13 +576,9 @@ cmd_run_standalone() {
 
 cmd_run_triton() {
     local has_image_override=false
-    local arg
-    for arg in "${TRITON_ARGS[@]}"; do
-        if [ "$arg" = "--image" ]; then
-            has_image_override=true
-            break
-        fi
-    done
+    if [ -n "$USER_IMAGE" ]; then
+        has_image_override=true
+    fi
 
     local compose_args=(
         up
@@ -585,6 +588,7 @@ cmd_run_triton() {
         --max-batch "$MAX_BATCH"
         --max-seq-len "$MAX_SEQ_LEN"
         --model-version "$MODEL_VERSION"
+        --engine-mode "$ENGINE_MODE"
     )
     if ! $has_image_override; then
         local triton_image="${TRITON_IMAGE:-}"
@@ -608,10 +612,13 @@ cmd_run_triton() {
             triton_image=$(resolve_triton_deploy_image) || exit 1
         fi
         compose_args+=(--image "$triton_image")
+    else
+        compose_args+=(--image "$USER_IMAGE")
     fi
     [ -n "$VARIANT" ] && compose_args+=(--variant "$VARIANT")
+    [ -n "${CONTAINER_NAME:-}" ] && compose_args+=(--container "$CONTAINER_NAME")
+    $NO_HEALTH_CHECK && compose_args+=(--no-health-check)
     $DRY_RUN && compose_args+=(--dry-run)
-    compose_args+=("${TRITON_ARGS[@]}")
 
     bash "${SCRIPT_DIR}/compose.sh" "${compose_args[@]}"
 }
@@ -712,17 +719,220 @@ cmd_status() {
     fi
 }
 
-# ── Triton-specific commands: forward to build_triton.sh ──
+# ── Triton-specific commands (formerly build_triton.sh) ──
 
-cmd_forward_triton() {
-    local subcmd="$1"
-    local forward_args=()
-    [ -n "$VARIANT" ] && forward_args+=(--variant "$VARIANT")
-    forward_args+=(--model-version "$MODEL_VERSION")
-    $DRY_RUN && forward_args+=(--dry-run)
-    forward_args+=("${TRITON_ARGS[@]}")
+# Generate Dockerfile.triton
+generate_dockerfile() {
+    local dockerfile="$REPO_ROOT/infra/docker/Dockerfile.triton"
 
-    bash "${SCRIPT_DIR}/build_triton.sh" "$subcmd" "${forward_args[@]}"
+    log_step "Generating Dockerfile.triton"
+
+    cat > "$dockerfile" << 'DOCKERFILE'
+# ===========================================================================
+#  Dockerfile.triton — Self-contained Qwen3-TTS Triton deployment image
+#
+#  Base: NVIDIA Triton full py3 image (onnxruntime + tensorrt + python).
+#  Build: bash scripts/bash/deploy.sh build --tag qwen3-tts-triton:latest
+#  Run:   docker run --gpus all -p 8000:8000 -p 8001:8001 -p 8002:8002 <tag>
+# ===========================================================================
+
+ARG BASE_IMAGE=nvcr.io/nvidia/tritonserver:25.05-py3
+FROM ${BASE_IMAGE}
+
+LABEL maintainer="Qwen3-TTS-Triton"
+LABEL description="Qwen3-TTS streaming TTS inference with Triton"
+
+# Model repository
+COPY workspace/model_repository /models
+
+# Health check
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=6 \
+    CMD curl -f http://localhost:8000/v2/health/ready || exit 1
+
+EXPOSE 8000 8001 8002
+
+ENTRYPOINT ["tritonserver"]
+CMD ["--model-repository=/models", "--strict-model-config=false", "--log-verbose=1"]
+DOCKERFILE
+
+    log_info "Generated: $dockerfile"
+    log_info "Build with: bash scripts/bash/deploy.sh build --tag qwen3-tts-triton:latest"
+}
+
+check_engine_artifact_fingerprint_for_variant() {
+    local variant="$1"
+    if [ "$ENGINE_MODE" != "trt" ]; then
+        return 0
+    fi
+    local artifact_manifest="$EXPORTED_DIR/artifact_manifest.json"
+    if [ ! -f "$artifact_manifest" ]; then
+        if $ALLOW_FINGERPRINT_MISMATCH; then
+            log_warn "No engine artifact manifest found; skipping fingerprint check"
+            return 0
+        fi
+        log_warn "No engine artifact manifest found; legacy local Phase B output will be accepted"
+        log_warn "For strict cross-host builds, import engines with: build_engines.sh import-artifact <bundle>"
+        return 0
+    fi
+    if engine_fingerprint_check "$artifact_manifest" "$EXPORTED_DIR/$variant/triton_manifest.json"; then
+        return 0
+    fi
+    if $ALLOW_FINGERPRINT_MISMATCH; then
+        log_warn "Engine fingerprint mismatch ignored by --allow-fingerprint-mismatch"
+        return 0
+    fi
+    return 1
+}
+
+cmd_assemble() {
+    resolve_variant
+    check_engine_artifact_fingerprint_for_variant "$VARIANT" || exit 1
+
+    if $DRY_RUN; then
+        log_info "[DRY RUN] Would assemble model repo:"
+        log_info "  Source:  $EXPORTED_DIR/$VARIANT"
+        log_info "  Target:  $MODEL_REPO_DIR"
+        log_info "  Engine:  $ENGINE_MODE"
+        log_info "  Version: $MODEL_VERSION"
+        return 0
+    fi
+
+    assemble_model_repo "$EXPORTED_DIR" "$VARIANT" "$MODEL_REPO_DIR" "$ENGINE_MODE" "$MODEL_VERSION" \
+        || { log_error "Assembly failed"; exit 1; }
+
+    echo ""
+    validate_model_repo "$MODEL_REPO_DIR" "$MODEL_VERSION"
+    local status=$?
+
+    echo ""
+    if [ $status -eq 0 ]; then
+        log_info "Next steps:"
+        log_info "  1. Pull container:  bash scripts/bash/deploy.sh pull --model-version $MODEL_VERSION"
+        log_info "  2. Start server:    bash scripts/bash/deploy.sh run --gateway triton --model-version $MODEL_VERSION"
+    fi
+
+    return $status
+}
+
+cmd_pull() {
+    check_docker_gpu_ready || exit 1
+
+    if $DRY_RUN; then
+        log_info "[DRY RUN] Would pull Triton full image (py3)"
+        return 0
+    fi
+
+    # Sync NGC compatibility matrix from NVIDIA website (best-effort, 25s timeout)
+    if [[ -z "${NGC_SKIP_MATRIX_UPDATE:-}" ]]; then
+        log_info "[1/3] Syncing NGC matrix from NVIDIA website (timeout 25s)..."
+        if command -v timeout &>/dev/null; then
+            timeout 25 bash -c "source '${SCRIPT_DIR}/lib/ngc_updater.sh' 2>/dev/null && update_ngc_matrix '${SCRIPT_DIR}/ngc_matrix.conf'" 2>/dev/null || true
+        else
+            source "${SCRIPT_DIR}/lib/ngc_updater.sh" 2>/dev/null || true
+            update_ngc_matrix "${SCRIPT_DIR}/ngc_matrix.conf" 2>/dev/null || true
+        fi
+        log_info "[1/3] Done (or skipped)"
+    fi
+
+    log_info "[2/3] Resolving NGC image for your driver (checking registry)..."
+    local triton_image
+    triton_image=$(resolve_triton_deploy_image) || exit 1
+    log_info "[2/3] Using: $triton_image"
+    log_info "[3/3] Pulling image (15-30 GB, may take several minutes)..."
+    ensure_ngc_image "$triton_image" || exit 1
+    log_info "Image ready: $triton_image"
+}
+
+cmd_build_image() {
+    log_step "Building Triton deploy image (Triton base + torch + tokenizers)"
+    log_info "Can run in parallel with engine build (build_engines.sh)"
+    check_docker_gpu_ready || exit 1
+    ensure_triton_deploy_image || exit 1
+    log_info "Deploy image ready. Run 'build' or 'run' after engines are ready."
+}
+
+cmd_build() {
+    if [ -z "$BUILD_TAG" ]; then
+        BUILD_TAG="qwen3-tts-triton:latest"
+        log_info "Using default image tag: $BUILD_TAG"
+    fi
+
+    if $DRY_RUN; then
+        resolve_variant
+        check_engine_artifact_fingerprint_for_variant "$VARIANT" || exit 1
+        local dry_base="$USER_IMAGE"
+        if [ -z "$dry_base" ]; then
+            local manifest_tag
+            manifest_tag=$(resolve_manifest_ngc_tag "$EXPORTED_DIR/$VARIANT/triton_manifest.json" 2>/dev/null || true)
+            if [ -n "$manifest_tag" ]; then
+                dry_base="nvcr.io/nvidia/tritonserver:${manifest_tag}-py3"
+            else
+                dry_base="${TRITON_IMAGE:-auto}"
+            fi
+        fi
+        log_info "[DRY RUN] Would assemble model repo:"
+        log_info "  Source:  $EXPORTED_DIR/$VARIANT"
+        log_info "  Target:  $MODEL_REPO_DIR"
+        log_info "  Engine:  $ENGINE_MODE"
+        log_info "  Version: $MODEL_VERSION"
+        log_info "[DRY RUN] Would build: $BUILD_TAG (base: $dry_base)"
+        return 0
+    fi
+
+    check_docker_gpu_ready || exit 1
+
+    local triton_image
+    if [ -z "$USER_IMAGE" ]; then
+        triton_image=$(resolve_triton_deploy_image) \
+            || { log_error "Failed to resolve Triton image"; exit 1; }
+    else
+        triton_image="$USER_IMAGE"
+    fi
+
+    resolve_variant
+    check_engine_artifact_fingerprint_for_variant "$VARIANT" || exit 1
+
+    if [ ! -d "$MODEL_REPO_DIR" ] || [ -z "$(ls -A "$MODEL_REPO_DIR" 2>/dev/null)" ]; then
+        assemble_model_repo "$EXPORTED_DIR" "$VARIANT" "$MODEL_REPO_DIR" "$ENGINE_MODE" "$MODEL_VERSION" \
+            || { log_error "Assembly failed"; exit 1; }
+    else
+        local repo_version=""
+        repo_version=$(_infer_model_version_from_repo "$MODEL_REPO_DIR" 2>/dev/null || true)
+        if [ -n "$repo_version" ] && [ "$repo_version" != "$MODEL_VERSION" ]; then
+            log_warn "Model repository version mismatch: repo=$repo_version requested=$MODEL_VERSION, re-assembling ..."
+            assemble_model_repo "$EXPORTED_DIR" "$VARIANT" "$MODEL_REPO_DIR" "$ENGINE_MODE" "$MODEL_VERSION" \
+                || { log_error "Assembly failed"; exit 1; }
+        fi
+    fi
+    validate_model_repo "$MODEL_REPO_DIR" "$MODEL_VERSION" || exit 1
+
+    # Generate Dockerfile if missing
+    if [ ! -f "$REPO_ROOT/infra/docker/Dockerfile.triton" ]; then
+        generate_dockerfile
+    fi
+
+    build_triton_image "$REPO_ROOT" "$BUILD_TAG" "$triton_image" || exit 1
+
+    echo ""
+    log_info "Run with:"
+    log_info "  docker run --gpus all -p 8000:8000 -p 8001:8001 -p 8002:8002 $BUILD_TAG"
+}
+
+cmd_stop_triton() {
+    local compose_args=(down --gateway triton --repo-dir "$MODEL_REPO_DIR")
+    if [[ -n "${CONTAINER_NAME:-}" ]]; then
+        compose_args+=(--container "$CONTAINER_NAME")
+    fi
+    bash "${SCRIPT_DIR}/compose.sh" "${compose_args[@]}"
+}
+
+cmd_status_triton() {
+    log_step "Triton Container Status"
+    local compose_args=(ps --gateway triton --repo-dir "$MODEL_REPO_DIR")
+    if [[ -n "${CONTAINER_NAME:-}" ]]; then
+        compose_args+=(--container "$CONTAINER_NAME")
+    fi
+    bash "${SCRIPT_DIR}/compose.sh" "${compose_args[@]}"
 }
 
 # ── Main dispatch ──
@@ -732,10 +942,10 @@ case "$COMMAND" in
     run)         cmd_run ;;
     stop)        cmd_stop ;;
     status)      cmd_status ;;
-    assemble)    cmd_forward_triton "assemble" ;;
-    pull)        cmd_forward_triton "pull" ;;
-    build-image) cmd_forward_triton "build-image" ;;
-    build)       cmd_forward_triton "build" ;;
+    assemble)    cmd_assemble ;;
+    pull)        cmd_pull ;;
+    build-image) cmd_build_image ;;
+    build)       cmd_build ;;
     -h|--help)   usage ;;
     *)
         log_error "Unknown command: $COMMAND"

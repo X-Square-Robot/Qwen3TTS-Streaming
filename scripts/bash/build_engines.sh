@@ -897,7 +897,7 @@ if [ "$SUCCEEDED" -gt 0 ] && ! $DRY_RUN; then
     log_info "Saved ENGINE_DTYPE=$ENGINE_DTYPE to $EXPORTED_DIR/.engine_dtype"
     echo ""
     log_info "Engines: $EXPORTED_DIR/<variant>/*.engine, $TOKENIZER_DIR/*.engine"
-    log_info "Next: bash scripts/bash/build_triton.sh assemble --engine-mode trt && build_triton.sh run"
+    log_info "Next: bash scripts/bash/deploy.sh assemble --engine-mode trt && deploy.sh run --gateway triton"
 fi
 
 exit "$FAILED"

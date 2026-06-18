@@ -28,6 +28,11 @@ from .common import (
     split_csv_arg,
     story_path,
 )
+from .docker import NgcMatrix, check_docker_gpu_ready, detect_driver_version, ensure_image
+from .engine import EngineManager
+from .ngc_matrix import NgcEntry, load_ngc_matrix, resolve_ngc_tag
+from .status import ProjectStatus, check_all, format_status
+from .triton import TritonManager
 
 __all__ = [
     "DEFAULT_ENGINE_GRPC",
@@ -40,7 +45,11 @@ __all__ = [
     "DEFAULT_TRITON_HTTP_MODEL",
     "DEFAULT_TRITON_MODEL",
     "DEFAULT_TRITON_MODEL_VERSION",
+    "EngineManager",
     "IMPORT_PATH_GROUPS",
+    "NgcEntry",
+    "NgcMatrix",
+    "ProjectStatus",
     "REPO_ROOT",
     "SCRIPTS_DIR",
     "SCRIPTS_EXPORT_DIR",
@@ -49,13 +58,21 @@ __all__ = [
     "TESTS_INTEGRATION_DIR",
     "THIRD_PARTY_DIR",
     "THIRD_PARTY_QWEN_DIR",
+    "TritonManager",
     "WORKSPACE_DIR",
     "bootstrap_project_imports",
+    "check_all",
+    "check_docker_gpu_ready",
     "dedupe_keep_order",
+    "detect_driver_version",
+    "ensure_image",
+    "format_status",
+    "load_ngc_matrix",
     "normalize_http_base",
     "parse_host_port",
     "pcm16_from_float_audio",
     "prepend_sys_paths",
+    "resolve_ngc_tag",
     "save_wav",
     "split_csv_arg",
     "story_path",

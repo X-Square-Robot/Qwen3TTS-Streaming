@@ -716,7 +716,7 @@ Talker Backbone 保留 KV Cache（与 Code Predictor 不同），因为：
 - **`triton_io_float_dtype`**：同一 manifest 中声明 **`talker_code2wav_fused` 浮点张量**的 binding（`fp32` / `bf16` / `fp16`）。Phase B 由 [`scripts/python/trt_fused_io_formats.py`](../../scripts/python/trt_fused_io_formats.py) 按与 `export_09` **相同的 I/O 顺序**生成 `--inputIOFormats` / `--outputIOFormats`（整型输入/输出固定 `int64:chw`）。Phase C [`generate_triton_configs.py`](../../scripts/python/generate_triton_configs.py) 据此生成 `TYPE_*`；BLS **优先读 manifest 的 `triton_io_float_dtype`** 设定 `torch` dtype，与 `config.pbtxt` 对齐。
 - **用户切换 fp16/bf16/fp32**：修改 manifest（或 `export_09 --engine-dtype` / `--triton-io-float-dtype`）后 **重跑 Phase B 编引擎 + Phase C assemble**；环境变量 `ENGINE_DTYPE` 仅在 **缺少 manifest** 时作为 fused 构建回退。
 
-切换方式：`build_triton.sh assemble --engine-mode onnx|trt`。BLS 根据是否存在 `talker_code2wav_fused/config.pbtxt` 选择融合或遗留流水线；融合路径下从 `triton_manifest.json` 的 `code2wav_fused` 读取 Code2Wav 状态张量布局（与导出融合 ONNX 一致）。
+切换方式：`deploy.sh assemble --engine-mode onnx|trt`。BLS 根据是否存在 `talker_code2wav_fused/config.pbtxt` 选择融合或遗留流水线；融合路径下从 `triton_manifest.json` 的 `code2wav_fused` 读取 Code2Wav 状态张量布局（与导出融合 ONNX 一致）。
 
 ### 6.1 生产融合引擎 (talker_code2wav_fused)
 
@@ -2009,7 +2009,7 @@ Qwen3-TTS-Triton/
 │   │   ├── autorun.sh                  # 智能入口 (串联 A→B→C, 子命令/交互)
 │   │   ├── setup_env.sh                # Phase A: 环境搭建 + 模型导出
 │   │   ├── build_engines.sh            # Phase B: trtexec 编译全部 ONNX → .engine
-│   │   ├── build_triton.sh             # Phase C: Triton 部署
+│   │   ├── deploy.sh                   # Phase C: 部署 (standalone / Triton / engine-docker)
 │   │   └── lib/                        # 模块化函数库
 │   │       ├── triton.sh               # model_repository 组装 (含 Pure TRT engine 复制)
 │   │       └── ...
@@ -2090,7 +2090,7 @@ flowchart LR
 
 - **Phase A** (`setup_env.sh`) 只需要 PyTorch + qwen_tts + ONNX 工具
 - **Phase B** (`build_engines.sh`) 默认 `trtexec` 编译 **speaker / speech_codec_fused / talker_code2wav_fused**；验证引擎见 `BUILD_VERIFICATION_ENGINES=1`
-- **Phase C** (`build_triton.sh`) 只需要 Triton + engine 文件，不需要任何构建工具
+- **Phase C** (`deploy.sh`) 只需要 Triton + engine 文件，不需要任何构建工具
 - 三阶段通过 `workspace/exported/` 目录传递中间产物
 - `autorun.sh` 作为智能入口串联三阶段，支持子命令和交互式引导
 
@@ -2112,7 +2112,7 @@ bash scripts/bash/autorun.sh status
 # 也可直接调用各阶段脚本
 bash scripts/bash/setup_env.sh         # Phase A
 bash scripts/bash/build_engines.sh     # Phase B
-bash scripts/bash/build_triton.sh run  # Phase C
+bash scripts/bash/deploy.sh run --gateway triton  # Phase C
 ```
 
 单独运行 `export_models.sh`、`download_models.sh` 或 `scripts/export/` 下的 Python 脚本时，需先手动激活虚拟环境：
@@ -2129,7 +2129,7 @@ source <venv-path>/bin/activate
 
 **选定方案: 拆分构建脚本 (方案 A)**
 
-`setup_env.sh` 做 Phase A（ONNX 导出 + .pt 权重），`build_engines.sh` 通过 `docker run` 调用 NGC 容器用 `trtexec` 做 Phase B，`build_triton.sh` 组装并部署 Triton。`autorun.sh` 智能串联三阶段。
+`setup_env.sh` 做 Phase A（ONNX 导出 + .pt 权重），`build_engines.sh` 通过 `docker run` 调用 NGC 容器用 `trtexec` 做 Phase B，`deploy.sh` 组装并部署 Triton。`autorun.sh` 智能串联三阶段。
 
 选择拆分构建的核心理由：
 - ONNX 导出与 engine 编译**完全解耦** — 改 batch size 等参数只需重跑 Phase B (~分钟级)
@@ -2169,7 +2169,7 @@ docker run --rm --gpus all \
 ```
 setup_env.sh (host)        →  workspace/exported/<variant>/*.onnx, *.pt
 build_engines.sh (docker)  →  workspace/exported/<variant>/*.engine (可选, TRT 模式)
-build_triton.sh (deploy)   →  workspace/model_repository/ → Triton Server
+deploy.sh (triton)   →  workspace/model_repository/ → Triton Server
 ```
 
 ### Phase 1: 模型导出 + 基础验证 + 风险阻断 (2-3 天)
@@ -2327,7 +2327,7 @@ build_triton.sh (deploy)   →  workspace/model_repository/ → Triton Server
 2. 导图/打包机执行 `autorun.sh make-bundle --target-profile target_profile.json`，生成 `engine_build_bundle.tar.zst`。
 3. 目标机器解包后执行 `build_on_target.sh`，生成 `engine_artifact_bundle.tar.zst`。
 4. 打包机执行 `autorun.sh import-artifact engine_artifact_bundle.tar.zst`。
-5. 打包机继续 `autorun.sh package` / `build_triton.sh assemble` / `build_triton.sh build`，只组装模型包和运行镜像，不启动服务。
+5. 打包机继续 `autorun.sh package` / `deploy.sh assemble` / `deploy.sh build`，只组装模型包和运行镜像，不启动服务。
 6. 只有当前机器就是服务机或本机验证机时，才执行 `autorun.sh deploy` 启动服务。
 
 `target_profile.json` 是跨机场景下 NGC tag 的唯一事实来源。Phase C package/run 使用 Phase B manifest 中记录的 NGC tag 推导运行镜像，不再从打包机本机 driver 回退猜测。详细命令见 `docs/cross_host_build.md`。

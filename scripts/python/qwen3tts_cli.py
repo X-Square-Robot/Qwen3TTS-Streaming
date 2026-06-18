@@ -1,4 +1,4 @@
-"""Qwen3-TTS CLI — thin Python wrapper around the Bash lifecycle scripts.
+"""Qwen3-TTS CLI — Python lifecycle manager.
 
 Usage::
 
@@ -10,9 +10,10 @@ Usage::
     qwen3tts status
     qwen3tts probe
 
-Each subcommand forwards its arguments to the corresponding Bash script
-under ``scripts/bash/``.  This is a thin convenience layer — all real
-logic remains in the Bash scripts.
+Lifecycle subcommands (all/setup/build/package/deploy) forward their
+arguments to the corresponding Bash scripts under ``scripts/bash/``.
+The ``status`` subcommand uses the native Python implementation in
+``qwen3tts_tools.status`` when available, falling back to Bash.
 """
 
 from __future__ import annotations
@@ -50,10 +51,28 @@ def _probe(_args: argparse.Namespace) -> int:
     return _run_bash("probe_target.sh", [])
 
 
+def _status(args: argparse.Namespace) -> int:
+    """Show project status using the Python implementation."""
+    try:
+        from qwen3tts_tools.status import check_all, format_status
+
+        status = check_all()
+        if getattr(args, "json", False):
+            import json
+            from dataclasses import asdict
+            print(json.dumps(asdict(status), indent=2))
+        else:
+            print(format_status(status))
+        return 0
+    except ImportError:
+        # Fall back to Bash if qwen3tts_tools not importable
+        return _run_bash("autorun.sh", ["status"])
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="qwen3tts",
-        description="Qwen3-TTS Triton lifecycle CLI. Delegates to scripts/bash/.",
+        description="Qwen3-TTS Triton lifecycle CLI.",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -68,7 +87,9 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("rest", nargs=argparse.REMAINDER,
                         help="Arguments forwarded to the underlying script")
 
-    sub.add_parser("status", help="Show current pipeline status")
+    p_status = sub.add_parser("status", help="Show current pipeline status")
+    p_status.add_argument("--json", action="store_true", help="Output as JSON")
+
     sub.add_parser("probe", help="Probe target GPU/driver profile")
 
     args = parser.parse_args(argv)
@@ -77,7 +98,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(0)
 
     if args.command == "status":
-        sys.exit(_run_bash("autorun.sh", ["status"]))
+        sys.exit(_status(args))
     if args.command == "probe":
         sys.exit(_probe())
 

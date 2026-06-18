@@ -8,6 +8,10 @@
 #  Depends:   lib/logging.sh, lib/utils.sh, lib/docker.sh
 #
 #  Assembles Phase A/B exported artifacts into a Triton model_repository
+
+#  DEPRECATED: This module is being replaced by
+#  ``scripts/python/qwen3tts_tools/triton.py``.  The Bash version
+#  remains functional during the transition period.
 #  and manages the deployment container lifecycle.
 # ===========================================================================
 
@@ -65,7 +69,7 @@ resolve_triton_deploy_image() {
 
     local image="${_NGC_TRITON_BASE}:${ngc_tag}${_NGC_PY3_SUFFIX}"
     log_warn "Deploy image not found ($deploy_tag), falling back to: $image"
-    log_warn "Build it first: bash scripts/bash/build_triton.sh build-image"
+    log_warn "Build it first: bash scripts/bash/deploy.sh build-image"
     echo "$image"
 }
 

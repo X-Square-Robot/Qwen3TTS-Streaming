@@ -3,7 +3,7 @@
 > 分支：`refact`
 > 编写日期：2026-06-17
 > 前置：第二轮重构已完成（tests/tools 精简、scripts/bash 精简、pyproject.toml 建立、Python CLI 原型）
-> 状态：已实施（Phase 1-5 完成，G1 src/ 迁移跳过）
+> 状态：已实施（Phase 1-5 完成，G1 src/ 迁移标记为 deferred，详见 G1 说明）
 
 ---
 
@@ -196,6 +196,15 @@ Qwen3-TTS-Triton/
 | `third_party/` | git 子模块，位置约定 |
 | `webui/` | 前端项目有独立的 npm 生态，保持顶级 |
 | `workspace/` | 运行时产物（gitignored），保持顶级 |
+
+> **⚠️ G1 DEFERRED**：src/ 迁移经评估后标记为 deferred（暂缓实施）。原因：
+> 1. 70+ import 语句需修改（`from engine.xxx` → `from src.engine.xxx`）
+> 2. `python -m engine.server` 启动方式会断裂
+> 3. pyproject.toml 已声明 engine/demo_api 是独立子项目，硬迁入 src/ 与设计矛盾
+> 4. Docker COPY 路径全部需更新
+> 5. 收益（"一眼可懂"）不足以覆盖风险
+>
+> 当前根目录结构虽扁平，但符合 Python 项目惯例（engine/、client/ 在根目录是常见做法）。未来如需迁移，建议配合 pyproject.toml 的 `[tool.setuptools.package-dir]` 配置统一调整。
 
 ### G2：文档治理——统一语言、建立索引、按角色分层
 

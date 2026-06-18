@@ -2,8 +2,8 @@
 L3 E2E tests: TTS Orchestrator via Triton gRPC (T3.1, T3.3, T3.4).
 
 Requires Triton server running with tts_orchestrator loaded, e.g.:
-  bash scripts/bash/build_triton.sh assemble --engine-mode onnx --variant custom-1.7b
-  bash scripts/bash/build_triton.sh run
+  bash scripts/bash/deploy.sh assemble --engine-mode onnx --variant custom-1.7b
+  bash scripts/bash/deploy.sh run --gateway triton
 
 Production assemble includes talker_code2wav_fused (+ optional speaker_encoder,
 speech_tokenizer_codec_fused for base ICL). Legacy talker_unified + code2wav is optional.

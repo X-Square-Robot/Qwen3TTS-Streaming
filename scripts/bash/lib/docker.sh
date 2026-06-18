@@ -13,6 +13,11 @@
 #
 #  NGC compatibility matrix loaded from scripts/bash/ngc_matrix.conf
 #  (falls back to built-in defaults if the file is missing).
+#
+#  DEPRECATED: This module is being replaced by
+#  ``scripts/python/qwen3tts_tools/docker.py`` and
+#  ``scripts/python/qwen3tts_tools/ngc_matrix.py``.  The Bash version
+#  remains functional during the transition period.
 #  Update via: bash scripts/bash/autorun.sh update-matrix
 #
 #  Container strategy (unified):
@@ -771,7 +776,7 @@ print_container_recommendation() {
     if image=$(resolve_ngc_image_info "$driver_ver"); then
         log_info "NGC image (Phase B + C): $image"
         log_info "  Phase B: bash scripts/bash/build_engines.sh"
-        log_info "  Phase C: bash scripts/bash/build_triton.sh run"
+        log_info "  Phase C: bash scripts/bash/deploy.sh run --gateway triton"
     else
         log_warn "No compatible NGC container for driver $driver_ver"
         log_warn "Upgrade your NVIDIA driver to >= $_QWEN3_MIN_DRIVER: https://www.nvidia.com/drivers"

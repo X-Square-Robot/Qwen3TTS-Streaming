@@ -4,7 +4,7 @@ Run: pytest tests/unit/test_tokenizer_core.py -v
 """
 import pytest
 
-from tests.paths import TOKENIZER_DIR, REPO_ROOT
+from tests.conftest import TOKENIZER_DIR, REPO_ROOT
 from engine.frontend.spliter.tokenizer import LightQwen3TTSTokenizer
 
 

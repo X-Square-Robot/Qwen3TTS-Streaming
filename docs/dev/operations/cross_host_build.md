@@ -71,7 +71,7 @@ bash scripts/bash/autorun.sh remote-build -m custom-1.7b \
 
 ## 严格指纹校验
 
-导入 artifact 后会写入 `workspace/exported/artifact_manifest.json`。`build_triton.sh assemble/run/build` 在 TRT 模式下会校验：
+导入 artifact 后会写入 `workspace/exported/artifact_manifest.json`。`deploy.sh assemble/run/build` 在 TRT 模式下会校验：
 
 - `ngc_tag`
 - `tensorrt_version` major.minor

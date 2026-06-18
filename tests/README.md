@@ -25,7 +25,7 @@ pytest tests/unit tests/integration -q
 Run Triton E2E pytest checks:
 
 ```bash
-bash scripts/bash/build_triton.sh run
+bash scripts/bash/deploy.sh run --gateway triton
 pytest tests/e2e/test_e2e.py -v -s
 ```
 

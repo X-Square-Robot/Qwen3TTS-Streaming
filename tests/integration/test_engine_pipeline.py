@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.paths import REPO_ROOT, TOKENIZER_DIR, WEIGHTS_DIR, VARIANT
+from tests.conftest import REPO_ROOT, TOKENIZER_DIR, WEIGHTS_DIR, VARIANT
 
 sys.path.insert(0, str(REPO_ROOT))
 

@@ -8,6 +8,10 @@
 #
 #  Manages the standalone TTS engine server (python -m engine.server)
 #  as a background process with PID file tracking.
+#
+#  DEPRECATED: This module is being replaced by
+#  ``scripts/python/qwen3tts_tools/engine.py``.  The Bash version
+#  remains functional during the transition period.
 # ===========================================================================
 
 [[ -n "${_LIB_ENGINE_LOADED:-}" ]] && return 0

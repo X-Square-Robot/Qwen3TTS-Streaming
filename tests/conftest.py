@@ -2,8 +2,7 @@
 Pytest conftest: shared path setup and variant auto-discovery.
 
 Path constants (REPO_ROOT, VARIANT, TOKENIZER_DIR, etc.) are defined here
-and can be imported from any test module via ``from tests.conftest import ...``
-or via the backward-compatible ``from tests.paths import ...``.
+and can be imported from any test module via ``from tests.conftest import ...``.
 """
 import os
 import sys
