@@ -170,6 +170,64 @@ def test_token_mode_serial_segments_defers_session_done_until_buffer_drains():
     asyncio.run(run())
 
 
+def test_token_mode_final_punct_flush_sends_session_done_without_empty_segment():
+    async def run():
+        inbox = asyncio.Queue(maxsize=128)
+        interface = FrontendInterface(
+            engine_inbox=inbox,
+            tokenizer=_CharTokenizer(),
+            max_sessions=2,
+            engine_max_decode_len=100,
+            ema_ratio=10.0,
+            max_concurrent_segments=2,
+        )
+
+        session = await interface.create_session(
+            "boundary-token",
+            config=SessionConfig(
+                task_type="custom_voice",
+                speaker="Serena",
+                input_mode=InputMode.TOKEN,
+                group_policy=GroupPolicy.NONE,
+            ),
+        )
+
+        await interface.push_text_input("boundary-token", "甲乙丙丁戊己。")
+        await interface.mark_input_complete("boundary-token")
+
+        initial = await _drain_requests(inbox)
+        assert any(
+            request.type == RequestType.SEGMENT_TOKENS_DONE
+            and request.segment_idx == 0
+            for request in initial
+        )
+        assert any(request.type == RequestType.SESSION_TOKENS_DONE for request in initial)
+        assert not any(
+            request.type == RequestType.START_TOKENS
+            and request.segment_idx == 1
+            for request in initial
+        )
+
+        await session.result_queue.put(
+            EngineResult(
+                type=ResultType.SEGMENT_END,
+                session_id="boundary-token",
+                segment_idx=0,
+                metrics={"audio_steps": 10, "text_tokens": 7},
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert await _drain_requests(inbox) == []
+
+        await session.result_queue.put(
+            EngineResult(type=ResultType.SESSION_DONE, session_id="boundary-token")
+        )
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+
 def test_prefill_done_event_exposes_reference_metadata():
     async def run():
         inbox = asyncio.Queue(maxsize=16)

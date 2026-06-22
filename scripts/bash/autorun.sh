@@ -196,7 +196,8 @@ Phase B options (forwarded to build_engines.sh):
   --dtype <type>          Engine precision: bf16|fp16|fp32|fp8 (default: bf16)
   --triton-io-float-dtype <type>
                           Float I/O dtype for generated TRT/Triton configs
-                          Use fp32 if Triton reports dtype mismatch (e.g. TYPE_FP32 vs TYPE_BF16).
+                          Default: same as --dtype. Use fp32 if Triton reports dtype mismatch
+                          (e.g. TYPE_FP32 vs TYPE_BF16).
 
 Phase C options (forwarded to deploy.sh):
   --gateway <mode>        Gateway: standalone | triton | engine-docker (default: standalone)
@@ -503,7 +504,7 @@ run_phase_b() {
     echo ""
 
     if $DRY_RUN; then
-        log_info "[DRY RUN] Would run unified bundle compile: variants=${VARIANT:-all} dtype=${ENGINE_DTYPE:-bf16}"
+        log_info "[DRY RUN] Would run unified bundle compile: variants=${VARIANT:-all} dtype=${ENGINE_DTYPE:-bf16} io_dtype=${TRITON_IO_FLOAT_DTYPE:-${ENGINE_DTYPE:-bf16}}"
         return 0
     fi
 
@@ -918,6 +919,27 @@ _prompt_with_default() {
     echo "${value:-$default_value}"
 }
 
+_default_triton_io_dtype() {
+    case "${1:-bf16}" in
+        bf16|fp16|fp32) echo "$1" ;;
+        *) echo "fp32" ;;
+    esac
+}
+
+_prompt_build_dtypes() {
+    local engine_default="${ENGINE_DTYPE:-bf16}"
+    local io_default="${TRITON_IO_FLOAT_DTYPE:-$(_default_triton_io_dtype "$engine_default")}"
+
+    echo ""
+    echo "  精度配置 (阶段 B)"
+    echo "    引擎精度: TensorRT builder/compute precision"
+    echo "    I/O 精度: fused TensorRT/Triton float binding dtype，默认跟随引擎精度"
+
+    ENGINE_DTYPE=$(_prompt_with_default "  引擎精度 bf16|fp16|fp32|fp8" "$engine_default")
+    io_default="${TRITON_IO_FLOAT_DTYPE:-$(_default_triton_io_dtype "$ENGINE_DTYPE")}"
+    TRITON_IO_FLOAT_DTYPE=$(_prompt_with_default "  浮点 I/O 精度 bf16|fp16|fp32" "$io_default")
+}
+
 interactive_cross_host_guide() {
     echo ""
     echo "  跨机 Engine 编译引导"
@@ -981,9 +1003,7 @@ interactive_cross_host_guide() {
             fi
             TARGET_PROFILE=$(_prompt_with_default "  目标机器 target_profile.json 路径" "${REPO_ROOT}/workspace/target_profile.json")
             BUNDLE_OUT=$(_prompt_with_default "  engine build bundle 输出路径" "${REPO_ROOT}/workspace/engine_build_bundle.tar.zst")
-            if [ -z "$ENGINE_DTYPE" ]; then
-                ENGINE_DTYPE=$(_prompt_with_default "  引擎精度 bf16|fp16|fp32|fp8" "bf16")
-            fi
+            _prompt_build_dtypes
             build_forward_args
             cmd_make_bundle
             ;;
@@ -1000,9 +1020,7 @@ interactive_cross_host_guide() {
             TARGET_PROFILE=$(_prompt_with_default "  目标机器 target_profile.json 路径" "${REPO_ROOT}/workspace/target_profile.json")
             REMOTE_HOST=$(_prompt_with_default "  SSH 目标主机 user@host" "${REMOTE_HOST:-user@prod-gpu-host}")
             REMOTE_WORKDIR=$(_prompt_with_default "  远端工作目录" "$REMOTE_WORKDIR")
-            if [ -z "$ENGINE_DTYPE" ]; then
-                ENGINE_DTYPE=$(_prompt_with_default "  引擎精度 bf16|fp16|fp32|fp8" "bf16")
-            fi
+            _prompt_build_dtypes
             build_forward_args
             cmd_remote_build
             ;;
@@ -1017,6 +1035,8 @@ interactive_cross_host_guide() {
     # 2. 把 target_profile.json 拷回当前导图/打包机器，生成构建包：
     bash scripts/bash/autorun.sh make-bundle -m custom-1.7b \\
       --target-profile target_profile.json \\
+      --dtype bf16 \\
+      --triton-io-float-dtype bf16 \\
       --out workspace/engine_build_bundle.tar.zst
 
     # 3. 把 engine_build_bundle.tar.zst 拷到目标机器：
@@ -1038,6 +1058,8 @@ interactive_cross_host_guide() {
 
     bash scripts/bash/autorun.sh remote-build -m custom-1.7b \\
       --target-profile target_profile.json \\
+      --dtype bf16 \\
+      --triton-io-float-dtype bf16 \\
       --remote-host user@prod-gpu-host \\
       --remote-workdir /tmp/qwen3-engine-build
 
@@ -1068,7 +1090,12 @@ show_run_banner() {
     [ -n "$VARIANT" ] && echo "  变体:      $VARIANT"
     [ -n "$MODEL_VERSION" ] && echo "  版本:      $MODEL_VERSION"
     [ -n "${GATEWAY_MODE:-}" ] && echo "  阶段 C:    $GATEWAY_MODE"
-    [ -n "$ENGINE_DTYPE" ] && echo "  精度:      $ENGINE_DTYPE"
+    [ -n "$ENGINE_DTYPE" ] && echo "  引擎精度:  $ENGINE_DTYPE"
+    if [ -n "$TRITON_IO_FLOAT_DTYPE" ]; then
+        echo "  I/O 精度:  $TRITON_IO_FLOAT_DTYPE"
+    elif [ -n "$ENGINE_DTYPE" ]; then
+        echo "  I/O 精度:  $ENGINE_DTYPE (默认跟随引擎精度)"
+    fi
     [ -n "${EXPORT_DEVICE:-$GLOBAL_DEVICE}" ] && echo "  导出 GPU:  ${EXPORT_DEVICE:-$GLOBAL_DEVICE}"
     [ -n "${BUILD_GPU_DEVICE:-$GLOBAL_DEVICE}" ] && echo "  构建 GPU:  ${BUILD_GPU_DEVICE:-$GLOBAL_DEVICE}"
     [ -n "${RUNTIME_GPU_DEVICE:-$GLOBAL_DEVICE}" ] && echo "  运行 GPU:  ${RUNTIME_GPU_DEVICE:-$GLOBAL_DEVICE}"
@@ -1210,14 +1237,8 @@ interactive_mode() {
         fi
     fi
 
-    if $needs_build && [ -z "$ENGINE_DTYPE" ] && [ -t 0 ]; then
-        echo ""
-        echo "  引擎精度 (阶段 B): bf16 | fp16 | fp32 | fp8 (默认: bf16)"
-        local _dtyp=""
-        read -rp "  精度 [bf16] (30s 后自动选择默认): " -t 30 _dtyp || true
-        if [ -n "$_dtyp" ]; then
-            ENGINE_DTYPE="$_dtyp"
-        fi
+    if $needs_build && [ -t 0 ]; then
+        _prompt_build_dtypes
     fi
 
     if $needs_build && [ -z "$NGC_TAG" ] && ! $BUILD_IMAGE_EXPLICIT && [ -t 0 ]; then

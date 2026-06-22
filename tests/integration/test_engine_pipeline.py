@@ -144,6 +144,24 @@ class TestSpliter:
         assert ActionType.PREFILL in action_types, "Should have PREFILL action"
         assert ActionType.DECODE in action_types, "Should have DECODE actions"
 
+    def test_streaming_flush_on_last_token_does_not_create_empty_next_segment(self):
+        """A terminal flush on the last token must not leave an empty driver behind."""
+        from engine.frontend.spliter.spliter import Spliter
+        from engine.frontend.spliter.driver import ActionType
+
+        spliter = Spliter(engine_max_decode_len=100, ema_ratio=10.0, max_concurrent=2)
+        th = spliter._make_thresholds()
+
+        tokens = [(i, f"tok{i}") for i in range(th.min_tokens_l1)]
+        tokens.append((999, "。"))
+
+        actions = spliter.feed_tokens(tokens)
+
+        assert actions[-1].action.type == ActionType.FLUSH_EOS
+        assert set(spliter._drivers.keys()) == {0}
+        assert spliter._flushing == {0}
+        assert spliter._get_active_driver_idx() is None
+
     def test_offline_set_full_text(self):
         """Offline mode: set full text, get all segment actions."""
         from engine.frontend.spliter.spliter import Spliter

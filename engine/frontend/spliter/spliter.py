@@ -461,7 +461,7 @@ class Spliter:
 
         actions: List[SegmentAction] = []
 
-        for token in classified:
+        for token_idx, token in enumerate(classified):
             active_idx = self._get_active_driver_idx()
             if active_idx is None:
                 if self.active_segment_count < self._max_concurrent:
@@ -484,7 +484,14 @@ class Spliter:
                 ))
                 if r.type in (ActionType.FLUSH_EOS, ActionType.FLUSH_NOP):
                     self._flushing.add(active_idx)
-                    actions.extend(self._try_start_next())
+                    # Only pre-create the follow-up segment if we already know
+                    # there is more text to feed. Creating an empty placeholder
+                    # driver at the end of a chunk can block SESSION_TOKENS_DONE
+                    # and leave the transport waiting forever for a terminal
+                    # event.
+                    has_more_classified = token_idx < len(classified) - 1
+                    if has_more_classified or self._token_buffer:
+                        actions.extend(self._try_start_next())
 
         return actions
 

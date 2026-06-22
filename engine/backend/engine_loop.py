@@ -1351,6 +1351,10 @@ class EngineLoop:
         Also waits for overflow_token_ids to be drained into new segments.
         """
         if not group.input_complete_all:
+            logger.debug(
+                "Session %s _check_session_done: input_complete_all=False, skipping",
+                group.session_id,
+            )
             return
 
         if group.overflow_token_ids:
@@ -1362,8 +1366,17 @@ class EngineLoop:
 
         all_done = all(s.state == "done" for s in group.segments.values())
         if not all_done:
+            seg_states = {idx: s.state for idx, s in group.segments.items()}
+            logger.debug(
+                "Session %s _check_session_done: not all done, seg_states=%s",
+                group.session_id, seg_states,
+            )
             return
 
+        logger.info(
+            "Session %s _check_session_done: ALL DONE, sending SESSION_DONE",
+            group.session_id,
+        )
         self._send_result(group, EngineResult(
             type=ResultType.SESSION_DONE,
             session_id=group.session_id,
