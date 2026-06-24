@@ -16,6 +16,44 @@ def load_weights_config(path: Path) -> Dict[str, Any]:
         return json.load(f)
 
 
+def resolve_submodel_precisions(manifest: Dict[str, Any]) -> Dict[str, str]:
+    """Resolve per-submodel compute precision from manifest.
+
+    Returns a dict with keys 'backbone', 'cp', 'code2wav', each mapping
+    to a normalized precision string (fp32, bf16, fp16, fp8).
+
+    If the manifest does not contain per-submodel precision fields,
+    all values default to engine_dtype (uniform precision).
+    """
+    engine_dtype = _normalize_precision(str(manifest.get("engine_dtype", "bf16")))
+    return {
+        "backbone": _normalize_precision(
+            manifest.get("backbone_precision", ""), engine_dtype
+        ),
+        "cp": _normalize_precision(
+            manifest.get("cp_precision", ""), engine_dtype
+        ),
+        "code2wav": _normalize_precision(
+            manifest.get("code2wav_precision", ""), engine_dtype
+        ),
+    }
+
+
+def _normalize_precision(value: str, fallback: str = "bf16") -> str:
+    """Normalize a precision string to canonical form."""
+    raw = value.strip().lower() if value else ""
+    aliases = {
+        "bfloat16": "bf16",
+        "float16": "fp16",
+        "float32": "fp32",
+        "float8": "fp8",
+    }
+    result = aliases.get(raw, raw)
+    if result in ("fp32", "bf16", "fp16", "fp8"):
+        return result
+    return fallback
+
+
 def weights_to_talker_section(w: Dict[str, Any]) -> Dict[str, int]:
     """Map export weights/config.json keys to manifest talker section."""
     h = int(w.get("talker_hidden_size", 2048))
@@ -152,12 +190,21 @@ def build_manifest_for_export(
     engine_mode: str = "trt",
     engine_dtype: str = "bf16",
     triton_io_float_dtype: str = "bf16",
+    backbone_precision: str = "",
+    cp_precision: str = "",
+    code2wav_precision: str = "",
 ) -> Dict[str, Any]:
     """Build a full manifest dict after export (e.g. export_09).
 
     engine_dtype: TensorRT builder precision (e.g. trtexec --bf16); Phase B reads this for prec flags.
     triton_io_float_dtype: Float tensor I/O for trtexec --inputIOFormats/--outputIOFormats and Triton config.pbtxt.
         ONNX graph remains FP32 (ONNX_EXPORT_DTYPE); TRT may insert reformats at boundaries.
+    backbone_precision: Compute precision for backbone (talker_unified + codec_sum) sub-graph.
+        Defaults to engine_dtype if empty.
+    cp_precision: Compute precision for code_predictor sub-graph.
+        Defaults to engine_dtype if empty; set to fp32 to mitigate BF16 numerical sensitivity.
+    code2wav_precision: Compute precision for code2wav sub-graph.
+        Defaults to engine_dtype if empty.
 
     The ``architecture`` section provides a complete, self-contained model
     description for the standalone engine.  Priority: manifest > engine.yaml > defaults.
@@ -188,12 +235,20 @@ def build_manifest_for_export(
         "dtype": engine_dtype,
     }
 
+    # Resolve mixed-precision defaults: unspecified fields fall back to engine_dtype
+    resolved_backbone_precision = backbone_precision or engine_dtype
+    resolved_cp_precision = cp_precision or engine_dtype
+    resolved_code2wav_precision = code2wav_precision or engine_dtype
+
     return {
         "schema_version": 2,
         "variant": variant,
         "engine_mode": engine_mode,
         "engine_dtype": engine_dtype,
         "triton_io_float_dtype": triton_io_float_dtype,
+        "backbone_precision": resolved_backbone_precision,
+        "cp_precision": resolved_cp_precision,
+        "code2wav_precision": resolved_code2wav_precision,
         "package": {
             "schema_version": 1,
             "layout": "triton_model_version",
@@ -213,6 +268,9 @@ def build_manifest_for_export(
             "engine_mode": engine_mode,
             "engine_dtype": engine_dtype,
             "triton_io_float_dtype": triton_io_float_dtype,
+            "backbone_precision": resolved_backbone_precision,
+            "cp_precision": resolved_cp_precision,
+            "code2wav_precision": resolved_code2wav_precision,
             "builder": "trtexec",
         },
         "architecture": architecture,

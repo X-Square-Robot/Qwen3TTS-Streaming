@@ -31,7 +31,7 @@ NGC_PY3_SUFFIX = "-py3"
 QWEN3_MIN_DRIVER = "550.54"
 
 # Default matrix path relative to repo root
-_DEFAULT_MATRIX_PATH = Path(__file__).resolve().parents[3] / "scripts" / "bash" / "ngc_matrix.conf"
+_DEFAULT_MATRIX_PATH = Path(__file__).resolve().parent.parent / "ngc_matrix.conf"
 
 # Built-in fallback when the conf file is missing or empty
 _FALLBACK_ENTRIES: list[dict[str, str]] = [
@@ -217,6 +217,59 @@ def resolve_ngc_entry(
     for entry in matrix:
         if _driver_ge(driver_version, entry.driver_version):
             return entry
+
+    return None
+
+
+def resolve_ngc_tag_from_profile(
+    profile_path: Path | str,
+    matrix: Sequence[NgcEntry] | None = None,
+) -> str | None:
+    """Read the ``recommended_ngc_tag`` from a target_profile.json.
+
+    This is the **primary** source of truth for NGC tag selection in the
+    unified build pipeline (mirrors ``resolve_ngc_tag_from_profile`` in
+    ``scripts/bash/lib/cross_host.sh``).  The profile is produced by
+    ``qwen3tts probe`` / ``qwen3tts discover-target`` and already contains
+    the best tag for the target hardware.
+
+    Falls back to reading ``driver_version`` and deriving the tag from the
+    matrix if ``recommended_ngc_tag`` is missing.
+
+    Args:
+        profile_path: Path to ``target_profile.json``.
+        matrix: Pre-loaded matrix entries. Loaded from the conf file if None.
+
+    Returns:
+        The NGC tag string (e.g. ``"25.10"``), or ``None`` if the profile
+        cannot be read or no compatible tag is found.
+    """
+    import json as _json
+
+    profile_path = Path(profile_path)
+    if not profile_path.is_file():
+        return None
+
+    try:
+        with open(profile_path, encoding="utf-8") as fh:
+            profile = _json.load(fh)
+    except (OSError, _json.JSONDecodeError):
+        return None
+
+    # Primary: use the pre-computed recommended_ngc_tag
+    tag = profile.get("recommended_ngc_tag", "")
+    if tag and isinstance(tag, str) and tag.strip():
+        tag = tag.strip()
+        # Validate against the matrix
+        if resolve_ngc_entry_by_tag(tag, matrix) is not None:
+            return tag
+        # Tag not in matrix — still return it; the matrix may be outdated
+        return tag
+
+    # Fallback: derive from driver_version in the profile
+    driver = profile.get("driver_version", "")
+    if driver and isinstance(driver, str) and driver.strip():
+        return resolve_ngc_tag(driver.strip(), matrix)
 
     return None
 

@@ -46,15 +46,15 @@ dev = [
 ]
 
 [project.scripts]
-qwen3tts = "qwen3tts_cli:main"
+qwen3tts = "qwen3tts_cli.main:cli_main"
 
 [build-system]
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["qwen3tts_cli"]
 package-dir = {"" = "scripts/python"}
+packages = {find = {where = ["scripts/python"], include = ["qwen3tts_cli*", "qwen3tts_tools*"]}}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

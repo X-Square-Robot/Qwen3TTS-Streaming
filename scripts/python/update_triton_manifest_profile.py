@@ -44,10 +44,18 @@ def update_manifest(args: argparse.Namespace) -> None:
     engine_dtype = _normalize_dtype(args.engine_dtype)
     triton_io_dtype = _normalize_dtype(args.triton_io_float_dtype or engine_dtype)
 
+    # Resolve per-submodel precision: explicit args override, else fall back to engine_dtype
+    backbone_prec = _normalize_dtype(args.backbone_precision) if args.backbone_precision else engine_dtype
+    cp_prec = _normalize_dtype(args.cp_precision) if args.cp_precision else engine_dtype
+    code2wav_prec = _normalize_dtype(args.code2wav_precision) if args.code2wav_precision else engine_dtype
+
     if args.engine_mode:
         data["engine_mode"] = args.engine_mode
     data["engine_dtype"] = engine_dtype
     data["triton_io_float_dtype"] = triton_io_dtype
+    data["backbone_precision"] = backbone_prec
+    data["cp_precision"] = cp_prec
+    data["code2wav_precision"] = code2wav_prec
 
     architecture = data.setdefault("architecture", {})
     if isinstance(architecture, dict):
@@ -65,6 +73,9 @@ def update_manifest(args: argparse.Namespace) -> None:
             "engine_mode": args.engine_mode or data.get("engine_mode", "trt"),
             "engine_dtype": engine_dtype,
             "triton_io_float_dtype": triton_io_dtype,
+            "backbone_precision": backbone_prec,
+            "cp_precision": cp_prec,
+            "code2wav_precision": code2wav_prec,
             "max_batch_size": int(args.max_batch_size),
             "max_input_len": int(args.max_input_len),
             "max_seq_len": int(args.max_seq_len),
@@ -89,6 +100,9 @@ def main() -> None:
     parser.add_argument("--engine-mode", default="trt", choices=("onnx", "trt"))
     parser.add_argument("--engine-dtype", required=True, help="bf16|fp16|fp32|fp8")
     parser.add_argument("--triton-io-float-dtype", default="", help="Default: same as --engine-dtype")
+    parser.add_argument("--backbone-precision", default="", help="Backbone compute precision; default: engine-dtype")
+    parser.add_argument("--cp-precision", default="", help="CP compute precision; default: engine-dtype")
+    parser.add_argument("--code2wav-precision", default="", help="Code2Wav compute precision; default: engine-dtype")
     parser.add_argument("--max-batch-size", type=_positive_int, required=True)
     parser.add_argument("--max-input-len", type=_positive_int, required=True)
     parser.add_argument("--max-seq-len", type=_positive_int, required=True)

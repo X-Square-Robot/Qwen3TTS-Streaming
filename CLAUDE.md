@@ -52,18 +52,24 @@ Qwen3-TTS-Triton/
 
 ```bash
 # 交互式全流程
-bash scripts/bash/autorun.sh
+qwen3tts all -m custom-1.7b
 
 # 分阶段执行
-bash scripts/bash/autorun.sh setup   -m custom-1.7b          # Phase A: 下载+导出
-bash scripts/bash/autorun.sh build   -m custom-1.7b          # Phase B: 编译 TRT
-bash scripts/bash/autorun.sh deploy  -m custom-1.7b --gateway standalone --engine-mode trt  # Phase C
+qwen3tts setup -m custom-1.7b              # Phase A: 下载+导出
+qwen3tts build -m custom-1.7b              # Phase B: 编译 TRT
+qwen3tts package -m custom-1.7b            # Phase C1: 组装部署产物
+qwen3tts run -m custom-1.7b --gateway standalone  # Phase C2: 启动服务
 
-# Python CLI（替代 autorun.sh 的现代入口）
-qwen3tts all -m custom-1.7b
-qwen3tts setup -m custom-1.7b
-qwen3tts build -m custom-1.7b
-qwen3tts deploy -m custom-1.7b --gateway standalone
+# 跨机编译
+qwen3tts probe --output target_profile.json              # 采集目标机指纹
+qwen3tts build make-bundle -m custom-1.7b --target-profile p.json  # 创建构建包
+qwen3tts build import-artifact bundle.tar.zst            # 导入编译产物
+qwen3tts build remote-build -m custom-1.7b --remote-host user@host  # SSH 远程编译
+
+# 其他
+qwen3tts status                            # 查看当前状态
+qwen3tts probe                             # 采集 GPU/driver 信息
+qwen3tts stop                              # 停止服务
 
 # 测试
 pytest tests/unit tests/integration -q
@@ -98,8 +104,11 @@ python -m engine.server --config engine.yaml
 | Serving 验收 | `python tools/validation/serving_endpoints.py --targets engine-grpc` |
 | 启动 WebUI Demo | `bash scripts/demo/start_webui_demo.sh --variant custom-1.7b` |
 | Docker Compose | `bash scripts/bash/compose.sh up --gateway triton --variant custom-1.7b` |
-| 导出 ONNX | `bash scripts/bash/autorun.sh setup -m custom-1.7b` |
-| 编译 TRT | `bash scripts/bash/autorun.sh build -m custom-1.7b` |
+| 导出 ONNX | `qwen3tts setup -m custom-1.7b` |
+| 编译 TRT | `qwen3tts build -m custom-1.7b` |
+| 跨机编译 | `qwen3tts build make-bundle -m custom-1.7b --target-profile p.json` |
+| 导入编译产物 | `qwen3tts build import-artifact bundle.tar.zst` |
+| 采集目标机信息 | `qwen3tts probe --output target_profile.json` |
 
 ## 重要约束
 

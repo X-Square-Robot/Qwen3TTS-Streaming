@@ -40,6 +40,9 @@ class EngineProfileConfig:
     engine_mode: str = ""
     engine_dtype: str = ""
     triton_io_float_dtype: str = ""
+    backbone_precision: str = ""
+    cp_precision: str = ""
+    code2wav_precision: str = ""
     max_batch_size: int = 0
     max_input_len: int = 0
     max_seq_len: int = 0
@@ -554,6 +557,9 @@ def load_model_manifest(
             "engine_mode",
             "engine_dtype",
             "triton_io_float_dtype",
+            "backbone_precision",
+            "cp_precision",
+            "code2wav_precision",
             "builder",
             "builder_image",
             "target_driver",

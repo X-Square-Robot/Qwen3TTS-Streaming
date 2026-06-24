@@ -1,4 +1,18 @@
 from .audio import pcm16_from_float_audio, save_wav
+from .bundle import (
+    ArtifactManifest,
+    BuildManifest,
+    collect_engines_to_workspace,
+    compile_engines_in_bundle,
+    extract_artifact_bundle,
+    fingerprint_check,
+    generate_build_on_target_script,
+    make_build_bundle,
+    pack_artifact_bundle,
+    prepare_local_workspace,
+    target_profile_memory_mb,
+    write_artifact_manifest,
+)
 from .common import (
     DEFAULT_ENGINE_GRPC,
     DEFAULT_ENGINE_WS,
@@ -28,13 +42,65 @@ from .common import (
     split_csv_arg,
     story_path,
 )
-from .docker import NgcMatrix, check_docker_gpu_ready, detect_driver_version, ensure_image
+from .compose import ComposeManager
+from .docker import (
+    NgcMatrix,
+    check_docker_gpu_ready,
+    detect_docker_gpu_args,
+    detect_driver_version,
+    detect_gpu_free_memory_mb,
+    detect_gpu_total_memory_mb,
+    ensure_image,
+)
 from .engine import EngineManager
+from .layer_audit import (
+    AuditReport,
+    LayerAuditError,
+    PrefixRule,
+    audit_onnx_prefixes,
+    classify_layer_name,
+    DEFAULT_PREFIX_RULES,
+)
+from .mixed_precision_builder import (
+    build_fused_mixed_precision,
+    is_mixed_precision,
+)
 from .ngc_matrix import NgcEntry, load_ngc_matrix, resolve_ngc_tag
 from .status import ProjectStatus, check_all, format_status
 from .triton import TritonManager
+from .trtexec import (
+    TrtProfile,
+    build_all_engines,
+    build_fused_engine,
+    build_peripheral_engines,
+    build_speaker_encoder,
+    build_speech_tokenizer_codec_fused,
+    build_talker_code2wav_fused,
+    build_talker_unified,
+    get_talker_dims,
+    io_format_string,
+    precision_flags,
+    resolve_runner,
+    run_trtexec,
+    suggest_build_profile,
+    suggest_profile,
+)
 
 __all__ = [
+    # bundle
+    "ArtifactManifest",
+    "BuildManifest",
+    "collect_engines_to_workspace",
+    "compile_engines_in_bundle",
+    "extract_artifact_bundle",
+    "fingerprint_check",
+    "generate_build_on_target_script",
+    "make_build_bundle",
+    "pack_artifact_bundle",
+    "prepare_local_workspace",
+    "target_profile_memory_mb",
+    "write_artifact_manifest",
+    # common
     "DEFAULT_ENGINE_GRPC",
     "DEFAULT_ENGINE_WS",
     "DEFAULT_PROBE_TARGETS",
@@ -45,11 +111,7 @@ __all__ = [
     "DEFAULT_TRITON_HTTP_MODEL",
     "DEFAULT_TRITON_MODEL",
     "DEFAULT_TRITON_MODEL_VERSION",
-    "EngineManager",
     "IMPORT_PATH_GROUPS",
-    "NgcEntry",
-    "NgcMatrix",
-    "ProjectStatus",
     "REPO_ROOT",
     "SCRIPTS_DIR",
     "SCRIPTS_EXPORT_DIR",
@@ -58,22 +120,59 @@ __all__ = [
     "TESTS_INTEGRATION_DIR",
     "THIRD_PARTY_DIR",
     "THIRD_PARTY_QWEN_DIR",
-    "TritonManager",
     "WORKSPACE_DIR",
     "bootstrap_project_imports",
-    "check_all",
-    "check_docker_gpu_ready",
     "dedupe_keep_order",
-    "detect_driver_version",
-    "ensure_image",
-    "format_status",
-    "load_ngc_matrix",
     "normalize_http_base",
     "parse_host_port",
-    "pcm16_from_float_audio",
     "prepend_sys_paths",
-    "resolve_ngc_tag",
-    "save_wav",
     "split_csv_arg",
     "story_path",
+    # compose
+    "ComposeManager",
+    # docker
+    "NgcMatrix",
+    "check_docker_gpu_ready",
+    "detect_docker_gpu_args",
+    "detect_driver_version",
+    "detect_gpu_free_memory_mb",
+    "detect_gpu_total_memory_mb",
+    "ensure_image",
+    # engine
+    "EngineManager",
+    # ngc_matrix
+    "NgcEntry",
+    "load_ngc_matrix",
+    "resolve_ngc_tag",
+    # status
+    "ProjectStatus",
+    "check_all",
+    "format_status",
+    # triton
+    "TritonManager",
+    # trtexec
+    "TrtProfile",
+    "build_all_engines",
+    "build_fused_engine",
+    "build_fused_mixed_precision",
+    "build_peripheral_engines",
+    "build_speaker_encoder",
+    "build_speech_tokenizer_codec_fused",
+    "build_talker_code2wav_fused",
+    "build_talker_unified",
+    "get_talker_dims",
+    "io_format_string",
+    "is_mixed_precision",
+    "precision_flags",
+    "resolve_runner",
+    "run_trtexec",
+    "suggest_build_profile",
+    "suggest_profile",
+    # layer_audit
+    "AuditReport",
+    "LayerAuditError",
+    "PrefixRule",
+    "audit_onnx_prefixes",
+    "classify_layer_name",
+    "DEFAULT_PREFIX_RULES",
 ]

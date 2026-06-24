@@ -29,6 +29,21 @@
       "enum": ["fp32", "bf16", "fp16", "fp8", "float32", "bfloat16", "float16", "float8"],
       "description": "Float I/O for talker_code2wav_fused: trtexec --inputIOFormats/--outputIOFormats + Triton TYPE_* + BLS torch dtype; export_09 default bf16; ONNX file stays FP32"
     },
+    "backbone_precision": {
+      "type": "string",
+      "enum": ["fp32", "bf16", "fp16", "fp8"],
+      "description": "Backbone (talker_unified + codec_sum) compute precision; defaults to engine_dtype if unspecified"
+    },
+    "cp_precision": {
+      "type": "string",
+      "enum": ["fp32", "bf16", "fp16", "fp8"],
+      "description": "Code Predictor compute precision; set to fp32 to mitigate BF16 numerical sensitivity"
+    },
+    "code2wav_precision": {
+      "type": "string",
+      "enum": ["fp32", "bf16", "fp16", "fp8"],
+      "description": "Code2Wav decoder compute precision; defaults to engine_dtype if unspecified"
+    },
     "engine_profile": {
       "type": "object",
       "description": "Actual TensorRT profile and build metadata used by Phase B",
@@ -46,6 +61,21 @@
         "triton_io_float_dtype": {
           "type": "string",
           "enum": ["fp32", "bf16", "fp16", "fp8", "float32", "bfloat16", "float16", "float8"]
+        },
+        "backbone_precision": {
+          "type": "string",
+          "enum": ["fp32", "bf16", "fp16", "fp8"],
+          "description": "Backbone compute precision used during build"
+        },
+        "cp_precision": {
+          "type": "string",
+          "enum": ["fp32", "bf16", "fp16", "fp8"],
+          "description": "CP compute precision used during build"
+        },
+        "code2wav_precision": {
+          "type": "string",
+          "enum": ["fp32", "bf16", "fp16", "fp8"],
+          "description": "Code2Wav compute precision used during build"
         },
         "max_batch_size": { "type": "integer", "minimum": 1 },
         "max_input_len": { "type": "integer", "minimum": 1 },

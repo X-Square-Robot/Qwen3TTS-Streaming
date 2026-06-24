@@ -604,7 +604,7 @@ class TritonManager:
                 "    Runtime fingerprint guard will fail-stop "
                 "unless QWEN3_ALLOW_FINGERPRINT_MISMATCH=1"
             )
-            logger.warning("    Run: bash scripts/bash/autorun.sh build")
+            logger.warning("    Run: qwen3tts build")
 
         # Prune unexpected files from the orchestrator directory
         _prune_orchestrator_dir(orch_model_dir)
@@ -788,7 +788,7 @@ class TritonManager:
             "Deploy image not found (%s), falling back to: %s",
             deploy_tag, base_image,
         )
-        logger.warning("Build it first: bash scripts/bash/deploy.sh build-image")
+        logger.warning("Build it first: qwen3tts build")
         return base_image
 
     # -- Health check -------------------------------------------------------

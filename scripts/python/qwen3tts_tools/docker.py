@@ -183,6 +183,128 @@ def detect_gpu_info() -> GpuInfo:
     )
 
 
+def detect_gpu_free_memory_mb(gpu_index: int = 0) -> int:
+    """Detect free GPU memory in MiB via ``nvidia-smi``.
+
+    Args:
+        gpu_index: GPU device index (default 0).
+
+    Returns:
+        Free memory in MiB, or 0 if detection fails.
+    """
+    if not shutil.which("nvidia-smi"):
+        return 0
+
+    try:
+        result = _run(
+            ["nvidia-smi", f"--id={gpu_index}",
+             "--query-gpu=memory.free",
+             "--format=csv,noheader,nounits"],
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return 0
+
+    if result.returncode != 0:
+        return 0
+
+    try:
+        return int(result.stdout.strip().split("\n")[0].strip())
+    except (ValueError, IndexError):
+        return 0
+
+
+def detect_gpu_total_memory_mb(gpu_index: int = 0) -> int:
+    """Detect total GPU memory in MiB via ``nvidia-smi``.
+
+    Args:
+        gpu_index: GPU device index (default 0).
+
+    Returns:
+        Total memory in MiB, or 0 if detection fails.
+    """
+    if not shutil.which("nvidia-smi"):
+        return 0
+
+    try:
+        result = _run(
+            ["nvidia-smi", f"--id={gpu_index}",
+             "--query-gpu=memory.total",
+             "--format=csv,noheader,nounits"],
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return 0
+
+    if result.returncode != 0:
+        return 0
+
+    try:
+        return int(result.stdout.strip().split("\n")[0].strip())
+    except (ValueError, IndexError):
+        return 0
+
+
+def detect_docker_gpu_args(image: str, gpu_device: str = "auto") -> list[str]:
+    """Detect Docker GPU arguments for container passthrough.
+
+    Tries ``--gpus device=N`` first, then falls back to
+    ``--runtime=nvidia`` with environment variables.
+
+    Args:
+        image: Docker image to use for the smoke test.
+        gpu_device: GPU device (auto|all|N|cuda:N).
+
+    Returns:
+        List of Docker run arguments for GPU passthrough.
+
+    Raises:
+        RuntimeError: If both GPU passthrough methods fail.
+    """
+    docker_gpu_arg = "all"
+    visible_devices = "all"
+
+    if gpu_device not in ("auto", "all", ""):
+        norm = gpu_device.removeprefix("cuda:")
+        docker_gpu_arg = f"device={norm}"
+        visible_devices = norm
+
+    # Try --gpus first
+    try:
+        proc = _run(
+            ["docker", "run", "--rm", "--gpus", docker_gpu_arg,
+             image, "/bin/true"],
+            timeout=30,
+        )
+        if proc.returncode == 0:
+            return ["--gpus", docker_gpu_arg]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Fallback: --runtime=nvidia
+    try:
+        proc = _run(
+            [
+                "docker", "run", "--rm",
+                "--runtime=nvidia",
+                "-e", f"NVIDIA_VISIBLE_DEVICES={visible_devices}",
+                "-e", "NVIDIA_DRIVER_CAPABILITIES=compute,utility",
+                image, "/bin/true",
+            ],
+            timeout=30,
+        )
+        if proc.returncode == 0:
+            return [
+                "--runtime=nvidia",
+                "-e", f"NVIDIA_VISIBLE_DEVICES={visible_devices}",
+                "-e", "NVIDIA_DRIVER_CAPABILITIES=compute,utility",
+            ]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    raise RuntimeError(f"Docker GPU smoke test failed for image: {image}")
+
+
 def _is_valid_driver_version(version: str) -> bool:
     """Check whether *version* looks like a valid NVIDIA driver version."""
     import re as _re
