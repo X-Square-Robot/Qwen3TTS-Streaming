@@ -50,7 +50,25 @@ Qwen3-TTS-Triton/
 
 ## 关键入口命令
 
+> **生命周期入口：bash 脚本（`scripts/bash/`）是当前受支持的真相源。**
+> bash 负责编排 docker / trtexec，Python 仅作为被 bash 调用的辅助处理 JSON / profile /
+> 网页解析等。`qwen3tts` Python CLI 与既有 bash 行为差异较大、问题较多，正在收敛/精简，
+> 暂不作为推荐入口。
+
 ```bash
+# Phase B: 编译 TRT 引擎（docker 内 trtexec；支持分子模块混合精度）
+bash scripts/bash/build_engines.sh --variant custom-1.7b              # 全 bf16
+bash scripts/bash/build_engines.sh --variant custom-1.7b --cp-precision fp32  # 混合：cp 用 fp32
+
+# Phase C: 组装模型包 + 启动 engine-docker 服务
+bash scripts/bash/compose.sh prepare --gateway engine --engine-mode trt   # 组装 model_repository
+bash scripts/bash/compose.sh up --gateway engine --engine-mode trt        # 构建 engine 镜像并启动
+bash scripts/bash/compose.sh down --gateway engine                        # 停止
+
+# 全流程编排
+bash scripts/bash/autorun.sh
+
+# ---- 以下 qwen3tts Python CLI 仍可用，但非推荐入口 ----
 # 交互式全流程
 qwen3tts all -m custom-1.7b
 
