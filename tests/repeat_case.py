@@ -1,24 +1,43 @@
-"""Repeatedly synthesize a single case N times to check hallucination rate.
+"""Run the badcase collection through the Qwen3-TTS client SDK and save audio.
 
-Reads the text from data.log, sends it to the local engine WebSocket service
-N times via token-level streaming (matching production config), and saves
-each WAV file for manual inspection.
+This rewrites the old ad-hoc WebSocket script to drive synthesis through the
+official Python client (``qwen3_tts_client.TTSClient``), using token-level
+streaming that matches the production path.  It is meant for *manual listening
+evaluation* of regressions — in particular:
 
-Usage:
-    python tests/repeat_case.py                          # default: 1 time
-    python tests/repeat_case.py -n 20                    # 20 times
-    python tests/repeat_case.py -n 20 --speaker Serena   # custom speaker
-    python tests/repeat_case.py -n 20 --line 2           # only line 2 from data.log
-    python tests/repeat_case.py --timeout 300            # 5 min per request
+  * ``resources/dataset/badcase/short.txt``     — a short utterance whose model
+    occasionally hallucinates (a ~10 s sentence balloons to 30 s+).  Run it many
+    times (``--repeat``) to catch the intermittent failure.
+  * ``resources/dataset/badcase/long.txt``      — long paragraphs whose audio
+    quality (听感) degrades.  One pass per paragraph is enough.
+  * ``resources/dataset/badcase/difficult.txt`` — a whitespace-separated list of
+    number / date / time items that stress text normalization.  Each item is
+    synthesized independently.
 
-Requires:
-    - Engine server running
-    - websockets: pip install websockets
+Each synthesized clip is written as a WAV next to a ``_reference.txt`` and a
+``_summary.json`` so the audio can be reviewed by ear afterwards.
+
+Examples
+--------
+    # Everything with per-dataset defaults (short x20, long x1, difficult x1):
+    python tests/repeat_case.py
+
+    # Only the short hallucination probe, 30 repeats:
+    python tests/repeat_case.py --datasets short --repeat 30
+
+    # Long-form listening only, against a custom endpoint:
+    python tests/repeat_case.py --datasets long --host 127.0.0.1 --port 50071
+
+Requires the engine to be running and reachable (default: engine gRPC on
+``localhost:50071``).  The client SDK is imported from ``client/src`` directly,
+so no ``pip install`` of the client package is needed.
 """
 
+from __future__ import annotations
+
 import argparse
-import asyncio
 import json
+import statistics
 import struct
 import sys
 import time
@@ -27,30 +46,50 @@ from pathlib import Path
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DATA_LOG = REPO_ROOT / "data.log"
+
+# Import the client SDK straight from the in-repo source tree so this script
+# works without installing the qwen3-tts-client package.
+_CLIENT_SRC = REPO_ROOT / "client" / "src"
+if _CLIENT_SRC.is_dir() and str(_CLIENT_SRC) not in sys.path:
+    sys.path.insert(0, str(_CLIENT_SRC))
+
+from qwen3_tts_client import (  # noqa: E402  (after sys.path tweak)
+    AudioChunk,
+    AudioFormat,
+    SessionStartRequest,
+    StreamEvent,
+    SynthesisConfig,
+    TTSClient,
+)
+
+BADCASE_DIR = REPO_ROOT / "resources" / "dataset" / "badcase"
 OUTPUT_DIR = REPO_ROOT / "workspace" / "repeat_case"
 SAMPLE_RATE = 24000
 
-WS_HOST = "8.160.176.148"
-# WS_HOST = "localhost"
-WS_PORT = 1182
-# WS_PORT = 50052
-WS_PATH = "/v1/ws"
+# Per-dataset behavior.  ``split`` selects how a file is turned into cases:
+#   "line"       — one case per non-empty line
+#   "whitespace" — one case per whitespace-separated token (whole file)
+# ``repeat`` is the default number of repetitions when --repeat is not given.
+DATASET_CONFIG: dict[str, dict] = {
+    "short":     {"split": "line",       "repeat": 20, "note": "intermittent hallucination probe"},
+    "long":      {"split": "line",       "repeat": 1,  "note": "long-form audio quality"},
+    "difficult": {"split": "whitespace", "repeat": 1,  "note": "number/date normalization"},
+}
 
 
-def parse_data_log(path: Path) -> list[dict]:
-    """Parse data.log into list of {line_no, text}."""
-    entries = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+def parse_cases(path: Path, split: str) -> list[dict]:
+    """Parse a badcase file into a list of {case_no, text} entries."""
+    raw = path.read_text(encoding="utf-8")
+    if split == "whitespace":
+        tokens = [t for t in raw.split() if t.strip()]
+        return [{"case_no": i + 1, "text": t} for i, t in enumerate(tokens)]
+    # default: line-based
+    cases = []
+    for line in raw.splitlines():
         stripped = line.strip()
-        if not stripped:
-            continue
-        parts = stripped.split("\t", 1)
-        if len(parts) == 2 and parts[0].strip().isdigit():
-            entries.append({"line_no": int(parts[0].strip()), "text": parts[1].strip()})
-        else:
-            entries.append({"line_no": len(entries) + 1, "text": stripped})
-    return entries
+        if stripped:
+            cases.append({"case_no": len(cases) + 1, "text": stripped})
+    return cases
 
 
 def make_wav(samples_f32: np.ndarray, sr: int = SAMPLE_RATE) -> bytes:
@@ -68,355 +107,238 @@ def make_wav(samples_f32: np.ndarray, sr: int = SAMPLE_RATE) -> bytes:
     return bytes(buf)
 
 
-async def synthesize_streaming(
-    ws_uri: str,
+def _chunk_to_array(chunk: AudioChunk) -> np.ndarray:
+    """Decode a streamed PCM chunk into float32 samples."""
+    encoding = (chunk.audio.encoding or "pcm_f32").lower()
+    if encoding == "pcm_s16le":
+        return np.frombuffer(chunk.pcm_bytes, dtype=np.int16).astype(np.float32) / 32767.0
+    return np.frombuffer(chunk.pcm_bytes, dtype=np.float32)
+
+
+def synthesize_once(
+    client: TTSClient,
     text: str,
+    *,
     speaker: str,
-    timeout: float = 600.0,
-):
-    """Send a token-level streaming WebSocket request and collect all audio.
+    input_mode: str,
+    group_policy: str,
+    session_id: str,
+) -> dict:
+    """Synthesize one utterance via token-streaming and collect the audio.
 
-    Protocol (matching production & serving_endpoints.py pattern):
-      1. send "start" → wait for server "start" event before proceeding
-      2. send "text"  → drain any queued audio/events (short window)
-      3. send "end"   → read until "done" event
-
-    Returns (chunks, first_chunk_sec, total_sec, error, actual_sample_rate).
+    Returns a dict with keys: status, samples (np.ndarray|None), sample_rate,
+    duration_s, ttft_ms, total_ms, chunks, error.
     """
-    import websockets
+    cfg = SynthesisConfig(
+        task_type="custom_voice",
+        language="auto",
+        speaker=speaker,
+        input_mode=input_mode,
+        group_policy=group_policy,
+        audio=AudioFormat(encoding="pcm_f32", sample_rate=SAMPLE_RATE, channels=1),
+    )
+    start = SessionStartRequest(
+        session_id=session_id,
+        config=cfg,
+        output_policy=cfg.output_policy,
+        timing=cfg.timing_context,
+    )
 
-    chunks = []
-    first_ts = None
-    error = None
-    actual_sr = SAMPLE_RATE
-    encoding = "pcm_f32"
-    session_started = False
-
-    async def _recv_frame(ws, recv_deadline: float):
-        """Receive one frame with timeout.
-
-        Returns:
-          - ("__audio__", raw_bytes) for binary audio frames
-          - parsed dict for text (JSON) frames
-          - None on timeout (no data available yet)
-        Raises ConnectionError on server close.
-        """
-        remaining = recv_deadline - time.perf_counter()
-        if remaining <= 0:
-            return None
-        try:
-            raw = await asyncio.wait_for(ws.recv(), timeout=max(0.01, remaining))
-        except asyncio.TimeoutError:
-            return None
-        except websockets.ConnectionClosed as cc:
-            raise ConnectionError(
-                f"WebSocket closed by server "
-                f"(code={getattr(cc, 'code', '?')}, "
-                f"reason={getattr(cc, 'reason', '')!r})"
-            ) from cc
-        if isinstance(raw, bytes):
-            return ("__audio__", raw)
-        if isinstance(raw, str):
-            return json.loads(raw)
-        return None
-
-    def _process_frame(frame):
-        """Process one decoded frame. Returns True if terminal (done/error)."""
-        nonlocal first_ts, error, actual_sr, encoding, session_started
-
-        if frame is None:
-            return False
-
-        # Binary audio frame
-        if isinstance(frame, tuple) and frame[0] == "__audio__":
-            now = time.perf_counter()
-            if first_ts is None:
-                first_ts = now
-            raw = frame[1]
-            if encoding == "pcm_s16le":
-                chunks.append(np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0)
-            else:
-                chunks.append(np.frombuffer(raw, dtype=np.float32))
-            return False
-
-        # JSON event frame
-        if isinstance(frame, dict):
-            msg_type = frame.get("type", "")
-            if msg_type == "event":
-                event = frame.get("event", {})
-                event_type = event.get("type", "")
-
-                if event_type == "start":
-                    session_started = True
-                    audio_info = event.get("audio", {})
-                    if audio_info:
-                        enc = audio_info.get("encoding")
-                        if enc:
-                            encoding = enc
-                        sr = audio_info.get("sample_rate")
-                        if sr:
-                            actual_sr = int(sr)
-                    return False
-
-                if event_type == "error":
-                    error = event.get("message", "engine event error")
-                    return True
-
-                if event_type in {"done", "end"}:
-                    return True
-
-            return False
-
-        return False
+    parts: list[np.ndarray] = []
+    sample_rate = SAMPLE_RATE
+    first_ts: float | None = None
+    error: str | None = None
 
     t0 = time.perf_counter()
-    deadline = t0 + timeout
-    connection_closed_normally = False
     try:
-        async with websockets.connect(
-            ws_uri,
-            open_timeout=30,
-            ping_interval=30,
-            ping_timeout=120,
-            close_timeout=10,
-        ) as ws:
-            # ---- Step 1: send "start", wait for server "start" event ----
-            await ws.send(json.dumps({
-                "type": "start",
-                "session_id": f"repeat_{int(t0*1000)}",
-                "config": {
-                    "task_type": "custom_voice",
-                    "language": "auto",
-                    "speaker": speaker,
-                    "input_mode": "token",
-                    "group_policy": "auto",
-                    "audio": {
-                        "encoding": "pcm_f32",
-                        "sample_rate": SAMPLE_RATE,
-                        "channels": 1,
-                    },
-                },
-            }, ensure_ascii=False))
-
-            # Wait for server to confirm session start
-            while not session_started and time.perf_counter() < deadline:
-                frame = await _recv_frame(ws, min(deadline, time.perf_counter() + 5.0))
-                if frame is None:
-                    continue
-                if _process_frame(frame):
+        session = client.open_stream(start)
+        session.send_text(text)
+        session.end()
+        for msg in session.iter_messages():
+            if isinstance(msg, AudioChunk):
+                if first_ts is None:
+                    first_ts = time.perf_counter()
+                if msg.audio and msg.audio.sample_rate:
+                    sample_rate = int(msg.audio.sample_rate)
+                arr = _chunk_to_array(msg)
+                if arr.size:
+                    parts.append(arr)
+            elif isinstance(msg, StreamEvent):
+                if msg.type == "error":
+                    error = msg.message or "engine error event"
                     break
+    except Exception as exc:  # noqa: BLE001 — surface any transport failure
+        error = f"{type(exc).__name__}: {exc}"
 
-            if not session_started and error is None:
-                error = "server did not send 'start' event"
-                total = time.perf_counter() - t0
-                first_sec = (first_ts - t0) if first_ts else None
-                return chunks, first_sec, total, error, actual_sr
+    total_ms = (time.perf_counter() - t0) * 1000.0
+    if not parts:
+        return {
+            "status": "error" if error else "no_audio", "samples": None,
+            "sample_rate": sample_rate, "duration_s": 0.0, "ttft_ms": None,
+            "total_ms": round(total_ms), "chunks": 0, "error": error,
+        }
 
-            if error:
-                total = time.perf_counter() - t0
-                first_sec = (first_ts - t0) if first_ts else None
-                return chunks, first_sec, total, error, actual_sr
-
-            # ---- Step 2: send "text" ----
-            await ws.send(json.dumps({
-                "type": "text",
-                "text": text,
-            }, ensure_ascii=False))
-
-            # Drain any queued frames briefly (0.1s window, matching serving_endpoints.py)
-            drain_deadline = min(deadline, time.perf_counter() + 0.1)
-            while time.perf_counter() < drain_deadline:
-                frame = await _recv_frame(ws, drain_deadline)
-                if frame is None:
-                    break
-                if _process_frame(frame):
-                    total = time.perf_counter() - t0
-                    first_sec = (first_ts - t0) if first_ts else None
-                    return chunks, first_sec, total, error, actual_sr
-
-            # ---- Step 3: send "end", read until done/error ----
-            await ws.send(json.dumps({"type": "end"}))
-
-            while time.perf_counter() < deadline:
-                frame = await _recv_frame(ws, deadline)
-                if frame is None:
-                    error = "WebSocket recv timed out waiting for done"
-                    break
-                if _process_frame(frame):
-                    break
-
-    except ConnectionError as exc:
-        # Server sends "done" then immediately closes the WebSocket (return ws
-        # in websocket_server.py).  The close frame can arrive before we read
-        # the "done" event.  If we already received audio, treat this as a
-        # normal completion rather than an error.
-        if chunks:
-            connection_closed_normally = True
-        else:
-            error = str(exc)
-    except Exception as exc:
-        error = f"WebSocket error: {exc}"
-
-    total = time.perf_counter() - t0
-    first_sec = (first_ts - t0) if first_ts else None
-    # If server closed the connection after sending all audio (done + close
-    # frame race), treat it as success.
-    if connection_closed_normally:
-        error = None
-    return chunks, first_sec, total, error, actual_sr
+    samples = np.concatenate(parts)
+    ttft_ms = round((first_ts - t0) * 1000.0) if first_ts else None
+    return {
+        "status": "ok",
+        "samples": samples,
+        "sample_rate": sample_rate,
+        "duration_s": round(samples.size / sample_rate, 3),
+        "ttft_ms": ttft_ms,
+        "total_ms": round(total_ms),
+        "chunks": len(parts),
+        "error": error,
+    }
 
 
-async def async_main():
-    parser = argparse.ArgumentParser(description="Repeat TTS synthesis for hallucination check")
-    parser.add_argument("-n", "--repeat", type=int, default=1, help="Number of repetitions (default: 1)")
-    parser.add_argument("--speaker", type=str, default="zhitian", help="Speaker name (default: zhitian)")
-    parser.add_argument("--line", type=int, default=None, help="Only synthesize a specific line from data.log")
-    parser.add_argument("--host", type=str, default=WS_HOST, help="Engine WebSocket host")
-    parser.add_argument("--port", type=int, default=WS_PORT, help="Engine WebSocket port")
-    parser.add_argument("--path", type=str, default=WS_PATH, help="Engine WebSocket path")
-    parser.add_argument("--timeout", type=float, default=600, help="Per-request timeout in seconds (default: 600)")
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Run the badcase collection through the client SDK and save audio.",
+    )
+    parser.add_argument("--datasets", default="short,long,difficult",
+                        help="Comma list of datasets under resources/dataset/badcase (default: all)")
+    parser.add_argument("-n", "--repeat", type=int, default=0,
+                        help="Repetitions per case (0 = per-dataset default)")
+    parser.add_argument("--speaker", default="serena", help="Speaker name (default: serena)")
+    parser.add_argument("--host", default="localhost", help="Engine host (default: localhost)")
+    parser.add_argument("--port", type=int, default=50071, help="Engine port (default: 50071)")
+    parser.add_argument("--transport", default="engine-grpc",
+                        help="Client transport (engine-grpc | engine-websocket | auto)")
+    parser.add_argument("--input-mode", default="token", help="Input mode (default: token)")
+    parser.add_argument("--group-policy", default="auto", help="Group policy (default: auto)")
+    parser.add_argument("--timeout", type=float, default=300.0,
+                        help="Per-request timeout in seconds (default: 300)")
+    parser.add_argument("--max-cases", type=int, default=0,
+                        help="Limit number of cases per dataset (0 = no limit)")
+    parser.add_argument("--outdir", default="", help="Override output run directory")
     args = parser.parse_args()
 
+    datasets = [d.strip() for d in args.datasets.split(",") if d.strip()]
+    for d in datasets:
+        if d not in DATASET_CONFIG:
+            print(f"ERROR: unknown dataset {d!r}; known: {', '.join(DATASET_CONFIG)}", file=sys.stderr)
+            return 2
+        if not (BADCASE_DIR / f"{d}.txt").is_file():
+            print(f"ERROR: missing {BADCASE_DIR / (d + '.txt')}", file=sys.stderr)
+            return 2
+
+    if args.transport == "engine-websocket":
+        endpoint = f"ws://{args.host}:{args.port}/v1/ws"
+    else:
+        endpoint = f"{args.host}:{args.port}"
+
+    print("=" * 72)
+    print("Badcase runner (client SDK)")
+    print("=" * 72)
+    print(f"  endpoint:    {endpoint}  (transport={args.transport})")
+    print(f"  speaker:     {args.speaker}")
+    print(f"  input_mode:  {args.input_mode}   group_policy: {args.group_policy}")
+    print(f"  datasets:    {', '.join(datasets)}")
+    print("=" * 72)
+
     try:
-        import websockets
-    except ImportError:
-        print("ERROR: websockets not installed.")
-        print("  pip install websockets")
-        sys.exit(1)
+        client = TTSClient.connect(endpoint, transport=args.transport, timeout=args.timeout)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: cannot connect to engine at {endpoint}: {exc}", file=sys.stderr)
+        print("  Make sure the engine is running and the port is correct.", file=sys.stderr)
+        return 1
+    print(f"  connected:   transport={client.resolved_transport}\n")
 
-    ws_uri = f"ws://{args.host}:{args.port}{args.path}"
-
-    # Quick connectivity check
-    try:
-        async with websockets.connect(
-            ws_uri, open_timeout=30, ping_interval=30, ping_timeout=120, close_timeout=5,
-        ):
-            pass
-    except Exception as exc:
-        print(f"ERROR: Cannot connect to engine WebSocket at {ws_uri}")
-        print(f"  {exc}")
-        print("  Make sure the engine server is running.")
-        sys.exit(1)
-
-    # Parse data.log
-    if not DATA_LOG.exists():
-        print(f"ERROR: data.log not found at {DATA_LOG}")
-        sys.exit(1)
-
-    entries = parse_data_log(DATA_LOG)
-    if not entries:
-        print("ERROR: data.log is empty or has no parseable entries")
-        sys.exit(1)
-
-    # Filter by line if specified
-    if args.line is not None:
-        entries = [e for e in entries if e["line_no"] == args.line]
-        if not entries:
-            print(f"ERROR: line {args.line} not found in data.log")
-            sys.exit(1)
-
-    # Create output directory
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    run_dir = OUTPUT_DIR / f"run_{timestamp}"
+    run_dir = Path(args.outdir) if args.outdir else OUTPUT_DIR / f"run_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save the text being synthesized for reference
-    ref_path = run_dir / "_reference.txt"
-    with open(ref_path, "w", encoding="utf-8") as f:
-        for e in entries:
-            f.write(f"[Line {e['line_no']}] {e['text']}\n\n")
-
-    print(f"{'='*70}")
-    print(f"Repeat Case - Hallucination Check")
-    print(f"{'='*70}")
-    print(f"  Text source:  {DATA_LOG}")
-    print(f"  Lines:        {', '.join(str(e['line_no']) for e in entries)}")
-    print(f"  Speaker:      {args.speaker}")
-    print(f"  Input mode:   token (streaming, matching production)")
-    print(f"  Repetitions:  {args.repeat}")
-    print(f"  Timeout:      {args.timeout}s per request")
-    print(f"  Output:       {run_dir}/")
-    print(f"  Engine WS:    {ws_uri}")
-    print(f"{'='*70}\n")
-
-    results = []
-    total_runs = args.repeat * len(entries)
-    run_idx = 0
-
-    for entry in entries:
-        line_no = entry["line_no"]
-        text = entry["text"]
-        print(f"\n--- Line {line_no}: \"{text[:60]}{'...' if len(text) > 60 else ''}\" ---")
-
-        for i in range(1, args.repeat + 1):
-            run_idx += 1
-            fname = f"line{line_no:02d}_run{i:03d}.wav"
-            wav_path = run_dir / fname
-
-            print(f"  [{run_idx}/{total_runs}] Run {i:3d}/{args.repeat} ... ", end="", flush=True)
-            chunks, first_sec, total_sec, err, actual_sr = await synthesize_streaming(
-                ws_uri, text, args.speaker, timeout=args.timeout
-            )
-
-            if err:
-                print(f"ERROR: {err}")
-                results.append({"file": fname, "line": line_no, "run": i, "status": "error", "error": err})
-                continue
-
-            if not chunks:
-                print(f"WARNING: no audio chunks received")
-                results.append({"file": fname, "line": line_no, "run": i, "status": "no_audio"})
-                continue
-
-            audio = np.concatenate(chunks)
-            duration = audio.size / actual_sr
-            wav_path.write_bytes(make_wav(audio, sr=actual_sr))
-
-            ttft_ms = f"{first_sec*1000:.0f}ms" if first_sec else "N/A"
-            print(f"OK  dur={duration:.2f}s  ttft={ttft_ms}  total={total_sec*1000:.0f}ms  chunks={len(chunks)}")
-            results.append({
-                "file": fname,
-                "line": line_no,
-                "run": i,
-                "status": "ok",
-                "duration_s": round(duration, 2),
-                "ttft_ms": round(first_sec * 1000, 0) if first_sec else None,
-                "total_ms": round(total_sec * 1000, 0),
-                "chunks": len(chunks),
-            })
-
-    # Save summary
-    summary_path = run_dir / "_summary.json"
-    summary = {
+    summary: dict = {
         "timestamp": timestamp,
+        "endpoint": endpoint,
+        "transport": client.resolved_transport,
         "speaker": args.speaker,
-        "input_mode": "token",
-        "repeat": args.repeat,
-        "lines": [e["line_no"] for e in entries],
-        "text_preview": {str(e["line_no"]): e["text"][:100] for e in entries},
-        "total_runs": total_runs,
-        "ok": sum(1 for r in results if r["status"] == "ok"),
-        "error": sum(1 for r in results if r["status"] == "error"),
-        "no_audio": sum(1 for r in results if r["status"] == "no_audio"),
-        "results": results,
+        "input_mode": args.input_mode,
+        "group_policy": args.group_policy,
+        "datasets": {},
     }
-    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    grand_ok = grand_total = 0
 
-    print(f"\n{'='*70}")
-    print(f"Done! {summary['ok']}/{total_runs} successful")
-    if summary["error"]:
-        print(f"  Errors: {summary['error']}")
-    if summary["no_audio"]:
-        print(f"  No audio: {summary['no_audio']}")
-    print(f"\nWAV files: {run_dir}/")
-    print(f"Summary:   {summary_path}")
-    print(f"Reference: {ref_path}")
-    print(f"{'='*70}")
+    for dataset in datasets:
+        conf = DATASET_CONFIG[dataset]
+        repeat = args.repeat if args.repeat > 0 else conf["repeat"]
+        cases = parse_cases(BADCASE_DIR / f"{dataset}.txt", conf["split"])
+        if args.max_cases > 0:
+            cases = cases[: args.max_cases]
 
+        ds_dir = run_dir / dataset
+        ds_dir.mkdir(parents=True, exist_ok=True)
+        with open(ds_dir / "_reference.txt", "w", encoding="utf-8") as f:
+            for c in cases:
+                f.write(f"[case {c['case_no']:03d}] {c['text']}\n")
 
-def main():
-    asyncio.run(async_main())
+        print(f"\n### dataset={dataset}  ({conf['note']})  cases={len(cases)}  repeat={repeat}")
+        results: list[dict] = []
+        durations_by_case: dict[int, list[float]] = {}
+
+        for c in cases:
+            case_no, text = c["case_no"], c["text"]
+            preview = text[:48] + ("…" if len(text) > 48 else "")
+            for r in range(1, repeat + 1):
+                fname = f"case{case_no:03d}_run{r:03d}.wav"
+                sid = f"badcase-{dataset}-{case_no:03d}-{r:03d}-{int(time.time()*1000)}"
+                res = synthesize_once(
+                    client, text,
+                    speaker=args.speaker, input_mode=args.input_mode,
+                    group_policy=args.group_policy, session_id=sid,
+                )
+                rec = {
+                    "file": f"{dataset}/{fname}", "case": case_no, "run": r,
+                    "status": res["status"], "duration_s": res["duration_s"],
+                    "ttft_ms": res["ttft_ms"], "total_ms": res["total_ms"],
+                    "chunks": res["chunks"], "text_len": len(text),
+                }
+                if res["status"] == "ok":
+                    (ds_dir / fname).write_bytes(make_wav(res["samples"], sr=res["sample_rate"]))
+                    durations_by_case.setdefault(case_no, []).append(res["duration_s"])
+                    print(f"  [{dataset} c{case_no:03d} r{r:03d}] OK  dur={res['duration_s']:6.2f}s "
+                          f"ttft={res['ttft_ms']}ms chunks={res['chunks']}  \"{preview}\"")
+                else:
+                    rec["error"] = res["error"]
+                    print(f"  [{dataset} c{case_no:03d} r{r:03d}] {res['status'].upper()}: {res['error']}")
+                results.append(rec)
+                grand_total += 1
+                grand_ok += 1 if res["status"] == "ok" else 0
+
+        # Per-case duration stats + simple hallucination flag (a run far longer
+        # than the case's own median — the 10s→30s blow-up signature).
+        case_stats = {}
+        for case_no, durs in durations_by_case.items():
+            med = statistics.median(durs)
+            outliers = [round(d, 2) for d in durs if med > 0 and d > med * 1.5]
+            case_stats[str(case_no)] = {
+                "runs": len(durs),
+                "min_s": round(min(durs), 2),
+                "median_s": round(med, 2),
+                "max_s": round(max(durs), 2),
+                "suspected_hallucination_runs": outliers,
+            }
+            if outliers:
+                print(f"  ⚠ case {case_no:03d}: median={med:.2f}s but runs {outliers} "
+                      f"(>1.5x median) — possible hallucination")
+
+        summary["datasets"][dataset] = {
+            "note": conf["note"], "split": conf["split"], "repeat": repeat,
+            "cases": len(cases), "case_stats": case_stats, "results": results,
+        }
+
+    summary["grand_total"] = grand_total
+    summary["grand_ok"] = grand_ok
+    (run_dir / "_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print("\n" + "=" * 72)
+    print(f"Done: {grand_ok}/{grand_total} OK")
+    print(f"Audio + summary: {run_dir}")
+    print("=" * 72)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
