@@ -189,8 +189,10 @@ class Capabilities:
 class DetectedTransport:
     """Result of transport auto-detection."""
     transport: str = ""
-    endpoint: str = ""
+    requested_endpoint: str = ""
+    resolved_endpoint: str = ""
     model_name: str = ""
+    model_version: str = ""
     probe_report: list[dict[str, Any]] = field(default_factory=list)
 
 
