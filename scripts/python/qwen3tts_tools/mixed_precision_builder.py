@@ -282,7 +282,11 @@ def build_fused_mixed_precision(
     trt_logger = trt.Logger(trt.Logger.WARNING)
 
     builder = trt.Builder(trt_logger)
-    network_flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    # EXPLICIT_BATCH was removed in TRT 10+ (always enabled); use 0 as default
+    if hasattr(trt.NetworkDefinitionCreationFlag, "EXPLICIT_BATCH"):
+        network_flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    else:
+        network_flags = 0
     network = builder.create_network(network_flags)
     parser = trt.OnnxParser(network, trt_logger)
 

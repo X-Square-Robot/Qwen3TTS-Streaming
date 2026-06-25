@@ -57,20 +57,20 @@ C2W_SLIDING_WINDOW = 72
 CP_NUM_STAGES = 15
 
 
-def main():
-    if len(sys.argv) < 6:
-        print(
-            "Usage: trt_fused_talk_c2w_profiles.py H KV_HEADS HEAD_DIM NUM_LAYERS MAX_BATCH "
-            "[MAX_INPUT_LEN] [MAX_SEQ_LEN] [NUM_C2W_DECODER_LAYERS] [CP_NUM_STAGES]",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    H, KV, HD, NL, Bmax = sys.argv[1:6]
-    max_in = sys.argv[6] if len(sys.argv) > 6 else "128"
-    max_seq = sys.argv[7] if len(sys.argv) > 7 else "512"
-    n_c2w = int(sys.argv[8]) if len(sys.argv) > 8 else 8
-    n_cp = int(sys.argv[9]) if len(sys.argv) > 9 else CP_NUM_STAGES
+def compute_fused_profiles(
+    H, KV, HD, NL, Bmax,
+    max_in="128", max_seq="512", n_c2w=8, n_cp=CP_NUM_STAGES,
+):
+    """Return (min, opt, max) trtexec shape strings for talker_code2wav_fused.
+
+    Single source of truth for the fused-engine optimization profile.  Both the
+    CLI ``main()`` below and the Python build pipeline
+    (``qwen3tts_tools.trtexec._compute_fused_shapes``) call this, so the shape
+    logic is never duplicated (and never drifts) across implementations.
+    """
     nl = int(NL)
+    n_c2w = int(n_c2w)
+    n_cp = int(n_cp)
     Bopt = "1"
     opt_spast = "128"
     V = VOCAB_SIZE
@@ -122,14 +122,34 @@ def main():
         f"c2w_past_kv:{Bmax}x{n_c2w * 2}x{C2W_KV_HEADS}x{C2W_SLIDING_WINDOW - 1}x{C2W_HEAD_DIM}",
     ]
 
-    for name, smin, sopt, smax in c2w_conv_transconv_specs(Bmax):
+    for name, smin, sopt, smax in c2w_conv_transconv_specs(str(Bmax)):
         parts_min.append(f"c2w_{name}:{smin}")
         parts_opt.append(f"c2w_{name}:{sopt}")
         parts_max.append(f"c2w_{name}:{smax}")
 
-    print(",".join(parts_min))
-    print(",".join(parts_opt))
-    print(",".join(parts_max))
+    return ",".join(parts_min), ",".join(parts_opt), ",".join(parts_max)
+
+
+def main():
+    if len(sys.argv) < 6:
+        print(
+            "Usage: trt_fused_talk_c2w_profiles.py H KV_HEADS HEAD_DIM NUM_LAYERS MAX_BATCH "
+            "[MAX_INPUT_LEN] [MAX_SEQ_LEN] [NUM_C2W_DECODER_LAYERS] [CP_NUM_STAGES]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    H, KV, HD, NL, Bmax = sys.argv[1:6]
+    max_in = sys.argv[6] if len(sys.argv) > 6 else "128"
+    max_seq = sys.argv[7] if len(sys.argv) > 7 else "512"
+    n_c2w = int(sys.argv[8]) if len(sys.argv) > 8 else 8
+    n_cp = int(sys.argv[9]) if len(sys.argv) > 9 else CP_NUM_STAGES
+
+    smin, sopt, smax = compute_fused_profiles(
+        H, KV, HD, NL, Bmax, max_in, max_seq, n_c2w, n_cp
+    )
+    print(smin)
+    print(sopt)
+    print(smax)
 
 
 if __name__ == "__main__":

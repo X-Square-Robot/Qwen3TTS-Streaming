@@ -346,12 +346,22 @@ def _run_docker(
     gpu_device: str = "auto",
     ngc_image: str = "",
 ) -> int:
-    """Run trtexec inside NGC Docker container."""
+    """Run trtexec inside an NGC Docker container.
+
+    Mirrors ``scripts/bash/lib/trtexec_runner.sh::_trtexec_run_docker``:
+    a single bind mount of the model directory at ``/mnt/model`` with the
+    ``--onnx`` / ``--saveEngine`` paths rewritten to that mount.  trtexec is
+    invoked by absolute path because it is *not* on ``PATH`` in NGC
+    tritonserver images (it lives under ``/usr/src/tensorrt/bin``); override
+    with the ``TRTEXEC`` env var if needed.
+    """
     image = ngc_image or _resolve_ngc_image()
     repo_root = _repo_root()
 
-    onnx_dir = str(Path(onnx).parent)
-    engine_dir = str(Path(engine).parent)
+    onnx_path = Path(onnx)
+    engine_path = Path(engine)
+    onnx_dir = onnx_path.parent
+    engine_dir = engine_path.parent
 
     # Detect GPU args
     try:
@@ -359,27 +369,42 @@ def _run_docker(
     except RuntimeError:
         gpu_args = ["--gpus", "all"]
 
-    # Check for bundle root
     bundle_root = os.environ.get("QWEN3_IN_BUNDLE_ROOT", "")
 
-    docker_args = [
-        "docker", "run", "--rm",
-    ] + gpu_args + [
-        "-v", f"{onnx_dir}:/models/onnx",
-        "-v", f"{engine_dir}:/models/output",
+    # trtexec is not on PATH in NGC tritonserver images.
+    trtexec_bin = os.environ.get("TRTEXEC", "/usr/src/tensorrt/bin/trtexec")
+
+    # Rewrite the onnx/engine paths to the container mount(s).  The ONNX (with
+    # its external-data files) and the output engine normally share one
+    # directory → a single /mnt/model mount, matching the bash runner.  Fall
+    # back to two mounts only if they somehow differ.
+    if onnx_dir == engine_dir:
+        mount_args = ["-v", f"{onnx_dir}:/mnt/model"]
+        onnx_in = f"/mnt/model/{onnx_path.name}"
+        engine_in = f"/mnt/model/{engine_path.name}"
+    else:
+        mount_args = [
+            "-v", f"{onnx_dir}:/mnt/onnx",
+            "-v", f"{engine_dir}:/mnt/output",
+        ]
+        onnx_in = f"/mnt/onnx/{onnx_path.name}"
+        engine_in = f"/mnt/output/{engine_path.name}"
+
+    rewritten_args = [
+        f"--onnx={onnx_in}" if a.startswith("--onnx=")
+        else f"--saveEngine={engine_in}" if a.startswith("--saveEngine=")
+        else a
+        for a in trtexec_args
     ]
 
+    docker_args = ["docker", "run", "--rm"] + gpu_args + mount_args
     if bundle_root:
         docker_args += ["-v", f"{bundle_root}:/bundle_root"]
     else:
         docker_args += ["-v", f"{repo_root}/scripts:/scripts"]
+    docker_args += [image, trtexec_bin] + rewritten_args
 
-    docker_args += [
-        image,
-        "trtexec",
-    ] + trtexec_args
-
-    logger.info("docker run: %s", " ".join(docker_args))
+    logger.info("docker run: %s", " ".join(docker_args[:20]) + ("..." if len(docker_args) > 20 else ""))
     return subprocess.call(docker_args)
 
 
@@ -580,7 +605,7 @@ def build_talker_code2wav_fused(
     engine_path = variant_dir / "talker_code2wav_fused.engine"
 
     if is_mixed:
-        # Mixed-precision path: use Python builder
+        # Mixed-precision path: use trtexec with --layerPrecisions
         result = _build_fused_mixed_precision(
             onnx_path, engine_path,
             backbone_precision=backbone_precision,
@@ -592,6 +617,9 @@ def build_talker_code2wav_fused(
             fused_max=fused_max,
             dtype=dtype,
             device=device,
+            variant_dir=variant_dir,
+            runner=runner,
+            ngc_image=ngc_image,
         )
     else:
         # Uniform-precision path: use trtexec (backward compatible)
@@ -673,28 +701,148 @@ def _build_fused_mixed_precision(
     fused_max: str = "",
     dtype: str = "bf16",
     device: str = "auto",
+    variant_dir: Path | None = None,
+    runner: str = "auto",
+    ngc_image: str = "",
 ) -> int:
-    """Build talker_code2wav_fused.engine using Python TRT builder (mixed precision)."""
-    try:
-        from qwen3tts_tools.mixed_precision_builder import build_fused_mixed_precision
-    except ImportError:
-        logger.error(
-            "mixed_precision_builder module not available; "
-            "cannot build mixed-precision engine"
-        )
-        return 1
+    """Build talker_code2wav_fused.engine using trtexec with --layerPrecisions.
 
-    return build_fused_mixed_precision(
-        onnx_path=onnx_path,
-        engine_path=engine_path,
-        backbone_precision=backbone_precision,
-        cp_precision=cp_precision,
-        code2wav_precision=code2wav_precision,
-        triton_io_float_dtype=triton_io_float_dtype,
+    Uses trtexec's ``--layerPrecisions`` and ``--precisionConstraints=obey``
+    to enforce per-submodule compute precision.  This avoids depending on the
+    local TensorRT Python API (which changed significantly in TRT 10+/11+).
+
+    Strategy:
+      1. Set the *global* builder flag to the most common precision among
+         backbone / cp / code2wav (the "majority" precision).
+      2. Enumerate ONNX node names whose prefix belongs to a submodule whose
+         precision differs from the global default.
+      3. Pass those layer names via ``--layerPrecisions`` to override.
+
+    Args:
+        onnx_path: Path to talker_code2wav_fused.onnx.
+        engine_path: Output path for the TensorRT engine.
+        backbone_precision: Compute precision for backbone sub-graph.
+        cp_precision: Compute precision for code_predictor sub-graph.
+        code2wav_precision: Compute precision for code2wav sub-graph.
+        triton_io_float_dtype: External float I/O dtype.
+        fused_min/opt/max: Shape profile strings.
+        dtype: Global engine dtype (used as fallback).
+        device: GPU device for build.
+        variant_dir: Path to the variant directory (for manifest I/O formats).
+        runner: trtexec runner mode.
+        ngc_image: Override NGC container image.
+    """
+    from qwen3tts_tools.mixed_precision_builder import is_mixed_precision
+
+    # Normalize
+    backbone_precision = _normalize_dtype(backbone_precision)
+    cp_precision = _normalize_dtype(cp_precision)
+    code2wav_precision = _normalize_dtype(code2wav_precision)
+    triton_io_float_dtype = _normalize_dtype(triton_io_float_dtype)
+
+    if not is_mixed_precision(backbone_precision, cp_precision, code2wav_precision):
+        # Not actually mixed — fall through to uniform path
+        logger.info("Not mixed precision; delegating to uniform trtexec build")
+        return _build_fused_trtexec(
+            variant_dir or onnx_path.parent,
+            onnx_path, engine_path,
+            dtype=dtype,
+            triton_io_float_dtype=triton_io_float_dtype,
+            runner=runner,
+            fused_min=fused_min,
+            fused_opt=fused_opt,
+            fused_max=fused_max,
+            device=device,
+            ngc_image=ngc_image,
+        )
+
+    # Use the backbone precision as the *global* builder precision.  The
+    # backbone is by far the largest sub-graph (tens of thousands of nodes),
+    # so making it the global default means we only ever have to *override*
+    # the two smaller sub-graphs (cp / code2wav) when they differ.
+    global_precision = backbone_precision
+    logger.info(
+        "Mixed-precision trtexec build: backbone=%s, cp=%s, code2wav=%s, "
+        "global=%s (backbone), io=%s",
+        backbone_precision, cp_precision, code2wav_precision,
+        global_precision, triton_io_float_dtype,
+    )
+
+    # Express per-submodule overrides as *wildcard* patterns instead of
+    # enumerating every layer name.  trtexec's --layerPrecisions accepts one
+    # '*' wildcard per entry and matches against TRT layer names (which keep
+    # their ONNX node-name prefix after parsing).  This keeps the argument a
+    # few dozen bytes long; enumerating all layers produced a >170 KB string
+    # that overflowed the kernel's per-argument limit (MAX_ARG_STRLEN, 128 KB)
+    # and made execve fail regardless of whether it was passed inline or via a
+    # script file.  Each sub-graph maps to a unique layer-name prefix
+    # (see _PREFIX_RULES in mixed_precision_builder).
+    _SUBMODULE_WILDCARDS: dict[str, list[str]] = {
+        "cp": ["/talker_fused/cp/*"],
+        "code2wav": ["/code2wav/*"],
+    }
+
+    layer_prec_parts: list[str] = []
+    for category, prec in (("cp", cp_precision), ("code2wav", code2wav_precision)):
+        if prec == global_precision:
+            continue
+        patterns = _SUBMODULE_WILDCARDS.get(category, [])
+        for pat in patterns:
+            layer_prec_parts.append(f"{pat}:{prec}")
+            logger.info("  %s override: %s → %s", category, pat, prec)
+
+    if not layer_prec_parts:
+        logger.warning(
+            "No sub-graph differs from the backbone precision — "
+            "building as uniform %s",
+            global_precision,
+        )
+        return _build_fused_trtexec(
+            variant_dir or onnx_path.parent,
+            onnx_path, engine_path,
+            dtype=global_precision,
+            triton_io_float_dtype=triton_io_float_dtype,
+            runner=runner,
+            fused_min=fused_min,
+            fused_opt=fused_opt,
+            fused_max=fused_max,
+            device=device,
+            ngc_image=ngc_image,
+        )
+
+    layer_precisions_str = ",".join(layer_prec_parts)
+    logger.info(
+        "Total --layerPrecisions entries: %d (%d chars)",
+        len(layer_prec_parts), len(layer_precisions_str),
+    )
+
+    # Resolve I/O formats
+    input_io, output_io, prec_override = "", "", ""
+    if variant_dir:
+        input_io, output_io, prec_override = _resolve_fused_io_formats(
+            variant_dir, global_precision, triton_io_float_dtype,
+        )
+
+    # Build extra_args for trtexec
+    extra_args: list[str] = [
+        "--precisionConstraints=obey",
+        f"--layerPrecisions={layer_precisions_str}",
+    ]
+
+    return run_trtexec(
+        onnx=str(onnx_path),
+        engine=str(engine_path),
+        dtype=global_precision,
+        runner=runner,
         min_shapes=fused_min,
         opt_shapes=fused_opt,
         max_shapes=fused_max,
+        input_io_formats=input_io,
+        output_io_formats=output_io,
+        mem_pool_size="workspace:8192",
+        extra_args=extra_args,
         gpu_device=device,
+        ngc_image=ngc_image,
     )
 
 
@@ -783,110 +931,24 @@ def _compute_fused_shapes(
 
     Uses the same packed KV format as trt_fused_talk_c2w_profiles.py.
     """
-    # Import shape generation logic
+    # Delegate to the canonical profile generator in
+    # scripts/python/trt_fused_talk_c2w_profiles.py — the single source of
+    # truth also used by the bash build pipeline (build_engines.sh).  Keeping
+    # one implementation prevents the optimization profile from drifting
+    # between the two code paths (a divergent copy here previously emitted a
+    # 3-D attention_bias opt shape, which trtexec rejected).
     sys_path = str(_repo_root() / "scripts" / "python")
     import sys
     if sys_path not in sys.path:
         sys.path.insert(0, sys_path)
 
-    try:
-        from trt_fused_talk_c2w_profiles import (
-            LOGITS_TOPK,
-            VOCAB_SIZE,
-            C2W_KV_HEADS,
-            C2W_HEAD_DIM,
-            C2W_SLIDING_WINDOW,
-            c2w_conv_transconv_specs,
-        )
-    except ImportError:
-        # Inline constants if module not importable
-        LOGITS_TOPK = 50
-        VOCAB_SIZE = 3072
-        C2W_KV_HEADS = 16
-        C2W_HEAD_DIM = 64
-        C2W_SLIDING_WINDOW = 72
-        n_cp = n_cp or 15
-        n_c2w = n_c2w or 8
+    from trt_fused_talk_c2w_profiles import compute_fused_profiles
 
-    V = VOCAB_SIZE
-    K = LOGITS_TOPK
-    Bmax = str(max_batch)
-    talker_kv_dim1 = num_layers * 2
-    opt_spast = 128
-
-    parts_min = [
-        f"input_embeds:1x1x{H}",
-        f"position_ids:1x3x1x1",
-        "attention_bias:1x1x1x1",
-        f"token_counts:1x{V}",
-        f"gumbel_noise:1x{K}",
-        f"cp_gumbel_noise:1x{n_cp}x{K}",
-        "temperature:1x1",
-        "penalty:1x1",
-        "cache_position:1x1",
-        "c2w_attention_bias:1x1x1x2",
-        f"talker_past_kv:1x{talker_kv_dim1}x{kv_heads}x0x{head_dim}",
-        f"c2w_past_kv:1x{n_c2w * 2}x{C2W_KV_HEADS}x1x{C2W_HEAD_DIM}",
-    ]
-    parts_opt = [
-        f"input_embeds:1x1x{H}",
-        f"position_ids:1x3x1x1",
-        f"attention_bias:1x1x{opt_spast + 1}",
-        f"token_counts:1x{V}",
-        f"gumbel_noise:1x{K}",
-        f"cp_gumbel_noise:1x{n_cp}x{K}",
-        "temperature:1x1",
-        "penalty:1x1",
-        "cache_position:1x1",
-        "c2w_attention_bias:1x1x1x5",
-        f"talker_past_kv:1x{talker_kv_dim1}x{kv_heads}x{opt_spast}x{head_dim}",
-        f"c2w_past_kv:1x{n_c2w * 2}x{C2W_KV_HEADS}x4x{C2W_HEAD_DIM}",
-    ]
-    parts_max = [
-        f"input_embeds:{Bmax}x{max_input}x{H}",
-        f"position_ids:{Bmax}x3x{max_input}x1",
-        f"attention_bias:{Bmax}x1x{max_input}x{max_seq + max_input}",
-        f"token_counts:{Bmax}x{V}",
-        f"gumbel_noise:{Bmax}x{K}",
-        f"cp_gumbel_noise:{Bmax}x{n_cp}x{K}",
-        f"temperature:{Bmax}x1",
-        f"penalty:{Bmax}x1",
-        f"cache_position:{Bmax}x1",
-        f"c2w_attention_bias:{Bmax}x1x1x{C2W_SLIDING_WINDOW}",
-        f"talker_past_kv:{Bmax}x{talker_kv_dim1}x{kv_heads}x{max_seq}x{head_dim}",
-        f"c2w_past_kv:{Bmax}x{n_c2w * 2}x{C2W_KV_HEADS}x{C2W_SLIDING_WINDOW - 1}x{C2W_HEAD_DIM}",
-    ]
-
-    # Add conv/transconv specs
-    try:
-        for name, smin, sopt, smax in c2w_conv_transconv_specs(Bmax):
-            parts_min.append(f"c2w_{name}:{smin}")
-            parts_opt.append(f"c2w_{name}:{sopt}")
-            parts_max.append(f"c2w_{name}:{smax}")
-    except NameError:
-        # Inline if c2w_conv_transconv_specs not available
-        conv_specs = [
-            ("conv_state_0", "1x512x2"), ("conv_state_1", "1x1024x6"),
-            ("conv_state_2", "1x1024x6"), ("conv_state_3", "1x1024x6"),
-            ("conv_state_4", "1x768x6"), ("conv_state_5", "1x768x18"),
-            ("conv_state_6", "1x768x54"), ("conv_state_7", "1x384x6"),
-            ("conv_state_8", "1x384x18"), ("conv_state_9", "1x384x54"),
-            ("conv_state_10", "1x192x6"), ("conv_state_11", "1x192x18"),
-            ("conv_state_12", "1x192x54"), ("conv_state_13", "1x96x6"),
-            ("conv_state_14", "1x96x18"), ("conv_state_15", "1x96x54"),
-            ("conv_state_16", "1x96x6"),
-        ]
-        tc_specs = [
-            ("transconv_overlap_0", "1x768x8"), ("transconv_overlap_1", "1x384x5"),
-            ("transconv_overlap_2", "1x192x4"), ("transconv_overlap_3", "1x96x3"),
-        ]
-        for name, s in conv_specs + tc_specs:
-            rest = s[2:]
-            parts_min.append(f"c2w_{name}:{s}")
-            parts_opt.append(f"c2w_{name}:{s}")
-            parts_max.append(f"c2w_{name}:{Bmax}x{rest}")
-
-    return ",".join(parts_min), ",".join(parts_opt), ",".join(parts_max)
+    return compute_fused_profiles(
+        H, kv_heads, head_dim, num_layers, max_batch,
+        max_in=max_input, max_seq=max_seq,
+        n_c2w=n_c2w or 8, n_cp=n_cp or 15,
+    )
 
 
 def _resolve_fused_io_formats(
