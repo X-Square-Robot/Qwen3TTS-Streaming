@@ -431,18 +431,18 @@ build_forward_args() {
     if [ -n "$VARIANT" ] && [[ "$VARIANT" != all* ]]; then
         BUILD_ARGS+=(--variant "$VARIANT")
     fi
-    if [ -n "$TARGET_DRIVER" ]; then BUILD_ARGS+=(--target-driver "$TARGET_DRIVER"); fi
-    if [ -n "$TARGET_PROFILE" ]; then BUILD_ARGS+=(--target-profile "$TARGET_PROFILE"); fi
-    if [ -n "$effective_build_device" ]; then BUILD_ARGS+=(--device "$effective_build_device"); fi
-    if [ -n "$MAX_BATCH_SIZE" ]; then BUILD_ARGS+=(--max-batch-size "$MAX_BATCH_SIZE"); fi
-    if [ -n "$MAX_INPUT_LEN" ]; then BUILD_ARGS+=(--max-input-len "$MAX_INPUT_LEN"); fi
-    if [ -n "$MAX_SEQ_LEN" ]; then BUILD_ARGS+=(--max-seq-len "$MAX_SEQ_LEN"); fi
-    if [ -n "$BUILD_IMAGE" ]; then BUILD_ARGS+=(--image "$BUILD_IMAGE"); fi
-    if [ -n "$ENGINE_DTYPE" ]; then BUILD_ARGS+=(--dtype "$ENGINE_DTYPE"); fi
-    if [ -n "$TRITON_IO_FLOAT_DTYPE" ]; then BUILD_ARGS+=(--triton-io-float-dtype "$TRITON_IO_FLOAT_DTYPE"); fi
-    if [ -n "$BUNDLE_OUT" ]; then BUILD_ARGS+=(--out "$BUNDLE_OUT"); fi
-    if [ -n "$REMOTE_HOST" ]; then BUILD_ARGS+=(--remote-host "$REMOTE_HOST"); fi
-    if [ -n "$REMOTE_WORKDIR" ]; then BUILD_ARGS+=(--remote-workdir "$REMOTE_WORKDIR"); fi
+    append_optarg BUILD_ARGS --target-driver "$TARGET_DRIVER"
+    append_optarg BUILD_ARGS --target-profile "$TARGET_PROFILE"
+    append_optarg BUILD_ARGS --device "$effective_build_device"
+    append_optarg BUILD_ARGS --max-batch-size "$MAX_BATCH_SIZE"
+    append_optarg BUILD_ARGS --max-input-len "$MAX_INPUT_LEN"
+    append_optarg BUILD_ARGS --max-seq-len "$MAX_SEQ_LEN"
+    append_optarg BUILD_ARGS --image "$BUILD_IMAGE"
+    append_optarg BUILD_ARGS --dtype "$ENGINE_DTYPE"
+    append_optarg BUILD_ARGS --triton-io-float-dtype "$TRITON_IO_FLOAT_DTYPE"
+    append_optarg BUILD_ARGS --out "$BUNDLE_OUT"
+    append_optarg BUILD_ARGS --remote-host "$REMOTE_HOST"
+    append_optarg BUILD_ARGS --remote-workdir "$REMOTE_WORKDIR"
     if $DRY_RUN; then BUILD_ARGS+=(--dry-run); fi
 
     # Phase C args (forwarded to deploy.sh)
@@ -450,19 +450,19 @@ build_forward_args() {
     if [ -n "$VARIANT" ] && [[ "$VARIANT" != all* ]]; then
         DEPLOY_ARGS+=(--variant "$VARIANT")
     fi
-    if [ -n "$GATEWAY_MODE" ]; then DEPLOY_ARGS+=(--gateway "$GATEWAY_MODE"); fi
-    if [ -n "$ENGINE_MODE" ]; then DEPLOY_ARGS+=(--engine-mode "$ENGINE_MODE"); fi
-    if [ -n "$effective_runtime_device" ]; then DEPLOY_ARGS+=(--device "$effective_runtime_device"); fi
-    if [ -n "$RUNTIME_MAX_BATCH_SIZE" ]; then DEPLOY_ARGS+=(--max-batch "$RUNTIME_MAX_BATCH_SIZE"); fi
-    if [ -n "$RUNTIME_MAX_SEQ_LEN" ]; then DEPLOY_ARGS+=(--max-seq-len "$RUNTIME_MAX_SEQ_LEN"); fi
+    append_optarg DEPLOY_ARGS --gateway "$GATEWAY_MODE"
+    append_optarg DEPLOY_ARGS --engine-mode "$ENGINE_MODE"
+    append_optarg DEPLOY_ARGS --device "$effective_runtime_device"
+    append_optarg DEPLOY_ARGS --max-batch "$RUNTIME_MAX_BATCH_SIZE"
+    append_optarg DEPLOY_ARGS --max-seq-len "$RUNTIME_MAX_SEQ_LEN"
     if $REBUILD_IMAGE; then DEPLOY_ARGS+=(--build); fi
     if $ENGINE_DOCKER_IMAGE_EXPLICIT; then
-        if [ -n "$ENGINE_DOCKER_IMAGE" ]; then DEPLOY_ARGS+=(--engine-image "$ENGINE_DOCKER_IMAGE"); fi
+        append_optarg DEPLOY_ARGS --engine-image "$ENGINE_DOCKER_IMAGE"
     fi
-    if [ -n "$ENGINE_PORT" ]; then DEPLOY_ARGS+=(--port "$ENGINE_PORT"); fi
-    if [ -n "$MODEL_VERSION" ]; then DEPLOY_ARGS+=(--model-version "$MODEL_VERSION"); fi
+    append_optarg DEPLOY_ARGS --port "$ENGINE_PORT"
+    append_optarg DEPLOY_ARGS --model-version "$MODEL_VERSION"
     if $BUILD_IMAGE_EXPLICIT; then
-        if [ -n "$BUILD_IMAGE" ]; then DEPLOY_ARGS+=(--image "$BUILD_IMAGE"); fi
+        append_optarg DEPLOY_ARGS --image "$BUILD_IMAGE"
     fi
     if [ -n "$GRPC_PORT" ]; then
         export TRITON_GRPC_PORT="$GRPC_PORT"

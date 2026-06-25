@@ -39,6 +39,19 @@ retry() {
 }
 
 # ---------------------------------------------------------------------------
+#  append_optarg <array_name> <flag> <value>
+#  Appends "<flag> <value>" to the named array only when <value> is non-empty.
+#  Replaces rows of `if [ -n "$x" ]; then arr+=(--flag "$x"); fi` with a single
+#  declarative call.  Always returns 0 so it is safe under `set -e` when called
+#  as a standalone statement (the empty-value case must not look like failure).
+# ---------------------------------------------------------------------------
+append_optarg() {
+    local -n _arr="$1"
+    [ -n "${3:-}" ] && _arr+=("$2" "$3")
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 #  require_cmd <command>
 #  Exits with error if the command is not available.
 # ---------------------------------------------------------------------------
