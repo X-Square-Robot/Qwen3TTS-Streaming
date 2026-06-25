@@ -60,6 +60,66 @@ def trtexec_precision_args(engine_dtype: str) -> List[str]:
     return []
 
 
+# Per-submodule layer-name prefixes in talker_code2wav_fused.onnx.  Each maps to
+# a single trtexec --layerPrecisions wildcard (one '*' allowed per entry).
+_SUBMODULE_WILDCARDS = {
+    "cp": "/talker_fused/cp/*",
+    "code2wav": "/code2wav/*",
+}
+
+
+def _submodule_precisions(manifest: Dict[str, Any]) -> Dict[str, str]:
+    """Resolve normalized per-submodule precisions from the manifest.
+
+    Falls back to the global engine_dtype when a submodule precision is absent
+    (i.e. a uniform-precision engine).
+    """
+    global_dtype = _normalize_engine_dtype(str(manifest.get("engine_dtype", "bf16")))
+    out = {}
+    for key in ("backbone", "cp", "code2wav"):
+        raw = manifest.get(f"{key}_precision")
+        out[key] = _normalize_engine_dtype(str(raw)) if raw else global_dtype
+    return out
+
+
+def fused_precision_args(manifest: Dict[str, Any]) -> List[str]:
+    """trtexec global precision flags = union of all submodule precisions.
+
+    Enabling every precision present lets ``--precisionConstraints=obey`` honor
+    the per-layer overrides (fp32 is always available, so it needs no flag).
+    """
+    precs = set(_submodule_precisions(manifest).values())
+    flags: List[str] = []
+    if "bf16" in precs:
+        flags.append("--bf16")
+    if "fp16" in precs:
+        flags.append("--fp16")
+    if "fp8" in precs:
+        flags.append("--fp8")
+    return flags
+
+
+def fused_layer_precisions(manifest: Dict[str, Any]) -> str:
+    """Return the trtexec --layerPrecisions value for a mixed-precision build.
+
+    The backbone (the bulk of the graph) is treated as the global precision and
+    floats to it via the enabled flags; only the well-prefixed cp / code2wav
+    sub-graphs are pinned via wildcards when they differ.  Returns "" for a
+    uniform engine (no override needed).
+
+    Note: this relies on the backbone being the high-speed default precision
+    (e.g. bf16); pinning the backbone itself is not expressible as a single
+    wildcard because it is the catch-all prefix.
+    """
+    precs = _submodule_precisions(manifest)
+    backbone = precs["backbone"]
+    parts: List[str] = []
+    for key in ("cp", "code2wav"):
+        if precs[key] != backbone:
+            parts.append(f"{_SUBMODULE_WILDCARDS[key]}:{precs[key]}")
+    return ",".join(parts)
+
+
 def fused_input_output_io_format_strings(manifest: Dict[str, Any]) -> Tuple[str, str]:
     """
     Return (input_io_formats, output_io_formats) comma-separated for trtexec.
@@ -131,16 +191,18 @@ def main() -> None:
     )
     p.add_argument(
         "--emit",
-        choices=("input", "output", "prec", "all"),
+        choices=("input", "output", "prec", "layer-precisions", "all"),
         default="all",
-        help="Print one value or all three lines (input, output, prec argv)",
+        help="Print one value, or all lines (input, output, prec, layer-precisions)",
     )
     args = p.parse_args()
     m = load_manifest(args.manifest)
 
     inp, out = fused_input_output_io_format_strings(m)
-    prec_list = trtexec_precision_args(str(m.get("engine_dtype", "bf16")))
-    prec_str = " ".join(prec_list) if prec_list else ""
+    # Global precision flags = union of submodule precisions (mixed-aware);
+    # falls back to a single flag for a uniform engine.
+    prec_str = " ".join(fused_precision_args(m))
+    layer_prec = fused_layer_precisions(m)
 
     if args.emit == "input":
         print(inp, end="")
@@ -148,10 +210,13 @@ def main() -> None:
         print(out, end="")
     elif args.emit == "prec":
         print(prec_str, end="")
+    elif args.emit == "layer-precisions":
+        print(layer_prec, end="")
     else:
         print(inp)
         print(out)
         print(prec_str)
+        print(layer_prec)
 
 
 if __name__ == "__main__":
