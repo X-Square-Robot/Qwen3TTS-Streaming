@@ -88,7 +88,7 @@ def run_deploy(args: argparse.Namespace) -> int:
             print(f"[DRY RUN] Would start standalone engine on port {port}")
             return 0
         print(f"Starting standalone engine on port {port}...")
-        return mgr.start(
+        status = mgr.start(
             variant=variant,
             port=port,
             ws_port=ws_port,
@@ -97,6 +97,25 @@ def run_deploy(args: argparse.Namespace) -> int:
             max_sessions=max_sessions,
             foreground=foreground,
         )
+        # mgr.start() returns an EngineStatus; the CLI must return an int code.
+        if foreground:
+            return 0
+        state = getattr(status, "state", "none")
+        if state == "none":
+            print(
+                "Error: standalone engine failed to start. The standalone "
+                "gateway runs engine.server as a host process and needs a "
+                "Python env with the engine dependencies (TensorRT, torch, "
+                "grpcio, qwen3_tts_protocol). Check workspace/engine.log, or "
+                "use '--gateway engine-docker' to run it in a container.",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            f"Standalone engine started (pid={getattr(status, 'pid', '?')}, "
+            f"gRPC :{port}, WebSocket :{ws_port})."
+        )
+        return 0
 
     elif gateway == "triton":
         try:

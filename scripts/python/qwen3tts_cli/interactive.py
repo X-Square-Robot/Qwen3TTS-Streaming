@@ -305,8 +305,13 @@ def interactive_cross_host_guide() -> None:
             "engine build bundle 输出路径",
             str(REPO_ROOT / "workspace" / "engine_build_bundle.tar.zst"),
         )
-        dtype, io_dtype = _prompt_build_dtypes()
-        _run_cli(["build", "make-bundle", "-m", variant, "--target-profile", tp, "--out", out, "--dtype", dtype])
+        engine_dtype, io_dtype, talker_p, cp_p, c2w_p = _prompt_build_dtypes()
+        # Parent (build) flags must precede the make-bundle sub-subcommand.
+        _run_cli(
+            ["build", "-m", variant]
+            + _precision_cli_args(engine_dtype, io_dtype, talker_p, cp_p, c2w_p)
+            + ["make-bundle", "--target-profile", tp, "--out", out]
+        )
     elif choice == "3":
         artifact = _prompt_with_default(
             "engine artifact bundle 路径",
@@ -321,14 +326,18 @@ def interactive_cross_host_guide() -> None:
         )
         remote_host = _prompt_with_default("SSH 目标主机 user@host", "user@prod-gpu-host")
         remote_workdir = _prompt_with_default("远端工作目录", "/tmp/qwen3-tts-engine-build")
-        dtype, io_dtype = _prompt_build_dtypes()
-        _run_cli([
-            "build", "remote-build", "-m", variant,
-            "--target-profile", tp,
-            "--remote-host", remote_host,
-            "--remote-workdir", remote_workdir,
-            "--dtype", dtype,
-        ])
+        engine_dtype, io_dtype, talker_p, cp_p, c2w_p = _prompt_build_dtypes()
+        # Parent (build) flags must precede the remote-build sub-subcommand.
+        _run_cli(
+            ["build", "-m", variant]
+            + _precision_cli_args(engine_dtype, io_dtype, talker_p, cp_p, c2w_p)
+            + [
+                "remote-build",
+                "--target-profile", tp,
+                "--remote-host", remote_host,
+                "--remote-workdir", remote_workdir,
+            ]
+        )
     elif choice == "5":
         _print_cross_host_help()
 
@@ -356,17 +365,61 @@ def _guide_discover_target() -> None:
         _run_cli(["discover-target", "--paste", "--output", out])
 
 
-def _prompt_build_dtypes() -> tuple[str, str]:
-    """Prompt for engine dtype and triton IO float dtype."""
+def _prompt_build_dtypes() -> tuple[str, str, str, str, str]:
+    """Prompt for per-submodule compute precision and float I/O precision.
+
+    Returns ``(engine_dtype, io_dtype, talker_precision, cp_precision,
+    code2wav_precision)``.  Each of the three fused sub-graphs (talker
+    backbone / code-predictor / code2wav) gets its own precision, defaulting
+    to bf16 — this matches how the model is tuned in practice (e.g. running cp
+    in fp32 to mitigate BF16 numerical sensitivity / hallucinations).  The
+    global engine dtype follows the talker precision: it is the base for the
+    peripheral speaker_encoder engine and the default float I/O binding.
+    """
+    _DTYPES = ["bf16", "fp16", "fp32", "fp8"]
     print()
     print("  精度配置 (阶段 B)")
-    print("    引擎精度: TensorRT builder/compute precision")
-    print("    I/O 精度: fused TensorRT/Triton float binding dtype，默认跟随引擎精度")
+    print("    默认 talker / cp / code2wav 三个子模块均为 bf16，可分别指定 TensorRT 计算精度")
+    print("    提示: cp(code_predictor) 设为 fp32 可缓解 BF16 数值敏感导致的偶发幻觉")
 
-    engine_dtype = _prompt_choice("引擎精度 bf16|fp16|fp32|fp8", ["bf16", "fp16", "fp32", "fp8"], default="bf16")
+    talker_precision = _prompt_choice(
+        "talker (backbone) 计算精度 bf16|fp16|fp32|fp8", _DTYPES, default="bf16")
+    cp_precision = _prompt_choice(
+        "cp (code_predictor) 计算精度 bf16|fp16|fp32|fp8", _DTYPES, default="bf16")
+    code2wav_precision = _prompt_choice(
+        "code2wav 计算精度 bf16|fp16|fp32|fp8", _DTYPES, default="bf16")
+
+    # Global engine dtype follows the talker (backbone) precision.
+    engine_dtype = talker_precision
     io_default = engine_dtype if engine_dtype in ("bf16", "fp16", "fp32") else "fp32"
-    io_dtype = _prompt_choice("浮点 I/O 精度 bf16|fp16|fp32", ["bf16", "fp16", "fp32"], default=io_default)
-    return engine_dtype, io_dtype
+    io_dtype = _prompt_choice(
+        "浮点 I/O 精度 bf16|fp16|fp32", ["bf16", "fp16", "fp32"], default=io_default)
+    return engine_dtype, io_dtype, talker_precision, cp_precision, code2wav_precision
+
+
+def _precision_cli_args(
+    engine_dtype: str, io_dtype: str,
+    talker_precision: str, cp_precision: str, code2wav_precision: str,
+) -> list[str]:
+    """Translate the precision selections into build CLI flags.
+
+    Only emits a flag when it deviates from the implied default so the command
+    line stays minimal (and a uniform-precision build still takes the simple
+    path).  ``--dtype`` carries the global/talker precision; the per-submodule
+    flags override cp / code2wav when they differ.
+    """
+    args: list[str] = []
+    if engine_dtype and engine_dtype != "bf16":
+        args += ["--dtype", engine_dtype]
+    if io_dtype and io_dtype != engine_dtype:
+        args += ["--triton-io-float-dtype", io_dtype]
+    if talker_precision and talker_precision != engine_dtype:
+        args += ["--backbone-precision", talker_precision]
+    if cp_precision and cp_precision != engine_dtype:
+        args += ["--cp-precision", cp_precision]
+    if code2wav_precision and code2wav_precision != engine_dtype:
+        args += ["--code2wav-precision", code2wav_precision]
+    return args
 
 
 def _print_cross_host_help() -> None:
@@ -482,15 +535,19 @@ def interactive_mode() -> int:
     needs_build = choice in ("1", "3") or (choice == "6" and resume_point in ("setup", "build"))
     engine_dtype = "bf16"
     triton_io_dtype = "bf16"
+    talker_precision = "bf16"
+    cp_precision = "bf16"
+    code2wav_precision = "bf16"
     ngc_tag = ""
     max_batch_size = ""
     max_input_len = ""
     max_seq_len = ""
 
     if needs_build:
-        # Engine dtype
+        # Per-submodule precision (talker / cp / code2wav) + float I/O dtype
         print()
-        engine_dtype, triton_io_dtype = _prompt_build_dtypes()
+        (engine_dtype, triton_io_dtype,
+         talker_precision, cp_precision, code2wav_precision) = _prompt_build_dtypes()
 
         # NGC tag
         print()
@@ -554,10 +611,10 @@ def interactive_mode() -> int:
         args: list[str] = []
         if variant:
             args += ["-m", variant]
-        if engine_dtype and engine_dtype != "bf16":
-            args += ["--dtype", engine_dtype]
-        if triton_io_dtype and triton_io_dtype != engine_dtype:
-            args += ["--triton-io-float-dtype", triton_io_dtype]
+        args += _precision_cli_args(
+            engine_dtype, triton_io_dtype,
+            talker_precision, cp_precision, code2wav_precision,
+        )
         if ngc_tag:
             args += ["--ngc-tag", ngc_tag]
         if max_batch_size:
