@@ -53,6 +53,12 @@ services:
             - __pycache__/
             - "*.pyc"
         - action: sync+restart
+          path: ../../client/src/qwen3_tts_protocol
+          target: /app/qwen3_tts_protocol
+          ignore:
+            - __pycache__/
+            - "*.pyc"
+        - action: sync+restart
           path: ../../engine.yaml
           target: /app/engine.yaml
         - action: sync+restart

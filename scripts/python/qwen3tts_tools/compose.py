@@ -66,6 +66,27 @@ class ComposeManager:
             logger.info("[DRY RUN] Would assemble model repository.")
         return 0
 
+    def _resolve_engine_ngc_tag(self, model_version: int = 1) -> str:
+        """Read the build-time NGC tag from the packaged manifest, if present.
+
+        The engine container's TensorRT base must match the TRT that compiled
+        the engine; the build records the NGC tag it used under
+        ``engine_profile.ngc_tag``.  Returns an empty string when no manifest
+        is available (then compose defaults apply).
+        """
+        import json
+        from qwen3tts_tools.common import REPO_ROOT
+
+        manifest = (
+            REPO_ROOT / "workspace" / "model_repository" / "tts_orchestrator"
+            / str(model_version) / "runtime" / "triton_manifest.json"
+        )
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        return str(data.get("engine_profile", {}).get("ngc_tag", "") or "")
+
     def up(
         self,
         *,
@@ -106,8 +127,12 @@ class ComposeManager:
         if result != 0:
             return result
 
-        # Resolve image
-        if not image:
+        # Resolve image.  For the triton gateway the service runs the NGC image
+        # directly, so we resolve it here.  For the engine gateway the image is
+        # *built* from Dockerfile.engine and its TensorRT base is handled below
+        # (it must match the TRT used to compile the engine), so we do not pin a
+        # tritonserver image to ENGINE_IMAGE.
+        if gateway != "engine" and not image:
             try:
                 driver = detect_driver_version()
                 image = resolve_ngc_image(driver) if driver else ""
@@ -141,7 +166,20 @@ class ComposeManager:
             env["RUNTIME_MAX_SEQ_LEN"] = str(max_seq_len)
         if model_version != 1:
             env["MODEL_VERSION"] = str(model_version)
-        if image:
+        if gateway == "engine":
+            # The engine container is built from Dockerfile.engine; its TRT base
+            # MUST match the TRT that compiled the .plan or deserialization
+            # fails (e.g. an engine built under NGC 25.10 / TRT 10.13 will not
+            # load in the default tensorrt:26.02 / TRT 10.15 base).  Derive the
+            # base + image tag from the build-time NGC tag recorded in the
+            # packaged manifest; fall back to compose defaults when unknown.
+            ngc_tag = self._resolve_engine_ngc_tag(model_version)
+            if ngc_tag:
+                env.setdefault("ENGINE_BASE_IMAGE", f"nvcr.io/nvidia/tensorrt:{ngc_tag}-py3")
+                env["ENGINE_IMAGE"] = image or f"qwen3-engine:{ngc_tag}"
+            elif image:
+                env["ENGINE_IMAGE"] = image
+        elif image:
             env["ENGINE_IMAGE"] = image
         if port != 50051:
             env["ENGINE_GRPC_PORT"] = str(port)
