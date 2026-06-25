@@ -475,6 +475,25 @@ build_forward_args() {
 
 # ── Phase runners ──
 
+# Run engine_fingerprint_check against the workspace exports and honor the
+# ALLOW_FINGERPRINT_MISMATCH=1 debug override.  Resolves the optional
+# target_profile argument (passed empty when the file is absent).
+# Returns 0 if the check passes or is overridden, 1 otherwise.
+_fingerprint_check_or_override() {
+    local manifest="$1" exported_dir="$2" target_profile_path="$3"
+    local tp_arg=""
+    [ -f "$target_profile_path" ] && tp_arg="$target_profile_path"
+    if engine_fingerprint_check "$manifest" "$exported_dir" "$tp_arg"; then
+        return 0
+    fi
+    if [ "${ALLOW_FINGERPRINT_MISMATCH:-}" = "1" ]; then
+        log_warn "Fingerprint mismatch ignored (ALLOW_FINGERPRINT_MISMATCH=1)"
+        return 0
+    fi
+    log_error "  请重新 build 或 import-artifact 以更新 engines。"
+    return 1
+}
+
 run_phase_a() {
     log_step "阶段 A: 环境配置与模型导出"
     echo ""
@@ -668,16 +687,7 @@ run_phase_c() {
         fi
         log_warn "ALLOW_FINGERPRINT_MISMATCH=1 — 跳过指纹校验（仅用于调试）"
     else
-        local tp_arg=""
-        [ -f "$target_profile_path" ] && tp_arg="$target_profile_path"
-        if ! engine_fingerprint_check "$artifact_manifest" "$exported_dir" "$tp_arg"; then
-            if [ "${ALLOW_FINGERPRINT_MISMATCH:-}" = "1" ]; then
-                log_warn "Fingerprint mismatch ignored (ALLOW_FINGERPRINT_MISMATCH=1)"
-            else
-                log_error "  请重新 build 或 import-artifact 以更新 engines。"
-                return 1
-            fi
-        fi
+        _fingerprint_check_or_override "$artifact_manifest" "$exported_dir" "$target_profile_path" || return 1
     fi
 
     bash "${SCRIPT_DIR}/deploy.sh" run "${DEPLOY_ARGS[@]}" || {
@@ -704,16 +714,7 @@ run_phase_c_package() {
         log_error "  打包前必须先完成 Phase B 或 import-artifact。"
         return 1
     fi
-    local tp_arg=""
-    [ -f "$target_profile_path" ] && tp_arg="$target_profile_path"
-    if ! engine_fingerprint_check "$artifact_manifest" "$exported_dir" "$tp_arg"; then
-        if [ "${ALLOW_FINGERPRINT_MISMATCH:-}" = "1" ]; then
-            log_warn "Fingerprint mismatch ignored (ALLOW_FINGERPRINT_MISMATCH=1)"
-        else
-            log_error "  请重新 build 或 import-artifact 以更新 engines。"
-            return 1
-        fi
-    fi
+    _fingerprint_check_or_override "$artifact_manifest" "$exported_dir" "$target_profile_path" || return 1
 
     bash "${SCRIPT_DIR}/deploy.sh" package "${DEPLOY_ARGS[@]}" || {
         log_error "Phase C package 失败。"
