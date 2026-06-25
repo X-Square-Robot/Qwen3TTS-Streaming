@@ -44,17 +44,19 @@ class TestClassifyLayerName:
         assert classify_layer_name("/code2wav/Conv1d_0") == "code2wav"
 
     def test_unclassified(self):
+        """Unknown /-prefixed modules fall back to backbone."""
         from qwen3tts_tools.layer_audit import classify_layer_name
-        assert classify_layer_name("/unknown_module/MatMul_0") == "unclassified"
+        assert classify_layer_name("/unknown_module/MatMul_0") == "backbone"
 
     def test_empty_name(self):
+        """Empty names fall back to backbone."""
         from qwen3tts_tools.layer_audit import classify_layer_name
-        assert classify_layer_name("") == "unclassified"
+        assert classify_layer_name("") == "backbone"
 
     def test_partial_prefix_no_match(self):
+        """'/talker_fused/' without a known submodule falls back to backbone."""
         from qwen3tts_tools.layer_audit import classify_layer_name
-        # "/talker_fused/" without a submodule prefix should be unclassified
-        assert classify_layer_name("/talker_fused/Gather_0") == "unclassified"
+        assert classify_layer_name("/talker_fused/Gather_0") == "backbone"
 
 
 # ---------------------------------------------------------------------------

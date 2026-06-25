@@ -92,11 +92,21 @@ def is_mixed_precision(
 # ---------------------------------------------------------------------------
 
 # Canonical prefix rules for talker_code2wav_fused.onnx
+#
+# Classification order: first match wins.  More-specific prefixes first,
+# broader fallback prefixes later.
+#
+# Fallback logic (per plan decision #4 and #2):
+# - /talker_fused/ nodes NOT under cp/ are backbone.
+# - Top-level nodes (e.g. /Constant, /Gather) are backbone — glue/bridge ops.
+# - Nodes without / prefix (e.g. Constant_13004) are backbone — ONNX auto-generated.
 _PREFIX_RULES: list[tuple[str, str]] = [
+    ("/talker_fused/cp/", "cp"),
     ("/talker_fused/talker_unified/", "backbone"),
     ("/talker_fused/codec_sum/", "backbone"),
-    ("/talker_fused/cp/", "cp"),
+    ("/talker_fused/", "backbone"),
     ("/code2wav/", "code2wav"),
+    ("/", "backbone"),
 ]
 
 
@@ -107,13 +117,15 @@ def classify_layer_name(name: str) -> str:
         name: Layer name (e.g. ``/talker_fused/cp/Linear_0``).
 
     Returns:
-        Category string: ``"backbone"``, ``"cp"``, ``"code2wav"``,
-        or ``"unclassified"``.
+        Category string: ``"backbone"``, ``"cp"``, or ``"code2wav"``.
+        Nodes that don't match any known prefix are classified as
+        ``"backbone"`` (ONNX auto-generated glue ops).
     """
     for prefix, category in _PREFIX_RULES:
         if name.startswith(prefix):
             return category
-    return "unclassified"
+    # Fallback: ONNX auto-generated names without / prefix are backbone
+    return "backbone"
 
 
 def _classify_layers(network) -> dict[str, list[int]]:
@@ -126,7 +138,6 @@ def _classify_layers(network) -> dict[str, list[int]]:
         "backbone": [],
         "cp": [],
         "code2wav": [],
-        "unclassified": [],
     }
 
     for i in range(network.num_layers):
@@ -143,16 +154,7 @@ def _log_classification_summary(categories: dict[str, list[int]], network) -> No
     logger.info("Layer classification summary (%d total layers):", total)
     for cat, indices in sorted(categories.items()):
         count = len(indices)
-        if cat == "unclassified" and count > 0:
-            logger.warning(
-                "  %s: %d layers (%.1f%%) — check prefix table",
-                cat, count, count / total * 100 if total else 0,
-            )
-            # Show up to 5 example names
-            for idx in indices[:5]:
-                logger.warning("    example: %s", network.get_layer(idx).name)
-        else:
-            logger.info("  %s: %d layers", cat, count)
+        logger.info("  %s: %d layers", cat, count)
 
 
 # ---------------------------------------------------------------------------
@@ -296,18 +298,6 @@ def build_fused_mixed_precision(
     categories = _classify_layers(network)
     _log_classification_summary(categories, network)
 
-    # Check for excessive unclassified layers
-    total = sum(len(v) for v in categories.values())
-    unclassified = len(categories.get("unclassified", []))
-    unclassified_ratio = unclassified / total if total > 0 else 0
-    if unclassified_ratio > 0.05:
-        logger.error(
-            "Too many unclassified layers (%d/%d = %.1f%%). "
-            "Possible ONNX prefix drift. Aborting build.",
-            unclassified, total, unclassified_ratio * 100,
-        )
-        return 1
-
     if dry_run:
         logger.info("[DRY RUN] Classification complete; skipping engine build")
         return 0
@@ -327,10 +317,25 @@ def build_fused_mixed_precision(
         "backbone": backbone_precision,
         "cp": cp_precision,
         "code2wav": code2wav_precision,
-        "unclassified": global_precision,  # unclassified uses global default
     }
 
+    # Layer types that support float precision overrides (whitelist).
+    # Only these layer types carry meaningful compute and can have their
+    # precision changed.  All other layer types (Constant, Gather, Shape,
+    # Reshape, etc.) are auxiliary / index-computation layers and must
+    # remain in their native precision.
+    _COMPUTE_LAYERS: set = set()
+    for _attr in (
+        "MATRIX_MULTIPLY", "CONVOLUTION", "ELEMENTWISE", "SCALE",
+        "ACTIVATION", "PADDING", "POOLING", "SOFTMAX",
+        "NORMALIZATION", "REDUCE", "UNARY", "LRN", "DECONVOLUTION",
+    ):
+        _val = getattr(trt.LayerType, _attr, None)
+        if _val is not None:
+            _COMPUTE_LAYERS.add(_val)
+
     constrained_count = 0
+    skipped_count = 0
     for category, indices in categories.items():
         target_precision = precision_map.get(category, global_precision)
         if target_precision == global_precision:
@@ -340,20 +345,30 @@ def build_fused_mixed_precision(
         trt_prec = _trt_dtype(target_precision)
         for idx in indices:
             layer = network.get_layer(idx)
-            layer.precision = trt_prec
-            # Also set output type for all outputs
-            for out_idx in range(layer.num_outputs):
-                try:
-                    layer.set_output_type(out_idx, trt_prec)
-                except Exception:
-                    # Some layer types don't support set_output_type
-                    pass
-            constrained_count += 1
+
+            # Only set precision on compute layers (whitelist).
+            # Auxiliary layers (Constant, Gather, Shape, Reshape, etc.)
+            # must remain in their native precision.
+            if hasattr(layer, 'type') and layer.type not in _COMPUTE_LAYERS:
+                skipped_count += 1
+                continue
+
+            try:
+                layer.precision = trt_prec
+                constrained_count += 1
+            except Exception as e:
+                # Layer does not support precision setting — skip it
+                skipped_count += 1
+                logger.debug(
+                    "Skipping precision override for layer %s (type=%s): %s",
+                    layer.name, getattr(layer, 'type', '?'), e,
+                )
 
     logger.info(
-        "Applied precision overrides to %d layers "
+        "Applied precision overrides to %d layers, skipped %d non-compute "
         "(cp=%s, backbone=%s, code2wav=%s)",
-        constrained_count, cp_precision, backbone_precision, code2wav_precision,
+        constrained_count, skipped_count,
+        cp_precision, backbone_precision, code2wav_precision,
     )
 
     # Step 5: Set optimization profiles (shapes)
@@ -376,8 +391,10 @@ def build_fused_mixed_precision(
 
     # Step 7: Save engine
     engine_path.parent.mkdir(parents=True, exist_ok=True)
-    engine_path.write_bytes(serialized_engine)
-    engine_size_mb = len(serialized_engine) / (1 << 20)
+    # IHostMemory: use buffer() for bytes conversion
+    engine_bytes = bytes(serialized_engine)
+    engine_path.write_bytes(engine_bytes)
+    engine_size_mb = len(engine_bytes) / (1 << 20)
     logger.info(
         "Engine saved: %s (%.1f MiB)",
         engine_path, engine_size_mb,
@@ -386,11 +403,12 @@ def build_fused_mixed_precision(
     # Step 8: Post-build verification (optional)
     try:
         runtime = trt.Runtime(trt_logger)
-        engine = runtime.deserialize_cuda_engine(serialized_engine)
+        engine = runtime.deserialize_cuda_engine(engine_bytes)
         if engine is not None:
+            num_io = engine.num_io_tensors if hasattr(engine, 'num_io_tensors') else engine.num_bindings
             logger.info(
-                "Post-build verification: engine has %d bindings",
-                engine.num_bindings,
+                "Post-build verification: engine has %d I/O tensors",
+                num_io,
             )
             del engine
         else:
@@ -432,9 +450,12 @@ def _apply_shapes_to_profile(
     opt_shapes: str,
     max_shapes: str,
 ) -> None:
-    """Apply shape specifications to a TRT optimization profile."""
+    """Apply shape specifications to a TRT optimization profile.
+
+    If a tensor's shape specification is missing or has incompatible
+    dimensions, falls back to the network's static shape.
+    """
     import tensorrt as trt
-    import numpy as np
 
     min_specs = dict(_parse_shape_string(min_shapes))
     opt_specs = dict(_parse_shape_string(opt_shapes))
@@ -445,12 +466,32 @@ def _apply_shapes_to_profile(
         name = input_tensor.name
 
         if name in min_specs and name in opt_specs and name in max_specs:
-            min_dim = trt.Dims(max_specs[name])  # Use max for min (will be overridden)
-            opt_dim = trt.Dims(opt_specs[name])
-            max_dim = trt.Dims(max_specs[name])
-            min_dim = trt.Dims(min_specs[name])
+            min_dims = min_specs[name]
+            opt_dims = opt_specs[name]
+            max_dims = max_specs[name]
 
-            profile.set_shape(name, min_dim, opt_dim, max_dim)
+            # Validate: all three must have the same rank and satisfy MIN<=OPT<=MAX
+            if (len(min_dims) == len(opt_dims) == len(max_dims)
+                    and all(mn <= op <= mx for mn, op, mx in zip(min_dims, opt_dims, max_dims))):
+                profile.set_shape(
+                    name,
+                    trt.Dims(min_dims),
+                    trt.Dims(opt_dims),
+                    trt.Dims(max_dims),
+                )
+            else:
+                # Shape mismatch (e.g. rank difference) — use max as static
+                logger.warning(
+                    "Shape spec mismatch for %s: min=%s opt=%s max=%s; "
+                    "using max as static shape",
+                    name, min_dims, opt_dims, max_dims,
+                )
+                profile.set_shape(
+                    name,
+                    trt.Dims(max_dims),
+                    trt.Dims(max_dims),
+                    trt.Dims(max_dims),
+                )
         else:
             # Use static shape from network
             shape = input_tensor.shape

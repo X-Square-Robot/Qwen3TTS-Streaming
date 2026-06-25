@@ -209,3 +209,67 @@ def test_infer_raises_when_output_shape_remains_dynamic():
             output_names=["wav"],
             stream=_FakeStream(),
         )
+
+
+# ---------------------------------------------------------------------------
+#  I/O dtype consistency validation tests
+# ---------------------------------------------------------------------------
+
+class TestIODtypeConsistency:
+    """Tests for TrtExecutor._validate_io_dtype_consistency()."""
+
+    def _make_executor_with_manifest(self, manifest: dict) -> Executor:
+        """Create a minimal Executor with a manifest and fake fused engine."""
+        executor = Executor.__new__(Executor)
+        executor._manifest = manifest
+        executor._device = torch.device("cpu")
+        executor._config = ModelConfig()
+
+        # Create a fake TRTEngine with input_embeds dtype set
+        fake_engine = TRTEngine.__new__(TRTEngine)
+        fake_engine._plan_path = "fake.plan"
+        fake_engine._device = torch.device("cpu")
+        fake_engine._engine = object()
+        fake_engine._context = None
+        fake_engine._input_names = {"input_embeds"}
+        fake_engine._input_dtypes = {"input_embeds": torch.bfloat16}
+        fake_engine._output_dtypes = {"wav": torch.bfloat16}
+        fake_engine._prev_input_shapes = {}
+        fake_engine._output_buffers = {}
+
+        executor._fused_engine = fake_engine
+        return executor
+
+    def test_passes_when_dtypes_match(self):
+        """No error when manifest bf16 matches engine bf16."""
+        executor = self._make_executor_with_manifest(
+            {"triton_io_float_dtype": "bf16"}
+        )
+        executor._validate_io_dtype_consistency()  # should not raise
+
+    def test_raises_on_mismatch(self):
+        """RuntimeError when manifest fp32 but engine is bf16."""
+        executor = self._make_executor_with_manifest(
+            {"triton_io_float_dtype": "fp32"}
+        )
+        with pytest.raises(RuntimeError, match="does not match engine actual"):
+            executor._validate_io_dtype_consistency()
+
+    def test_skips_when_no_manifest(self):
+        """No error when manifest is empty."""
+        executor = Executor.__new__(Executor)
+        executor._manifest = {}
+        executor._fused_engine = None
+        executor._validate_io_dtype_consistency()  # should not raise
+
+    def test_skips_when_no_io_dtype_in_manifest(self):
+        """No error when manifest has no triton_io_float_dtype."""
+        executor = self._make_executor_with_manifest({"variant": "custom-1.7b"})
+        executor._validate_io_dtype_consistency()  # should not raise
+
+    def test_accepts_alias_bfloat16(self):
+        """Accepts 'bfloat16' alias for bf16."""
+        executor = self._make_executor_with_manifest(
+            {"triton_io_float_dtype": "bfloat16"}
+        )
+        executor._validate_io_dtype_consistency()  # should not raise

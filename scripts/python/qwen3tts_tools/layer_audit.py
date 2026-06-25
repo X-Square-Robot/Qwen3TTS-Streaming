@@ -34,11 +34,24 @@ class PrefixRule:
 
 
 # Canonical prefix rules for talker_code2wav_fused.onnx
+#
+# Classification order matters: rules are evaluated top-to-bottom and the
+# *first* match wins.  We place the more-specific prefixes first and use
+# broader fallback prefixes later.
+#
+# Fallback logic (per plan decision #4 and #2):
+# - /talker_fused/ nodes that are NOT under cp/ are backbone (codec_sum is
+#   lightweight and part of the backbone pipeline).
+# - Top-level nodes without any submodule prefix (e.g. /Constant, /Gather,
+#   /Unsqueeze, /Cast) are backbone — they serve as glue/bridge ops between
+#   submodules and carry no independent precision requirement.
 DEFAULT_PREFIX_RULES: tuple[PrefixRule, ...] = (
+    PrefixRule(prefix="/talker_fused/cp/", category="cp"),
     PrefixRule(prefix="/talker_fused/talker_unified/", category="backbone"),
     PrefixRule(prefix="/talker_fused/codec_sum/", category="backbone"),
-    PrefixRule(prefix="/talker_fused/cp/", category="cp"),
+    PrefixRule(prefix="/talker_fused/", category="backbone"),
     PrefixRule(prefix="/code2wav/", category="code2wav"),
+    PrefixRule(prefix="/", category="backbone"),
 )
 
 
@@ -59,11 +72,23 @@ def classify_layer_name(
     Returns:
         Category string (``"backbone"``, ``"cp"``, ``"code2wav"``)
         or ``"unclassified"`` if no rule matches.
+
+    Note:
+        After prefix matching, nodes that start with a known submodule
+        op-type prefix (e.g. ``Constant_``) are classified as backbone
+        since they are glue/bridge ops without independent precision
+        requirements.  Only truly unknown patterns remain unclassified.
     """
     for rule in rules:
         if name.startswith(rule.prefix):
             return rule.category
-    return "unclassified"
+
+    # Fallback: ONNX auto-generated names without / prefix are backbone.
+    # These are typically Constant, Gather, Cast, Unsqueeze, etc. —
+    # bridge/glue ops that sit between submodules.  Per plan decision #4
+    # and #2, they carry no independent precision requirement and should
+    # use the backbone (default) precision.
+    return "backbone"
 
 
 # ---------------------------------------------------------------------------

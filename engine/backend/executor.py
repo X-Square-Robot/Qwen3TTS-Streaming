@@ -567,6 +567,7 @@ class Executor:
             )
             self._fused_engine.load()
             self._apply_runtime_profile_limits()
+            self._validate_io_dtype_consistency()
             self._discover_c2w_io_names()
 
         else:
@@ -623,6 +624,72 @@ class Executor:
             )
             self._max_seq_len = profile_max_seq
         self._config.max_seq_len = min(self._config.max_seq_len, self._max_seq_len)
+
+    def _validate_io_dtype_consistency(self) -> None:
+        """Validate that manifest-declared I/O dtype matches engine actual I/O dtype.
+
+        Checks that the ``triton_io_float_dtype`` recorded in the manifest matches
+        the actual float tensor dtypes exposed by the loaded TRT engine.  Mismatches
+        cause incorrect tensor allocation at runtime (e.g. fp32 tensors fed to an
+        engine expecting bf16), so this must fail early.
+        """
+        if not self._manifest or self._fused_engine is None:
+            return
+
+        manifest_dtype = self._manifest.get("triton_io_float_dtype", "")
+        if not manifest_dtype:
+            return
+
+        # Normalize manifest dtype to torch dtype
+        _DTYPE_MAP = {
+            "bf16": torch.bfloat16,
+            "fp16": torch.float16,
+            "fp32": torch.float32,
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+        }
+        expected_torch_dtype = _DTYPE_MAP.get(manifest_dtype)
+        if expected_torch_dtype is None:
+            logger.warning(
+                "Unknown triton_io_float_dtype '%s' in manifest; "
+                "skipping I/O dtype consistency check",
+                manifest_dtype,
+            )
+            return
+
+        # Check a representative float I/O tensor — input_embeds is the main
+        # float input and should reflect the engine's I/O precision.
+        representative_name = "input_embeds"
+        actual_dtype = self._fused_engine.get_tensor_dtype(representative_name)
+        if actual_dtype is None:
+            # input_embeds may not exist in all engine variants; try another
+            for name in ("hidden_states", "new_hidden"):
+                actual_dtype = self._fused_engine.get_tensor_dtype(name)
+                if actual_dtype is not None:
+                    representative_name = name
+                    break
+
+        if actual_dtype is None:
+            logger.info(
+                "Could not find representative float I/O tensor for dtype check; skipping"
+            )
+            return
+
+        if actual_dtype != expected_torch_dtype:
+            raise RuntimeError(
+                f"Manifest triton_io_float_dtype={manifest_dtype} "
+                f"(torch: {expected_torch_dtype}) does not match engine actual "
+                f"I/O dtype for '{representative_name}': {actual_dtype}. "
+                f"This usually means the engine was rebuilt with different "
+                f"precision settings but the manifest was not updated. "
+                f"Re-run 'qwen3tts build' to rebuild the engine."
+            )
+
+        logger.info(
+            "I/O dtype consistency check passed: manifest=%s, engine=%s (via %s)",
+            manifest_dtype, actual_dtype, representative_name,
+        )
 
     def _validate_prefill_len(self, seq: int, stage: str) -> None:
         if self._max_input_len > 0 and seq > self._max_input_len:
