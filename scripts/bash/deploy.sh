@@ -417,35 +417,32 @@ ensure_engine_docker_image_current() {
 
 # ── Commands ──
 
+# Assemble the shared engine model package via compose.sh prepare, honoring
+# --dry-run.  Uses the current VARIANT / MODEL_REPO_DIR / MODEL_VERSION.
+_compose_prepare_engine() {
+    local prepare_args=(
+        prepare
+        --gateway engine
+        --variant "$VARIANT"
+        --engine-mode trt
+        --repo-dir "$MODEL_REPO_DIR"
+        --model-version "$MODEL_VERSION"
+    )
+    $DRY_RUN && prepare_args+=(--dry-run)
+    MODEL_REPO_DIR="$MODEL_REPO_DIR" bash "${SCRIPT_DIR}/compose.sh" "${prepare_args[@]}"
+}
+
 cmd_package() {
     resolve_variant
     $DRY_RUN || check_engine_artifact_ready || return 1
 
     case "$GATEWAY_MODE" in
         standalone)
-            local prepare_args=(
-                prepare
-                --gateway engine
-                --variant "$VARIANT"
-                --engine-mode trt
-                --repo-dir "$MODEL_REPO_DIR"
-                --model-version "$MODEL_VERSION"
-            )
-            $DRY_RUN && prepare_args+=(--dry-run)
-            MODEL_REPO_DIR="$MODEL_REPO_DIR" bash "${SCRIPT_DIR}/compose.sh" "${prepare_args[@]}"
+            _compose_prepare_engine
             log_info "Model package ready: $MODEL_REPO_DIR/tts_orchestrator/$MODEL_VERSION"
             ;;
         engine-docker)
-            local prepare_args=(
-                prepare
-                --gateway engine
-                --variant "$VARIANT"
-                --engine-mode trt
-                --repo-dir "$MODEL_REPO_DIR"
-                --model-version "$MODEL_VERSION"
-            )
-            $DRY_RUN && prepare_args+=(--dry-run)
-            MODEL_REPO_DIR="$MODEL_REPO_DIR" bash "${SCRIPT_DIR}/compose.sh" "${prepare_args[@]}"
+            _compose_prepare_engine
             local img
             img=$(resolve_engine_docker_image) || return 1
             if ! $DRY_RUN; then
@@ -514,13 +511,7 @@ cmd_run_standalone() {
         return 0
     fi
 
-    MODEL_REPO_DIR="$MODEL_REPO_DIR" bash "${SCRIPT_DIR}/compose.sh" \
-        prepare \
-        --gateway engine \
-        --variant "$VARIANT" \
-        --engine-mode trt \
-        --repo-dir "$MODEL_REPO_DIR" \
-        --model-version "$MODEL_VERSION"
+    _compose_prepare_engine
 
     ENGINE_MODEL_PACKAGE_DIR="$MODEL_REPO_DIR/tts_orchestrator/$MODEL_VERSION"
 
@@ -539,9 +530,7 @@ cmd_run_standalone() {
         --max-batch "$MAX_BATCH"
         --max-sessions "$MAX_SESSIONS"
     )
-    if [ -n "$MAX_SEQ_LEN" ]; then
-        start_args+=(--max-seq-len "$MAX_SEQ_LEN")
-    fi
+    append_optarg start_args --max-seq-len "$MAX_SEQ_LEN"
     if $FOREGROUND; then
         start_args+=(--foreground)
     fi
@@ -654,9 +643,7 @@ cmd_run_engine_docker() {
         --max-sessions "$MAX_SESSIONS"
         --model-version "$MODEL_VERSION"
     )
-    if [ -n "$MAX_SEQ_LEN" ]; then
-        compose_args+=(--max-seq-len "$MAX_SEQ_LEN")
-    fi
+    append_optarg compose_args --max-seq-len "$MAX_SEQ_LEN"
     $DRY_RUN && compose_args+=(--dry-run)
 
     bash "${SCRIPT_DIR}/compose.sh" "${compose_args[@]}" || exit 1
