@@ -300,7 +300,8 @@ def suggest_profile(
     available_mib = memory_mib * usable_fraction - fixed_mib - runtime_reserve_mib
     raw_capacity = int(math.floor(available_mib / per_lane_peak_mib)) if per_lane_peak_mib > 0 else 0
     supported = [tier for tier in PROFILE_TIERS if tier <= batch_cap]
-    batch = supported[0]
+    # Guard against a batch_cap below the smallest tier (would IndexError).
+    batch = supported[0] if supported else min(PROFILE_TIERS)
     for tier in supported:
         if raw_capacity >= tier:
             batch = tier

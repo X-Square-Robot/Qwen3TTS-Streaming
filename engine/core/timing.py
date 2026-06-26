@@ -88,7 +88,11 @@ class ServerTimingAccumulator:
 
         # -- Epoch timestamps --
         epoch_fields: list[tuple[str, Optional[float]]] = [
-            ("server_session_created_epoch_ms", self.session_created_monotonic),
+            # Monotonic-derived session-created time. Emitted under its own
+            # schema key — the explicit *_epoch_ms below is a separate metric
+            # (set to request-received epoch by the gateway); routing this into
+            # _epoch_ms collided with and was clobbered by it.
+            ("server_session_created_monotonic", self.session_created_monotonic),
             ("server_first_text_enqueued_epoch_ms", self.first_text_enqueued_monotonic),
             ("server_first_text_dequeued_epoch_ms", self.first_text_dequeued_monotonic),
             ("server_prefill_started_epoch_ms", self.prefill_started_monotonic),

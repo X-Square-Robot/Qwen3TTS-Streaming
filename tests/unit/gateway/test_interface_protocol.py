@@ -120,3 +120,21 @@ def test_normalize_capabilities_adds_interface_contract_fields():
     assert "vad_policy" in caps["supported_output_policy_features"]
     assert "prefix_trim" in caps["supported_vad_strategies"]
     assert "server_ttft_ms" in caps["supported_timing_fields"]
+
+
+def test_server_timing_emits_distinct_session_created_keys():
+    """Regression: the monotonic session-created value was routed into the
+    _epoch_ms key and clobbered by the explicit epoch value, so the schema's
+    server_session_created_monotonic metric was never emitted."""
+    from engine.core.timing import ServerTimingAccumulator
+
+    acc = ServerTimingAccumulator()
+    acc.base_monotonic = 1000.0
+    acc.base_epoch_ms = 1_700_000_000_000
+    acc.session_created_monotonic = 1000.0           # -> base_epoch_ms exactly
+    acc.session_created_epoch_ms = 1_700_000_009_999  # distinct explicit value
+
+    meta = acc.to_meta_dict()
+
+    assert meta["server_session_created_monotonic"] == "1700000000000"
+    assert meta["server_session_created_epoch_ms"] == "1700000009999"

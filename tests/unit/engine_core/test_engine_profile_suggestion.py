@@ -57,3 +57,20 @@ def test_profile_suggestion_falls_back_without_manifest(tmp_path):
 
     assert result["source"] == "coarse-fallback"
     assert result["max_batch_size"] == 64
+
+
+def test_profile_suggestion_handles_batch_cap_below_min_tier(tmp_path, monkeypatch):
+    """A QWEN3_PROFILE_MAX_BATCH_CAP below the smallest tier must not IndexError."""
+    helper = _load_helper()
+    monkeypatch.setenv("QWEN3_PROFILE_MAX_BATCH_CAP", "8")
+
+    result = helper.suggest_profile(
+        memory_mib=46068,
+        exported_dir=tmp_path / "missing",
+        variants=["custom-1.7b"],
+        engine_dtype="bf16",
+        max_input_len=128,
+        max_seq_len=512,
+    )
+
+    assert result["max_batch_size"] >= 1  # produced a value, did not crash
