@@ -98,7 +98,13 @@ class ServerTimingReport:
         return cls(
             # Epoch timestamps
             server_request_received_epoch_ms=_safe_int(meta.get("server_request_received_epoch_ms")),
-            server_session_created_epoch_ms=_safe_int(meta.get("server_session_created_epoch_ms")),
+            # Prefer the real session-created timestamp (server emits it under
+            # *_monotonic); the *_epoch_ms key carries the request-received time
+            # as a coarse approximation. Fall back to it for older servers.
+            server_session_created_epoch_ms=_safe_int(
+                meta.get("server_session_created_monotonic")
+                or meta.get("server_session_created_epoch_ms")
+            ),
             server_first_text_received_epoch_ms=_safe_int(meta.get("server_first_text_received_epoch_ms")),
             server_first_text_enqueued_epoch_ms=_safe_int(meta.get("server_first_text_enqueued_epoch_ms")),
             server_first_text_dequeued_epoch_ms=_safe_int(meta.get("server_first_text_dequeued_epoch_ms")),
@@ -142,14 +148,14 @@ class ServerTimingReport:
     @property
     def client_request_to_server_first_audio_ms(self) -> Optional[float]:
         """Contextual: client request to server first effective audio."""
-        if self.client_request_ts_ms and self.server_first_effective_audio_epoch_ms:
+        if self.client_request_ts_ms is not None and self.server_first_effective_audio_epoch_ms is not None:
             return self.server_first_effective_audio_epoch_ms - self.client_request_ts_ms
         return None
 
     @property
     def client_request_to_server_first_raw_audio_ms(self) -> Optional[float]:
         """Contextual: client request to server first raw audio."""
-        if self.client_request_ts_ms and self.server_first_raw_audio_epoch_ms:
+        if self.client_request_ts_ms is not None and self.server_first_raw_audio_epoch_ms is not None:
             return self.server_first_raw_audio_epoch_ms - self.client_request_ts_ms
         return None
 

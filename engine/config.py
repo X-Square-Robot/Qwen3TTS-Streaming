@@ -310,7 +310,12 @@ def _dict_to_config(raw: dict) -> EngineConfig:
             if hasattr(section_obj, k):
                 expected_type = type(getattr(section_obj, k))
                 try:
-                    setattr(section_obj, k, expected_type(v))
+                    if expected_type is bool and isinstance(v, str):
+                        # bool("false") is True — parse string bools explicitly.
+                        coerced = v.strip().lower() in ("1", "true", "yes", "on")
+                    else:
+                        coerced = expected_type(v)
+                    setattr(section_obj, k, coerced)
                 except (ValueError, TypeError):
                     logger.warning("Cannot set %s.%s = %r", section_name, k, v)
     return cfg

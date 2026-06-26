@@ -190,6 +190,14 @@ class LatencyAnalyzer:
             current = self.mean(metric)
             if current is None:
                 continue
+            if baseline_val == 0:
+                # Can't express a percentage increase over a zero baseline;
+                # flag any positive current value instead of dividing by zero.
+                if current > 0:
+                    regressions.append(
+                        f"{metric}: {current:.1f}ms vs baseline 0.0ms (new latency)"
+                    )
+                continue
             increase_pct = ((current - baseline_val) / baseline_val) * 100.0
             if increase_pct > threshold_pct:
                 regressions.append(

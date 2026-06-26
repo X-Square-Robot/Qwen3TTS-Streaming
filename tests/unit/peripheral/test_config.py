@@ -328,3 +328,15 @@ class _patch_env:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = self._orig[k]
+
+
+def test_dict_to_config_parses_string_bools():
+    """A string 'false' must not become True via bool('false')."""
+    cfg = _dict_to_config({"prefix_cache": {"enabled": "false"}})
+    assert cfg.prefix_cache.enabled is False
+
+    cfg2 = _dict_to_config({"sampling": {"do_sample": "true"}})
+    assert cfg2.sampling.do_sample is True
+
+    # real bools still pass through
+    assert _dict_to_config({"prefix_cache": {"enabled": False}}).prefix_cache.enabled is False
