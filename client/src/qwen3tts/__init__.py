@@ -1,10 +1,18 @@
 """Unified lightweight Python SDK for Qwen3-TTS deployments.
 
+One package, one import root — everything a client needs lives here::
+
+    from qwen3tts import TTSClient, SynthesisConfig
+
 Public entry points:
 
-- `TTSClient.connect(...)`
-- `AsyncTTSClient.connect(...)`
-- shared protocol types from `qwen3tts_protocol`
+- `TTSClient.connect(...)` — synchronous client
+- `AsyncTTSClient.connect(...)` — asyncio client
+- `RealtimeAudioStream` — wall-clock-aligned frames for playback / WebRTC
+- protocol types (`SynthesisConfig`, `SessionStartRequest`, `AudioChunk`, …)
+- exceptions (`TTSClientError`, …)
+
+Optional latency/timing diagnostics live in `qwen3tts.diagnostics`.
 """
 
 from qwen3tts_protocol import (
@@ -35,11 +43,7 @@ from .exceptions import (
     TransportNotSupportedError,
     TransportProbeError,
 )
-from .analyzers import LatencyAnalyzer, TimelineReconstructor
-from .error_report import ErrorTimingReport
 from .realtime import RealtimeAudioStream, TimedAudio
-from .segment_timing import SegmentTimingReport
-from .timing import ServerTimingReport
 
 __all__ = (
     "ArrayResult",
@@ -50,13 +54,9 @@ __all__ = (
     "Capabilities",
     "DependencyMissingError",
     "DetectedTransport",
-    "ErrorTimingReport",
-    "LatencyAnalyzer",
     "OutputPolicy",
     "ProtocolError",
     "RealtimeAudioStream",
-    "SegmentTimingReport",
-    "ServerTimingReport",
     "SessionEndRequest",
     "SessionStartRequest",
     "StreamCancelRequest",
@@ -67,7 +67,6 @@ __all__ = (
     "TimedAudio",
     "TTSClient",
     "TTSClientError",
-    "TimelineReconstructor",
     "TimingContext",
     "TransportNotSupportedError",
     "TransportProbeError",
