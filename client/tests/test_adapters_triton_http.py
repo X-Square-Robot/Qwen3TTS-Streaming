@@ -91,6 +91,26 @@ class TestTritonHttpAdapter:
         assert result.transport == TRANSPORT_TRITON_HTTP
         assert result.details.get("degraded_to_oneshot") is False
 
+    def test_request_payload_carries_tenvad_policy(self):
+        adapter = TritonHttpAdapter(
+            "http://localhost:8000",
+            model_name="tts_orchestrator_http",
+            timeout=5.0,
+        )
+        start = SessionStartRequest(
+            session_id="s-vad",
+            config=SynthesisConfig(task_type="custom_voice"),
+            output_policy=OutputPolicy(
+                vad=VADPolicy(enabled=True, strategy="tenvad", config={"k": "v"}),
+            ),
+        )
+        payload = adapter._request_payload_for_text(start, "hello")
+
+        vad = payload["output_policy"]["vad_policy"]
+        assert vad["strategy"] == "tenvad"
+        assert vad["enabled"] is True
+        assert vad["config"] == {"k": "v"}
+
 
 class TestTritonHttpBufferedSession:
     def test_degraded_to_oneshot_flag(self):
