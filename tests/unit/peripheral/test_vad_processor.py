@@ -457,3 +457,34 @@ class TestVADReset:
         # Second use — should work the same
         result = proc.process_chunk(_make_tone(200, amplitude=0.5))
         assert result.size > 0
+
+
+def test_onset_frames_not_clipped_by_small_lookback_margin():
+    """Regression: consecutive begin-candidate frames must not be evicted by the
+    small lookback margin. With begin_count=5 and start_margin_ms=20 (< 4 frames),
+    the old code dropped the first ~3 onset frames."""
+    cfg = vad_config_from_dict(
+        {"mode": "energy", "chunk_ms": 16, "begin_count": 5, "start_margin_ms": 20}
+    )
+    proc = EnergyVADProcessor(cfg, sample_rate=SAMPLE_RATE)
+    proc._score_frame = lambda frame: 1.0  # force all-speech, isolate the FSM
+
+    fs = proc._frame_samples
+    # Tag each frame with a distinct value so we can see which survive.
+    audio = np.concatenate([np.full(fs, i + 1, dtype=np.int16) for i in range(8)])
+    emitted = np.concatenate([proc.process_chunk(audio), proc.flush()])
+
+    surviving = set(int(x) for x in emitted)
+    assert {1, 2, 3, 4, 5, 6, 7, 8} <= surviving  # no onset frame dropped
+
+
+def test_vad_config_honors_explicit_zero():
+    """Regression: an explicit 0/0.0 must not be replaced by the default."""
+    cfg = vad_config_from_dict(
+        {"start_margin_ms": 0, "begin_count": 1, "end_threshold": 0.0}
+    )
+    assert cfg.start_margin_ms == 0
+    assert cfg.begin_count == 1
+    assert cfg.end_threshold == 0.0
+    # omitted keys still fall back to defaults
+    assert vad_config_from_dict({}).start_margin_ms == 20

@@ -145,6 +145,11 @@ class TTSVADProcessor(ABC):
         # Pending emit buffer: audio confirmed as speech, awaiting batch emit
         self._emit_buffer: list[np.ndarray] = []
 
+        # Candidate onset frames: consecutive above-threshold frames while the
+        # begin counter is climbing. Held uncapped (bounded by begin_count) so a
+        # real speech onset is never evicted by the small lookback margin.
+        self._begin_buffer: list[np.ndarray] = []
+
         # State counters
         self._begin_counter: int = 0
         self._end_counter: int = 0
@@ -216,6 +221,11 @@ class TTSVADProcessor(ABC):
             # If we had entered speech at some point, the margin was already consumed.
             self._metrics.prefix_trimmed_samples += self._margin_buffer.size
             self._margin_buffer = np.empty((0,), dtype=np.int16)
+            # Candidate onset frames that never confirmed as speech are discarded
+            # too (an unconfirmed begin run at end-of-stream).
+            for candidate in self._begin_buffer:
+                self._metrics.prefix_trimmed_samples += candidate.size
+            self._begin_buffer = []
         else:
             # In speech state — emit all pending
             if self._margin_buffer.size > 0:
@@ -227,6 +237,7 @@ class TTSVADProcessor(ABC):
         self._state = VADState.SILENCE
         self._begin_counter = 0
         self._end_counter = 0
+        self._begin_buffer = []
         return result
 
     def reset(self) -> None:
@@ -235,6 +246,7 @@ class TTSVADProcessor(ABC):
         self._input_buffer = np.empty((0,), dtype=np.int16)
         self._margin_buffer = np.empty((0,), dtype=np.int16)
         self._emit_buffer = []
+        self._begin_buffer = []
         self._begin_counter = 0
         self._end_counter = 0
         self._metrics = VADMetrics()
@@ -261,8 +273,19 @@ class TTSVADProcessor(ABC):
             # Check for begin
             if score >= cfg.begin_threshold:
                 self._begin_counter += 1
+                # Hold this candidate onset frame uncapped (see _begin_buffer).
+                self._begin_buffer.append(frame_int16.copy())
             else:
+                # A below-threshold frame breaks the run: the candidate frames
+                # were not speech after all → demote them to lookback silence
+                # (capped) and count as trimmed, like any other silence.
+                for candidate in self._begin_buffer:
+                    self._update_margin_buffer(candidate)
+                    self._metrics.prefix_trimmed_samples += candidate.size
+                self._begin_buffer = []
                 self._begin_counter = 0
+                self._update_margin_buffer(frame_int16)
+                self._metrics.prefix_trimmed_samples += frame_int16.size
 
             if self._begin_counter >= cfg.begin_count:
                 # Begin triggered!
@@ -271,7 +294,7 @@ class TTSVADProcessor(ABC):
                 self._begin_counter = 0
                 self._metrics.begin_trigger_count += 1
 
-                # Emit margin buffer + this frame
+                # Emit the lookback margin (silence before the onset) ...
                 if self._margin_buffer.size > 0:
                     self._emit_buffer.append(self._margin_buffer.copy())
                     self._metrics.effective_audio_samples += self._margin_buffer.size
@@ -280,12 +303,12 @@ class TTSVADProcessor(ABC):
                 if not self._metrics.first_effective_audio_found:
                     self._metrics.first_effective_audio_found = True
 
-                self._emit_buffer.append(frame_int16.copy())
-                self._metrics.effective_audio_samples += frame_int16.size
-            else:
-                # Still silence — add to margin buffer
-                self._update_margin_buffer(frame_int16)
-                self._metrics.prefix_trimmed_samples += frame_int16.size
+                # ... then ALL candidate onset frames (uncapped) — this is the
+                # real speech onset that the old code clipped via the margin cap.
+                for candidate in self._begin_buffer:
+                    self._emit_buffer.append(candidate)
+                    self._metrics.effective_audio_samples += candidate.size
+                self._begin_buffer = []
 
         elif self._state == VADState.SPEECH:
             # Check for end
@@ -531,15 +554,21 @@ def vad_config_from_dict(d: dict) -> TTSVADConfig:
     mode_str = str(d.get("mode", "disabled") or "disabled").strip().lower()
     mode = VADMode(mode_str) if mode_str in {m.value for m in VADMode} else VADMode.DISABLED
 
+    # Use `if k in d else default` rather than `d.get(k) or default` so an
+    # explicit 0 / 0.0 (e.g. start_margin_ms=0 to disable lookback) is honored
+    # instead of being silently replaced by the default.
+    def _num(key, default, cast):
+        return cast(d[key]) if d.get(key) is not None else default
+
     return TTSVADConfig(
         mode=mode,
-        chunk_ms=int(d.get("chunk_ms", 16) or 16),
-        begin_threshold=float(d.get("begin_threshold", 0.6) or 0.6),
-        begin_count=int(d.get("begin_count", 5) or 5),
-        end_threshold=float(d.get("end_threshold", 0.35) or 0.35),
-        end_count=int(d.get("end_count", 31) or 31),
-        start_margin_ms=int(d.get("start_margin_ms", 20) or 20),
-        preemphasis=float(d.get("preemphasis", 0.97) or 0.97),
-        tenvad_hop_size=int(d.get("tenvad_hop_size", 256) or 256),
-        tenvad_threshold=float(d.get("tenvad_threshold", 0.5) or 0.5),
+        chunk_ms=_num("chunk_ms", 16, int),
+        begin_threshold=_num("begin_threshold", 0.6, float),
+        begin_count=_num("begin_count", 5, int),
+        end_threshold=_num("end_threshold", 0.35, float),
+        end_count=_num("end_count", 31, int),
+        start_margin_ms=_num("start_margin_ms", 20, int),
+        preemphasis=_num("preemphasis", 0.97, float),
+        tenvad_hop_size=_num("tenvad_hop_size", 256, int),
+        tenvad_threshold=_num("tenvad_threshold", 0.5, float),
     )
