@@ -1,8 +1,12 @@
 # 混合精度方案落地计划
 
 > 日期：2026-06-22
-> 状态：已实施（阶段 0–3 完成，待 GPU 验证）
+> 状态：已落地，但**实现方式与本草案不同**——最终在 bash 生命周期实现，而非下文的 Python CLI 方案。
 > 范围：`talker_code2wav_fused` TensorRT 单引擎的子模块混合精度控制
+>
+> **实际用法**：`bash scripts/bash/build_engines.sh --variant custom-1.7b --cp-precision fp32`（默认 bf16）。
+> 精度写入 manifest，由 `scripts/python/trt_fused_io_formats.py --emit layer-precisions` 翻译成 trtexec
+> `--layerPrecisions` 通配符。下文保留原始 Python CLI 设计作为历史记录（其中的 `qwen3tts_*` 模块已移除）。
 
 ## 背景
 
@@ -340,13 +344,13 @@ triton_io_float_dtype: bf16
 
 ```bash
 # 全局精度（向后兼容）
-qwen3tts build -m custom-1.7b --dtype bf16
+bash scripts/bash/build_engines.sh --variant custom-1.7b --dtype bf16
 
 # 混合精度
-qwen3tts build -m custom-1.7b --dtype bf16 --cp-precision fp32
+bash scripts/bash/build_engines.sh --variant custom-1.7b --dtype bf16 --cp-precision fp32
 
 # 显式指定每段精度
-qwen3tts build -m custom-1.7b \
+bash scripts/bash/build_engines.sh --variant custom-1.7b \
     --backbone-precision bf16 \
     --cp-precision fp32 \
     --code2wav-precision bf16 \

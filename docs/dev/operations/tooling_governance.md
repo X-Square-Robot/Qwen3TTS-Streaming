@@ -26,7 +26,7 @@
 
 ### 4. 共享工具库
 
-- `scripts/python/qwen3tts_tools/`：小型、依赖轻量的 Python 辅助工具，用于共享工具需求。
+- `scripts/python/`：被 bash 调用的小型、依赖轻量的 Python 辅助工具（JSON/profile/网页解析等）。
 - 这是可复用的仓库路径、端点、目标列表和 WAV 辅助逻辑的首选位置。
 - 保持这一层小型和通用。它应该支持工具，而不是成为第二个应用运行时。
 
@@ -63,7 +63,7 @@
 1. 如果行为应该在 CI 中运行并自动断言正确性，添加 pytest 测试。
 2. 如果行为是探索性的、面向基准测试的，或依赖于人工听音/检查，放在 `tools/validation/`。
 3. 如果行为支持 setup/export/build/deploy 而非验证，放在 `scripts/`。
-4. 如果两个或更多文件需要相同的 Python 工具，提取到 `scripts/python/qwen3tts_tools/`。
+4. 如果两个或更多文件需要相同的 Python 工具，提取到 `scripts/python/`（测试专用的提取到 `tests/support/`）。
 5. 如果两个或更多 shell 入口点需要相同逻辑，提取到 `scripts/bash/lib/`。
 
 ## 命名规则

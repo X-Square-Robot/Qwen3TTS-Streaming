@@ -14,7 +14,7 @@
 | `scripts/bash/` | lifecycle and operator workflows (14 files) | users deploying or packaging the project |
 | `scripts/bash/lib/` | shared shell library code | maintainers extending shell flows |
 | `scripts/export/` | model export implementation (01–09) | maintainers working on ONNX / TRT export |
-| `scripts/python/qwen3tts_tools/` | shared Python helper layer | maintainers adding or refactoring CLIs |
+| `scripts/python/` | bash-called Python helpers (JSON/profile/NGC/Triton-config) | maintainers |
 | `scripts/python/` | build/config/manifest tools (9 scripts) | advanced developers and maintainers |
 | `scripts/compose/` | container entrypoints | deployment maintainers |
 | `scripts/demo/` | demo launchers | demo users |
@@ -36,7 +36,7 @@
 ## Governance Rules
 
 - A new user-facing validation or benchmark tool should live in `tools/validation/`, not `scripts/python/`.
-- Shared types and schemas belong in `qwen3_tts_protocol`; repo-internal helpers in `scripts/python/qwen3tts_tools/`.
+- Shared types and schemas belong in `qwen3_tts_protocol`; repo-internal helpers in `scripts/python/`.
 - Keep `scripts/python/` entry points thin — parse args, call shared code, render results.
 - Before adding a new tool, check if an existing unified tool (e.g. `compare_audio.py`, `verify_engine.py`) already covers the use case.
 

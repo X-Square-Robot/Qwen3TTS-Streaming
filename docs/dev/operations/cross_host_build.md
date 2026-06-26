@@ -7,13 +7,13 @@ TensorRT `.engine` 绑定目标 GPU 架构、TensorRT 版本和构建 profile。
 1. 在目标生产同构机器上采集指纹：
 
 ```bash
-qwen3tts probe --output target_profile.json
+bash scripts/bash/autorun.sh probe-target --out target_profile.json
 ```
 
 2. 把 `target_profile.json` 拷回导图/构建包：
 
 ```bash
-qwen3tts build make-bundle -m custom-1.7b \
+bash scripts/bash/autorun.sh make-bundle -m custom-1.7b \
   --target-profile target_profile.json \
   --out workspace/engine_build_bundle.tar.zst
 ```
@@ -30,13 +30,13 @@ bash run.sh
 4. 把 `engine_artifact_bundle.tar.zst` 拷回打包机并导入：
 
 ```bash
-qwen3tts build import-artifact workspace/engine_artifact_bundle.tar.zst
+bash scripts/bash/autorun.sh import-artifact workspace/engine_artifact_bundle.tar.zst
 ```
 
 5. 回到打包机组装部署产物，不启动服务：
 
 ```bash
-qwen3tts package -m custom-1.7b --gateway engine-docker
+bash scripts/bash/autorun.sh package -m custom-1.7b --gateway engine-docker
 ```
 
 `package --gateway engine-docker` 会组装 `workspace/model_repository/tts_orchestrator/<version>`，并用当前 checkout 重建 engine 镜像。镜像 tag 默认从 Phase B manifest 的 NGC tag 推导，例如 `qwen3-engine:25.03`。
@@ -44,7 +44,7 @@ qwen3tts package -m custom-1.7b --gateway engine-docker
 6. 只有当前机器就是要提供服务的机器时，才启动服务：
 
 ```bash
-qwen3tts run -m.7b --gateway engine-docker
+bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway engine-docker
 ```
 
 ## Remote SSH 流程
@@ -52,7 +52,7 @@ qwen3tts run -m.7b --gateway engine-docker
 当打包机可以 SSH 到目标机器时，可以把 bundle 流程自动化：
 
 ```bash
-qwen3tts build remote-build -m custom-1.7b \
+bash scripts/bash/autorun.sh remote-build -m custom-1.7b \
   --target-profile target_profile.json \
   --remote-host user@prod-gpu-host \
   --remote-workdir /tmp/qwen3-engine-build
@@ -64,7 +64,7 @@ qwen3tts build remote-build -m custom-1.7b \
 
 跨机场景下，`target_profile.json` 是 NGC tag 的唯一事实来源：
 
-- `qwen3tts probe` 在目标机器根据生产驱动选择 `recommended_ngc_tag`
+- `probe-target` 在目标机器根据生产驱动选择 `recommended_ngc_tag`
 - `make-bundle` 使用该 tag 写入 `build_manifest.json`
 -同一 NGC 镜像编译 engine
 - Phase C package/run 从 manifest 推导运行镜像，不再用打包机本机 driver 回退猜测
@@ -84,29 +84,29 @@ qwen3tts build remote-build -m custom-1.7b \
 没有 artifact manifest 的旧本地构建会保留兼容，只打印警告。跨机流程导入的 artifact 若不匹配会直接失败；开发调试可显式设置 `--allow-fingerprint-mismatch`：
 
 ```bash
-qwen3tts build import-artifact bundle.tar.zst --allow-fingerprint-mismatch
+bash scripts/bash/autorun.sh import-artifact bundle.tar.zst --allow-fingerprint-mismatch
 ```
 
 ## 和 Phase C 的关系
 
-`qwen3tts package` 和 `qwen3tts run` 的职责不同：
+`package` 和 `deploy` 的职责不同：
 
 ```bash
 # 打包机/发布流水线：只产出模型包和运行镜像
-qwen3tts package -m custom-1.7b --gateway engine-docker
+bash scripts/bash/autorun.sh package -m custom-1.7b --gateway engine-docker
 
 # 服务机/本机验证：用已有模型包和运行镜像启动服务
-qwen3tts run -m custom-1.7b --gateway engine-docker
+bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway engine-docker
 ```
 
-本地部署可以直接执行 `qwen3tts all -m custom-1.7b --gateway engine-docker`，它会按 `setup → build → package → deploy` 跑完；跨机部署通常不要在打包机执行最后的 `run`。
+本地部署可以直接执行 `bash scripts/bash/autorun.sh all -m custom-1.7b --gateway engine-docker`，它会按 `setup → build → package → deploy` 跑完；跨机部署通常不要在打包机执行最后的 `deploy`。
 
 ## 命令速查
 
 | 操作 | 命令 |
 |------|------|
-| 采集目标机指纹 | `qwen3tts probe --output target_profile.json` |
-| 创建构建包 | `qwen3tts build make-bundle -m custom-1.7b --target-profile p.json` |
-| SSH 远程编译 | `qwen3tts build remote-build -m custom-1.7b --target-profile p.json --remote-host user@host` |
-| 导入编译产物 | `qwen3tts build import-artifact bundle.tar.zst` |
-| 本地编译 | `qwen3tts build -m custom-1.7b` |
+| 采集目标机指纹 | `bash scripts/bash/autorun.sh probe-target --out target_profile.json` |
+| 创建构建包 | `bash scripts/bash/autorun.sh make-bundle -m custom-1.7b --target-profile p.json` |
+| SSH 远程编译 | `bash scripts/bash/autorun.sh remote-build -m custom-1.7b --target-profile p.json --remote-host user@host` |
+| 导入编译产物 | `bash scripts/bash/autorun.sh import-artifact bundle.tar.zst` |
+| 本地编译 | `bash scripts/bash/autorun.sh build -m custom-1.7b` |

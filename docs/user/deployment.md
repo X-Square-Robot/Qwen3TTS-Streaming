@@ -7,39 +7,39 @@
 v0.1 推荐先使用：
 
 ```bash
-qwen3tts all -m custom-1.7b
+bash scripts/bash/autorun.sh all -m custom-1.7b
 ```
 
 首次部署建议分阶段执行，便于定位问题：
 
 ```bash
-qwen3tts setup -m custom-1.7b
-qwen3tts build -m custom-1.7b
-qwen3tts run -m custom-1.7b --gateway standalone
+bash scripts/bash/autorun.sh setup -m custom-1.7b
+bash scripts/bash/autorun.sh build -m custom-1.7b
+bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway standalone
 ```
 
 ## 统一入口与控制参数
 
-`qwen3tts` CLI 是推荐的统一入口。它同时支持两种方式：
+生命周期统一入口是 `bash scripts/bash/autorun.sh`，它同时支持两种方式：
 
-- 交互式：`qwen3tts`
-- 一次性调用：`qwen3tts <command> -m <variant> [options]`
+- 交互式：`bash scripts/bash/autorun.sh`
+- 一次性调用：`bash scripts/bash/autorun.sh <command> -m <variant> [options]`
 
-所有关键控制项都可以从 `qwen3tts` 进入：导出 GPU、TensorRT 编译 GPU、engine profile、runtime 上限、部署方式和端口。
+所有关键控制项都可以从 autorun 进入：导出 GPU、TensorRT 编译 GPU、engine profile、runtime 上限、部署方式和端口。
 
 Phase C 被拆成两个显式命令：
 
 ```bash
 # 只组装部署产物，不启动服务；跨机/打包机场景用这个
-qwen3tts package -m custom-1.7b --gateway engine-docker
+bash scripts/bash/autorun.sh package -m custom-1.7b --gateway engine-docker
 
 # 只在当前机器启动服务；当前机器不是生产服务机时不要执行这个
-qwen3tts run -m custom-1.7b --gateway engine-docker
+bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway engine-docker
 ```
 
-`qwen3tts all` 是"本机完整流程"，会执行 `setup → build → package → run`。如果你是在导图/打包机上为云端生产容器准备产物，通常应在导入云端返回的 engine artifact 后执行 `package`，然后把镜像和模型包交给生产部署系统；不要在打包机上执行 `run`。
+`autorun.sh all` 是"本机完整流程"，会执行 `setup → build → package → deploy`。如果你是在导图/打包机上为云端生产容器准备产物，通常应在导入云端返回的 engine artifact 后执行 `package`，然后把镜像和模型包交给生产部署系统；不要在打包机上执行 `deploy`。
 
-配置优先级是：命令行参数 > 已导出的环境变量 > manifest/default。常用环境变量包括 `MODEL_VERSION`、`EXPORT_DEVICE`、`BUILD_GPU_DEVICE`、`RUNTIME_GPU_DEVICE`、`MAX_BATCH_SIZE`、`MAX_INPUT_LEN`、`MAX_SEQ_LEN`、`RUNTIME_MAX_BATCH_SIZE`、`RUNTIME_MAX_SEQ_LEN`；但推荐日常都从 `qwen3tts` 参数进入，便于复现。
+配置优先级是：命令行参数 > 已导出的环境变量 > manifest/default。常用环境变量包括 `MODEL_VERSION`、`EXPORT_DEVICE`、`BUILD_GPU_DEVICE`、`RUNTIME_GPU_DEVICE`、`MAX_BATCH_SIZE`、`MAX_INPUT_LEN`、`MAX_SEQ_LEN`、`RUNTIME_MAX_BATCH_SIZE`、`RUNTIME_MAX_SEQ_LEN`；但推荐日常都从 autorun 参数进入，便于复现。
 
 ### Phase B 参数
 
@@ -70,7 +70,7 @@ Phase C:
 默认会组装 Triton model version 目录 `1`。如果需要生成其他版本目录，可以通过 `--model-version <N>` 指定；这会把共享模型包放到 `workspace/model_repository/tts_orchestrator/<N>`，并让 standalone、engine Docker 和 Triton 都从 `/models/tts_orchestrator/<N>` 读取。
 
 ```bash
-qwen3tts run -m custom-1.7b \
+bash scripts/bash/autorun.sh deploy -m custom-1.7b \
   --gateway triton \
   --model-version 2
 ```
@@ -82,13 +82,13 @@ qwen3tts run -m custom-1.7b \
 默认 `--device auto`：脚本会选择当前空闲显存最多的 GPU。你也可以显式指定同一张卡用于所有阶段：
 
 ```bash
-qwen3tts all -m custom-1.7b --device 1
+bash scripts/bash/autorun.sh all -m custom-1.7b --device 1
 ```
 
 也可以按阶段拆开指定：
 
 ```bash
-qwen3tts all -m custom-1.7b \
+bash scripts/bash/autorun.sh all -m custom-1.7b \
   --export-device auto \
   --build-device 1 \
   --runtime-device 1
@@ -110,7 +110,7 @@ Phase B 会在 Docker 层限制构建 GPU，例如 `--build-device 1` 会使用�
 Phase A 下载模型、安装依赖、导出 ONNX/weights/manifest。
 
 ```bash
-qwen3tts setup -m custom-1.7b
+bash scripts/bash/autorun.sh setup -m custom-1.7b
 ```
 
 常用参数：
@@ -128,7 +128,7 @@ qwen3tts setup -m custom-1.7b
 Phase B 在 NGC 容器里运行 trtexec，并把实际 profile 写入 manifest：
 
 ```bash
-qwen3tts build -m custom-1.7b \
+bash scripts/bash/autorun.sh build -m custom-1.7b \
   --max-batch-size 64 \
   --max-input-len 128 \
   --max-seq-len 512 \
@@ -188,7 +188,7 @@ runtime 的 batch/seq 不能超过这里的 profile。需要更大 batch 或更�
 这只是默认建议，不是限制；显式参数仍然最高优先级。比如你可以在 24G 机器上为 48G 部署机尝试构建更大的 profile：
 
 ```bash
-qwen3tts build -m custom-1.7b \
+bash scripts/bash/autorun.sh build -m custom-1.7b \
   --build-device 1 \
   --max-batch-size 64 \
   --max-input-len 128 \
@@ -203,17 +203,17 @@ qwen3tts build -m custom-1.7b \
 
 ```bash
 # 构建较小 profile，便于低显存机器验证
-qwen3tts build -m custom-1.7b \
+bash scripts/bash/autorun.sh build -m custom-1.7b \
   --max-batch-size 16 --max-input-len 96 --max-seq-len 384
 
 # runtime 使用不得超过 manifest 里记录的 profile
-qwen3tts run -m custom-1.7b \
+bash scripts/bash/autorun.sh deploy -m custom-1.7b \
   --gateway standalone \
   --runtime-max-batch-size 16 \
   --runtime-max-seq-len 384
 
 # Triton gateway 也走同一套 runtime 上限和 GPU 入口
-qwen3tts run -m custom-1.7b \
+bash scripts/bash/autorun.sh deploy -m custom-1.7b \
   --gateway triton \
   --runtime-device 1 \
   --runtime-max-batch-size 16 \
@@ -225,7 +225,7 @@ qwen3tts run -m custom-1.7b \
 ### Standalone
 
 ```bash
-qwen3tts run \
+bash scripts/bash/autorun.sh deploy \
   --gateway standalone \
   -m custom-1.7b \
   --max-batch 32 \
@@ -254,7 +254,7 @@ ref TRT engine，减少 24GB 级显存上 request path 再加载 speaker/codec e
 ### Engine Docker
 
 ```bash
-qwen3tts run \
+bash scripts/bash/autorun.sh deploy \
   --gateway engine-docker \
   -m custom-1.7b
 ```
@@ -290,7 +290,7 @@ reference registry 可以直接使用模型包相对路径，例如
 ENGINE_CONFIG=/etc/qwen3-tts/engine.yaml \
 ENGINE_CONFIG_FILE=/srv/qwen3/config/engine.yaml \
 MODEL_REPO_DIR=/srv/qwen3/model_repository \
-qwen3tts run --gateway engine -m custom-1.7b
+bash scripts/bash/autorun.sh deploy --gateway engine-docker -m custom-1.7b
 ```
 
 如果直接写 compose volume，可挂载：
@@ -306,13 +306,13 @@ environment:
 开发期推荐改用：
 
 ```bash
-qwen3tts run --gateway engine -m custom-1.7b --dev
+bash scripts/bash/compose.sh up --gateway engine --variant custom-1.7b --dev
 ```
 
 或：
 
 ```bash
-qwen3tts run --gateway engine -m custom-1.7b --watch
+bash scripts/bash/compose.sh watch --gateway engine --variant custom-1.7b
 ```
 
 这样可以把环境层和代码层拆开，避免每次改 Python 代码都重新构建依赖镜像。
@@ -320,12 +320,12 @@ qwen3tts run --gateway engine -m custom-1.7b --watch
 ### Triton
 
 ```bash
-qwen3tts package \
+bash scripts/bash/autorun.sh package \
   --gateway triton \
   -m custom-1.7b \
   --engine-mode trt
 
-qwen3tts run \
+bash scripts/bash/autorun.sh deploy \
   --gateway triton \
   -m custom-1.7b
 ```
@@ -351,7 +351,7 @@ npm run dev
 Compose 运行：
 
 ```bash
-qwen3tts run --gateway triton -m custom-1.7b
+bash scripts/bash/autorun.sh deploy --gateway triton -m custom-1.7b
 docker compose --profile demo up --build demo-api webui
 ```
 
@@ -368,7 +368,7 @@ runtime max_seq_len=1024 exceeds engine profile max_seq_len=512
 解决方式：
 
 - 降低 `--max-seq-len` / `ENGINE_SCHEDULER_MAX_SEQ_LEN`。
-- 或重新构建 engine：`qwen3tts build -m custom-1.7b --max-seq-len 1024`。
+- 或重新构建 engine：`bash scripts/bash/autorun.sh build -m custom-1.7b --max-seq-len 1024`。
 
 ### dtype 不匹配
 

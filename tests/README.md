@@ -79,4 +79,4 @@ When adding or refactoring manual tools, run:
 python scripts/python/audit_tooling_surface.py
 ```
 
-If a helper is shared across multiple CLIs, prefer extracting it into `scripts/python/qwen3tts_tools/` instead of copying it into another tool.
+If a helper is shared across tools, prefer extracting it into `scripts/python/` (or `tests/support/` for test-only helpers) instead of copying it.
