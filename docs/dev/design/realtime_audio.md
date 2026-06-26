@@ -49,7 +49,7 @@
 
 ## 2. 具体变更
 
-### 2.1 新增 `client/src/qwen3_tts_client/realtime.py`
+### 2.1 新增 `client/src/qwen3tts/realtime.py`
 
 ```python
 @dataclass
@@ -89,7 +89,7 @@ class RealtimeAudioStream:
 - 10ms 粒度会产生过多队列操作和静音帧切片
 - 对齐到 20ms 可直接映射到 WebRTC 音频帧，减少切片和重打包
 
-### 2.3 更新 `client/src/qwen3_tts_client/__init__.py`
+### 2.3 更新 `client/src/qwen3tts/__init__.py`
 
 - 导出 `RealtimeAudioStream`、`TimedAudio`
 
@@ -118,7 +118,7 @@ class RealtimeAudioStream:
 
 本目标属于 REFACTOR_GOALS.md Phase 1（协议层建立）的扩展，应在 Phase 1 完成后、Phase 3（tests/ 清理）之前实施：
 
-1. **Phase 1 扩展**：在 `client/src/qwen3_tts_client/` 新增 `realtime.py`
+1. **Phase 1 扩展**：在 `client/src/qwen3tts/` 新增 `realtime.py`
 2. **Phase 3 前置**：删除 `tests/save.py`，改用 `RealtimeAudioStream`
 3. **Phase 5 文档**：更新 `client/README.md`，补充 RealtimeAudioStream 用法
 
@@ -126,7 +126,7 @@ class RealtimeAudioStream:
 
 ## 4. 验收标准
 
-1. ✅ `from qwen3_tts_client import RealtimeAudioStream, TimedAudio` 可用
+1. ✅ `from qwen3tts import RealtimeAudioStream, TimedAudio` 可用
 2. ✅ `RealtimeAudioStream(session)` 产生等时音频流，空隙处自动填充静音
 3. ✅ `fill_silence=False` 时行为与直接 `iter_messages()` 等价
 4. ✅ `tests/save.py` 已删除

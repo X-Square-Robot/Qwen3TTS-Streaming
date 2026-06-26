@@ -132,7 +132,7 @@ pip install qwen3-tts-client[all]      # 全部传输 + audio
 快速使用：
 
 ```python
-from qwen3_tts_client import TTSClient, SynthesisConfig
+from qwen3tts import TTSClient, SynthesisConfig
 
 client = TTSClient.connect("ws://localhost:50052/v1/ws")
 result = client.synthesize_bytes(
@@ -144,7 +144,7 @@ result = client.synthesize_bytes(
 流式 session：
 
 ```python
-from qwen3_tts_client import TTSClient, SessionStartRequest, SynthesisConfig
+from qwen3tts import TTSClient, SessionStartRequest, SynthesisConfig
 
 client = TTSClient.connect("localhost")
 session = client.open_stream(
@@ -241,8 +241,8 @@ standalone engine 同时支持 gRPC 和 WebSocket。WebSocket 控制帧示例：
 Qwen3-TTS-Triton/
 ├── engine/                     # 推理引擎：frontend/backend/gateway/core
 ├── client/                     # 独立 Python SDK 包 (pip install qwen3-tts-client)
-│   ├── src/qwen3_tts_client/  #   客户端实现与传输适配器
-│   └── src/qwen3_tts_protocol/ #  共享协议层（单一真相源）
+│   ├── src/qwen3tts/  #   客户端实现与传输适配器
+│   └── src/qwen3tts_protocol/ #  共享协议层（单一真相源）
 ├── demo_api/                   # WebUI Demo API（依赖 client 包）
 ├── webui/                      # Vite/React WebUI
 ├── infra/

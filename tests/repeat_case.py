@@ -1,7 +1,7 @@
 """Run the badcase collection through the Qwen3-TTS client SDK and save audio.
 
 This rewrites the old ad-hoc WebSocket script to drive synthesis through the
-official Python client (``qwen3_tts_client.TTSClient``), using token-level
+official Python client (``qwen3tts.TTSClient``), using token-level
 streaming that matches the production path.  It is meant for *manual listening
 evaluation* of regressions — in particular:
 
@@ -53,7 +53,7 @@ _CLIENT_SRC = REPO_ROOT / "client" / "src"
 if _CLIENT_SRC.is_dir() and str(_CLIENT_SRC) not in sys.path:
     sys.path.insert(0, str(_CLIENT_SRC))
 
-from qwen3_tts_client import (  # noqa: E402  (after sys.path tweak)
+from qwen3tts import (  # noqa: E402  (after sys.path tweak)
     AudioChunk,
     AudioFormat,
     SessionStartRequest,

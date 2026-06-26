@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .audio_store import AudioStore
-from qwen3_tts_protocol.schemas import RunResult
+from qwen3tts_protocol.schemas import RunResult
 
 
 def attach_audio_to_result(result: RunResult, audio_store: AudioStore) -> None:

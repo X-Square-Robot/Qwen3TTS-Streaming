@@ -3,7 +3,7 @@
 `tools/validation/` contains scripts for validation, benchmarking, audio inspection, and debugging.
 These are **not** pytest tests — they are standalone CLI tools.
 
-Shared types and schemas live in `qwen3_tts_protocol`.  Repo-internal helpers
+Shared types and schemas live in `qwen3tts_protocol`.  Repo-internal helpers
 (path constants, bootstrap) live in `scripts/python/`.
 
 ## Primary Tool
@@ -108,4 +108,4 @@ python tools/validation/prefill_compare.py --mode cp-parity           # CP sampl
 
 Before adding a new tool here, check whether an existing unified tool already covers
 the use case (e.g. `compare_audio.py --mode` instead of a new compare script).
-Shared logic belongs in `qwen3_tts_protocol` or `scripts/python/`.
+Shared logic belongs in `qwen3tts_protocol` or `scripts/python/`.

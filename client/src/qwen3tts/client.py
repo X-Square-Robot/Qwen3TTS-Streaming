@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from qwen3_tts_protocol import ArrayResult, BytesResult, SessionStartRequest, SynthesisConfig
+from qwen3tts_protocol import ArrayResult, BytesResult, SessionStartRequest, SynthesisConfig
 
 from ._adapters.engine_grpc import EngineGrpcAdapter
 from ._adapters.engine_websocket import EngineWebSocketAdapter

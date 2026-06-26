@@ -10,8 +10,8 @@ Qwen3-TTS-Triton 将官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运�
 Qwen3-TTS-Triton/
 ├── engine/              # 推理引擎核心（frontend/backend/gateway/core/interface）
 ├── client/              # 独立 Python SDK 包 (pip install qwen3-tts-client)
-│   ├── src/qwen3_tts_client/     # 客户端实现与传输适配器
-│   └── src/qwen3_tts_protocol/   # 共享协议层（单一真相源）
+│   ├── src/qwen3tts/     # 客户端实现与传输适配器
+│   └── src/qwen3tts_protocol/   # 共享协议层（单一真相源）
 ├── demo_api/            # WebUI Demo API 后端（aiohttp）
 ├── webui/               # Vite/React 前端
 ├── model_repository/    # Triton Python BLS 模型定义

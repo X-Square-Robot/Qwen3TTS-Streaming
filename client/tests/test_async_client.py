@@ -4,14 +4,14 @@ import asyncio
 
 import pytest
 
-from qwen3_tts_protocol import (
+from qwen3tts_protocol import (
     AudioFormat,
     BytesResult,
     SessionStartRequest,
     StreamEvent,
     SynthesisConfig,
 )
-from qwen3_tts_client.async_client import AsyncTTSClient
+from qwen3tts.async_client import AsyncTTSClient
 
 
 class _FakeAdapter:

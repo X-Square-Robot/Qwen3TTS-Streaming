@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from qwen3_tts_protocol import (
+from qwen3tts_protocol import (
     AudioChunk,
     BytesResult,
     Capabilities,
@@ -15,8 +15,8 @@ from qwen3_tts_protocol import (
     SynthesisConfig,
     VADPolicy,
 )
-from qwen3_tts_client._adapters.triton_http import TritonHttpAdapter, TritonHttpBufferedSession
-from qwen3_tts_client.constants import TRANSPORT_TRITON_HTTP
+from qwen3tts._adapters.triton_http import TritonHttpAdapter, TritonHttpBufferedSession
+from qwen3tts.constants import TRANSPORT_TRITON_HTTP
 
 
 class TestTritonHttpAdapter:
@@ -77,7 +77,7 @@ class TestTritonHttpAdapter:
 
             return FakeResponse()
 
-        monkeypatch.setattr("qwen3_tts_client._adapters.triton_http.requests.post", fake_post)
+        monkeypatch.setattr("qwen3tts._adapters.triton_http.requests.post", fake_post)
 
         adapter = TritonHttpAdapter(
             "http://localhost:8000",
@@ -141,7 +141,7 @@ class TestTritonHttpBufferedSession:
 
             return FakeResponse()
 
-        monkeypatch.setattr("qwen3_tts_client._adapters.triton_http.requests.post", fake_post)
+        monkeypatch.setattr("qwen3tts._adapters.triton_http.requests.post", fake_post)
 
         adapter = TritonHttpAdapter(
             "http://localhost:8000",

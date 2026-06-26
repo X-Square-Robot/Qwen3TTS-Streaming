@@ -28,4 +28,4 @@ make proto-sync
 
 This copies the generated files to:
 - `engine/gateway/` (engine runtime)
-- `client/src/qwen3_tts_client/_proto/` (client SDK)
+- `client/src/qwen3tts/_proto/` (client SDK)

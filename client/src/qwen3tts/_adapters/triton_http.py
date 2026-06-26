@@ -7,7 +7,7 @@ from typing import Any
 
 import requests
 
-from qwen3_tts_protocol import AudioChunk, AudioFormat, Capabilities, SessionStartRequest, StreamEvent
+from qwen3tts_protocol import AudioChunk, AudioFormat, Capabilities, SessionStartRequest, StreamEvent
 
 from .._internal.utils import build_bytes_result, capabilities_from_payload, synthesis_config_to_mapping
 from .._session import BaseStreamSession

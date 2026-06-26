@@ -18,8 +18,8 @@
 SDK 作为独立子项目放在仓库的 [`client/`](../../client) 目录下：
 
 - 打包配置：[`client/pyproject.toml`](../../client/pyproject.toml)
-- 源码入口：[`client/src/qwen3_tts_client`](../../client/src/qwen3_tts_client)
-- 共享协议层：[`client/src/qwen3_tts_protocol`](../../client/src/qwen3_tts_protocol)
+- 源码入口：[`client/src/qwen3tts`](../../client/src/qwen3tts)
+- 共享协议层：[`client/src/qwen3tts_protocol`](../../client/src/qwen3tts_protocol)
 - SDK 单测：[`client/tests`](../../client/tests)
 
 这样做的目的，是避免把服务端重量依赖和部署逻辑一起打进客户端 wheel。
@@ -52,7 +52,7 @@ pip install .[all]
 ## 快速开始
 
 ```python
-from qwen3_tts_client import TTSClient, SynthesisConfig
+from qwen3tts import TTSClient, SynthesisConfig
 
 client = TTSClient.connect("localhost")
 caps = client.get_capabilities()
@@ -69,7 +69,7 @@ print(len(result.audio_bytes))
 ## 统一流式接口
 
 ```python
-from qwen3_tts_client import SessionStartRequest, SynthesisConfig, TTSClient
+from qwen3tts import SessionStartRequest, SynthesisConfig, TTSClient
 
 client = TTSClient.connect("ws://localhost:50052/v1/ws")
 session = client.open_stream(
@@ -126,7 +126,7 @@ Triton HTTP 本身不支持真正的 decoupled streaming infer。
 
 - SDK 代码被收敛到 `client/` 子项目
 - 提供统一同步 / 异步 façade
-- 引入共享协议层 `qwen3_tts_protocol`
+- 引入共享协议层 `qwen3tts_protocol`
 - 提供 auto-detect 骨架和四类 adaptor 入口
 - 为 `triton-http` 提供显式的流式降级语义
 

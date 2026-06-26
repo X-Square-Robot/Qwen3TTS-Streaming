@@ -6,7 +6,7 @@ import socket
 from typing import Any
 from urllib.parse import urlparse
 
-from qwen3_tts_protocol import (
+from qwen3tts_protocol import (
     AudioChunk,
     AudioFormat,
     BytesResult,

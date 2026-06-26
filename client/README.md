@@ -31,7 +31,7 @@ pip install qwen3-tts-client[all]
 ## Quick Start
 
 ```python
-from qwen3_tts_client import TTSClient, SynthesisConfig
+from qwen3tts import TTSClient, SynthesisConfig
 
 client = TTSClient.connect("ws://localhost:50052/v1/ws")
 result = client.synthesize_bytes(
@@ -45,7 +45,7 @@ print(len(result.audio_bytes))
 Streaming session:
 
 ```python
-from qwen3_tts_client import TTSClient, SessionStartRequest, SynthesisConfig
+from qwen3tts import TTSClient, SessionStartRequest, SynthesisConfig
 
 client = TTSClient.connect("localhost")
 session = client.open_stream(
@@ -64,21 +64,21 @@ for message in session.iter_messages():
 More details:
 
 - project manual: `docs/zh/client_sdk.md`
-- public API docs live in `qwen3_tts_client.__init__`
+- public API docs live in `qwen3tts.__init__`
 
 ## Protocol Layer
 
-The SDK includes `qwen3_tts_protocol`, a shared protocol package that defines
+The SDK includes `qwen3tts_protocol`, a shared protocol package that defines
 wire-format types (AudioFormat, SynthesisConfig, StreamEvent, …) and
 Triton-specific types (TtsRequest, build_payload, TraceEvent, RunResult, …).
 Both the client SDK and other project components (demo_api, tests/tools) import
 from this single source of truth.
 
 ```python
-from qwen3_tts_protocol import AudioFormat, SynthesisConfig
-from qwen3_tts_protocol.schemas import TraceEvent, RunResult
-from qwen3_tts_protocol.triton_types import TtsRequest, build_payload
-from qwen3_tts_protocol.audio import save_wav, StreamResult
+from qwen3tts_protocol import AudioFormat, SynthesisConfig
+from qwen3tts_protocol.schemas import TraceEvent, RunResult
+from qwen3tts_protocol.triton_types import TtsRequest, build_payload
+from qwen3tts_protocol.audio import save_wav, StreamResult
 ```
 
 ## Realtime Audio Stream
@@ -90,7 +90,7 @@ produces an isochronous (wall-clock aligned) audio flow, automatically
 inserting silence frames to cover gaps:
 
 ```python
-from qwen3_tts_client import TTSClient, RealtimeAudioStream, SessionStartRequest, SynthesisConfig
+from qwen3tts import TTSClient, RealtimeAudioStream, SessionStartRequest, SynthesisConfig
 
 client = TTSClient.connect("localhost")
 session = client.open_stream(

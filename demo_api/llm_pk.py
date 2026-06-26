@@ -10,9 +10,9 @@ from typing import Any
 
 import numpy as np
 
-from qwen3_tts_protocol.schemas import RunMetrics, RunResult, TraceEvent
-from qwen3_tts_protocol.triton_types import TtsRequest, build_action_payload
-from qwen3_tts_protocol.audio import decode_obj
+from qwen3tts_protocol.schemas import RunMetrics, RunResult, TraceEvent
+from qwen3tts_protocol.triton_types import TtsRequest, build_action_payload
+from qwen3tts_protocol.audio import decode_obj
 from .triton_client import (
     DEFAULT_TRITON_GRPC,
     DEFAULT_TRITON_MODEL,

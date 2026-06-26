@@ -57,7 +57,7 @@ bootstrap_project_imports("scripts", "scripts_export", "third_party_qwen")
 
 # Protocol & streaming support (imported for side-effect availability in phases)
 try:
-    import qwen3_tts_protocol  # noqa: F401
+    import qwen3tts_protocol  # noqa: F401
 except ImportError:
     pass
 

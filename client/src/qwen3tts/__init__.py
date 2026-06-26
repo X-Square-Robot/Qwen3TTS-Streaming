@@ -4,10 +4,10 @@ Public entry points:
 
 - `TTSClient.connect(...)`
 - `AsyncTTSClient.connect(...)`
-- shared protocol types from `qwen3_tts_protocol`
+- shared protocol types from `qwen3tts_protocol`
 """
 
-from qwen3_tts_protocol import (
+from qwen3tts_protocol import (
     ArrayResult,
     AudioChunk,
     AudioFormat,

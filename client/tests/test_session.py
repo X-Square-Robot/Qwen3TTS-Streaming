@@ -6,9 +6,9 @@ import threading
 
 import pytest
 
-from qwen3_tts_protocol import AudioChunk, AudioFormat, StreamEvent
-from qwen3_tts_client._session import BaseStreamSession, AsyncStreamSession, _QUEUE_SENTINEL
-from qwen3_tts_client.exceptions import StreamClosedError
+from qwen3tts_protocol import AudioChunk, AudioFormat, StreamEvent
+from qwen3tts._session import BaseStreamSession, AsyncStreamSession, _QUEUE_SENTINEL
+from qwen3tts.exceptions import StreamClosedError
 
 
 class TestBaseStreamSession:

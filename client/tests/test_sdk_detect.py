@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from qwen3_tts_client.constants import (
+from qwen3tts.constants import (
     DEFAULT_TRITON_HTTP_MODEL,
     DEFAULT_TRITON_GRPC_MODEL,
     TRANSPORT_ENGINE_GRPC,
@@ -10,7 +10,7 @@ from qwen3_tts_client.constants import (
     TRANSPORT_TRITON_GRPC,
     TRANSPORT_TRITON_HTTP,
 )
-from qwen3_tts_client.detect import detect_transport
+from qwen3tts.detect import detect_transport
 
 
 def test_explicit_ws_transport_resolves_ws_endpoint():
@@ -64,7 +64,7 @@ def test_ws_scheme_short_circuit(monkeypatch):
     def fake_probe(url, *, timeout, headers):
         calls.append((url, timeout))
 
-    monkeypatch.setattr("qwen3_tts_client.detect._probe_engine_websocket", fake_probe)
+    monkeypatch.setattr("qwen3tts.detect._probe_engine_websocket", fake_probe)
     detected = detect_transport(
         "ws://example.test/v1/ws",
         transport="auto",
@@ -82,7 +82,7 @@ def test_http_scheme_prefers_standalone_capabilities(monkeypatch):
         def json(self):
             return {"loaded_model_type": "custom_voice", "variant": "custom-1.7b"}
 
-    monkeypatch.setattr("qwen3_tts_client.detect.requests.get", lambda *args, **kwargs: _Resp())
+    monkeypatch.setattr("qwen3tts.detect.requests.get", lambda *args, **kwargs: _Resp())
     detected = detect_transport(
         "http://example.test:50052",
         transport="auto",
@@ -97,8 +97,8 @@ def test_host_port_prefers_engine_grpc(monkeypatch):
     def fake_engine_grpc(endpoint, *, timeout):
         assert endpoint == "host.test:50051"
 
-    monkeypatch.setattr("qwen3_tts_client.detect._probe_engine_grpc", fake_engine_grpc)
-    monkeypatch.setattr("qwen3_tts_client.detect._probe_triton_grpc", lambda *args, **kwargs: pytest.fail("should not probe triton grpc"))
+    monkeypatch.setattr("qwen3tts.detect._probe_engine_grpc", fake_engine_grpc)
+    monkeypatch.setattr("qwen3tts.detect._probe_triton_grpc", lambda *args, **kwargs: pytest.fail("should not probe triton grpc"))
     detected = detect_transport(
         "host.test:50051",
         transport="auto",
@@ -114,7 +114,7 @@ def test_host_without_port_expands_candidates(monkeypatch):
     def fake_engine_ws(url, *, timeout, headers):
         seen.append(url)
 
-    monkeypatch.setattr("qwen3_tts_client.detect._probe_engine_websocket", fake_engine_ws)
+    monkeypatch.setattr("qwen3tts.detect._probe_engine_websocket", fake_engine_ws)
     detected = detect_transport(
         "host.test",
         transport="auto",

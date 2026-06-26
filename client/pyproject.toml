@@ -56,8 +56,8 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 include = [
-  "qwen3_tts_client",
-  "qwen3_tts_client.*",
-  "qwen3_tts_protocol",
-  "qwen3_tts_protocol.*",
+  "qwen3tts",
+  "qwen3tts.*",
+  "qwen3tts_protocol",
+  "qwen3tts_protocol.*",
 ]

@@ -5,7 +5,7 @@ capability normalization logic that is shared between the engine and client.
 
 Serialization/parsing functions are re-exported from the package's __init__
 for backward compatibility with import paths like
-``from qwen3_tts_protocol.protocol import parse_output_policy``.
+``from qwen3tts_protocol.protocol import parse_output_policy``.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 # Re-export serialization/parsing functions from the package
-from qwen3_tts_protocol import (  # noqa: F401
+from qwen3tts_protocol import (  # noqa: F401
     parse_output_policy,
     parse_timing_context,
     serialize_output_policy,

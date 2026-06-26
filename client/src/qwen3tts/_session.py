@@ -5,7 +5,7 @@ import queue
 import threading
 from typing import Iterator
 
-from qwen3_tts_protocol import AudioChunk, StreamEvent
+from qwen3tts_protocol import AudioChunk, StreamEvent
 
 from .exceptions import StreamClosedError
 

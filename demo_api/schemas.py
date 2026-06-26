@@ -1,11 +1,11 @@
 """Demo API schemas — thin re-export layer.
 
-All types are now defined in ``qwen3_tts_protocol.schemas``.
+All types are now defined in ``qwen3tts_protocol.schemas``.
 This module re-exports them for backward compatibility with code that
 imports from ``demo_api.schemas``.
 """
 
-from qwen3_tts_protocol.schemas import (  # noqa: F401
+from qwen3tts_protocol.schemas import (  # noqa: F401
     BACKENDS,
     TraceEvent,
     RunMetrics,

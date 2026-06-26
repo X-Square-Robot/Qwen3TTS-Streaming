@@ -14,9 +14,9 @@ from .audio_assets import attach_audio_to_result
 from .audio_store import AudioStore
 from . import llm_pk
 from .jobs import ConcurrencyJobManager
-from qwen3_tts_protocol.schemas import TraceEvent
+from qwen3tts_protocol.schemas import TraceEvent
 from .trace_store import TraceStore
-from qwen3_tts_protocol.triton_types import TtsRequest
+from qwen3tts_protocol.triton_types import TtsRequest
 from .triton_client import probe_ready, stream_once
 
 

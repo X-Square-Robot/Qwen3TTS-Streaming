@@ -54,7 +54,7 @@ COPY engine.yaml /etc/qwen3-tts/engine.yaml
 COPY engine/ /app/engine/
 COPY scripts/compose/ /app/scripts/compose/
 # The engine imports the shared protocol dataclasses (engine/interface/*
-# → ``import qwen3_tts_protocol``).  They ship in the qwen3-tts-client package
+# → ``import qwen3tts_protocol``).  They ship in the qwen3-tts-client package
 # but are pure-stdlib, so vendor the package directly onto PYTHONPATH (=/app)
 # instead of pulling the whole client dependency tree into the runtime image.
-COPY client/src/qwen3_tts_protocol/ /app/qwen3_tts_protocol/
+COPY client/src/qwen3tts_protocol/ /app/qwen3tts_protocol/

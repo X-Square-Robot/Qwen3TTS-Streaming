@@ -81,6 +81,6 @@ bash scripts/demo/start_webui_demo.sh
 
 ## 与 client 包的关系
 
-demo_api 依赖 `qwen3_tts_protocol` 包中的 `schemas`（如 `TraceEvent`）和 `triton_types`（如 `TtsRequest`），
+demo_api 依赖 `qwen3tts_protocol` 包中的 `schemas`（如 `TraceEvent`）和 `triton_types`（如 `TtsRequest`），
 用于请求/响应的结构化定义。实际的 Triton gRPC 通信由 `triton_client` 模块封装，
 demo_api 不再内嵌客户端逻辑，保持职责单一。

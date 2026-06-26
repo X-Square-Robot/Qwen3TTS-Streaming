@@ -104,7 +104,7 @@ def _get_triton_client(url):
     return g, g.InferenceServerClient(url=url)
 
 def _run_triton_concurrent(args) -> int:
-    from qwen3_tts_protocol import save_wav
+    from qwen3tts_protocol import save_wav
     from tests.support.triton_streaming import StreamResult, infer_stream, infer_text_stream
 
     output_dir = Path(args.output_dir); output_dir.mkdir(parents=True, exist_ok=True)

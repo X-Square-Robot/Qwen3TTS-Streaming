@@ -3,18 +3,18 @@ from __future__ import annotations
 import json
 import pytest
 
-from qwen3_tts_protocol import (
+from qwen3tts_protocol import (
     BytesResult,
     Capabilities,
     OutputPolicy,
     SessionStartRequest,
     SynthesisConfig,
 )
-from qwen3_tts_client._adapters.engine_websocket import (
+from qwen3tts._adapters.engine_websocket import (
     EngineWebSocketAdapter,
     EngineWebSocketStreamSession,
 )
-from qwen3_tts_client.constants import TRANSPORT_ENGINE_WEBSOCKET
+from qwen3tts.constants import TRANSPORT_ENGINE_WEBSOCKET
 
 
 class FakeRawWebSocketConnection:
@@ -86,19 +86,19 @@ class TestEngineWebSocketAdapter:
         closed = [False]
 
         monkeypatch.setattr(
-            "qwen3_tts_client._adapters.engine_websocket.ws_connect",
+            "qwen3tts._adapters.engine_websocket.ws_connect",
             _make_ws_connect(fake_conn),
         )
         monkeypatch.setattr(
-            "qwen3_tts_client._adapters.engine_websocket.ws_send_json",
+            "qwen3tts._adapters.engine_websocket.ws_send_json",
             _make_ws_send_json(sent),
         )
         monkeypatch.setattr(
-            "qwen3_tts_client._adapters.engine_websocket.ws_recv_frame",
+            "qwen3tts._adapters.engine_websocket.ws_recv_frame",
             _make_ws_recv_frame([caps_response]),
         )
         monkeypatch.setattr(
-            "qwen3_tts_client._adapters.engine_websocket.ws_close",
+            "qwen3tts._adapters.engine_websocket.ws_close",
             _make_ws_close(closed),
         )
 
@@ -120,23 +120,23 @@ class TestEngineWebSocketAdapter:
         closed = [False]
 
         monkeypatch.setattr(
-            "qwen3_tts_client._adapters.engine_websocket.ws_connect",
+            "qwen3tts._adapters.engine_websocket.ws_connect",
             _make_ws_connect(fake_conn),
         )
         monkeypatch.setattr(
-            "qwen3_tts_client._adapters.engine_websocket.ws_send_json",
+            "qwen3tts._adapters.engine_websocket.ws_send_json",
             _make_ws_send_json(sent),
         )
         monkeypatch.setattr(
-            "qwen3_tts_client._adapters.engine_websocket.ws_recv_frame",
+            "qwen3tts._adapters.engine_websocket.ws_recv_frame",
             _make_ws_recv_frame([done_event]),
         )
         monkeypatch.setattr(
-            "qwen3_tts_client._adapters.engine_websocket.ws_close",
+            "qwen3tts._adapters.engine_websocket.ws_close",
             _make_ws_close(closed),
         )
         monkeypatch.setattr(
-            "qwen3_tts_client._adapters.engine_websocket.ws_send_frame",
+            "qwen3tts._adapters.engine_websocket.ws_send_frame",
             lambda conn, *, opcode, payload: None,
         )
 
@@ -155,25 +155,25 @@ class TestEngineWebSocketAdapter:
         closed = [False]
 
         monkeypatch.setattr(
-            "qwen3_tts_client._adapters.engine_websocket.ws_connect",
+            "qwen3tts._adapters.engine_websocket.ws_connect",
             _make_ws_connect(fake_conn),
         )
         monkeypatch.setattr(
-            "qwen3_tts_client._adapters.engine_websocket.ws_send_json",
+            "qwen3tts._adapters.engine_websocket.ws_send_json",
             _make_ws_send_json(sent),
         )
         monkeypatch.setattr(
-            "qwen3_tts_client._adapters.engine_websocket.ws_recv_frame",
+            "qwen3tts._adapters.engine_websocket.ws_recv_frame",
             _make_ws_recv_frame([
                 {"type": "event", "event": {"type": "done", "session_id": "s3"}},
             ]),
         )
         monkeypatch.setattr(
-            "qwen3_tts_client._adapters.engine_websocket.ws_close",
+            "qwen3tts._adapters.engine_websocket.ws_close",
             _make_ws_close(closed),
         )
         monkeypatch.setattr(
-            "qwen3_tts_client._adapters.engine_websocket.ws_send_frame",
+            "qwen3tts._adapters.engine_websocket.ws_send_frame",
             lambda conn, *, opcode, payload: None,
         )
 

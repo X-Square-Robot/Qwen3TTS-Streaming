@@ -5,7 +5,7 @@ import threading
 import time
 from typing import Any
 
-from qwen3_tts_protocol import AudioChunk, AudioFormat, BytesResult, Capabilities, SessionStartRequest, StreamEvent
+from qwen3tts_protocol import AudioChunk, AudioFormat, BytesResult, Capabilities, SessionStartRequest, StreamEvent
 
 from .._internal.utils import build_bytes_result, capabilities_from_payload, decode_stream_event
 from .._proto import tts_pb2, tts_pb2_grpc

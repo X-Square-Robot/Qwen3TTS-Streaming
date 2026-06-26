@@ -5,7 +5,7 @@ into a structured object with computed latency properties.
 
 Usage::
 
-    from qwen3_tts_client.timing import ServerTimingReport
+    from qwen3tts.timing import ServerTimingReport
 
     report = ServerTimingReport.from_done_meta(done_event_meta)
     print(report.explain_latency())

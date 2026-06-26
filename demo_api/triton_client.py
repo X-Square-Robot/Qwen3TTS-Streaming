@@ -1,7 +1,7 @@
 """Demo API Triton client — thin adapter using the protocol layer.
 
 Types (TtsRequest, build_payload, build_action_payload) and schemas
-(TraceEvent, RunResult, …) are now defined in ``qwen3_tts_protocol``.
+(TraceEvent, RunResult, …) are now defined in ``qwen3tts_protocol``.
 This module only keeps the demo-specific ``stream_once`` and
 ``measure_once`` async helpers.
 """
@@ -17,13 +17,13 @@ from typing import Any, AsyncIterator
 
 import numpy as np
 
-from qwen3_tts_protocol.schemas import RunMetrics, RunResult, TraceEvent
-from qwen3_tts_protocol.triton_types import (
+from qwen3tts_protocol.schemas import RunMetrics, RunResult, TraceEvent
+from qwen3tts_protocol.triton_types import (
     TtsRequest,
     build_action_payload,
     build_payload,
 )
-from qwen3_tts_protocol.audio import decode_obj
+from qwen3tts_protocol.audio import decode_obj
 
 
 DEFAULT_TRITON_GRPC = os.environ.get("QWEN_DEMO_TRITON_GRPC", "localhost:8001")

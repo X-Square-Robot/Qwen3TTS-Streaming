@@ -8,9 +8,9 @@ from unittest.mock import patch
 
 import pytest
 
-from qwen3_tts_protocol import AudioChunk, AudioFormat, StreamEvent
-from qwen3_tts_client._session import BaseStreamSession
-from qwen3_tts_client.realtime import (
+from qwen3tts_protocol import AudioChunk, AudioFormat, StreamEvent
+from qwen3tts._session import BaseStreamSession
+from qwen3tts.realtime import (
     RealtimeAudioStream,
     TimedAudio,
     _audio_duration_s,
@@ -291,14 +291,14 @@ class TestEarlyBreak:
 
 class TestPublicAPI:
     def test_import_from_package(self):
-        from qwen3_tts_client import RealtimeAudioStream as RAS
-        from qwen3_tts_client import TimedAudio as TA
+        from qwen3tts import RealtimeAudioStream as RAS
+        from qwen3tts import TimedAudio as TA
 
         assert RAS is RealtimeAudioStream
         assert TA is TimedAudio
 
     def test_in_all(self):
-        import qwen3_tts_client
+        import qwen3tts
 
-        assert "RealtimeAudioStream" in qwen3_tts_client.__all__
-        assert "TimedAudio" in qwen3_tts_client.__all__
+        assert "RealtimeAudioStream" in qwen3tts.__all__
+        assert "TimedAudio" in qwen3tts.__all__

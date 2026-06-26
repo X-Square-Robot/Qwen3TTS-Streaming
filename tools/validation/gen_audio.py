@@ -17,8 +17,8 @@ from common import REPO_ROOT, bootstrap_project_imports
 
 bootstrap_project_imports("repo", "scripts_python")
 
-from qwen3_tts_protocol.triton_types import build_request_payload
-from qwen3_tts_protocol.audio import save_wav
+from qwen3tts_protocol.triton_types import build_request_payload
+from qwen3tts_protocol.audio import save_wav
 from tests.support.triton_streaming import infer_stream
 
 OUTPUT_DIR = REPO_ROOT / "workspace" / "audio_samples"

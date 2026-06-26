@@ -11,7 +11,7 @@ PROTO_DIR := proto
 PROTO_FILE := $(PROTO_DIR)/tts.proto
 
 ENGINE_PROTO_DIR := engine/gateway
-CLIENT_PROTO_DIR := client/src/qwen3_tts_client/_proto
+CLIENT_PROTO_DIR := client/src/qwen3tts/_proto
 
 proto:
 	python -m grpc_tools.protoc \

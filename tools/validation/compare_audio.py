@@ -71,11 +71,11 @@ if "tests" in sys.modules:
     if not getattr(_t, "__file__", None) or not str(getattr(_t, "__file__", "")).startswith(_repo_str):
         del sys.modules["tests"]
 
-from qwen3_tts_protocol.triton_types import (
+from qwen3tts_protocol.triton_types import (
     build_request_payload,
     build_variant_request_payload,
 )
-from qwen3_tts_protocol.audio import save_wav, StreamResult
+from qwen3tts_protocol.audio import save_wav, StreamResult
 from tests.support.triton_streaming import infer_stream
 
 # Lazy imports for heavy dependencies (torch, onnxruntime, grpc, etc.) are

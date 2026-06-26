@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from qwen3_tts_client import SessionStartRequest, SynthesisConfig, TTSClient
-from qwen3_tts_client.audio import decode_audio_bytes_to_array
-from qwen3_tts_client.exceptions import DependencyMissingError
+from qwen3tts import SessionStartRequest, SynthesisConfig, TTSClient
+from qwen3tts.audio import decode_audio_bytes_to_array
+from qwen3tts.exceptions import DependencyMissingError
 
 
 class _FakeAdapter:
@@ -16,7 +16,7 @@ class _FakeAdapter:
 
     def synthesize_bytes(self, text: str, *, request):
         self.start_requests.append((text, request))
-        from qwen3_tts_protocol import AudioFormat, BytesResult, StreamEvent
+        from qwen3tts_protocol import AudioFormat, BytesResult, StreamEvent
 
         return BytesResult(
             audio_bytes=(b"\x00\x00\x00\x00" * 2),

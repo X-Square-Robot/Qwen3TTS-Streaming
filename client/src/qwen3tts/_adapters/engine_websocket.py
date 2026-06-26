@@ -6,7 +6,7 @@ import threading
 import time
 from typing import Any
 
-from qwen3_tts_protocol import (
+from qwen3tts_protocol import (
     AudioChunk,
     AudioFormat,
     BytesResult,

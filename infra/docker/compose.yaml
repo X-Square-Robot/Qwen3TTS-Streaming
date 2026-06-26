@@ -53,8 +53,8 @@ services:
             - __pycache__/
             - "*.pyc"
         - action: sync+restart
-          path: ../../client/src/qwen3_tts_protocol
-          target: /app/qwen3_tts_protocol
+          path: ../../client/src/qwen3tts_protocol
+          target: /app/qwen3tts_protocol
           ignore:
             - __pycache__/
             - "*.pyc"

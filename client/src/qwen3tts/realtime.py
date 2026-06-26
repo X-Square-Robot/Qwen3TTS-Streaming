@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from queue import Empty, Queue
 from typing import Iterator
 
-from qwen3_tts_protocol import AudioChunk, StreamEvent
+from qwen3tts_protocol import AudioChunk, StreamEvent
 
 from ._session import BaseStreamSession
 

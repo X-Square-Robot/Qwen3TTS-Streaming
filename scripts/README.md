@@ -36,7 +36,7 @@
 ## Governance Rules
 
 - A new user-facing validation or benchmark tool should live in `tools/validation/`, not `scripts/python/`.
-- Shared types and schemas belong in `qwen3_tts_protocol`; repo-internal helpers in `scripts/python/`.
+- Shared types and schemas belong in `qwen3tts_protocol`; repo-internal helpers in `scripts/python/`.
 - Keep `scripts/python/` entry points thin — parse args, call shared code, render results.
 - Before adding a new tool, check if an existing unified tool (e.g. `compare_audio.py`, `verify_engine.py`) already covers the use case.
 

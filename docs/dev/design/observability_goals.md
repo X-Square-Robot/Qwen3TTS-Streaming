@@ -605,7 +605,7 @@ first_audio=231.6ms
 | gRPC 网关 | `engine/gateway/grpc_server.py` | Session 级日志 | 新增 `request.accepted` 事件，在响应 meta 中注入时间戳 |
 | WebSocket 网关 | `engine/gateway/websocket_server.py` | Session 级日志 | 同 gRPC |
 | Proto 定义 | `engine/gateway/tts.proto` | `TimingContext` 只有客户端时间戳 | 新增 `ServerTiming` 消息类型 |
-| 客户端 SDK | `client/src/qwen3_tts_client/` | 不解析服务端时间戳 | 新增 `TimingReport` 解析和计算 |
+| 客户端 SDK | `client/src/qwen3tts/` | 不解析服务端时间戳 | 新增 `TimingReport` 解析和计算 |
 
 ---
 

@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from qwen3_tts_protocol import DetectedTransport
+from qwen3tts_protocol import DetectedTransport
 
 from ._internal.raw_websocket import RawWebSocketError, ws_close, ws_connect, ws_recv_frame, ws_send_json
 from .constants import (

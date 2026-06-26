@@ -1,13 +1,13 @@
 """Shared Triton streaming helpers for tools/validation.
 
 .. deprecated::
-   Types and payload builders have moved to ``qwen3_tts_protocol``.
+   Types and payload builders have moved to ``qwen3tts_protocol``.
    This module re-exports them for backward compatibility and keeps the
    synchronous ``infer_stream`` / ``infer_stream_sequence`` /
    ``infer_text_stream`` helpers that depend on the live Triton gRPC
    client (not part of the protocol layer).
 
-   New code should import from ``qwen3_tts_protocol`` directly.
+   New code should import from ``qwen3tts_protocol`` directly.
 """
 
 from __future__ import annotations
@@ -23,19 +23,19 @@ from typing import Any, Sequence
 import numpy as np
 
 # ---- Re-exports from the protocol layer ----
-from qwen3_tts_protocol.audio import (  # noqa: F401
+from qwen3tts_protocol.audio import (  # noqa: F401
     DEFAULT_SAMPLE_RATE as SAMPLE_RATE,
     StreamResult,
     decode_audio_bytes,
     decode_obj,
     save_wav,
 )
-from qwen3_tts_protocol.triton_types import (  # noqa: F401
+from qwen3tts_protocol.triton_types import (  # noqa: F401
     build_request_payload,
     build_text_stream_requests,
     build_variant_request_payload,
 )
-from qwen3_tts_protocol.triton_types import build_request_payload as _build_request_payload
+from qwen3tts_protocol.triton_types import build_request_payload as _build_request_payload
 
 # ---- Constants kept locally (Triton-specific) ----
 REQUEST_MODEL_NAME = "tts_orchestrator"

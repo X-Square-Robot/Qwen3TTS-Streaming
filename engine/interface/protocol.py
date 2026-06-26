@@ -4,7 +4,7 @@ import json
 
 from ..core.types import OutputPolicyConfig, TimingConfig, VADConfig
 from .types import OutputPolicy, StreamEvent, TimingContext
-from qwen3_tts_protocol.protocol import (
+from qwen3tts_protocol.protocol import (
     PROTOCOL_VERSION,
     SUPPORTED_OUTPUT_POLICY_FEATURES,
     SUPPORTED_TIMING_FIELDS,

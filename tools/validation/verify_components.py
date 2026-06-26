@@ -32,7 +32,7 @@ from _bootstrap import bootstrap_tool_imports
 
 bootstrap_tool_imports()
 
-from qwen3_tts_protocol.audio import DEFAULT_SAMPLE_RATE  # noqa: F401 — protocol import per spec
+from qwen3tts_protocol.audio import DEFAULT_SAMPLE_RATE  # noqa: F401 — protocol import per spec
 from common import REPO_ROOT, bootstrap_project_imports
 
 # ---------------------------------------------------------------------------
