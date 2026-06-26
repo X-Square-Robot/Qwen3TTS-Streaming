@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/unit/operators/<file> -> repo root
 EXPORT_DIR = REPO_ROOT / "scripts" / "export"
 if str(EXPORT_DIR) not in sys.path:
     sys.path.insert(0, str(EXPORT_DIR))
@@ -15,25 +15,68 @@ if str(EXPORT_DIR) not in sys.path:
 from utils import CodePredictorUnrolled
 
 
+def _zero_linear(in_features: int, out_features: int) -> nn.Linear:
+    """A Linear whose weight and bias are zero (so it outputs a zero tensor)."""
+    layer = nn.Linear(in_features, out_features)
+    with torch.no_grad():
+        layer.weight.zero_()
+        if layer.bias is not None:
+            layer.bias.zero_()
+    return layer
+
+
+class _IdentityAttention(nn.Module):
+    """Self-attention stub whose ``o_proj`` is zero, so the attention block
+    contributes nothing and the surrounding residual makes it an identity.
+
+    ``CodePredictorUnrolled`` no longer calls ``layer(...)`` directly; it
+    decomposes the block and runs attention via ``_run_attention``, which reads
+    these sub-module attributes.
+    """
+
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.head_dim = hidden_size
+        self.num_key_value_groups = 1
+        self.scaling = 1.0
+        self.q_proj = nn.Linear(hidden_size, hidden_size)
+        self.k_proj = nn.Linear(hidden_size, hidden_size)
+        self.v_proj = nn.Linear(hidden_size, hidden_size)
+        self.q_norm = nn.Identity()
+        self.k_norm = nn.Identity()
+        self.o_proj = _zero_linear(hidden_size, hidden_size)
+
+
+class _ZeroMLP(nn.Module):
+    """MLP stub returning zeros, so the residual makes the block an identity."""
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        return torch.zeros_like(hidden)
+
+
 class _IdentityLayer(nn.Module):
-    def forward(
-        self,
-        hidden: torch.Tensor,
-        *,
-        attention_mask=None,
-        position_ids=None,
-        past_key_values=None,
-        output_attentions=False,
-        use_cache=False,
-        cache_position=None,
-        position_embeddings=None,
-    ):
-        return (hidden,)
+    """A decoder layer that is a no-op identity under the unrolled contract:
+    layernorms are identities and both the attention and MLP branches
+    contribute zero, so ``residual + branch == residual``.
+    """
+
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.input_layernorm = nn.Identity()
+        self.self_attn = _IdentityAttention(hidden_size)
+        self.post_attention_layernorm = nn.Identity()
+        self.mlp = _ZeroMLP()
 
 
 class _DummyRotary(nn.Module):
+    """Returns a non-rotating (cos=1, sin=0) embedding so attention is unrotated."""
+
     def forward(self, x: torch.Tensor, position_ids: torch.Tensor):
-        return None
+        batch, seq_len = x.shape[0], x.shape[1]
+        head_dim = x.shape[-1]
+        cos = torch.ones(batch, seq_len, head_dim, dtype=x.dtype, device=x.device)
+        sin = torch.zeros(batch, seq_len, head_dim, dtype=x.dtype, device=x.device)
+        return cos, sin
 
 
 class _SequenceLengthProjection(nn.Module):
@@ -73,7 +116,7 @@ def test_code_predictor_projects_prefix_once_then_only_new_tokens():
 
     code_predictor = SimpleNamespace(
         model=SimpleNamespace(
-            layers=nn.ModuleList([_IdentityLayer()]),
+            layers=nn.ModuleList([_IdentityLayer(hidden_size)]),
             norm=nn.Identity(),
             rotary_emb=_DummyRotary(),
             codec_embedding=codec_embeddings,

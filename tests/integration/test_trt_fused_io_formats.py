@@ -17,7 +17,7 @@ from trt_fused_io_formats import (  # noqa: E402
     trtexec_precision_args,
 )
 
-FIXTURE_MANIFEST = REPO_ROOT / "tests" / "data" / "triton_manifest_custom_1_7b.json"
+FIXTURE_MANIFEST = REPO_ROOT / "tools" / "data" / "triton_manifest_custom_1_7b.json"
 
 
 def _load_fixture() -> dict:

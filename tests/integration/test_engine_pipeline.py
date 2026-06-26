@@ -289,6 +289,7 @@ class TestPrefillBuilderBoundary:
         class _FakeWeights:
             def __init__(self):
                 self.device = torch.device("cpu")
+                self.dtype = torch.bfloat16
                 self.hidden_size = 4
                 self.variant = "fake"
                 self.codec_bos_id = 10

@@ -2,8 +2,8 @@ import importlib.util
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-HELPER_PATH = REPO_ROOT / "scripts" / "python" / "suggest_engine_profile.py"
+REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/unit/engine_core/<file> -> repo root
+HELPER_PATH = REPO_ROOT / "tools" / "validation" / "suggest_engine_profile.py"
 
 
 def _load_helper():
@@ -20,7 +20,7 @@ def test_export_aware_profile_suggests_128_for_48g_1_7b(tmp_path):
     exported = tmp_path / "exported"
     variant_dir = exported / "custom-1.7b"
     variant_dir.mkdir(parents=True)
-    fixture = REPO_ROOT / "tests" / "data" / "triton_manifest_custom_1_7b.json"
+    fixture = REPO_ROOT / "tools" / "data" / "triton_manifest_custom_1_7b.json"
     variant_dir.joinpath("triton_manifest.json").write_text(
         fixture.read_text(encoding="utf-8"),
         encoding="utf-8",

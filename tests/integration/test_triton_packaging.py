@@ -25,7 +25,7 @@ from generate_triton_configs import (  # noqa: E402
 from triton_manifest_io import build_manifest_for_export, load_manifest  # noqa: E402
 
 
-FIXTURE_MANIFEST = REPO_ROOT / "tests" / "data" / "triton_manifest_custom_1_7b.json"
+FIXTURE_MANIFEST = REPO_ROOT / "tools" / "data" / "triton_manifest_custom_1_7b.json"
 FIXTURE_LAYOUT = REPO_ROOT / "workspace" / "exported" / "custom-1.7b" / "code2wav_state_layout.json"
 
 

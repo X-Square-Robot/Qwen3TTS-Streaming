@@ -4,13 +4,19 @@ from engine.backend.executor import Executor
 
 
 class _FakeTRTEngine:
-    def __init__(self, shape):
+    def __init__(self, shape, input_embeds_shape=(1, 2048)):
         self._shape = shape
+        self._input_embeds_shape = input_embeds_shape
 
     def get_input_profile_max_shape(self, name: str, profile_idx: int = 0):
-        assert name == "talker_past_kv"
         assert profile_idx == 0
-        return self._shape
+        # The executor queries the talker_past_kv profile (drives batch/seq
+        # clamping) and the input_embeds profile (drives max_input_len).
+        if name == "talker_past_kv":
+            return self._shape
+        if name == "input_embeds":
+            return self._input_embeds_shape
+        raise AssertionError(f"unexpected input name: {name}")
 
 
 class TestExecutorProfileLimits:
