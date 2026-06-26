@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import time
 import uuid
@@ -11,6 +12,8 @@ from .audio_store import AudioStore
 from qwen3tts_protocol.schemas import summarize_ttft
 from qwen3tts_protocol.triton_types import TtsRequest
 from .triton_client import TritonUnavailable, measure_once
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -40,6 +43,8 @@ class ConcurrencyJobManager:
         self.audio_store = audio_store
         self.live_slot_limit = max(1, int(live_slot_limit))
         self._jobs: dict[str, ConcurrencyJob] = {}
+        self._max_jobs = 128  # bound memory: this server can run indefinitely
+        self._tasks: set[asyncio.Task] = set()  # keep refs so tasks aren't GC'd
 
     def get(self, job_id: str) -> ConcurrencyJob | None:
         return self._jobs.get(job_id)
@@ -48,7 +53,13 @@ class ConcurrencyJobManager:
         job_id = f"bench-{uuid.uuid4().hex[:10]}"
         job = ConcurrencyJob(job_id=job_id, request=dict(request))
         self._jobs[job_id] = job
-        asyncio.create_task(self._run(job))
+        # Bound memory: evict oldest jobs once over the cap (dicts preserve
+        # insertion order). Without this, _jobs grows forever.
+        while len(self._jobs) > self._max_jobs:
+            del self._jobs[next(iter(self._jobs))]
+        task = asyncio.create_task(self._run(job))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
         return job
 
     async def subscribe(self, job: ConcurrencyJob) -> asyncio.Queue:
@@ -63,24 +74,40 @@ class ConcurrencyJobManager:
             job.subscribers.remove(queue)
 
     async def _run(self, job: ConcurrencyJob) -> None:
-        concurrency = int(job.request.get("concurrency") or 128)
-        concurrency = max(1, min(128, concurrency))
-        live_requested = bool(job.request.get("live"))
-        live = bool(self.enable_live and live_requested)
-        started = time.perf_counter()
-        await job.publish(
-            {
-                "type": "job_started",
-                "job_id": job.job_id,
-                "concurrency": concurrency,
-                "source": "live_triton" if live else "simulated",
-            }
-        )
-        if live:
-            await self._run_live(job, concurrency, started)
-        else:
-            await self._run_simulated(job, concurrency, started)
-        job.done = True
+        try:
+            concurrency = int(job.request.get("concurrency") or 128)
+            concurrency = max(1, min(128, concurrency))
+            live_requested = bool(job.request.get("live"))
+            live = bool(self.enable_live and live_requested)
+            started = time.perf_counter()
+            await job.publish(
+                {
+                    "type": "job_started",
+                    "job_id": job.job_id,
+                    "concurrency": concurrency,
+                    "source": "live_triton" if live else "simulated",
+                }
+            )
+            if live:
+                await self._run_live(job, concurrency, started)
+            else:
+                await self._run_simulated(job, concurrency, started)
+        except Exception as exc:  # noqa: BLE001 — must always release subscribers
+            # If the run dies before publishing its summary, subscribers (which
+            # only stop on a "summary" message) would hang forever. Always emit
+            # a terminal summary.
+            logger.exception("Concurrency job %s failed", job.job_id)
+            if job.summary is None:
+                await job.publish(
+                    {
+                        "type": "summary",
+                        "job_id": job.job_id,
+                        "error": str(exc),
+                        "failed": True,
+                    }
+                )
+        finally:
+            job.done = True
 
     async def _run_simulated(self, job: ConcurrencyJob, concurrency: int, started: float) -> None:
         rng = random.Random(job.job_id)

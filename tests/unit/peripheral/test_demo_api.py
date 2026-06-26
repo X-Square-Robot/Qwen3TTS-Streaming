@@ -263,3 +263,48 @@ def test_llm_pk_streaming_init_uses_token_mode(monkeypatch):
         "，",
     ]
     assert result.metrics.chunks == 2
+
+
+def test_failed_job_publishes_terminal_summary(monkeypatch):
+    """A job that raises mid-run must still publish a terminal 'summary' so
+    subscribers (which only stop on a 'summary' message) don't hang forever."""
+
+    async def run_job():
+        manager = ConcurrencyJobManager(enable_live=False)
+
+        async def _boom(job, concurrency, started):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(manager, "_run_simulated", _boom)
+        job = await manager.create_job({"concurrency": 2, "live": False})
+        queue = await manager.subscribe(job)
+        while True:
+            message = await asyncio.wait_for(queue.get(), timeout=2)
+            if message.get("type") == "summary":
+                return message
+
+    summary = asyncio.run(run_job())
+    assert summary["failed"] is True
+    assert "boom" in summary["error"]
+
+
+def test_jobs_evicted_when_over_cap(monkeypatch):
+    """_jobs must stay bounded — oldest jobs are evicted past the cap."""
+
+    async def run():
+        manager = ConcurrencyJobManager(enable_live=False)
+        manager._max_jobs = 3
+
+        async def _noop(job):
+            job.done = True
+
+        monkeypatch.setattr(manager, "_run", _noop)
+        ids = [
+            (await manager.create_job({"concurrency": 1, "live": False})).job_id
+            for _ in range(6)
+        ]
+        assert len(manager._jobs) <= 3
+        assert manager.get(ids[-1]) is not None  # newest retained
+        assert manager.get(ids[0]) is None       # oldest evicted
+
+    asyncio.run(run())

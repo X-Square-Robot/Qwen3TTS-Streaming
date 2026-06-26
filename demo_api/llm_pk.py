@@ -297,9 +297,11 @@ async def _run_pk(
                             type="first_audio_chunk",
                             t_ms=now_ms,
                             meta={
+                                **meta,
+                                # locally-computed fields win over any same-named
+                                # server-supplied meta keys
                                 "bytes": len(audio_bytes_value),
                                 "audio_format": dict(audio_format),
-                                **meta,
                             },
                         )
                     )
