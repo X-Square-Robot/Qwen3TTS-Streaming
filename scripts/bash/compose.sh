@@ -754,44 +754,27 @@ cmd_prepare() {
     prepare_model_repo
 }
 
+# Run `compose up` for the given services, honoring --build.
+_compose_up_exec() {
+    if $BUILD_BEFORE_UP; then
+        compose_cmd up --build -d "$@"
+    else
+        compose_cmd up -d "$@"
+    fi
+}
+
 cmd_up() {
     require_docker_compose_if_needed
 
     if $DRY_RUN; then
+        resolve_variant_if_needed
+        export_compose_env
+        resolve_compose_image_defaults
+        log_compose_runtime_summary
         case "$GATEWAY" in
-            engine)
-                resolve_variant_if_needed
-                export_compose_env
-                resolve_compose_image_defaults
-                log_compose_runtime_summary
-                if $BUILD_BEFORE_UP; then
-                    compose_cmd up --build -d engine
-                else
-                    compose_cmd up -d engine
-                fi
-                ;;
-            triton)
-                resolve_variant_if_needed
-                export_compose_env
-                resolve_compose_image_defaults
-                log_compose_runtime_summary
-                if $BUILD_BEFORE_UP; then
-                    compose_cmd up --build -d triton
-                else
-                    compose_cmd up -d triton
-                fi
-                ;;
-            all)
-                resolve_variant_if_needed
-                export_compose_env
-                resolve_compose_image_defaults
-                log_compose_runtime_summary
-                if $BUILD_BEFORE_UP; then
-                    compose_cmd up --build -d engine triton
-                else
-                    compose_cmd up -d engine triton
-                fi
-                ;;
+            engine) _compose_up_exec engine ;;
+            triton) _compose_up_exec triton ;;
+            all)    _compose_up_exec engine triton ;;
         esac
         return 0
     fi
@@ -805,11 +788,7 @@ cmd_up() {
             export_compose_env
             resolve_compose_image_defaults
             compose_preflight_service engine
-            if $BUILD_BEFORE_UP; then
-                compose_cmd up --build -d engine
-            else
-                compose_cmd up -d engine
-            fi
+            _compose_up_exec engine
             if ! $NO_HEALTH_CHECK; then
                 compose_wait_engine_ready
             fi
@@ -819,11 +798,7 @@ cmd_up() {
             export_compose_env
             resolve_compose_image_defaults
             compose_preflight_service triton
-            if $BUILD_BEFORE_UP; then
-                compose_cmd up --build -d triton
-            else
-                compose_cmd up -d triton
-            fi
+            _compose_up_exec triton
             if ! $NO_HEALTH_CHECK; then
                 compose_wait_triton_ready
             fi
@@ -834,11 +809,7 @@ cmd_up() {
             resolve_compose_image_defaults
             compose_preflight_service engine
             compose_preflight_service triton
-            if $BUILD_BEFORE_UP; then
-                compose_cmd up --build -d engine triton
-            else
-                compose_cmd up -d engine triton
-            fi
+            _compose_up_exec engine triton
             if ! $NO_HEALTH_CHECK; then
                 compose_wait_engine_ready
                 compose_wait_triton_ready
@@ -856,15 +827,7 @@ cmd_watch() {
     fi
 
     case "$GATEWAY" in
-        engine)
-            ensure_model_repo
-            ;;
-        triton)
-            ensure_model_repo
-            ;;
-        all)
-            ensure_model_repo
-            ;;
+        engine|triton|all) ensure_model_repo ;;
     esac
 
     export_compose_env
