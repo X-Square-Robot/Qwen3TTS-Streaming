@@ -445,15 +445,9 @@ cmd_run() {
         --image "$TRITON_IMAGE"
         --device "$TRITON_GPU_DEVICE"
     )
-    if [[ -n "$TRITON_MAX_BATCH_SLOTS" ]]; then
-        compose_args+=(--max-batch "$TRITON_MAX_BATCH_SLOTS")
-    fi
-    if [[ -n "$TRITON_MAX_SEQ_LEN" ]]; then
-        compose_args+=(--max-seq-len "$TRITON_MAX_SEQ_LEN")
-    fi
-    if [[ -n "${CONTAINER_NAME:-}" ]]; then
-        compose_args+=(--container "$CONTAINER_NAME")
-    fi
+    append_optarg compose_args --max-batch "$TRITON_MAX_BATCH_SLOTS"
+    append_optarg compose_args --max-seq-len "$TRITON_MAX_SEQ_LEN"
+    append_optarg compose_args --container "${CONTAINER_NAME:-}"
     if $NO_HEALTH_CHECK; then
         compose_args+=(--no-health-check)
     fi
@@ -545,18 +539,14 @@ cmd_build() {
 
 cmd_stop() {
     local compose_args=(down --gateway triton --repo-dir "$MODEL_REPO_DIR")
-    if [[ -n "${CONTAINER_NAME:-}" ]]; then
-        compose_args+=(--container "$CONTAINER_NAME")
-    fi
+    append_optarg compose_args --container "${CONTAINER_NAME:-}"
     bash "${SCRIPT_DIR}/compose.sh" "${compose_args[@]}"
 }
 
 cmd_status() {
     log_step "Triton Container Status"
     local compose_args=(ps --gateway triton --repo-dir "$MODEL_REPO_DIR")
-    if [[ -n "${CONTAINER_NAME:-}" ]]; then
-        compose_args+=(--container "$CONTAINER_NAME")
-    fi
+    append_optarg compose_args --container "${CONTAINER_NAME:-}"
     bash "${SCRIPT_DIR}/compose.sh" "${compose_args[@]}"
 }
 
