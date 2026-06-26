@@ -45,7 +45,14 @@ def _load_triton_client():
 def probe_ready(endpoint: str = DEFAULT_TRITON_GRPC, model_name: str = DEFAULT_TRITON_MODEL) -> bool:
     grpcclient = _load_triton_client()
     client = grpcclient.InferenceServerClient(url=endpoint)
-    return bool(client.is_server_live() and client.is_server_ready() and client.is_model_ready(model_name))
+    try:
+        return bool(client.is_server_live() and client.is_server_ready() and client.is_model_ready(model_name))
+    finally:
+        # Close the gRPC channel — probe_ready runs on every /capabilities hit.
+        try:
+            client.close()
+        except Exception:
+            pass
 
 
 async def measure_once(
@@ -283,3 +290,7 @@ async def stream_once(
             yield item
     finally:
         client.stop_stream()
+        try:
+            client.close()
+        except Exception:
+            pass

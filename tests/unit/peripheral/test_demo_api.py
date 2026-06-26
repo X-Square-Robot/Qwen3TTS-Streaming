@@ -288,6 +288,22 @@ def test_failed_job_publishes_terminal_summary(monkeypatch):
     assert "boom" in summary["error"]
 
 
+def test_wav_from_pcm_f32_clips_and_encodes_pcm16():
+    """The vectorized encoder must clip to [-1,1] and truncate toward zero,
+    matching the old per-sample loop."""
+    from demo_api.audio_store import wav_from_pcm_f32
+
+    pcm = np.array([0.0, 1.5, -1.5, 0.5], dtype="<f4").tobytes()
+    wav = wav_from_pcm_f32(pcm, sample_rate=24000)
+
+    assert wav[:4] == b"RIFF"
+    assert wav[8:12] == b"WAVE"
+    assert len(wav) == 44 + 4 * 2  # 44-byte header + 4 int16 samples
+    samples = np.frombuffer(wav[44:], dtype="<i2")
+    # 1.5->clip 1.0->32767; -1.5->-32767; 0.5*32767=16383.5->trunc 16383
+    assert list(samples) == [0, 32767, -32767, 16383]
+
+
 def test_jobs_evicted_when_over_cap(monkeypatch):
     """_jobs must stay bounded — oldest jobs are evicted past the cap."""
 

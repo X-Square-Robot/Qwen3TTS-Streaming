@@ -426,6 +426,10 @@ async def _run_pk(
             client.stop_stream()
         except Exception:
             pass
+        try:
+            client.close()
+        except Exception:
+            pass
 
     if first_audio_ms is None:
         raise LlmPkError("Triton stream completed without audio")

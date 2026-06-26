@@ -5,6 +5,8 @@ import os
 import struct
 from pathlib import Path
 
+import numpy as np
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AUDIO_DIR = Path(os.environ.get("QWEN_DEMO_AUDIO_DIR", str(REPO_ROOT / "workspace" / "demo_audio")))
@@ -52,7 +54,12 @@ def wav_from_pcm_f32(pcm_f32: bytes, *, sample_rate: int) -> bytes:
     out += struct.pack("<IHHIIHH", 16, 1, 1, sample_rate, sample_rate * 2, 2, 16)
     out += b"data"
     out += struct.pack("<I", data_size)
-    for (sample,) in struct.iter_unpack("<f", pcm_f32[: sample_count * 4]):
-        clipped = max(-1.0, min(1.0, float(sample)))
-        out += struct.pack("<h", int(clipped * 32767.0))
+    # Vectorized float32 -> int16 (truncation toward zero matches int()); the
+    # old per-sample Python loop blocked the event loop (~20ms per 4s of audio,
+    # x128 concurrent encodes). np.frombuffer needs a 4-aligned length.
+    # float64 intermediate matches the old `int(float(sample) * 32767.0)` path
+    # exactly (float32 math would drift by +-1 LSB near truncation boundaries).
+    samples = np.frombuffer(pcm_f32[: sample_count * 4], dtype="<f4").astype(np.float64)
+    pcm16 = (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2")
+    out += pcm16.tobytes()
     return bytes(out)
