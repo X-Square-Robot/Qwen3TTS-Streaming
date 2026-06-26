@@ -683,7 +683,7 @@ class Executor:
                 f"I/O dtype for '{representative_name}': {actual_dtype}. "
                 f"This usually means the engine was rebuilt with different "
                 f"precision settings but the manifest was not updated. "
-                f"Re-run 'qwen3tts build' to rebuild the engine."
+                f"Re-run 'bash scripts/bash/build_engines.sh' to rebuild the engine."
             )
 
         logger.info(

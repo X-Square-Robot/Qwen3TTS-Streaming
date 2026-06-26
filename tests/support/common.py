@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 SCRIPTS_PYTHON_DIR = REPO_ROOT / "scripts" / "python"
 SCRIPTS_EXPORT_DIR = REPO_ROOT / "scripts" / "export"

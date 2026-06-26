@@ -14,12 +14,12 @@ from typing import List, Optional
 
 import numpy as np
 import pytest
-from qwen3tts_tools.common import REPO_ROOT, bootstrap_project_imports
+from tests.support.common import REPO_ROOT, bootstrap_project_imports
 
 bootstrap_project_imports("scripts_python", "repo")
 
-from qwen3tts_tools.audio import save_wav
-from qwen3tts_tools.common import (
+from tests.support.audio import save_wav
+from tests.support.common import (
     DEFAULT_ENGINE_GRPC,
     DEFAULT_SAMPLE_RATE,
     parse_host_port,

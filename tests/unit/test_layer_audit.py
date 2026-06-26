@@ -28,34 +28,34 @@ class TestClassifyLayerName:
     """Tests for classify_layer_name function."""
 
     def test_backbone_talker_unified(self):
-        from qwen3tts_tools.layer_audit import classify_layer_name
+        from tests.support.layer_audit import classify_layer_name
         assert classify_layer_name("/talker_fused/talker_unified/LayerNorm_0") == "backbone"
 
     def test_backbone_codec_sum(self):
-        from qwen3tts_tools.layer_audit import classify_layer_name
+        from tests.support.layer_audit import classify_layer_name
         assert classify_layer_name("/talker_fused/codec_sum/Add_0") == "backbone"
 
     def test_cp(self):
-        from qwen3tts_tools.layer_audit import classify_layer_name
+        from tests.support.layer_audit import classify_layer_name
         assert classify_layer_name("/talker_fused/cp/Linear_0") == "cp"
 
     def test_code2wav(self):
-        from qwen3tts_tools.layer_audit import classify_layer_name
+        from tests.support.layer_audit import classify_layer_name
         assert classify_layer_name("/code2wav/Conv1d_0") == "code2wav"
 
     def test_unclassified(self):
         """Unknown /-prefixed modules fall back to backbone."""
-        from qwen3tts_tools.layer_audit import classify_layer_name
+        from tests.support.layer_audit import classify_layer_name
         assert classify_layer_name("/unknown_module/MatMul_0") == "backbone"
 
     def test_empty_name(self):
         """Empty names fall back to backbone."""
-        from qwen3tts_tools.layer_audit import classify_layer_name
+        from tests.support.layer_audit import classify_layer_name
         assert classify_layer_name("") == "backbone"
 
     def test_partial_prefix_no_match(self):
         """'/talker_fused/' without a known submodule falls back to backbone."""
-        from qwen3tts_tools.layer_audit import classify_layer_name
+        from tests.support.layer_audit import classify_layer_name
         assert classify_layer_name("/talker_fused/Gather_0") == "backbone"
 
 
@@ -67,7 +67,7 @@ class TestAuditReport:
     """Tests for AuditReport health check."""
 
     def test_healthy_when_below_threshold(self):
-        from qwen3tts_tools.layer_audit import AuditReport
+        from tests.support.layer_audit import AuditReport
         report = AuditReport(
             total_nodes=100,
             categories={"backbone": [0]*80, "cp": [0]*15, "code2wav": [0]*4, "unclassified": [0]},
@@ -76,7 +76,7 @@ class TestAuditReport:
         assert report.is_healthy
 
     def test_healthy_at_boundary(self):
-        from qwen3tts_tools.layer_audit import AuditReport
+        from tests.support.layer_audit import AuditReport
         report = AuditReport(
             total_nodes=100,
             categories={"backbone": [0]*80, "cp": [0]*15, "code2wav": [0]*0, "unclassified": [0]*5},
@@ -85,7 +85,7 @@ class TestAuditReport:
         assert report.is_healthy  # exactly at 5%
 
     def test_unhealthy_above_threshold(self):
-        from qwen3tts_tools.layer_audit import AuditReport
+        from tests.support.layer_audit import AuditReport
         report = AuditReport(
             total_nodes=100,
             categories={"backbone": [0]*80, "cp": [0]*10, "code2wav": [0]*0, "unclassified": [0]*10},
@@ -93,48 +93,3 @@ class TestAuditReport:
         )
         assert not report.is_healthy
 
-
-# ---------------------------------------------------------------------------
-#  mixed_precision_builder classification tests
-# ---------------------------------------------------------------------------
-
-class TestMixedPrecisionBuilderClassification:
-    """Tests for mixed_precision_builder.classify_layer_name."""
-
-    def test_backbone_talker_unified(self):
-        from qwen3tts_tools.mixed_precision_builder import classify_layer_name
-        assert classify_layer_name("/talker_fused/talker_unified/LayerNorm_0") == "backbone"
-
-    def test_cp(self):
-        from qwen3tts_tools.mixed_precision_builder import classify_layer_name
-        assert classify_layer_name("/talker_fused/cp/Linear_0") == "cp"
-
-    def test_code2wav(self):
-        from qwen3tts_tools.mixed_precision_builder import classify_layer_name
-        assert classify_layer_name("/code2wav/Conv1d_0") == "code2wav"
-
-    def test_is_mixed_precision_uniform(self):
-        from qwen3tts_tools.mixed_precision_builder import is_mixed_precision
-        assert not is_mixed_precision("bf16", "bf16", "bf16")
-
-    def test_is_mixed_precision_mixed(self):
-        from qwen3tts_tools.mixed_precision_builder import is_mixed_precision
-        assert is_mixed_precision("bf16", "fp32", "bf16")
-
-    def test_is_mixed_precision_all_different(self):
-        from qwen3tts_tools.mixed_precision_builder import is_mixed_precision
-        assert is_mixed_precision("fp16", "fp32", "bf16")
-
-    def test_normalize_dtype_valid(self):
-        from qwen3tts_tools.mixed_precision_builder import _normalize_dtype
-        assert _normalize_dtype("bf16") == "bf16"
-        assert _normalize_dtype("bfloat16") == "bf16"
-        assert _normalize_dtype("fp32") == "fp32"
-        assert _normalize_dtype("float32") == "fp32"
-        assert _normalize_dtype("fp16") == "fp16"
-        assert _normalize_dtype("float16") == "fp16"
-
-    def test_normalize_dtype_invalid(self):
-        from qwen3tts_tools.mixed_precision_builder import _normalize_dtype
-        with pytest.raises(ValueError):
-            _normalize_dtype("invalid")

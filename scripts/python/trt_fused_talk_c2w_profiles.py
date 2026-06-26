@@ -63,10 +63,9 @@ def compute_fused_profiles(
 ):
     """Return (min, opt, max) trtexec shape strings for talker_code2wav_fused.
 
-    Single source of truth for the fused-engine optimization profile.  Both the
-    CLI ``main()`` below and the Python build pipeline
-    (``qwen3tts_tools.trtexec._compute_fused_shapes``) call this, so the shape
-    logic is never duplicated (and never drifts) across implementations.
+    Single source of truth for the fused-engine optimization profile.  The
+    ``main()`` CLI below and ``scripts/bash/build_engines.sh`` both call this,
+    so the shape logic is never duplicated (and never drifts).
     """
     nl = int(NL)
     n_c2w = int(n_c2w)

@@ -4,7 +4,8 @@
 # It exists solely to:
 #   1. Declare optional dependency groups for `pip install -e ".[group]"`
 #   2. Configure pytest markers and test paths
-#   3. Register the `qwen3tts` CLI entry point
+# The lifecycle is driven by scripts/bash/ (see README); there is no installable
+# Python CLI here.
 
 [project]
 name = "qwen3-tts-triton"
@@ -45,16 +46,13 @@ dev = [
     "qwen3-tts-triton[test,client,demo]",
 ]
 
-[project.scripts]
-qwen3tts = "qwen3tts_cli.main:cli_main"
-
 [build-system]
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-package-dir = {"" = "scripts/python"}
-packages = {find = {where = ["scripts/python"], include = ["qwen3tts_cli*", "qwen3tts_tools*"]}}
+# No installable Python package — the lifecycle lives in scripts/bash/.
+packages = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

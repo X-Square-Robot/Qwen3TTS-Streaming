@@ -14,7 +14,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 try:
-    from qwen3tts_tools.common import REPO_ROOT
+    from tests.support.common import REPO_ROOT
 except ImportError:
     REPO_ROOT = Path(__file__).resolve().parents[1]
 
