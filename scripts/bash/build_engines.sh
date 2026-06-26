@@ -56,9 +56,11 @@ MAX_SEQ_LEN="${MAX_SEQ_LEN:-}"
 ENGINE_DTYPE="${ENGINE_DTYPE:-bfloat16}"
 TRITON_IO_FLOAT_DTYPE="${TRITON_IO_FLOAT_DTYPE:-}"
 # Per-submodule compute precision for the fused engine (empty = follow ENGINE_DTYPE).
-# Mixed example: --cp-precision fp32 to mitigate BF16 numerical sensitivity.
+# Code Predictor defaults to fp32: bf16 there causes near-tie argmax flips in the
+# CP tail (logit margins < the 0.125 bf16 ULP), the confirmed cause of streaming
+# hallucination. Override with `CP_PRECISION=bf16` only if you accept that risk.
 BACKBONE_PRECISION="${BACKBONE_PRECISION:-}"
-CP_PRECISION="${CP_PRECISION:-}"
+CP_PRECISION="${CP_PRECISION:-fp32}"
 CODE2WAV_PRECISION="${CODE2WAV_PRECISION:-}"
 BUILD_GPU_DEVICE="${BUILD_GPU_DEVICE:-auto}"
 RESOLVED_BUILD_GPU_DEVICE=""
