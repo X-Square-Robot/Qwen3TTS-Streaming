@@ -153,7 +153,9 @@ def benchmark(
     Returns dict with keys: opt_ms, naive_ms, speedup.
     """
     if device is None:
-        device = next(module.parameters()).device
+        # CodecEmbeddingSum holds its weights in a buffer, not a Parameter, so
+        # next(module.parameters()) would raise StopIteration.
+        device = module.stacked_weight.device
     if isinstance(device, str):
         device = torch.device(device)
     B = batch_size
