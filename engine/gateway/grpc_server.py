@@ -717,19 +717,35 @@ def _proto_map_to_dict(raw_map) -> dict[str, str]:
     return {str(key): str(value) for key, value in dict(raw_map).items()}
 
 
+# VAD tuning params have no dedicated proto fields; the client carries them
+# through the proto VADPolicy.config string-map. Lift them back to top-level so
+# parse_output_policy reads the real values instead of falling back to defaults.
+_VAD_TUNING_FIELDS = (
+    "chunk_ms",
+    "begin_threshold",
+    "begin_count",
+    "end_threshold",
+    "end_count",
+    "start_margin_ms",
+)
+
+
 def _output_policy_from_proto(proto_policy) -> object:
     if proto_policy is None:
         return parse_output_policy({})
     emit_text_events = True
     if proto_policy.HasField("emit_text_events"):
         emit_text_events = bool(proto_policy.emit_text_events)
+    vad_config = _proto_map_to_dict(proto_policy.vad_policy.config)
+    tuning = {f: vad_config.pop(f) for f in _VAD_TUNING_FIELDS if f in vad_config}
     return parse_output_policy(
         {
             "vad_policy": {
                 "enabled": bool(proto_policy.vad_policy.enabled),
                 "strategy": str(proto_policy.vad_policy.strategy or "disabled"),
                 "implementation": str(proto_policy.vad_policy.implementation or ""),
-                "config": _proto_map_to_dict(proto_policy.vad_policy.config),
+                "config": vad_config,
+                **tuning,
             },
             "chunk_ms": int(proto_policy.chunk_ms or 0),
             "packet_format": str(proto_policy.packet_format or "raw_pcm"),

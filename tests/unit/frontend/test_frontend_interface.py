@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 
 from engine.core.types import (
     EngineResult,
@@ -316,3 +317,45 @@ def test_tokenizer_observability_logs_raw_and_normalized_text(caplog):
     assert payload["normalized_text"] == "湿度19%，气温为23℃。"
     assert payload["tokenizer"]["ids"]
     assert payload["tokenizer"]["pieces"]
+
+
+def _make_summary_stub(session_id: str):
+    """Minimal stand-in carrying the attributes _cleanup_session's summary reads."""
+    return SimpleNamespace(
+        session_id=session_id,
+        segments_done=0,
+        segments_submitted=0,
+        total_audio_bytes=0,
+        session_create_to_first_raw_audio_ms=None,
+        first_raw_audio_at=None,
+        first_text_enqueued_at=None,
+        first_text_dequeued_at=None,
+        prefill_completed_at=None,
+        prefill_started_at=None,
+        config=SimpleNamespace(timing=SimpleNamespace(request_id="", turn_id="")),
+    )
+
+
+def test_cleanup_session_identity_guard_protects_recreated_session():
+    """A stale cancelled task must not clobber a session re-created under the
+    same id (the session_id reuse race)."""
+    interface = FrontendInterface.__new__(FrontendInterface)
+    interface._sessions = {}
+    interface._consumer_tasks = {}
+
+    sid = "reused"
+    old = _make_summary_stub(sid)
+    new = _make_summary_stub(sid)
+    # The NEW session currently owns the id.
+    interface._sessions[sid] = new
+    interface._consumer_tasks[sid] = "new-task"
+
+    # The OLD task's deferred cleanup must be a no-op (its session is gone).
+    interface._cleanup_session(sid, expected=old)
+    assert interface._sessions[sid] is new
+    assert interface._consumer_tasks[sid] == "new-task"
+
+    # The matching cleanup still removes it.
+    interface._cleanup_session(sid, expected=new)
+    assert sid not in interface._sessions
+    assert sid not in interface._consumer_tasks

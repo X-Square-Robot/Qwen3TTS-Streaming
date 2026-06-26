@@ -354,6 +354,40 @@ def test_start_request_from_stream_request_round_trips_output_policy_and_timing(
     assert start.config.timing.extra["client_protocol_version"] == "tts-session-v2alpha1"
 
 
+def test_stream_request_recovers_vad_tuning_params_from_config_map():
+    # The proto VADPolicy has no dedicated tuning fields, so the client carries
+    # them through the config string-map; the server must lift them back out
+    # instead of falling back to defaults (gRPC parity with the WebSocket path).
+    request = tts_pb2.SynthesizeRequest(
+        start=tts_pb2.StartRequest(
+            session_id="sid-vad-tuning",
+            config=tts_pb2.SessionConfig(
+                task_type="custom_voice",
+                output_policy=tts_pb2.OutputPolicy(
+                    vad_policy=tts_pb2.VADPolicy(
+                        enabled=True,
+                        strategy="tenvad",
+                        config={
+                            "chunk_ms": "8",
+                            "begin_threshold": "0.9",
+                            "end_count": "99",
+                            "user_key": "kept",
+                        },
+                    ),
+                ),
+            ),
+        )
+    )
+
+    vad = _start_request_from_stream_request(request).output_policy.vad
+
+    assert vad.chunk_ms == 8
+    assert vad.begin_threshold == 0.9
+    assert vad.end_count == 99
+    # Non-tuning config entries are preserved; tuning keys are lifted out of it.
+    assert vad.config == {"user_key": "kept"}
+
+
 def test_start_request_from_oneshot_request_defaults_vad_to_disabled():
     request = tts_pb2.SynthesizeOnceRequest(
         session_id="sid-oneshot",

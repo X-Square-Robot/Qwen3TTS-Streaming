@@ -436,9 +436,17 @@ class FrontendInterface:
         except asyncio.CancelledError:
             pass
         finally:
-            self._cleanup_session(session.session_id)
+            self._cleanup_session(session.session_id, expected=session)
 
-    def _cleanup_session(self, session_id: str) -> None:
+    def _cleanup_session(self, session_id: str, *, expected: Optional[Session] = None) -> None:
+        # Identity guard: a cancelled consumer task unwinds and runs this
+        # `finally` only later, after the event loop resumes it. If the same
+        # session_id was re-created in the meantime (create_session cancels the
+        # old session then registers a new one under the same id), the stale
+        # task must not clobber the new session/task. Only clean up when the
+        # registered session is still the one this call is for.
+        if expected is not None and self._sessions.get(session_id) is not expected:
+            return
         session = self._sessions.pop(session_id, None)
         self._consumer_tasks.pop(session_id, None)
         if session:
