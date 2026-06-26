@@ -21,8 +21,7 @@ Qwen3-TTS-Triton/
 │   ├── export/          # PyTorch → ONNX/manifest 导出
 │   ├── compose/         # 容器入口点脚本
 │   ├── demo/            # Demo 启动脚本
-│   └── python/          # Python CLI + 工具库
-│       └── qwen3tts_tools/  # 共享 Python 工具函数
+│   └── python/          # bash 调用的 Python 辅助（manifest/profile/NGC/triton 配置生成）
 ├── tests/
 │   ├── unit/            # pytest 单元测试
 │   ├── integration/     # pytest 集成测试
@@ -50,10 +49,9 @@ Qwen3-TTS-Triton/
 
 ## 关键入口命令
 
-> **生命周期入口：bash 脚本（`scripts/bash/`）是当前受支持的真相源。**
-> bash 负责编排 docker / trtexec，Python 仅作为被 bash 调用的辅助处理 JSON / profile /
-> 网页解析等。`qwen3tts` Python CLI 与既有 bash 行为差异较大、问题较多，正在收敛/精简，
-> 暂不作为推荐入口。
+> **生命周期入口：bash 脚本（`scripts/bash/`）是唯一受支持的真相源。**
+> bash 负责编排 docker / trtexec，Python 仅作为被 bash 调用的辅助，处理 JSON / profile /
+> 网页解析等 bash 不擅长的部分。（早期的 `qwen3tts` Python CLI 已移除。）
 
 ```bash
 # Phase B: 编译 TRT 引擎（docker 内 trtexec；支持分子模块混合精度）
@@ -65,29 +63,22 @@ bash scripts/bash/compose.sh prepare --gateway engine --engine-mode trt   # 组�
 bash scripts/bash/compose.sh up --gateway engine --engine-mode trt        # 构建 engine 镜像并启动
 bash scripts/bash/compose.sh down --gateway engine                        # 停止
 
-# 全流程编排
-bash scripts/bash/autorun.sh
-
-# ---- 以下 qwen3tts Python CLI 仍可用，但非推荐入口 ----
-# 交互式全流程
-qwen3tts all -m custom-1.7b
-
-# 分阶段执行
-qwen3tts setup -m custom-1.7b              # Phase A: 下载+导出
-qwen3tts build -m custom-1.7b              # Phase B: 编译 TRT
-qwen3tts package -m custom-1.7b            # Phase C1: 组装部署产物
-qwen3tts run -m custom-1.7b --gateway standalone  # Phase C2: 启动服务
+# 全流程 / 分阶段（autorun 子命令，交互模式直接 `bash scripts/bash/autorun.sh`）
+bash scripts/bash/autorun.sh all     -m custom-1.7b                          # A→B→package→deploy
+bash scripts/bash/autorun.sh setup   -m custom-1.7b                          # Phase A: 下载+导出
+bash scripts/bash/autorun.sh build   -m custom-1.7b                          # Phase B: 编译 TRT
+bash scripts/bash/autorun.sh package -m custom-1.7b --gateway standalone     # Phase C1: 组装产物
+bash scripts/bash/autorun.sh deploy  -m custom-1.7b --gateway standalone     # Phase C2: 启动服务
 
 # 跨机编译
-qwen3tts probe --output target_profile.json              # 采集目标机指纹
-qwen3tts build make-bundle -m custom-1.7b --target-profile p.json  # 创建构建包
-qwen3tts build import-artifact bundle.tar.zst            # 导入编译产物
-qwen3tts build remote-build -m custom-1.7b --remote-host user@host  # SSH 远程编译
+bash scripts/bash/autorun.sh probe-target --out target_profile.json                                  # 采集目标机指纹
+bash scripts/bash/autorun.sh make-bundle  -m custom-1.7b --target-profile target_profile.json        # 创建构建包
+bash scripts/bash/autorun.sh import-artifact workspace/engine_artifact_bundle.tar.zst                # 导入编译产物
+bash scripts/bash/autorun.sh remote-build -m custom-1.7b --target-profile target_profile.json --remote-host user@host  # SSH 远程编译
 
-# 其他
-qwen3tts status                            # 查看当前状态
-qwen3tts probe                             # 采集 GPU/driver 信息
-qwen3tts stop                              # 停止服务
+# 状态 / 停止
+bash scripts/bash/autorun.sh status
+bash scripts/bash/autorun.sh stop
 
 # 测试
 pytest tests/unit tests/integration -q
@@ -122,11 +113,11 @@ python -m engine.server --config engine.yaml
 | Serving 验收 | `python tools/validation/serving_endpoints.py --targets engine-grpc` |
 | 启动 WebUI Demo | `bash scripts/demo/start_webui_demo.sh --variant custom-1.7b` |
 | Docker Compose | `bash scripts/bash/compose.sh up --gateway triton --variant custom-1.7b` |
-| 导出 ONNX | `qwen3tts setup -m custom-1.7b` |
-| 编译 TRT | `qwen3tts build -m custom-1.7b` |
-| 跨机编译 | `qwen3tts build make-bundle -m custom-1.7b --target-profile p.json` |
-| 导入编译产物 | `qwen3tts build import-artifact bundle.tar.zst` |
-| 采集目标机信息 | `qwen3tts probe --output target_profile.json` |
+| 导出 ONNX | `bash scripts/bash/autorun.sh setup -m custom-1.7b` |
+| 编译 TRT | `bash scripts/bash/build_engines.sh --variant custom-1.7b` |
+| 跨机编译 | `bash scripts/bash/autorun.sh make-bundle -m custom-1.7b --target-profile target_profile.json` |
+| 导入编译产物 | `bash scripts/bash/autorun.sh import-artifact workspace/engine_artifact_bundle.tar.zst` |
+| 采集目标机信息 | `bash scripts/bash/autorun.sh probe-target --out target_profile.json` |
 
 ## 重要约束
 
