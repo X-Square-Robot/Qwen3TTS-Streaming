@@ -33,7 +33,7 @@ if _validation_dir not in sys.path:
 from _bootstrap import bootstrap_tool_imports
 
 PROJ_ROOT = bootstrap_tool_imports()
-from qwen3tts_tools.common import bootstrap_project_imports
+from common import bootstrap_project_imports
 
 bootstrap_project_imports("third_party_qwen")
 

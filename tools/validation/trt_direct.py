@@ -26,8 +26,8 @@ if _validation_dir not in sys.path:
 from _bootstrap import bootstrap_tool_imports
 
 bootstrap_tool_imports()
-from qwen3tts_tools.audio import save_wav
-from qwen3tts_tools.common import REPO_ROOT
+from audio import save_wav
+from common import REPO_ROOT
 
 from engine.backend.executor import TRTEngine
 from engine.backend.prefill import EmbeddingWeights, PrefillBuilder, TaskType

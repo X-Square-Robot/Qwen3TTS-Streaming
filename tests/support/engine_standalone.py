@@ -14,12 +14,12 @@ from typing import List, Optional
 
 import numpy as np
 import pytest
-from tests.support.common import REPO_ROOT, bootstrap_project_imports
+from common import REPO_ROOT, bootstrap_project_imports
 
 bootstrap_project_imports("scripts_python", "repo")
 
-from tests.support.audio import save_wav
-from tests.support.common import (
+from audio import save_wav
+from common import (
     DEFAULT_ENGINE_GRPC,
     DEFAULT_SAMPLE_RATE,
     parse_host_port,

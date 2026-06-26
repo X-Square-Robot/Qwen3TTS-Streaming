@@ -36,7 +36,7 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-#  Bootstrap — add repo root to sys.path so qwen3tts_tools is importable
+#  Bootstrap — add repo root to sys.path so the common helper is importable
 # ---------------------------------------------------------------------------
 
 import sys
@@ -51,7 +51,7 @@ from _bootstrap import bootstrap_tool_imports
 
 REPO_ROOT = bootstrap_tool_imports()
 
-from qwen3tts_tools.common import bootstrap_project_imports
+from common import bootstrap_project_imports
 
 bootstrap_project_imports("scripts", "scripts_export", "third_party_qwen")
 

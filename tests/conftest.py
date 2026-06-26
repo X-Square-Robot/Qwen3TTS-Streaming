@@ -13,8 +13,14 @@ from pathlib import Path
 # REPO_ROOT — canonical source
 # ---------------------------------------------------------------------------
 
+# Put scripts/python on sys.path so the shared helpers (common/audio/layer_audit)
+# are importable by tests and tools alike.
+_SCRIPTS_PYTHON = Path(__file__).resolve().parents[1] / "scripts" / "python"
+if str(_SCRIPTS_PYTHON) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_PYTHON))
+
 try:
-    from tests.support.common import REPO_ROOT
+    from common import REPO_ROOT
 except ImportError:
     REPO_ROOT = Path(__file__).resolve().parents[1]
 

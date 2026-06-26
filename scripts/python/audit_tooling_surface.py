@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PYTHON_ROOTS = ("scripts", "tests")
 COMMON_DUPLICATE_NAMES = {"__init__", "callback", "forward", "main", "parse_args"}
 MANAGED_SYS_PATH_BOOTSTRAPS = {
-    "tests/support/common.py",
+    "scripts/python/common.py",
     "tools/validation/_bootstrap.py",
 }
 

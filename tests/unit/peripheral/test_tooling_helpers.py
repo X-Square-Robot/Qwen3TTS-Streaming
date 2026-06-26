@@ -12,8 +12,8 @@ SCRIPTS_PYTHON = REPO_ROOT / "scripts" / "python"
 if str(SCRIPTS_PYTHON) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_PYTHON))
 
-from tests.support.audio import save_wav
-from tests.support.common import (
+from audio import save_wav
+from common import (
     REPO_ROOT as HELPER_REPO_ROOT,
     SCRIPTS_EXPORT_DIR,
     THIRD_PARTY_QWEN_DIR,

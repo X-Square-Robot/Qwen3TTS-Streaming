@@ -25,7 +25,7 @@ from pathlib import Path
 
 import torch, torch.nn.functional as F
 
-from qwen3tts_tools.common import REPO_ROOT, bootstrap_project_imports
+from common import REPO_ROOT, bootstrap_project_imports
 bootstrap_project_imports("repo", "scripts_python", "third_party_qwen")
 
 # -- shared -----------------------------------------------------------------

@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-# Bootstrap import paths (must run before qwen3tts_tools imports).
+# Bootstrap import paths (must run before common/audio imports).
 import sys
 from pathlib import Path
 
@@ -47,7 +47,7 @@ from _bootstrap import bootstrap_tool_imports
 
 bootstrap_tool_imports()
 
-from qwen3tts_tools.common import REPO_ROOT, bootstrap_project_imports
+from common import REPO_ROOT, bootstrap_project_imports
 
 # ---------------------------------------------------------------------------
 # Bootstrap: ensure all sub-project packages are importable.

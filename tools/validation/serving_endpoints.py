@@ -40,8 +40,8 @@ REPO_ROOT = bootstrap_tool_imports()
 
 import numpy as np
 import requests
-from qwen3tts_tools.audio import save_wav
-from qwen3tts_tools.common import (
+from audio import save_wav
+from common import (
     DEFAULT_ENGINE_GRPC,
     DEFAULT_ENGINE_WS,
     DEFAULT_SAMPLE_RATE,
