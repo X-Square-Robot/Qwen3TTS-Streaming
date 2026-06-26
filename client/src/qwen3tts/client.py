@@ -84,6 +84,15 @@ class TTSClient:
         )
 
     def open_stream(self, start_request: SessionStartRequest):
+        # Convenience: default the per-session output policy / timing from the
+        # config so callers can pass just
+        # ``SessionStartRequest(session_id=..., config=SynthesisConfig(...))``.
+        if start_request.output_policy is None or start_request.timing is None:
+            start_request = replace(
+                start_request,
+                output_policy=start_request.output_policy or start_request.config.output_policy,
+                timing=start_request.timing or start_request.config.timing_context,
+            )
         return self._adapter.open_stream(start_request)
 
 

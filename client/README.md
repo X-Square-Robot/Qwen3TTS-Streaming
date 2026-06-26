@@ -61,9 +61,20 @@ for message in session.iter_messages():
     print(type(message).__name__, getattr(message, "meta", {}))
 ```
 
+## Examples
+
+Runnable scripts in [`examples/`](examples/) — start an endpoint first, then:
+
+```bash
+python examples/quickstart.py                  # one-shot     -> quickstart.wav
+python examples/streaming.py                   # incremental  -> streaming.wav
+python examples/realtime.py                    # wall-clock aligned frames
+python examples/quickstart.py localhost:50051  # point at engine gRPC
+```
+
 More details:
 
-- project manual: `docs/zh/client_sdk.md`
+- project manual: `docs/user/client_sdk.md`
 - public API docs live in `qwen3tts.__init__`
 
 ## Protocol Layer
