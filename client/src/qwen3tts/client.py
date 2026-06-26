@@ -73,7 +73,6 @@ class TTSClient:
         result = self.synthesize_bytes(text, request=request)
         audio_array = decode_audio_bytes_to_array(result.audio_bytes, encoding=result.audio_format.encoding)
         return ArrayResult(
-            audio_bytes=result.audio_bytes,
             audio_format=result.audio_format,
             session_id=result.session_id,
             transport=result.transport,

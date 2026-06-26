@@ -79,7 +79,11 @@ class TestAsyncTTSClient:
         detected = type("D", (), {"transport": "fake", "probe_report": []})()
 
         def _synthesize_bytes(self_unused, text: str, *, request=None):
-            return fake_adapter.synthesize_bytes(text, request=request)
+            # Mirror TTSClient.synthesize_bytes: wrap the SynthesisConfig into a
+            # SessionStartRequest before handing it to the adapter.
+            config = request or SynthesisConfig()
+            start = SessionStartRequest(session_id="", config=config)
+            return fake_adapter.synthesize_bytes(text, request=start)
 
         sync_client = type(
             "TTSClient",

@@ -130,7 +130,8 @@ class TestTritonHttpBufferedSession:
                         "outputs": [
                             {"name": "audio_chunk", "data": [audio_data.hex()]},
                             {"name": "event_type", "data": ["done"]},
-                            {"name": "event_json", "data": [json.dumps({"session_id": "s1"})]},
+                            # NB: the `json` param above shadows the module, so use a literal.
+                            {"name": "event_json", "data": ['{"session_id": "s1"}']},
                             {"name": "is_final", "data": [True]},
                         ]
                     }
