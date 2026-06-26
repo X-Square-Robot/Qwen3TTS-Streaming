@@ -476,7 +476,10 @@ class FrontendInterface:
                 phase="session.completed",
                 request_id=session.config.timing.request_id or None,
                 turn_id=session.config.timing.turn_id or None,
-                **summary,
+                # ``summary`` carries its own "session_id" key (used by the
+                # human-readable log below); drop it here so it doesn't collide
+                # with the explicit session_id= argument.
+                **{k: v for k, v in summary.items() if k != "session_id"},
             )
 
             # Also log a human-readable summary
