@@ -246,6 +246,29 @@ class TestPacedMode:
         audio_frames = [f for f in frames if not f.is_silence]
         assert len(audio_frames) == 3
 
+    def test_paced_mode_drains_at_real_time(self):
+        """Regression: paced mode must actually pace, not dump instantly.
+
+        Four 0.02 s frames are all immediately available. A correct pacer
+        takes ~0.08 s of wall-clock; the previous (broken) implementation
+        drained all frames in ~0 s because the wall anchor reset every
+        iteration. NOTE: deliberately *not* patching time.sleep here — real
+        pacing is what we're verifying.
+        """
+        chunks = [_make_audio_chunk(0.02) for _ in range(4)]
+        session = _session_with_chunks(*chunks)
+        stream = RealtimeAudioStream(
+            session, fill_silence=True, chunk_s=0.05, sample_rate=SAMPLE_RATE
+        )
+
+        t0 = time.monotonic()
+        frames = list(stream)
+        wall = time.monotonic() - t0
+
+        audio = sum(f.duration_s for f in frames if not f.is_silence)
+        assert audio == pytest.approx(0.08, abs=1e-4)  # 4 * 0.02
+        assert wall >= 0.06  # paced to ~real time (broken code finished in ~0)
+
 
 # ---------------------------------------------------------------------------
 # Early break / cleanup

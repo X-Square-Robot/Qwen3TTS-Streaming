@@ -120,10 +120,21 @@ class RealtimeAudioStream:
     def _iter_paced(self) -> Iterator[TimedAudio]:
         """Yield frames at real-time pace, inserting silence for gaps.
 
-        The algorithm maintains a virtual *play_clock* that tracks how much
-        audio time has been "played".  When the wall-clock advances faster
-        than the play clock (i.e. the engine is late), silence is inserted
-        to keep the output isochronous.
+        The clock is anchored at the first audio frame (``wall_start``).
+        ``play_clock`` is the *cumulative* duration of everything emitted so
+        far (audio + silence) — i.e. the virtual playhead. On every step we
+        compare the playhead against the real elapsed time since the anchor:
+
+        - playhead behind wall-clock (engine was late) → emit silence to catch
+          up, keeping the output isochronous;
+        - playhead ahead of wall-clock (engine produced faster than real time)
+          → sleep until real time catches up, so we never dump audio faster
+          than it plays.
+
+        The previous implementation reset the wall anchor every iteration, so
+        ``elapsed`` (per-iteration) and ``play_clock`` (cumulative) were
+        dimensionally mismatched and no pacing/silence ever happened after the
+        first frame.
         """
         # Bridge queue: the session iterator runs in the calling thread,
         # and we need a timeout-capable get().  A small bounded queue is
@@ -144,20 +155,23 @@ class RealtimeAudioStream:
         feeder_thread = threading.Thread(target=_feeder, daemon=True)
         feeder_thread.start()
 
-        play_clock: float | None = None
+        wall_start: float | None = None  # anchored at the first audio frame
+        play_clock = 0.0                 # cumulative emitted duration (playhead)
 
         try:
             while True:
-                wall_now = time.monotonic()
-
                 try:
                     audio = bridge.get(timeout=self._chunk_s)
                 except Empty:
-                    # No new frame arrived within chunk_s → fill silence
-                    elapsed = time.monotonic() - wall_now
-                    yield _make_silence(elapsed, self._sample_rate)
-                    if play_clock is not None:
-                        play_clock += elapsed
+                    # No frame within chunk_s. Before the first frame there is
+                    # nothing to pace against, so just keep waiting. After it,
+                    # fill the gap between the playhead and the wall clock.
+                    if wall_start is None:
+                        continue
+                    gap = (time.monotonic() - wall_start) - play_clock
+                    if gap > 0:
+                        yield _make_silence(gap, self._sample_rate)
+                        play_clock += gap
                     continue
 
                 # Sentinel — stream ended
@@ -166,35 +180,25 @@ class RealtimeAudioStream:
 
                 duration = _audio_duration_s(audio.pcm_bytes, self._sample_rate)
 
-                # First frame: initialise play clock, output immediately
-                if play_clock is None:
+                if wall_start is None:
+                    # First frame: anchor the clock and emit immediately.
+                    wall_start = time.monotonic()
                     yield TimedAudio(data=audio.pcm_bytes, duration_s=duration)
                     play_clock = duration
-                    # Simulate first-frame playback time
-                    time.sleep(duration)
-                    continue
-
-                # Compute wall-clock elapsed since last iteration start
-                elapsed = time.monotonic() - wall_now
-                gap = elapsed - play_clock
-
-                # If the engine was late, fill the gap with silence
-                if gap > 0:
-                    yield _make_silence(gap, self._sample_rate)
-                    play_clock += gap
-
-                # Output the actual audio frame
-                yield TimedAudio(data=audio.pcm_bytes, duration_s=duration)
-
-                # If the frame is longer than remaining wall-clock time,
-                # sleep to simulate playback; otherwise just advance the
-                # play clock.
-                remaining = duration - (time.monotonic() - wall_now - gap)
-                if remaining > 0:
-                    time.sleep(remaining)
-                    play_clock = duration
                 else:
+                    # Fill any catch-up gap (engine was late), then emit.
+                    gap = (time.monotonic() - wall_start) - play_clock
+                    if gap > 0:
+                        yield _make_silence(gap, self._sample_rate)
+                        play_clock += gap
+                    yield TimedAudio(data=audio.pcm_bytes, duration_s=duration)
                     play_clock += duration
+
+                # If the playhead is ahead of real time, sleep so the output
+                # stays wall-clock aligned instead of draining at full speed.
+                ahead = play_clock - (time.monotonic() - wall_start)
+                if ahead > 0:
+                    time.sleep(ahead)
         finally:
             # Ensure the feeder thread is not left hanging if the caller
             # breaks out of the iterator early.
