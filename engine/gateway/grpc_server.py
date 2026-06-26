@@ -274,6 +274,19 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
 
                 done, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
 
+                # Flush any ready audio BEFORE handling a control frame, so a
+                # parked chunk is not reordered behind chunks the request branch
+                # drains via get_nowait (full-duplex: the client keeps sending
+                # text while receiving audio).
+                if audio_task in done:
+                    msg_type_q, payload = audio_task.result()
+                    audio_task = None
+                    response = _queue_message_to_response(msg_type_q, payload)
+                    if response is not None:
+                        yield response
+                        if _is_done_response(response):
+                            return
+
                 if request_task in done:
                     kind, payload = request_task.result()
                     request_task = None
@@ -316,20 +329,16 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                             if session_id:
                                 await self._engine.cancel(session_id)
                             got_cancel = True
+                            # Stop reading further requests so the loop can end
+                            # even if the client never half-closes the stream
+                            # (otherwise the handler parks on request_queue.get()
+                            # forever). Mirrors the WebSocket handler's behavior.
+                            input_eof = True
 
                         async for response in self._drain_available_audio(audio_queue):
                             yield response
                             if _is_done_response(response):
                                 return
-
-                if audio_task in done:
-                    msg_type_q, payload = audio_task.result()
-                    audio_task = None
-                    response = _queue_message_to_response(msg_type_q, payload)
-                    if response is not None:
-                        yield response
-                        if _is_done_response(response):
-                            return
 
                 if input_eof and got_cancel:
                     break

@@ -118,6 +118,17 @@ class WebSocketGateway:
 
                 done, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
 
+                # Flush any ready outbound frame BEFORE handling a control frame,
+                # so a parked chunk is not reordered behind frames the request
+                # branch drains via get_nowait (full-duplex: the client keeps
+                # sending text while receiving audio).
+                if outbound_task in done:
+                    frame = outbound_task.result()
+                    outbound_task = None
+                    await _send_frame(ws, frame)
+                    if _is_terminal_frame(frame):
+                        return ws
+
                 if request_task in done:
                     kind, payload = request_task.result()
                     request_task = None
@@ -210,13 +221,6 @@ class WebSocketGateway:
                             await _send_frame(ws, frame)
                             if _is_terminal_frame(frame):
                                 return ws
-
-                if outbound_task in done:
-                    frame = outbound_task.result()
-                    outbound_task = None
-                    await _send_frame(ws, frame)
-                    if _is_terminal_frame(frame):
-                        return ws
 
                 if connection_closed and got_cancel:
                     break
