@@ -847,7 +847,7 @@ KV 显存: 28L × 2 × 8(kv_heads) × max_seq × 128(head_dim) × 2B(bf16)。
 **当前验证口径（需与旧验证脚本区分）**：
 
 - 旧的 `verify_e2e_trt.sh` 主要覆盖遗留 `talker_unified`/分步路径，不能代表当前生产 fused 主链路。
-- 当前 fused 主链路应以 [`tools/validation/verify_engine.py`](../../tools/validation/verify_engine.py) 为准，直接比较：
+- 当前 fused 主链路应以 [`tools/validation/compare_audio.py`](../../tools/validation/compare_audio.py)（`compare-ort` / `compare-triton` 模式）为准，直接比较：
   - 本地 ORT `talker_code2wav_fused.onnx`
   - Triton `talker_code2wav_fused` backend
 - 现阶段结论是：

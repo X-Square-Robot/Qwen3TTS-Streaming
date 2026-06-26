@@ -36,34 +36,6 @@ python tools/validation/compare_audio.py fused-onnx       # Run fused ONNX to WA
 python tools/validation/compare_audio.py long-ab           # Long text A/B compare
 ```
 
-### `verify_engine.py` — Engine-level verification
-
-Replaces: `verify_e2e.py`, `verify_e2e_trt.py`, `verify_e2e_trt_ref.py`,
-`verify_fused_triton_backend.py`, `verify_onnx_autoregressive.py`,
-`verify_code_predictor_trt.py`, `verify_trt_talker.py`, `verify_multi_variant.py`
-
-```bash
-python tools/validation/verify_engine.py --phase e2e              # Full decomposed pipeline
-python tools/validation/verify_engine.py --phase e2e-trt          # TRT engine verification
-python tools/validation/verify_engine.py --phase e2e-trt-ref      # Generate TRT reference
-python tools/validation/verify_engine.py --phase fused-triton     # ORT vs Triton TRT parity
-python tools/validation/verify_engine.py --phase code-predictor   # CP TRT parity
-python tools/validation/verify_engine.py --phase trt-talker       # Talker TRT verification
-python tools/validation/verify_engine.py --phase multi-variant    # Multi-variant prefill
-```
-
-### `verify_components.py` — Component-level verification
-
-Replaces: `verify_code2wav_streaming.py`, `verify_speech_tokenizer_encoder.py`,
-`verify_precision_ort.py`, `verify_prototype_parity.py`
-
-```bash
-python tools/validation/verify_components.py --component code2wav           # Code2wav streaming
-python tools/validation/verify_components.py --component speech-tokenizer    # Speech tokenizer
-python tools/validation/verify_components.py --component precision-ort      # FP32 precision
-python tools/validation/verify_components.py --component prototype-parity   # Prototype parity
-```
-
 ### `benchmark.py` — Performance benchmarks
 
 Replaces: `engine_standalone_benchmark.py`, `triton_concurrent_tts.py`
@@ -95,6 +67,7 @@ python tools/validation/prefill_compare.py --mode cp-parity           # CP sampl
 | `suggest_engine_profile.py` | Suggest TensorRT/runtime profile limits |
 | `pad_tolerance_experiment.py` | Pad token insertion study |
 | `vad_verification.py` | VAD verification |
+| `trt_direct.py` | Direct TRT engine decode-to-WAV |
 
 ## Helper Modules (not standalone CLIs)
 
@@ -102,7 +75,6 @@ python tools/validation/prefill_compare.py --mode cp-parity           # CP sampl
 |--------|---------|
 | `_bootstrap.py` | Path bootstrap for tools |
 | `triton_tts_client.py` | compare_audio, benchmark |
-| `trt_direct.py` | verify_engine |
 
 ## Maintenance
 
