@@ -68,7 +68,7 @@ function decodeSamples(bytes: ArrayBuffer, format: AudioFormat): Float32Array {
     const view = new Int16Array(bytes);
     const out = new Float32Array(view.length);
     for (let i = 0; i < view.length; i += 1) {
-      out[i] = Math.max(-1, Math.min(1, view[i] / 32767));
+      out[i] = Math.max(-1, Math.min(1, view[i] / 32768));
     }
     return out;
   }

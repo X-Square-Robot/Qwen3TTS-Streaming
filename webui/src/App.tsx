@@ -3,7 +3,7 @@ import type { MutableRefObject } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCapabilities, mediaUrl, runLlmPk, wsUrl } from "./api";
 import { PcmStreamPlayer } from "./audio/pcm-player";
-import { wavBlobFromPcmF32 } from "./audio/wav";
+import { wavBlobFromPcm } from "./audio/wav";
 import { ConcurrencyPanel } from "./components/ConcurrencyPanel";
 import { PerformanceRace } from "./components/PerformanceRace";
 import { TextPlayer } from "./components/TextPlayer";
@@ -186,7 +186,7 @@ export default function App() {
           setLiveClockMs(trace.t_ms);
           livePlaybackEndMsRef.current = playbackEndMs;
           if (liveAudioPartsRef.current.length > 0) {
-            const blob = wavBlobFromPcmF32(liveAudioPartsRef.current, liveAudioFormatRef.current.sample_rate || 24000);
+            const blob = wavBlobFromPcm(liveAudioPartsRef.current, liveAudioFormatRef.current);
             setLiveAudioUrl(URL.createObjectURL(blob));
           }
           if (playbackEndMs <= trace.t_ms + 16) {

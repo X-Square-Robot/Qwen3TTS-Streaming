@@ -33,7 +33,12 @@ export function ConcurrencyPanel({ request }: ConcurrencyPanelProps) {
     const socket = new WebSocket(wsUrl(`/api/v1/concurrency/${jobId}`));
     socketRef.current = socket;
     socket.onmessage = (event) => {
-      const message = JSON.parse(event.data);
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        return; // ignore malformed frames instead of killing the run
+      }
       if (message.type === "job_started") {
         setSource(message.source);
       }
@@ -50,7 +55,19 @@ export function ConcurrencyPanel({ request }: ConcurrencyPanelProps) {
       }
     };
     socket.onerror = () => setRunning(false);
+    // Re-enable the Run button if the socket drops without a summary frame,
+    // otherwise it stays stuck on "Running" forever.
+    socket.onclose = () => setRunning(false);
   }
+
+  // Close the live socket if the panel unmounts mid-run (avoids a leaked
+  // connection whose handlers keep setting state on an unmounted component).
+  useEffect(() => {
+    return () => {
+      socketRef.current?.close();
+      socketRef.current = null;
+    };
+  }, []);
 
   const laneList = useMemo(() => {
     return Array.from({ length: concurrency }, (_, index) => {
