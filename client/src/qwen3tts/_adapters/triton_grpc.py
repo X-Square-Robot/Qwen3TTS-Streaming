@@ -245,7 +245,7 @@ class TritonGrpcStreamSession(BaseStreamSession):
                     StreamEvent(
                         type=event_type if event_type != "end" else "done",
                         session_id=str(payload.get("session_id", self.session_id) or self.session_id),
-                        segment_id=int(payload.get("segment_id", -1) or -1),
+                        segment_id=int(payload.get("segment_id", -1)),
                         text=str(payload.get("text", "") or ""),
                         message=str(payload.get("message", "") or ""),
                         meta={str(k): str(v) for k, v in dict(payload.get("meta") or {}).items()},
@@ -274,6 +274,11 @@ class TritonGrpcStreamSession(BaseStreamSession):
             client.stop_stream()
         if errors:
             self._put_message(StreamEvent(type="error", session_id=self.session_id, message=errors[0]))
+        elif not self._closed:
+            # The stream ended without an explicit end/error event (e.g. the
+            # engine set is_final on an audio chunk). Emit a terminal so the
+            # queue sentinel is enqueued and iter_messages() doesn't hang.
+            self._put_message(StreamEvent(type="done", session_id=self.session_id))
 
 
 def _outputs(grpcclient):

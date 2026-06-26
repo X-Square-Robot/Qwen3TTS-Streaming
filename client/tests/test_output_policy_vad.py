@@ -91,4 +91,27 @@ class TestEngineGrpcVadMapping:
 
         assert proto.vad_policy.strategy == "tenvad"
         assert proto.vad_policy.enabled is True
-        assert dict(proto.vad_policy.config) == {"k": "v"}
+        assert dict(proto.vad_policy.config)["k"] == "v"
+
+    def test_tuning_params_ride_through_config_map(self):
+        # proto VADPolicy has no dedicated tuning fields; for non-disabled
+        # strategies they must be carried through the config string-map so the
+        # engine can recover them (gRPC parity with the WebSocket path).
+        pytest.importorskip("grpc")
+        from qwen3tts._adapters.engine_grpc import _output_policy_to_proto
+
+        proto = _output_policy_to_proto(
+            OutputPolicy(vad=VADPolicy(enabled=True, strategy="tenvad",
+                                       begin_threshold=0.9, end_count=99, chunk_ms=8))
+        )
+        cfg = dict(proto.vad_policy.config)
+        assert cfg["begin_threshold"] == "0.9"
+        assert cfg["end_count"] == "99"
+        assert cfg["chunk_ms"] == "8"
+
+    def test_disabled_strategy_omits_tuning_from_config(self):
+        pytest.importorskip("grpc")
+        from qwen3tts._adapters.engine_grpc import _output_policy_to_proto
+
+        proto = _output_policy_to_proto(OutputPolicy())  # default strategy = disabled
+        assert "begin_threshold" not in dict(proto.vad_policy.config)

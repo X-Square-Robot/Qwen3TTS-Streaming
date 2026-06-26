@@ -233,14 +233,34 @@ def _group_policy_to_proto(value: str):
     return mapping.get(str(value or "").strip().lower(), tts_pb2.GROUP_POLICY_AUTO)
 
 
+# VAD tuning params live on the dataclass but have no dedicated proto fields,
+# so they ride through the proto VADPolicy.config string-map. The engine side
+# (_output_policy_from_proto) lifts them back out.
+_VAD_TUNING_FIELDS = (
+    "chunk_ms",
+    "begin_threshold",
+    "begin_count",
+    "end_threshold",
+    "end_count",
+    "start_margin_ms",
+)
+
+
 def _output_policy_to_proto(policy):
     vad = policy.vad
+    vad_config = {str(k): str(v) for k, v in dict(vad.config or {}).items()}
+    # Carry the tuning params through config for non-disabled strategies;
+    # otherwise a gRPC client tuning thresholds silently gets engine defaults
+    # (the WebSocket path transmits them, so this keeps transports consistent).
+    if str(vad.strategy or "disabled") not in ("disabled", ""):
+        for field_name in _VAD_TUNING_FIELDS:
+            vad_config[field_name] = str(getattr(vad, field_name))
     return tts_pb2.OutputPolicy(
         vad_policy=tts_pb2.VADPolicy(
             enabled=bool(vad.enabled),
             strategy=str(vad.strategy or "disabled"),
             implementation=str(vad.implementation or ""),
-            config={str(k): str(v) for k, v in dict(vad.config or {}).items()},
+            config=vad_config,
         ),
         chunk_ms=int(policy.chunk_ms or 0),
         packet_format=str(policy.packet_format or "raw_pcm"),
@@ -283,11 +303,15 @@ def _capabilities_message_to_dict(resp) -> dict[str, Any]:
         "variant": resp.variant,
         "loaded_model_type": resp.loaded_model_type,
         "declared_supported_task_types": list(resp.declared_supported_task_types),
+        # proto3 repeated enum fields come across as ints — map them back to the
+        # enum names before stripping the prefix (str(int) would yield "4", etc.).
         "supported_input_modes": [
-            str(value).lower().replace("input_mode_", "") for value in resp.supported_input_modes
+            tts_pb2.InputMode.Name(int(value)).lower().replace("input_mode_", "")
+            for value in resp.supported_input_modes
         ],
         "supported_group_policies": [
-            str(value).lower().replace("group_policy_", "") for value in resp.supported_group_policies
+            tts_pb2.GroupPolicy.Name(int(value)).lower().replace("group_policy_", "")
+            for value in resp.supported_group_policies
         ],
         "supported_audio_formats": [
             {

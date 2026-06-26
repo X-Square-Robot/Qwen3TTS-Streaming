@@ -123,7 +123,7 @@ def decode_stream_event(payload: dict[str, Any]) -> StreamEvent:
     return StreamEvent(
         type=str(payload.get("type", "") or ""),
         session_id=str(payload.get("session_id", "") or ""),
-        segment_id=int(payload.get("segment_id", -1) or -1),
+        segment_id=int(payload.get("segment_id", -1)),
         text=str(payload.get("text", "") or ""),
         message=str(payload.get("message", "") or ""),
         audio=(
