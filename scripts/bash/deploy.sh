@@ -673,7 +673,7 @@ cmd_stop() {
 
     # Stop compose-managed Docker services
     if command -v docker &>/dev/null && docker compose version &>/dev/null 2>&1; then
-        if docker compose -f "${REPO_ROOT}/compose.yaml" ps -q 2>/dev/null | grep -q .; then
+        if docker compose -f "${REPO_ROOT}/infra/docker/compose.yaml" ps -q 2>/dev/null | grep -q .; then
             bash "${SCRIPT_DIR}/compose.sh" down --gateway all
             stopped=true
         fi

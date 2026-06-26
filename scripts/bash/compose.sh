@@ -822,7 +822,7 @@ cmd_watch() {
     require_docker_compose_if_needed
 
     if $USE_DEV_OVERLAY; then
-        log_error "`watch` cannot be combined with --dev; use either bind mounts or compose watch"
+        log_error "'watch' cannot be combined with --dev; use either bind mounts or compose watch"
         exit 1
     fi
 
