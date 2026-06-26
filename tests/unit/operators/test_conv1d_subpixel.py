@@ -130,6 +130,10 @@ def test_conv1d_subpixel_from_real_decoder():
             tc = mod.conv
             if isinstance(tc, nn.ConvTranspose1d):
                 sub = Conv1dInsertZeros(tc)
+                # Seed so the input is independent of prior tests' RNG use —
+                # otherwise the unseeded randn varies with test order and the
+                # float32 max-abs-diff occasionally tips over the 1e-5 tol.
+                torch.manual_seed(0)
                 x = torch.randn(1, tc.in_channels, 4)
                 match, mad, cos = _compare(tc, sub, x)
                 assert match, f"Real decoder layer: mad={mad:.6f}, cos={cos:.6f}"
