@@ -159,6 +159,7 @@ make_engine_build_bundle() {
         "$max_batch_size" "$max_input_len" "$max_seq_len" "$ngc_tag" "$ngc_image" "$build_gpu_device" <<'PY'
 import datetime as dt
 import json
+import os
 import sys
 
 path, variants, dtype, io_dtype, mb, mi, ms, tag, image, device = sys.argv[1:11]
@@ -174,6 +175,10 @@ manifest = {
     "ngc_tag": tag,
     "ngc_image": image,
     "build_gpu_device": device,
+    # Per-submodule precision overrides (empty = build_engines.sh defaults).
+    "backbone_precision": os.environ.get("BACKBONE_PRECISION", ""),
+    "cp_precision": os.environ.get("CP_PRECISION", ""),
+    "code2wav_precision": os.environ.get("CODE2WAV_PRECISION", ""),
 }
 with open(path, "w", encoding="utf-8") as f:
     json.dump(manifest, f, indent=2, ensure_ascii=False)

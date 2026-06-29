@@ -268,6 +268,7 @@ prepare_local_bundle_workspace() {
         "$ngc_tag" "$ngc_image" "$build_gpu_device" <<'PY'
 import datetime as dt
 import json
+import os
 import sys
 
 path, variants, dtype, io_dtype, mb, mi, ms, tag, image, device = sys.argv[1:11]
@@ -283,6 +284,10 @@ manifest = {
     "ngc_tag": tag,
     "ngc_image": image,
     "build_gpu_device": device,
+    # Per-submodule precision overrides (empty = build_engines.sh defaults).
+    "backbone_precision": os.environ.get("BACKBONE_PRECISION", ""),
+    "cp_precision": os.environ.get("CP_PRECISION", ""),
+    "code2wav_precision": os.environ.get("CODE2WAV_PRECISION", ""),
 }
 with open(path, "w", encoding="utf-8") as f:
     json.dump(manifest, f, indent=2, ensure_ascii=False)
@@ -312,6 +317,7 @@ compile_engines_in_bundle() {
     [ -f "$target_profile" ] || { log_error "Missing target_profile.json in $bundle_root"; return 1; }
 
     local engine_dtype io_dtype max_batch max_input max_seq ngc_tag ngc_image build_device
+    local backbone_prec cp_prec code2wav_prec
     engine_dtype=$(cross_host_json_value "$manifest" engine_dtype) || engine_dtype=""
     io_dtype=$(cross_host_json_value "$manifest" triton_io_float_dtype) || io_dtype=""
     max_batch=$(cross_host_json_value "$manifest" max_batch_size) || max_batch=""
@@ -320,6 +326,10 @@ compile_engines_in_bundle() {
     ngc_tag=$(cross_host_json_value "$manifest" ngc_tag) || ngc_tag=""
     ngc_image=$(cross_host_json_value "$manifest" ngc_image) || ngc_image=""
     build_device=$(cross_host_json_value "$manifest" build_gpu_device) || build_device="auto"
+    # Per-submodule precision overrides (absent/empty = build_engines.sh defaults).
+    backbone_prec=$(cross_host_json_value "$manifest" backbone_precision) || backbone_prec=""
+    cp_prec=$(cross_host_json_value "$manifest" cp_precision) || cp_prec=""
+    code2wav_prec=$(cross_host_json_value "$manifest" code2wav_precision) || code2wav_prec=""
 
     local variants_json
     variants_json=$(cross_host_json_value "$manifest" variants) || variants_json="[]"
@@ -343,6 +353,12 @@ compile_engines_in_bundle() {
     export NGC_IMAGE="$ngc_image"
     export BUILD_GPU_DEVICE="$build_device"
 
+    # Forward per-submodule precision overrides only when present in the manifest.
+    local -a prec_args=()
+    [ -n "$backbone_prec" ] && prec_args+=(--backbone-precision "$backbone_prec")
+    [ -n "$cp_prec" ] && prec_args+=(--cp-precision "$cp_prec")
+    [ -n "$code2wav_prec" ] && prec_args+=(--code2wav-precision "$code2wav_prec")
+
     local variant
     local failed=0
     for variant in $variants; do
@@ -358,6 +374,7 @@ compile_engines_in_bundle() {
             --max-batch-size "$max_batch" \
             --max-input-len "$max_input" \
             --max-seq-len "$max_seq" \
+            ${prec_args[@]+"${prec_args[@]}"} \
             || failed=$((failed + 1))
     done
 

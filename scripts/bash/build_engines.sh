@@ -62,6 +62,9 @@ TRITON_IO_FLOAT_DTYPE="${TRITON_IO_FLOAT_DTYPE:-}"
 BACKBONE_PRECISION="${BACKBONE_PRECISION:-}"
 CP_PRECISION="${CP_PRECISION:-fp32}"
 CODE2WAV_PRECISION="${CODE2WAV_PRECISION:-}"
+# Exported so the make-bundle manifest writer (a python heredoc subprocess) can
+# persist these into build_manifest.json for the cross-host build to honor.
+export BACKBONE_PRECISION CP_PRECISION CODE2WAV_PRECISION
 BUILD_GPU_DEVICE="${BUILD_GPU_DEVICE:-auto}"
 RESOLVED_BUILD_GPU_DEVICE=""
 

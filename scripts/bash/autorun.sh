@@ -106,6 +106,12 @@ BUILD_IMAGE="${NGC_IMAGE:-}"
 BUILD_IMAGE_EXPLICIT=false
 ENGINE_DTYPE="${ENGINE_DTYPE:-}"
 TRITON_IO_FLOAT_DTYPE="${TRITON_IO_FLOAT_DTYPE:-}"
+# Per-submodule compute precision (empty = follow ENGINE_DTYPE). The fused engine
+# builds backbone / code-predictor / code2wav independently; CP defaults to fp32
+# downstream in build_engines.sh to avoid streaming hallucination.
+BACKBONE_PRECISION="${BACKBONE_PRECISION:-}"
+CP_PRECISION="${CP_PRECISION:-}"
+CODE2WAV_PRECISION="${CODE2WAV_PRECISION:-}"
 BUNDLE_OUT="${BUNDLE_OUT:-${REPO_ROOT}/workspace/engine_build_bundle.tar.zst}"
 ARTIFACT_IN=""
 REMOTE_HOST=""
@@ -193,7 +199,12 @@ Phase B options (forwarded to build_engines.sh):
   --max-input-len <N>     TensorRT profile max input/prefill length
   --max-seq-len <N>       TensorRT profile max sequence/KV length
   --image <uri>           Override NGC container image
-  --dtype <type>          Engine precision: bf16|fp16|fp32|fp8 (default: bf16)
+  --dtype <type>          Base engine precision: bf16|fp16|fp32|fp8 (default: bf16)
+                          Used as the default for each fused submodule below.
+  --backbone-precision <type>   Talker backbone precision (default: follow --dtype)
+  --cp-precision <type>         Code Predictor precision (default: fp32 —
+                          bf16 causes near-tie argmax flips / streaming hallucination)
+  --code2wav-precision <type>   Code2Wav precision (default: follow --dtype)
   --triton-io-float-dtype <type>
                           Float I/O dtype for generated TRT/Triton configs
                           Default: same as --dtype. Use fp32 if Triton reports dtype mismatch
@@ -278,6 +289,9 @@ parse_args() {
             --image)            BUILD_IMAGE="$2"; BUILD_IMAGE_EXPLICIT=true; shift 2 ;;
             --dtype)            ENGINE_DTYPE="$2"; shift 2 ;;
             --triton-io-float-dtype) TRITON_IO_FLOAT_DTYPE="$2"; shift 2 ;;
+            --backbone-precision) BACKBONE_PRECISION="$2"; shift 2 ;;
+            --cp-precision)     CP_PRECISION="$2"; shift 2 ;;
+            --code2wav-precision) CODE2WAV_PRECISION="$2"; shift 2 ;;
             --out)              BUNDLE_OUT="$2"; DISCOVER_OUT="$2"; shift 2 ;;
             --artifact)         ARTIFACT_IN="$2"; shift 2 ;;
             --remote-host)      REMOTE_HOST="$2"; DISCOVER_MODE="${DISCOVER_MODE:-remote}"; shift 2 ;;
@@ -439,6 +453,9 @@ build_forward_args() {
     append_optarg BUILD_ARGS --max-seq-len "$MAX_SEQ_LEN"
     append_optarg BUILD_ARGS --image "$BUILD_IMAGE"
     append_optarg BUILD_ARGS --dtype "$ENGINE_DTYPE"
+    append_optarg BUILD_ARGS --backbone-precision "$BACKBONE_PRECISION"
+    append_optarg BUILD_ARGS --cp-precision "$CP_PRECISION"
+    append_optarg BUILD_ARGS --code2wav-precision "$CODE2WAV_PRECISION"
     append_optarg BUILD_ARGS --triton-io-float-dtype "$TRITON_IO_FLOAT_DTYPE"
     append_optarg BUILD_ARGS --out "$BUNDLE_OUT"
     append_optarg BUILD_ARGS --remote-host "$REMOTE_HOST"
@@ -576,6 +593,11 @@ run_phase_b() {
     local engine_dtype="${ENGINE_DTYPE:-bf16}"
     local io_dtype="${TRITON_IO_FLOAT_DTYPE:-$engine_dtype}"
     local build_device="${BUILD_GPU_DEVICE:-${GLOBAL_DEVICE:-auto}}"
+
+    # Propagate per-submodule precision to build_engines.sh (invoked by
+    # compile_engines_in_bundle) via its env interface. Empty = follow dtype;
+    # an empty CP_PRECISION is defaulted to fp32 inside build_engines.sh.
+    export BACKBONE_PRECISION CP_PRECISION CODE2WAV_PRECISION
 
     # Resolve build profile defaults from target GPU memory.  Same logic
     # as build_engines.sh::_resolve_build_profile_defaults so all paths
@@ -922,23 +944,27 @@ _prompt_with_default() {
 
 _default_triton_io_dtype() {
     case "${1:-bf16}" in
-        bf16|fp16|fp32) echo "$1" ;;
+        bf16|fp16|fp32|fp8) echo "$1" ;;
         *) echo "fp32" ;;
     esac
 }
 
 _prompt_build_dtypes() {
     local engine_default="${ENGINE_DTYPE:-bf16}"
-    local io_default="${TRITON_IO_FLOAT_DTYPE:-$(_default_triton_io_dtype "$engine_default")}"
 
     echo ""
-    echo "  精度配置 (阶段 B)"
-    echo "    引擎精度: TensorRT builder/compute precision"
-    echo "    I/O 精度: fused TensorRT/Triton float binding dtype，默认跟随引擎精度"
+    echo "  精度配置 (阶段 B) — fused 引擎按子模块独立编译"
+    echo "    基础精度: TensorRT builder/compute 精度，作为各子模块默认"
+    echo "    Backbone / Code Predictor / Code2Wav 可单独覆盖 (空 = 跟随基础)"
+    echo "    Code Predictor 推荐 fp32：bf16 近似平局 argmax 翻转会引起流式幻觉"
+    echo "    I/O 精度: fused TensorRT/Triton float binding dtype，默认跟随基础精度"
 
-    ENGINE_DTYPE=$(_prompt_with_default "  引擎精度 bf16|fp16|fp32|fp8" "$engine_default")
-    io_default="${TRITON_IO_FLOAT_DTYPE:-$(_default_triton_io_dtype "$ENGINE_DTYPE")}"
-    TRITON_IO_FLOAT_DTYPE=$(_prompt_with_default "  浮点 I/O 精度 bf16|fp16|fp32" "$io_default")
+    ENGINE_DTYPE=$(_prompt_with_default "  基础引擎精度 bf16|fp16|fp32|fp8" "$engine_default")
+    BACKBONE_PRECISION=$(_prompt_with_default "  Backbone 精度 (空=跟随基础)" "${BACKBONE_PRECISION:-}")
+    CP_PRECISION=$(_prompt_with_default "  Code Predictor 精度 (推荐 fp32)" "${CP_PRECISION:-fp32}")
+    CODE2WAV_PRECISION=$(_prompt_with_default "  Code2Wav 精度 (空=跟随基础)" "${CODE2WAV_PRECISION:-}")
+    local io_default="${TRITON_IO_FLOAT_DTYPE:-$(_default_triton_io_dtype "$ENGINE_DTYPE")}"
+    TRITON_IO_FLOAT_DTYPE=$(_prompt_with_default "  浮点 I/O 精度 bf16|fp16|fp32|fp8" "$io_default")
 }
 
 interactive_cross_host_guide() {
@@ -1037,6 +1063,7 @@ interactive_cross_host_guide() {
     bash scripts/bash/autorun.sh make-bundle -m custom-1.7b \\
       --target-profile target_profile.json \\
       --dtype bf16 \\
+      --cp-precision fp32 \\
       --triton-io-float-dtype bf16 \\
       --out workspace/engine_build_bundle.tar.zst
 
@@ -1060,6 +1087,7 @@ interactive_cross_host_guide() {
     bash scripts/bash/autorun.sh remote-build -m custom-1.7b \\
       --target-profile target_profile.json \\
       --dtype bf16 \\
+      --cp-precision fp32 \\
       --triton-io-float-dtype bf16 \\
       --remote-host user@prod-gpu-host \\
       --remote-workdir /tmp/qwen3-engine-build
@@ -1091,11 +1119,15 @@ show_run_banner() {
     [ -n "$VARIANT" ] && echo "  变体:      $VARIANT"
     [ -n "$MODEL_VERSION" ] && echo "  版本:      $MODEL_VERSION"
     [ -n "${GATEWAY_MODE:-}" ] && echo "  阶段 C:    $GATEWAY_MODE"
-    [ -n "$ENGINE_DTYPE" ] && echo "  引擎精度:  $ENGINE_DTYPE"
+    [ -n "$ENGINE_DTYPE" ] && echo "  基础精度:  $ENGINE_DTYPE"
+    # Per-submodule precision (empty = follow base; CP empty -> fp32 in build_engines.sh).
+    echo "  Backbone:  ${BACKBONE_PRECISION:-${ENGINE_DTYPE:-bf16} (跟随基础)}"
+    echo "  CodePred:  ${CP_PRECISION:-fp32 (默认，缓解流式幻觉)}"
+    echo "  Code2Wav:  ${CODE2WAV_PRECISION:-${ENGINE_DTYPE:-bf16} (跟随基础)}"
     if [ -n "$TRITON_IO_FLOAT_DTYPE" ]; then
         echo "  I/O 精度:  $TRITON_IO_FLOAT_DTYPE"
     elif [ -n "$ENGINE_DTYPE" ]; then
-        echo "  I/O 精度:  $ENGINE_DTYPE (默认跟随引擎精度)"
+        echo "  I/O 精度:  $ENGINE_DTYPE (默认跟随基础精度)"
     fi
     [ -n "${EXPORT_DEVICE:-$GLOBAL_DEVICE}" ] && echo "  导出 GPU:  ${EXPORT_DEVICE:-$GLOBAL_DEVICE}"
     [ -n "${BUILD_GPU_DEVICE:-$GLOBAL_DEVICE}" ] && echo "  构建 GPU:  ${BUILD_GPU_DEVICE:-$GLOBAL_DEVICE}"
