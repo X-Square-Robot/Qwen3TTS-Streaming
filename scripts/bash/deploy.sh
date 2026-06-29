@@ -71,6 +71,9 @@ FOREGROUND=false
 
 # Triton forwarding
 TRITON_ARGS=()
+# Compose overlay flags (dev overlay, health/metrics ports, triton GPU) spliced
+# into every compose.sh invocation (prepare + triton/engine run paths).
+COMPOSE_EXTRA=()
 
 # engine-docker: use --engine-image for an explicit image.  Without it, Phase C
 # derives qwen3-engine:<tag> from the model manifest's Phase B builder_image.
@@ -111,6 +114,12 @@ Options:
     --max-seq-len <N>    Runtime max sequence length (default: manifest profile, else 512)
     --max-sessions <N>   Max concurrent sessions (default: 128)
     --foreground         Run in foreground (don't daemonize)
+
+  Compose overlay options (triton / engine gateways):
+    --dev                Enable the compose dev overlay (bind mounts)
+    --health-port <N>    Engine health port (default: 8080)
+    --metrics-port <N>   Triton metrics port (default: 8002)
+    --triton-device <N>  Triton GPU device
 
   Triton options (forwarded to build_triton.sh):
     --engine-mode <mode> onnx | trt (default: trt)
@@ -189,6 +198,12 @@ while [[ $# -gt 0 ]]; do
         --max-seq-len|--runtime-max-seq-len|--runtime-max-seq) MAX_SEQ_LEN="$2"; shift 2 ;;
         --max-sessions)   MAX_SESSIONS="$2"; shift 2 ;;
         --foreground)     FOREGROUND=true; shift ;;
+
+        # Compose overlay flags (triton / engine gateways only).
+        --dev)            COMPOSE_EXTRA+=(--dev); shift ;;
+        --health-port)    COMPOSE_EXTRA+=(--health-port "$2"); shift 2 ;;
+        --metrics-port)   COMPOSE_EXTRA+=(--metrics-port "$2"); shift 2 ;;
+        --triton-device)  COMPOSE_EXTRA+=(--triton-device "$2"); shift 2 ;;
 
         # Everything else is forwarded to build_triton.sh
         *)
@@ -432,6 +447,7 @@ _compose_prepare_engine() {
         --repo-dir "$MODEL_REPO_DIR"
         --model-version "$MODEL_VERSION"
     )
+    prepare_args+=(${COMPOSE_EXTRA[@]+"${COMPOSE_EXTRA[@]}"})
     $DRY_RUN && prepare_args+=(--dry-run)
     MODEL_REPO_DIR="$MODEL_REPO_DIR" bash "${SCRIPT_DIR}/compose.sh" "${prepare_args[@]}"
 }
@@ -604,6 +620,7 @@ cmd_run_triton() {
     fi
     [ -n "$VARIANT" ] && compose_args+=(--variant "$VARIANT")
     $DRY_RUN && compose_args+=(--dry-run)
+    compose_args+=(${COMPOSE_EXTRA[@]+"${COMPOSE_EXTRA[@]}"})
     compose_args+=("${TRITON_ARGS[@]}")
 
     bash "${SCRIPT_DIR}/compose.sh" "${compose_args[@]}"
@@ -648,6 +665,7 @@ cmd_run_engine_docker() {
         --model-version "$MODEL_VERSION"
     )
     append_optarg compose_args --max-seq-len "$MAX_SEQ_LEN"
+    compose_args+=(${COMPOSE_EXTRA[@]+"${COMPOSE_EXTRA[@]}"})
     $DRY_RUN && compose_args+=(--dry-run)
 
     bash "${SCRIPT_DIR}/compose.sh" "${compose_args[@]}" || exit 1

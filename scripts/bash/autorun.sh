@@ -139,6 +139,11 @@ RUNTIME_MAX_SEQ_LEN="${RUNTIME_MAX_SEQ_LEN:-}"
 MAX_SESSIONS="${MAX_SESSIONS:-}"
 ENGINE_WS_PORT="${ENGINE_WS_PORT:-}"
 FOREGROUND="${FOREGROUND:-false}"
+# Compose overlay knobs (triton / engine gateways), forwarded to deploy.sh.
+DEV_OVERLAY="${DEV_OVERLAY:-false}"
+HEALTH_PORT="${HEALTH_PORT:-}"
+METRICS_PORT="${METRICS_PORT:-}"
+TRITON_DEVICE="${TRITON_DEVICE:-}"
 
 # ── Help ──
 
@@ -229,6 +234,10 @@ Phase C options (forwarded to deploy.sh):
   --ws-port <port>        Standalone / engine-docker WebSocket port (default: 50052)
   --max-sessions <N>      Max concurrent sessions (default: 128)
   --foreground            Run Phase C in foreground (don't daemonize)
+  --dev                   Enable compose dev overlay (triton/engine gateways)
+  --health-port <N>       Engine health port (default: 8080)
+  --metrics-port <N>      Triton metrics port (default: 8002)
+  --triton-device <N>     Triton GPU device
   --grpc-port <port>      Triton gRPC port (default: 8001)
   --http-port <port>      Triton HTTP port (default: 8000)
 
@@ -319,6 +328,10 @@ parse_args() {
             --ws-port)          ENGINE_WS_PORT="$2"; shift 2 ;;
             --max-sessions)     MAX_SESSIONS="$2"; shift 2 ;;
             --foreground)       FOREGROUND=true; shift ;;
+            --dev)              DEV_OVERLAY=true; shift ;;
+            --health-port)      HEALTH_PORT="$2"; shift 2 ;;
+            --metrics-port)     METRICS_PORT="$2"; shift 2 ;;
+            --triton-device)    TRITON_DEVICE="$2"; shift 2 ;;
             --grpc-port)        GRPC_PORT="$2"; shift 2 ;;
             --http-port)        HTTP_PORT="$2"; shift 2 ;;
 
@@ -493,6 +506,10 @@ build_forward_args() {
     append_optarg DEPLOY_ARGS --ws-port "$ENGINE_WS_PORT"
     append_optarg DEPLOY_ARGS --max-sessions "$MAX_SESSIONS"
     if [ "$FOREGROUND" = "true" ]; then DEPLOY_ARGS+=(--foreground); fi
+    if [ "$DEV_OVERLAY" = "true" ]; then DEPLOY_ARGS+=(--dev); fi
+    append_optarg DEPLOY_ARGS --health-port "$HEALTH_PORT"
+    append_optarg DEPLOY_ARGS --metrics-port "$METRICS_PORT"
+    append_optarg DEPLOY_ARGS --triton-device "$TRITON_DEVICE"
     append_optarg DEPLOY_ARGS --model-version "$MODEL_VERSION"
     if $BUILD_IMAGE_EXPLICIT; then
         append_optarg DEPLOY_ARGS --image "$BUILD_IMAGE"
