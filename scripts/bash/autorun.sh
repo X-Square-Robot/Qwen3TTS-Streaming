@@ -124,6 +124,9 @@ DISCOVER_OUT="${REPO_ROOT}/workspace/target_profile.json"
 # Phase C forwarding
 DEPLOY_ARGS=()
 GATEWAY_MODE="${GATEWAY_MODE:-}"
+# `engine` is the canonical gateway name (compose.sh / CLAUDE.md); deploy and
+# autorun internally use `engine-docker`. Accept both everywhere.
+[ "$GATEWAY_MODE" = "engine" ] && GATEWAY_MODE="engine-docker"
 ENGINE_MODE="${ENGINE_MODE:-}"
 ENGINE_PORT="$(_env_or_empty ENGINE_GRPC_PORT)"
 ENGINE_DOCKER_IMAGE="$(_env_or_empty ENGINE_IMAGE)"
@@ -132,6 +135,10 @@ GRPC_PORT="$(_env_or_empty TRITON_GRPC_PORT)"
 HTTP_PORT="$(_env_or_empty TRITON_HTTP_PORT)"
 RUNTIME_MAX_BATCH_SIZE="${RUNTIME_MAX_BATCH_SIZE:-}"
 RUNTIME_MAX_SEQ_LEN="${RUNTIME_MAX_SEQ_LEN:-}"
+# Serving knobs forwarded to deploy.sh (Phase C).
+MAX_SESSIONS="${MAX_SESSIONS:-}"
+ENGINE_WS_PORT="${ENGINE_WS_PORT:-}"
+FOREGROUND="${FOREGROUND:-false}"
 
 # ── Help ──
 
@@ -211,7 +218,7 @@ Phase B options (forwarded to build_engines.sh):
                           (e.g. TYPE_FP32 vs TYPE_BF16).
 
 Phase C options (forwarded to deploy.sh):
-  --gateway <mode>        Gateway: standalone | triton | engine-docker (default: standalone)
+  --gateway <mode>        Gateway: standalone | triton | engine (alias: engine-docker) (default: standalone)
   --engine-mode <mode>    Triton assemble mode: trt | onnx (default: trt)
   --runtime-max-batch-size <N>
                           Runtime scheduler max batch size
@@ -219,6 +226,9 @@ Phase C options (forwarded to deploy.sh):
                           Runtime scheduler max sequence length
   --engine-image <tag>    Image for engine-docker (default: qwen3-engine:<ngc-tag>, else qwen3-engine:26.02)
   --port <port>           Standalone / engine-docker gRPC port (default: 50051)
+  --ws-port <port>        Standalone / engine-docker WebSocket port (default: 50052)
+  --max-sessions <N>      Max concurrent sessions (default: 128)
+  --foreground            Run Phase C in foreground (don't daemonize)
   --grpc-port <port>      Triton gRPC port (default: 8001)
   --http-port <port>      Triton HTTP port (default: 8000)
 
@@ -300,12 +310,15 @@ parse_args() {
             --paste)            DISCOVER_MODE="paste"; shift ;;
 
             # Phase C
-            --gateway)          GATEWAY_MODE="$2"; shift 2 ;;
+            --gateway)          GATEWAY_MODE="$2"; [ "$GATEWAY_MODE" = "engine" ] && GATEWAY_MODE="engine-docker"; shift 2 ;;
             --engine-mode)      ENGINE_MODE="$2"; shift 2 ;;
             --runtime-max-batch-size|--runtime-max-batch) RUNTIME_MAX_BATCH_SIZE="$2"; shift 2 ;;
             --runtime-max-seq-len|--runtime-max-seq) RUNTIME_MAX_SEQ_LEN="$2"; shift 2 ;;
             --engine-image)      ENGINE_DOCKER_IMAGE="$2"; ENGINE_DOCKER_IMAGE_EXPLICIT=true; shift 2 ;;
             --port)             ENGINE_PORT="$2"; shift 2 ;;
+            --ws-port)          ENGINE_WS_PORT="$2"; shift 2 ;;
+            --max-sessions)     MAX_SESSIONS="$2"; shift 2 ;;
+            --foreground)       FOREGROUND=true; shift ;;
             --grpc-port)        GRPC_PORT="$2"; shift 2 ;;
             --http-port)        HTTP_PORT="$2"; shift 2 ;;
 
@@ -477,6 +490,9 @@ build_forward_args() {
         append_optarg DEPLOY_ARGS --engine-image "$ENGINE_DOCKER_IMAGE"
     fi
     append_optarg DEPLOY_ARGS --port "$ENGINE_PORT"
+    append_optarg DEPLOY_ARGS --ws-port "$ENGINE_WS_PORT"
+    append_optarg DEPLOY_ARGS --max-sessions "$MAX_SESSIONS"
+    if [ "$FOREGROUND" = "true" ]; then DEPLOY_ARGS+=(--foreground); fi
     append_optarg DEPLOY_ARGS --model-version "$MODEL_VERSION"
     if $BUILD_IMAGE_EXPLICIT; then
         append_optarg DEPLOY_ARGS --image "$BUILD_IMAGE"
@@ -1311,6 +1327,21 @@ interactive_mode() {
             *) GATEWAY_MODE="standalone" ;;
         esac
         log_info "已选择 Phase C 方式: $GATEWAY_MODE"
+
+        # Triton can assemble from the fused TRT engine or the raw ONNX graphs.
+        if [ "$GATEWAY_MODE" = "triton" ] && [ -z "$ENGINE_MODE" ]; then
+            echo ""
+            echo "  Triton 组装模式:"
+            echo "    [1] trt  — 使用编译好的 fused TensorRT engine (推荐, 生产)"
+            echo "    [2] onnx — 直接用 ONNX 图 (无需 Phase B 编译, 调试用)"
+            local emch=""
+            read -rp "  请选择 [1-2] (默认: 1 trt): " -t 30 emch || true
+            case "${emch:-1}" in
+                2) ENGINE_MODE="onnx" ;;
+                *) ENGINE_MODE="trt" ;;
+            esac
+            log_info "已选择 Triton engine-mode: $ENGINE_MODE"
+        fi
     fi
     if { $will_package || $will_deploy; } && [ -z "$GATEWAY_MODE" ]; then
         GATEWAY_MODE="standalone"

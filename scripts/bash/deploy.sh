@@ -95,7 +95,7 @@ Commands:
     build                Build self-contained Docker image
 
 Options:
-  --gateway <mode>       Gateway: standalone | triton | engine-docker (default: standalone)
+  --gateway <mode>       Gateway: standalone | triton | engine (alias: engine-docker) (default: standalone)
   --engine-image <tag>   Image tag for engine-docker (default: Phase B NGC tag)
   --variant <name>       Model variant (default: auto-discover)
   --model-version <N>    Triton model version directory (default: 1)
@@ -210,6 +210,10 @@ done
 MODEL_VERSION=$(resolve_model_version "$MODEL_VERSION") || exit 1
 export MODEL_VERSION
 export ENGINE_MODEL_VERSION="$MODEL_VERSION"
+
+# `engine` is the canonical gateway name (compose.sh / CLAUDE.md); deploy
+# internally uses `engine-docker`. Accept both.
+[ "$GATEWAY_MODE" = "engine" ] && GATEWAY_MODE="engine-docker"
 
 # Validate gateway mode
 case "$GATEWAY_MODE" in
