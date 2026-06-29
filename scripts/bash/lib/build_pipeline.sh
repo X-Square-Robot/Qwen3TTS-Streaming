@@ -447,12 +447,21 @@ write_artifact_manifest() {
     if [ -n "$actual_cc" ]; then
         actual_sm="sm_${actual_cc//./}"
     fi
+    # GPU name from the SAME (build) host as gpu_sm/driver above, so the
+    # artifact_manifest identity fields share one provenance. The fingerprint
+    # check compares these against the runtime host; mixing in target_profile's
+    # name (a different machine) made the gpu_name/gpu_sm cross-checks muddled.
+    local actual_gpu_name=""
+    if command -v nvidia-smi &>/dev/null; then
+        actual_gpu_name=$(nvidia-smi --id="$probe_device" --query-gpu=name \
+            --format=csv,noheader 2>/dev/null | head -1 | sed 's/^ *//;s/ *$//')
+    fi
 
     local cuda_version
     cuda_version=$(cross_host_json_value "$target_profile" cuda_runtime 2>/dev/null || true)
 
     python3 - "$bundle_root" "$build_manifest" "$target_profile" \
-        "$tensorrt_version" "$actual_driver" "$actual_sm" "$cuda_version" <<'PY'
+        "$tensorrt_version" "$actual_driver" "$actual_sm" "$cuda_version" "$actual_gpu_name" <<'PY'
 import datetime as dt
 import hashlib
 import json
@@ -463,7 +472,7 @@ from pathlib import Path
 root = Path(sys.argv[1])
 build = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
 target = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
-tensorrt_version, driver, sm, cuda_version = sys.argv[4:8]
+tensorrt_version, driver, sm, cuda_version, build_gpu_name = sys.argv[4:9]
 
 engines = {}
 for engine in sorted((root / "workspace" / "exported").glob("**/*.engine")):
@@ -485,7 +494,9 @@ manifest = {
     "tensorrt_version": tensorrt_version,
     "cuda_version": cuda_version,
     "gpu_sm": sm,
-    "gpu_name": gpu.get("name", ""),
+    # Prefer the build host's own GPU name (same provenance as gpu_sm); fall
+    # back to target_profile only if nvidia-smi was unavailable at build time.
+    "gpu_name": build_gpu_name or gpu.get("name", ""),
     "driver_version": driver,
     "engine_dtype": build["engine_dtype"],
     "triton_io_float_dtype": build["triton_io_float_dtype"],

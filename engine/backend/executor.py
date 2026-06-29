@@ -543,6 +543,11 @@ class Executor:
     def max_seq_len(self) -> int:
         return self._max_seq_len
 
+    @property
+    def max_input_len(self) -> int:
+        """Max prefill length the loaded TRT plan supports (0 if unknown)."""
+        return self._max_input_len
+
     # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------

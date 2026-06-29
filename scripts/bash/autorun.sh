@@ -107,10 +107,13 @@ BUILD_IMAGE_EXPLICIT=false
 ENGINE_DTYPE="${ENGINE_DTYPE:-}"
 TRITON_IO_FLOAT_DTYPE="${TRITON_IO_FLOAT_DTYPE:-}"
 # Per-submodule compute precision (empty = follow ENGINE_DTYPE). The fused engine
-# builds backbone / code-predictor / code2wav independently; CP defaults to fp32
-# downstream in build_engines.sh to avoid streaming hallucination.
+# builds backbone / code-predictor / code2wav independently. CP defaults to fp32
+# (matching build_engines.sh) to avoid streaming hallucination — set explicitly
+# here too so the recorded build_manifest.json matches what is actually built
+# (an empty value would be re-defaulted to fp32 downstream, leaving the manifest
+# disagreeing with the engine).
 BACKBONE_PRECISION="${BACKBONE_PRECISION:-}"
-CP_PRECISION="${CP_PRECISION:-}"
+CP_PRECISION="${CP_PRECISION:-fp32}"
 CODE2WAV_PRECISION="${CODE2WAV_PRECISION:-}"
 BUNDLE_OUT="${BUNDLE_OUT:-${REPO_ROOT}/workspace/engine_build_bundle.tar.zst}"
 ARTIFACT_IN=""

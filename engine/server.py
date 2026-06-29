@@ -151,6 +151,40 @@ class TTSEngine:
         """Fail early if requested runtime limits exceed the built TRT profile."""
         profile = self._model_arch.engine_profile
         variant = self._model_arch.variant or "unknown"
+
+        # Surface the per-submodule precision the engine claims to be built with,
+        # and warn on the streaming-hallucination knob (CP not in fp32). This is
+        # the only runtime visibility into cp_precision — it is otherwise baked
+        # into the plan and never cross-checked.
+        logger.info(
+            "Engine precision: base=%s backbone=%s cp=%s code2wav=%s (variant=%s)",
+            self._model_arch.dtype or "bf16",
+            profile.backbone_precision or "(base)",
+            profile.cp_precision or "(base)",
+            profile.code2wav_precision or "(base)",
+            variant,
+        )
+        cp_prec = (profile.cp_precision or self._model_arch.dtype or "bf16").lower()
+        if cp_prec in ("bf16", "fp16"):
+            logger.warning(
+                "Code Predictor precision is %s — bf16/fp16 CP causes near-tie "
+                "argmax flips and streaming hallucination. Rebuild with "
+                "--cp-precision fp32 unless this is intentional.",
+                cp_prec,
+            )
+
+        # When the manifest carries no engine_profile bounds, the hard checks
+        # below are skipped and the only remaining guard is the executor's silent
+        # clamp to the loaded plan. Make that loud so an operator-requested limit
+        # is never quietly lowered.
+        if profile.max_batch_size <= 0 and profile.max_seq_len <= 0:
+            logger.warning(
+                "Manifest has no engine_profile bounds for variant '%s'; runtime "
+                "max_batch/max_seq are NOT pre-validated and will be silently "
+                "clamped to the loaded TRT plan. Rebuild Phase B to record bounds.",
+                variant,
+            )
+
         if profile.max_batch_size > 0 and self._max_batch > profile.max_batch_size:
             raise ValueError(
                 f"runtime max_batch_size={self._max_batch} exceeds engine profile "
@@ -210,9 +244,35 @@ class TTSEngine:
             repetition_penalty=sampling.repetition_penalty,
             random_seed=sampling.random_seed,
         )
-        self._executor.load()
+        try:
+            self._executor.load()
+        except Exception as exc:
+            if _is_cuda_oom(exc):
+                # The artifact fingerprint validates GPU identity (SM/driver/TRT),
+                # not memory capacity, so an engine sized for a larger GPU passes
+                # the check and then OOMs here. Make that actionable.
+                raise RuntimeError(
+                    f"GPU out of memory loading the engine for variant "
+                    f"'{self._model_arch.variant}' (max_batch_size={self._max_batch}). "
+                    "The Phase B profile was likely sized for a larger GPU than this host; "
+                    "lower --max-batch / ENGINE_SCHEDULER_MAX_BATCH_SIZE, or rebuild Phase B "
+                    "for this GPU's memory."
+                ) from exc
+            raise
         self._max_batch = self._executor.max_batch_size
         self._max_seq_len = self._executor.max_seq_len
+
+        # Cross-check the loaded plan's prefill bound against the manifest so a
+        # mismatch surfaces at startup rather than mid-stream on the first
+        # over-long request (the per-request guard lives deep in the executor).
+        _prof_max_in = self._model_arch.engine_profile.max_input_len
+        _plan_max_in = self._executor.max_input_len
+        if _prof_max_in > 0 and _plan_max_in > 0 and _prof_max_in != _plan_max_in:
+            logger.warning(
+                "manifest max_input_len=%d disagrees with loaded TRT plan "
+                "max_input_len=%d (variant=%s); prefill is enforced at the plan value.",
+                _prof_max_in, _plan_max_in, self._model_arch.variant or "unknown",
+            )
 
         sc = self._cfg.spliter
         self._frontend = FrontendInterface(
@@ -258,6 +318,20 @@ class TTSEngine:
                         device="cpu",
                         default_speaker=pf.default_speaker,
                         fallback_speaker=pf.fallback_speaker,
+                    )
+                # The engine trusts the manifest's architecture, but the actual
+                # weights are loaded separately. If they describe different models
+                # (stale/foreign manifest), fail cleanly at startup instead of
+                # crashing on a raw tensor-shape mismatch at first inference.
+                if (
+                    self._model_arch.hidden_size
+                    and emb_weights.hidden_size != self._model_arch.hidden_size
+                ):
+                    raise ValueError(
+                        f"weights hidden_size={emb_weights.hidden_size} disagrees with "
+                        f"manifest architecture hidden_size={self._model_arch.hidden_size} "
+                        f"for variant '{self._model_arch.variant}': the loaded weights and "
+                        "triton_manifest.json describe different models — re-export/rebuild."
                     )
                 self._executor.set_embedding_weights(emb_weights)
                 prefill_builder = PrefillBuilder(

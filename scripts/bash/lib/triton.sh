@@ -637,18 +637,19 @@ sync_trt_configs() {
     local exported_dir="${3:-}"
     [ "$engine_mode" != "trt" ] && return 0
 
-    local engine_dtype="bf16"
-    if [ -n "$exported_dir" ] && [ -f "$exported_dir/.engine_dtype" ]; then
-        engine_dtype=$(cat "$exported_dir/.engine_dtype" 2>/dev/null | tr -d '\n' || echo "bf16")
-    fi
-    engine_dtype="${engine_dtype:-bf16}"
-
     local manifest_path
     manifest_path=$(_resolve_repo_manifest "$repo_dir" "${MODEL_VERSION:-${ENGINE_MODEL_VERSION:-}}" 2>/dev/null || true)
     if [ -z "$manifest_path" ]; then
         log_warn "  sync_trt_configs: no triton_manifest.json in model package (skip)"
         return 0
     fi
+
+    # Source engine_dtype from the manifest (the single source of truth), not the
+    # lossy .engine_dtype sidecar — the sidecar can go stale and cannot represent
+    # the per-submodule precision the manifest carries, so the two could disagree.
+    local engine_dtype
+    engine_dtype=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('engine_dtype') or 'bf16')" "$manifest_path" 2>/dev/null || echo "bf16")
+    engine_dtype="${engine_dtype:-bf16}"
     local repo_root
     repo_root="$(cd "${_LIB_DIR}/../../.." && pwd)"
     if python3 "$repo_root/scripts/python/generate_triton_configs.py" \
