@@ -64,6 +64,10 @@ class MLFQScheduler:
     def __init__(self, config: Optional[MLFQConfig] = None):
         self._cfg = config or MLFQConfig()
         self._global_step: int = 0
+        # ids of metas scheduled into a batch during the current step;
+        # consumed (and cleared) by tick() to age the segments that were
+        # *not* scheduled. See tick() for the anti-starvation rationale.
+        self._scheduled_this_step: set[int] = set()
 
     @property
     def global_step(self) -> int:
@@ -82,9 +86,15 @@ class MLFQScheduler:
         meta.reset()
 
     def on_step_done(self, meta: MLFQMeta) -> None:
-        """Called after each decode step for a segment."""
+        """Called after each decode step for a segment.
+
+        Note: ``steps_since_schedule`` is *not* advanced here. It tracks
+        time since a segment was last selected into a batch, which is an
+        attribute of the global step rather than of a per-segment decode
+        step — so it is aged in :meth:`tick` for every active segment that
+        was not scheduled this step.
+        """
         meta.decode_steps += 1
-        meta.steps_since_schedule += 1
 
         if meta.level == 0 and meta.decode_steps >= self._cfg.q1_threshold:
             meta.level = 1
@@ -95,6 +105,7 @@ class MLFQScheduler:
         """Mark a segment as having been included in the current batch."""
         meta.last_scheduled_at = self._global_step
         meta.steps_since_schedule = 0
+        self._scheduled_this_step.add(id(meta))
 
     # ------------------------------------------------------------------
     # Batch selection
@@ -148,6 +159,18 @@ class MLFQScheduler:
         Returns:
             Number of segments boosted by anti-starvation.
         """
+        # Age every active segment that was *not* scheduled into this step's
+        # batch. Scheduled segments had ``steps_since_schedule`` reset to 0 in
+        # on_scheduled, so this measures global steps since last scheduled and
+        # lets the starvation boost below actually fire for segments that the
+        # batch never picks (e.g. when candidates exceed max_batch).
+        if all_metas:
+            scheduled = self._scheduled_this_step
+            for meta in all_metas:
+                if id(meta) not in scheduled:
+                    meta.steps_since_schedule += 1
+        self._scheduled_this_step.clear()
+
         self._global_step += 1
         boosted = 0
 

@@ -83,6 +83,68 @@ class TestMLFQScheduler:
             boosted = sched.tick([meta])
         assert meta.level == 0
 
+    def test_unscheduled_segment_ages_while_scheduled_does_not(self):
+        # Regression: steps_since_schedule must advance for active segments
+        # that are NOT selected into a batch, otherwise the starvation boost
+        # can never fire. A scheduled segment must stay at 0.
+        cfg = MLFQConfig(
+            q1_threshold=1000, q2_threshold=2000,
+            aging_interval=5, starvation_limit=5,
+        )
+        sched = MLFQScheduler(cfg)
+
+        starved = MLFQMeta()
+        starved.level = 2
+        scheduled = MLFQMeta()  # stays Q0, picked every step
+
+        all_metas = [starved, scheduled]
+        for _ in range(5):
+            # Emulate the engine loop: only `scheduled` makes it into the batch.
+            sched.on_scheduled(scheduled)
+            sched.on_step_done(scheduled)
+            sched.tick(all_metas)
+
+        # The never-scheduled segment was aged...
+        assert starved.steps_since_schedule == 0  # reset by the boost
+        assert starved.level == 0  # boosted out of Q2 by anti-starvation
+        # ...while the continuously-scheduled one never accrued starvation.
+        assert scheduled.steps_since_schedule == 0
+
+    def test_starved_segment_eventually_scheduled_when_candidates_exceed_batch(self):
+        # Drive candidates > max_batch so select_batch truncates and the
+        # lowest-priority segment is never picked until aging rescues it.
+        cfg = MLFQConfig(
+            q1_threshold=1000, q2_threshold=2000,
+            aging_interval=5, starvation_limit=5,
+        )
+        sched = MLFQScheduler(cfg)
+        max_batch = 2
+
+        starved = FakeSegment("starved")
+        starved.meta.level = 2
+        hog_a = FakeSegment("hog_a")
+        hog_b = FakeSegment("hog_b")
+        candidates = [starved, hog_a, hog_b]  # 3 candidates, batch of 2
+
+        scheduled_at = []
+        for step in range(8):
+            ordered = sched.select_batch(
+                candidates, max_batch, get_meta=lambda s: s.meta,
+            )
+            for seg in ordered:
+                sched.on_step_done(seg.meta)
+            if starved in ordered:
+                scheduled_at.append(step)
+            sched.tick([s.meta for s in candidates])
+
+        # Starved while the two Q0 hogs monopolised the batch...
+        assert scheduled_at and scheduled_at[0] >= 4, (
+            f"starved segment should be skipped until aging boosts it, "
+            f"got first schedule at step {scheduled_at[0] if scheduled_at else None}"
+        )
+        # ...and the boost actually let it into a batch.
+        assert len(scheduled_at) >= 1
+
     def test_on_scheduled_resets_counter(self):
         sched = MLFQScheduler()
         meta = MLFQMeta()
