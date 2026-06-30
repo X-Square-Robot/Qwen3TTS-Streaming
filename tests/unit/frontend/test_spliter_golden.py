@@ -65,13 +65,14 @@ def test_offline_set_full_text_finds_global_optimal_l1_cut():
     sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
     segs = _summarize(sp.set_full_text(_toks(SIGNATURE)))
 
-    # NOTE: a flush-triggering punct emits FLUSH_EOS with empty token_text, so
-    # seg1's terminal "？" does not appear in the reconstructed text (it triggered
-    # the flush). seg0's "？" appears because that group flushes on END, not on
-    # the punct. This per-path asymmetry is itself frozen here.
+    # Bin-packing: "你好吗？" is one packed group; the over-capacity unit
+    # "明天天气不错，有没有什么想吃的？" (16 > cap 15) is cut at its latest L2 (，),
+    # leaving "有没有什么想吃的？" as a third group (pending under concurrency=2,
+    # so not in this synchronous batch). The orphaned trailing "？" of the old
+    # first-fit force-cut is gone.
     assert [(s["seg"], s["group"], s["text"]) for s in segs] == [
         (0, 0, "你好吗？"),
-        (1, 1, "明天天气不错，有没有什么想吃的"),
+        (1, 1, "明天天气不错，"),
     ]
     assert segs[0]["acts"] == ["PREFILL", "DECODE", "DECODE", "DECODE", "FLUSH_EOS"]
     assert segs[1]["acts"][0] == "PREFILL"
@@ -156,7 +157,7 @@ def test_auto_long_packet_engages_stage1_global_optimal():
 
     assert [(s["seg"], s["group"], s["text"]) for s in segs] == [
         (0, 0, "你好吗？"),
-        (1, 1, "明天天气不错，有没有什么想吃的"),
+        (1, 1, "明天天气不错，"),
     ]
     # Matches the offline path exactly — Stage 1 had full foresight over the packet.
     off = _summarize(Spliter(engine_max_decode_len=100, ema_ratio=10.0).set_full_text(_toks(SIGNATURE)))
