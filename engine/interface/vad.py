@@ -154,6 +154,21 @@ class TTSVADProcessor(ABC):
         self._begin_counter: int = 0
         self._end_counter: int = 0
 
+        # L2 observability side-channel (decoupled from logging — the gateway
+        # owns session context and emits). Off by default ⇒ zero cost.
+        self._record_transitions: bool = False
+        self._transitions: list[dict] = []
+
+    def enable_transition_recording(self, flag: bool) -> None:
+        self._record_transitions = flag
+
+    def drain_transitions(self) -> list[dict]:
+        if not self._transitions:
+            return []
+        out = self._transitions
+        self._transitions = []
+        return out
+
     @property
     def config(self) -> TTSVADConfig:
         return self._config
@@ -293,6 +308,12 @@ class TTSVADProcessor(ABC):
                 self._end_counter = 0
                 self._begin_counter = 0
                 self._metrics.begin_trigger_count += 1
+                if self._record_transitions:
+                    self._transitions.append({
+                        "event": "begin", "score": round(float(score), 4),
+                        "threshold": cfg.begin_threshold,
+                        "trigger_count": self._metrics.begin_trigger_count,
+                    })
 
                 # Emit the lookback margin (silence before the onset) ...
                 if self._margin_buffer.size > 0:
@@ -323,6 +344,12 @@ class TTSVADProcessor(ABC):
                 self._begin_counter = 0
                 self._end_counter = 0
                 self._metrics.end_trigger_count += 1
+                if self._record_transitions:
+                    self._transitions.append({
+                        "event": "end", "score": round(float(score), 4),
+                        "threshold": cfg.end_threshold,
+                        "trigger_count": self._metrics.end_trigger_count,
+                    })
                 # The end_count frames that triggered end are discarded
                 # (they were below end_threshold = noise/silence)
                 self._metrics.tail_trimmed_samples += frame_int16.size

@@ -38,6 +38,7 @@ from ..core.types import (
     SessionConfig,
 )
 from ..core.timing import ServerTimingAccumulator
+from ..core.lifecycle import LifecycleLogger
 from ..interface import (
     OutputPipeline,
     SessionStartRequest,
@@ -271,6 +272,15 @@ class WebSocketGateway:
         timing_acc.session_created_epoch_ms = timing_acc.request_received_epoch_ms
         timing_acc.vad_policy = config.output_policy.vad.strategy or "disabled"
         timing_acc.text_input_mode = config.input_mode.value
+
+        LifecycleLogger.emit(
+            session_id=session_id,
+            phase="request.accepted",
+            request_id=config.timing.request_id or None,
+            turn_id=config.timing.turn_id or None,
+            transport="websocket",
+            client_request_ts_ms=config.timing.client_request_ts_ms or None,
+        )
 
         # Store accumulator reference in timing extra for engine thread access
         config.timing.extra["_server_timing_accumulator"] = timing_acc

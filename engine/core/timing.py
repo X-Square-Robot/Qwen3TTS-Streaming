@@ -78,6 +78,36 @@ class ServerTimingAccumulator:
             return None
         return (end - start) * 1000.0
 
+    def summary_dict(self) -> dict[str, Any]:
+        """Structured (numeric) strong-metric summary for the L1 session.summary
+        lifecycle log. Complements ``to_meta_dict`` (which is string-typed for
+        protocol output). Only metrics computable within the monotonic clock
+        domain are included; ``None`` entries are dropped by the caller.
+        """
+        d = self._derived_ms
+        ttft = {
+            "prefill_ms": d(self.prefill_started_monotonic, self.prefill_completed_monotonic),
+            "dequeue_to_first_raw_ms": d(self.first_text_dequeued_monotonic, self.first_raw_audio_monotonic),
+            "create_to_first_raw_ms": d(self.session_created_monotonic, self.first_raw_audio_monotonic),
+        }
+        pipeline = {
+            "engine_queue_ms": d(self.first_text_enqueued_monotonic, self.first_text_dequeued_monotonic),
+            "inference_ms": d(self.first_text_dequeued_monotonic, self.first_raw_audio_monotonic),
+            "gating_ms": d(self.first_raw_audio_monotonic, self.first_effective_audio_monotonic),
+        }
+        round2 = lambda m: {k: round(v, 2) for k, v in m.items() if v is not None}
+        out: dict[str, Any] = {
+            "ttft": round2(ttft),
+            "pipeline_ms": round2(pipeline),
+            "cache": {"prefix_cache_hit": self.cache_hit, "cache_tokens_reused": self.cache_tokens_reused},
+            "vad_policy": self.vad_policy,
+            "prefix_trim_applied": self.prefix_trim_applied,
+            "prefix_trimmed_ms": round(self.prefix_trimmed_ms, 2) if self.prefix_trim_applied else 0.0,
+        }
+        if self.total_audio_ms > 0:
+            out["total_audio_ms"] = round(self.total_audio_ms, 1)
+        return out
+
     def to_meta_dict(self) -> dict[str, str]:
         """Produce the complete server timing meta dict for protocol output.
 

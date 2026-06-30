@@ -37,6 +37,8 @@ from ..core.types import (
     SessionConfig,
 )
 from ..core.timing import ServerTimingAccumulator
+from ..core.lifecycle import LifecycleLogger
+from ..core import observability as obs
 from ..interface import (
     OutputPipeline,
     SessionStartRequest,
@@ -99,6 +101,15 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
         timing_acc.vad_policy = config.output_policy.vad.strategy or "disabled"
         timing_acc.text_input_mode = config.input_mode.value
 
+        LifecycleLogger.emit(
+            session_id=session_id,
+            phase="request.accepted",
+            request_id=config.timing.request_id or None,
+            turn_id=config.timing.turn_id or None,
+            transport="grpc",
+            client_request_ts_ms=config.timing.client_request_ts_ms or None,
+        )
+
         # Store accumulator reference in timing extra for engine thread access
         config.timing.extra["_server_timing_accumulator"] = timing_acc
 
@@ -112,6 +123,19 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
         vad_config = _build_vad_config(config)
         vad_processor = create_vad_processor(vad_config, sample_rate=ENGINE_SAMPLE_RATE)
 
+        def _drain_vad_transitions():
+            # L2 vad_transition: emit per begin/end transition with session
+            # context (answers "为什么裁了这段"). No-op unless recording enabled.
+            for tr in vad_processor.drain_transitions():
+                LifecycleLogger.emit(
+                    session_id=session_id,
+                    phase="vad_transition",
+                    request_id=config.timing.request_id or None,
+                    session_level=config.observability_level,
+                    min_level=obs.ObsLevel.DEBUG,
+                    **tr,
+                )
+
         async def on_audio(sid, data):
             # Apply VAD filtering before output pipeline
             raw = np.frombuffer(data, dtype=np.float32)
@@ -122,6 +146,7 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             audio_int16 = (audio_int16 * 32767.0).astype(np.int16)
 
             filtered_int16 = vad_processor.process_chunk(audio_int16)
+            _drain_vad_transitions()
             if filtered_int16.size == 0:
                 return
 
@@ -149,6 +174,7 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                 frame = pipeline.convert_audio_chunk(final_bytes)
                 await audio_queue.put(("audio", _make_audio_response(frame.pcm_bytes, frame.audio, meta=frame.meta)))
 
+            _drain_vad_transitions()
             # Inject VAD observability into metrics
             _inject_vad_metrics(vad_processor, pipeline, metrics)
             await audio_queue.put((
@@ -162,6 +188,11 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             on_audio=on_audio,
             on_done=on_done,
             on_event=on_event,
+        )
+        # The frontend resolved the per-session observability level during
+        # start_session; enable VAD transition recording before audio flows.
+        vad_processor.enable_transition_recording(
+            obs.is_enabled(obs.ObsLevel.DEBUG, config.observability_level)
         )
         await audio_queue.put((
             "event",

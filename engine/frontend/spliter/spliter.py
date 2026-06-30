@@ -178,6 +178,14 @@ class Spliter:
         # Segments fully done (engine reported SEGMENT_END)
         self._done: set[int] = set()
 
+        # L2 observability side-channel: when recording is enabled, each split
+        # decision is buffered here (path/trigger/thresholds/remaining_kv/ema/
+        # reason/text_preview) and drained by the caller, which owns the session
+        # context and emits the structured event. Keeps the spliter decoupled
+        # from lifecycle logging. Off by default ⇒ zero cost at L1/daily.
+        self._record_decisions: bool = False
+        self._split_decisions: List[dict] = []
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -194,6 +202,48 @@ class Spliter:
     @property
     def active_segment_count(self) -> int:
         return len(self._drivers)
+
+    # ------------------------------------------------------------------
+    # L2 split-decision observability (side-channel; see __init__)
+    # ------------------------------------------------------------------
+
+    def enable_decision_recording(self, flag: bool) -> None:
+        """Toggle split-decision recording (caller sets this from the session's
+        effective observability level)."""
+        self._record_decisions = flag
+
+    def drain_split_decisions(self) -> List[dict]:
+        """Return and clear buffered split-decision records."""
+        if not self._split_decisions:
+            return []
+        out = self._split_decisions
+        self._split_decisions = []
+        return out
+
+    def _record_split(
+        self, trigger: str, th: SplitThresholds, seg_tokens: List[SegmentToken],
+        last_l1_pos: int, chosen_level: int, reason: str,
+    ) -> None:
+        if not self._record_decisions:
+            return
+        preview = "".join(getattr(t, "text", "") or "" for t in seg_tokens)
+        self._split_decisions.append({
+            "obs": "split_decision",
+            "path": "offline_pre_split",
+            "trigger": trigger,
+            "remaining_kv": self._engine_max - self._prefill_len,
+            "prefill_len": self._prefill_len,
+            "ema_ratio": round(self._ema_ratio, 2),
+            "thresholds": {
+                "min_tokens_l1": th.min_tokens_l1,
+                "force_split_at": th.force_split_at,
+            },
+            "token_count_at_split": len(seg_tokens),
+            "last_l1_pos": last_l1_pos,
+            "chosen_level": chosen_level,
+            "reason": reason,
+            "text_preview": preview,
+        })
 
     # ------------------------------------------------------------------
     # Threshold helpers
@@ -360,11 +410,26 @@ class Spliter:
 
             if token.punct_level == 1 and n >= th.min_tokens_l1:
                 _flush_at(n - 1)
+                self._record_split(
+                    "l1_punct", th, segments[-1], n - 1, 1,
+                    f"L1 punct at {n} tokens >= min_tokens_l1({th.min_tokens_l1})",
+                )
             elif n >= th.force_split_at:
                 if last_l1 >= 0:
+                    prev_last_l1 = last_l1
                     _flush_at(last_l1)
+                    self._record_split(
+                        "force_fallback_l1", th, segments[-1], prev_last_l1, 1,
+                        f"force_split_at({th.force_split_at}) reached without fresh L1; "
+                        f"fell back to last L1 at pos {prev_last_l1}",
+                    )
                 else:
                     segments.append(current)
+                    self._record_split(
+                        "force_hard_cut", th, segments[-1], -1, 0,
+                        f"force_split_at({th.force_split_at}) reached, no L1 since "
+                        f"segment start; hard cut",
+                    )
                     current = []
                     last_l1 = -1
 

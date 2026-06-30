@@ -77,6 +77,7 @@ from ..core.types import (
     ResultType,
 )
 from ..core.lifecycle import LifecycleLogger
+from ..core import observability as obs
 from .executor import Executor, StepOutput
 from .kv_cache_pool import KVCachePool, SlotKVState
 from .prefix_cache import PrefixKVCache
@@ -104,6 +105,7 @@ class EngineSegment:
         "prefill_completed_at",
         "cache_hit",
         "cache_tokens_reused",
+        "max_decode_batch",
     )
 
     def __init__(
@@ -129,6 +131,9 @@ class EngineSegment:
         self.prefill_completed_at: Optional[float] = None
         self.cache_hit: bool = False
         self.cache_tokens_reused: int = 0
+        # Largest decode batch this segment was ever co-scheduled in (continuous
+        # batching observability — answers "拼没拼 batch"). 0 until first decode.
+        self.max_decode_batch: int = 0
 
 
 class EngineSessionGroup:
@@ -224,6 +229,9 @@ class EngineLoop:
         self._total_eos: int = 0
         self._total_timeouts: int = 0
         self._total_evictions: int = 0
+        self._last_health_emit: float = 0.0
+        # L2 batch_compose(decode): only emit when the decode batch size changes.
+        self._last_decode_batch: int = 0
 
         self._embed_device = self._executor._device
         self._embed_dtype = self._executor._config.dtype
@@ -300,6 +308,7 @@ class EngineLoop:
             self._drain_inbox()
             self._try_evict_idle_slots()
             self._try_timeout_sessions()
+            self._maybe_emit_health()
 
             # --- Phase 5: Wait for GPU, store output for next iteration ---
             if gpu_future is not None:
@@ -313,6 +322,43 @@ class EngineLoop:
     # ------------------------------------------------------------------
     # Inbox
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _session_obs_level(group: Optional["EngineSessionGroup"]):
+        """Per-session resolved observability level (None ⇒ use global), for
+        gating L2 decision logs from the engine thread."""
+        sc = group.request.session_config if group and group.request else None
+        return getattr(sc, "observability_level", None) if sc else None
+
+    def _maybe_emit_health(self) -> None:
+        """Emit the periodic L1 ``engine.health`` gauge (aggregate engine state).
+
+        Cadence is ``observability.health_interval_sec`` (0 disables). Cheap:
+        one ``time.monotonic()`` check per loop iteration.
+        """
+        interval = obs.health_interval_sec()
+        if interval <= 0:
+            return
+        now = time.monotonic()
+        if now - self._last_health_emit < interval:
+            return
+        self._last_health_emit = now
+        kv_pool = self._executor.kv_pool
+        cache_stats = self._prefix_cache.stats()
+        LifecycleLogger.emit(
+            session_id="-",
+            phase="engine.health",
+            active_sessions=len(self._groups),
+            kv_used=kv_pool.used_count if kv_pool else None,
+            kv_free=kv_pool.free_count if kv_pool else None,
+            queue_depth=self._inbox.qsize(),
+            prefix_cache_hit_rate=round(cache_stats.get("hit_rate", 0.0), 3),
+            total_steps=self._total_steps,
+            total_prefills=self._total_prefills,
+            total_eos=self._total_eos,
+            total_evictions=self._total_evictions,
+            total_timeouts=self._total_timeouts,
+        )
 
     def _drain_inbox(self) -> None:
         drained = 0
@@ -382,6 +428,16 @@ class EngineLoop:
             self._groups[req.session_id] = group
             self._total_sessions += 1
             logger.debug("New session group: %s", req.session_id)
+            kv_pool = self._executor.kv_pool
+            LifecycleLogger.emit(
+                session_id=req.session_id,
+                phase="session.registered",
+                request_id=(
+                    req.session_config.timing.request_id if req.session_config else None
+                ) or None,
+                free_slots=kv_pool.free_count if kv_pool else None,
+                active_sessions=len(self._groups),
+            )
 
         elif req.type == RequestType.START_TOKENS:
             group = self._groups.get(req.session_id)
@@ -1119,10 +1175,30 @@ class EngineLoop:
             )
 
         batch_size = len(output.slots)
+        # L2 batch_compose(decode): emit only when the batch size changes, to
+        # show continuous-batching composition over time without per-step flood.
+        if batch_size != self._last_decode_batch and obs.is_enabled(obs.ObsLevel.DEBUG):
+            members = []
+            for s in output.slots:
+                m = self._seg_by_slot.get(s.slot_id)
+                if m is not None:
+                    members.append({"session_id": m.session_id, "segment_id": m.segment_idx})
+            LifecycleLogger.emit(
+                session_id="-",
+                phase="batch_compose",
+                min_level=obs.ObsLevel.DEBUG,
+                stage="decode",
+                batch_size=batch_size,
+                prev_batch_size=self._last_decode_batch,
+                members=members,
+            )
+        self._last_decode_batch = batch_size
         for i, slot in enumerate(output.slots):
             seg = self._seg_by_slot.get(slot.slot_id)
             if seg is None:
                 continue
+            if batch_size > seg.max_decode_batch:
+                seg.max_decode_batch = batch_size
             group = self._groups.get(seg.session_id)
             if group is None:
                 continue
@@ -1241,7 +1317,24 @@ class EngineLoop:
                                 slot.pad_consecutive_silence,
                                 silence_limit, pad_steps, remaining_kv,
                             )
-                            self._handle_segment_eos(group, seg)
+                            # L2 pad_phase: why this segment got silence-aborted.
+                            session_level = self._session_obs_level(group)
+                            if obs.is_enabled(obs.ObsLevel.DEBUG, session_level):
+                                LifecycleLogger.emit(
+                                    session_id=seg.session_id,
+                                    phase="pad_phase",
+                                    segment_idx=seg.segment_idx,
+                                    min_level=obs.ObsLevel.DEBUG,
+                                    session_level=session_level,
+                                    decision="silence_abort",
+                                    pad_steps=pad_steps,
+                                    pad_consecutive_silence=slot.pad_consecutive_silence,
+                                    silence_limit=silence_limit,
+                                    remaining_kv=remaining_kv,
+                                )
+                            self._handle_segment_eos(
+                                group, seg, eos_reason="silence_abort",
+                            )
                             continue
 
                 if audio is not None and len(audio) > 0:
@@ -1314,18 +1407,34 @@ class EngineLoop:
 
     def _handle_segment_eos(
         self, group: EngineSessionGroup, seg: EngineSegment,
-        *, overflow: bool = False,
+        *, overflow: bool = False, eos_reason: Optional[str] = None,
     ) -> None:
-        """Handle EOS for one segment."""
+        """Handle EOS for one segment.
+
+        ``eos_reason`` records *why* the segment ended (daily L1 observability):
+        ``codec_eos`` (model emitted EOS — normal), ``kv_overflow`` (hit the KV
+        budget cap), or ``silence_abort`` (pad-phase silence heuristic). When not
+        given it is derived from ``overflow``.
+        """
         self._total_eos += 1
+        if eos_reason is None:
+            eos_reason = "kv_overflow" if overflow else "codec_eos"
         audio_steps = 0
         if seg.slot:
             audio_steps = seg.slot.frame_idx - seg.decode_start_frame
+        text_tokens = seg.text_tokens_consumed
+        audio_text_ratio = round(audio_steps / text_tokens, 2) if text_tokens else 0.0
+        batched = seg.max_decode_batch > 1
         metrics = {
             "audio_steps": audio_steps,
-            "text_tokens": seg.text_tokens_consumed,
+            "text_tokens": text_tokens,
             "segment_idx": seg.segment_idx,
             "overflow": overflow,
+            "eos_reason": eos_reason,
+            "audio_text_ratio": audio_text_ratio,
+            "batched": batched,
+            "batch_size_seen": seg.max_decode_batch,
+            "cache_hit": seg.cache_hit,
         }
 
         seg.state = "done"
@@ -1337,9 +1446,62 @@ class EngineLoop:
             segment_idx=seg.segment_idx,
             metrics=metrics,
         ))
-        logger.info("Segment EOS: %s seg=%d audio_steps=%d text_tokens=%d overflow=%s",
-                    seg.session_id, seg.segment_idx,
-                    audio_steps, seg.text_tokens_consumed, overflow)
+        LifecycleLogger.emit(
+            session_id=seg.session_id,
+            phase="engine.segment.eos",
+            segment_idx=seg.segment_idx,
+            eos_reason=eos_reason,
+            audio_steps=audio_steps,
+            text_tokens=text_tokens,
+            audio_text_ratio=audio_text_ratio,
+            batched=batched,
+            batch_size_seen=seg.max_decode_batch,
+            cache_hit=seg.cache_hit,
+        )
+        logger.info(
+            "Segment EOS: %s seg=%d reason=%s audio_steps=%d text_tokens=%d "
+            "ratio=%.2f batch=%d",
+            seg.session_id, seg.segment_idx, eos_reason,
+            audio_steps, text_tokens, audio_text_ratio, seg.max_decode_batch,
+        )
+
+        # L2 segment_synthesis: sampling params + anomaly heuristics that flag
+        # the C4 hallucination / non-termination signature (answers "合成为什么错").
+        session_level = self._session_obs_level(group)
+        if obs.is_enabled(obs.ObsLevel.DEBUG, session_level):
+            kv_pool = self._executor.kv_pool
+            max_seq = kv_pool.max_seq_len if kv_pool else 512
+            anomaly: list[str] = []
+            if eos_reason == "kv_overflow" or audio_steps >= max_seq - 1:
+                anomaly.append("hit_kv_cap")
+            if eos_reason == "silence_abort":
+                anomaly.append("silence_aborted")
+            if eos_reason != "codec_eos":
+                anomaly.append("no_codec_eos")
+            if audio_text_ratio > 10.0:
+                anomaly.append("ratio_outlier")
+            reason = (
+                "ran to KV cap without codec EOS — likely hallucination tail"
+                if "hit_kv_cap" in anomaly else
+                "pad-phase silence abort" if "silence_aborted" in anomaly else
+                "normal codec EOS"
+            )
+            LifecycleLogger.emit(
+                session_id=seg.session_id,
+                phase="segment_synthesis",
+                segment_idx=seg.segment_idx,
+                min_level=obs.ObsLevel.DEBUG,
+                session_level=session_level,
+                do_sample=self._executor._do_sample,
+                temperature=self._executor._temperature,
+                repetition_penalty=self._executor._repetition_penalty,
+                audio_steps=audio_steps,
+                text_tokens=text_tokens,
+                audio_text_ratio=audio_text_ratio,
+                eos_reason=eos_reason,
+                anomaly=anomaly,
+                reason=reason,
+            )
 
         self._check_session_done(group)
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Callable, Dict, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 from ..core.session import Session, SegmentOrderMeta
 from ..core.types import (
@@ -28,6 +28,7 @@ from ..core.types import (
     TokenizedText,
 )
 from ..core.lifecycle import LifecycleLogger
+from ..core import observability as obs
 from ..core.timing import ServerTimingAccumulator
 from ..text_normalization import strip_emoji
 from .dispatcher import Dispatcher
@@ -146,15 +147,35 @@ class FrontendInterface:
         session.event_callback = on_event
         self._sessions[session_id] = session
 
+        # Resolve per-session observability level (raise-only override of the
+        # global floor, clamped to max_session_level — see observability_tiers §3).
+        requested_level = (
+            config.output_policy.config.get("obs_level")
+            or config.timing.extra.get("obs_level")
+        )
+        obs_level_clamped = False
+        if requested_level is not None:
+            effective, obs_level_clamped = obs.resolve_session_level(requested_level)
+            config.observability_level = effective
+        session_level = config.observability_level
+        active_level = session_level if session_level is not None else obs.global_level()
+        session.spliter.enable_decision_recording(active_level >= obs.ObsLevel.DEBUG)
+
         # Emit lifecycle events
         LifecycleLogger.emit(
             session_id=session_id,
             phase="session.config.validated",
             request_id=config.timing.request_id or None,
             turn_id=config.timing.turn_id or None,
+            session_level=session_level,
             input_mode=config.input_mode.value,
+            group_policy=config.group_policy.value,
+            task_type=config.task_type or None,
             vad_strategy=config.output_policy.vad.strategy or "disabled",
             protocol_version=str(config.timing.extra.get("client_protocol_version", "")),
+            obs_level=active_level.name.lower(),
+            **({"obs_level_clamped": True, "obs_level_requested": str(requested_level)}
+               if obs_level_clamped else {}),
         )
         LifecycleLogger.emit(
             session_id=session_id,
@@ -268,6 +289,10 @@ class FrontendInterface:
         on_done: Optional[Callable] = None,
         on_event: Optional[Callable] = None,
     ) -> None:
+        # L1 session-level aggregation for the session.summary log (answers the
+        # daily "拼没拼 batch / 合成了什么" questions).
+        batch_agg = {"segments": 0, "batched": 0, "solo": 0, "max_batch_size_seen": 0}
+        final_text_parts: list[str] = []
         try:
             while True:
                 result: EngineResult = await session.result_queue.get()
@@ -330,6 +355,20 @@ class FrontendInterface:
                 elif result.type == ResultType.SEGMENT_END:
                     seg_idx = result.segment_idx
                     session.segments_done += 1
+
+                    # Aggregate batch facts for the session.summary line.
+                    rm = result.metrics or {}
+                    batch_agg["segments"] += 1
+                    if rm.get("batched"):
+                        batch_agg["batched"] += 1
+                    else:
+                        batch_agg["solo"] += 1
+                    bseen = int(rm.get("batch_size_seen", 0) or 0)
+                    if bseen > batch_agg["max_batch_size_seen"]:
+                        batch_agg["max_batch_size_seen"] = bseen
+                    seg_text_for_summary = session.segment_texts.get(seg_idx, "")
+                    if seg_text_for_summary:
+                        final_text_parts.append(seg_text_for_summary)
 
                     reorder = session.reorder
                     meta = session.segment_order.pop(
@@ -405,6 +444,16 @@ class FrontendInterface:
 
                 elif result.type == ResultType.SESSION_DONE:
                     session.state = SessionState.DONE
+                    self._emit_session_summary(session, batch_agg, final_text_parts)
+                    LifecycleLogger.emit(
+                        session_id=session.session_id,
+                        phase="session.completed",
+                        request_id=session.config.timing.request_id or None,
+                        turn_id=session.config.timing.turn_id or None,
+                        session_level=session.config.observability_level,
+                        total_segments=session.segments_done,
+                        total_audio_bytes=session.total_audio_bytes,
+                    )
                     if on_done:
                         await on_done(session.session_id, result.metrics)
                     break
@@ -437,6 +486,44 @@ class FrontendInterface:
             pass
         finally:
             self._cleanup_session(session.session_id, expected=session)
+
+    def _emit_session_summary(
+        self, session: Session, batch_agg: dict, final_text_parts: list,
+    ) -> None:
+        """Emit the L1 ``session.summary`` line: one structured record + one
+        human-readable line answering the five daily questions (TTFT / link
+        timing / synthesized text / batch / VAD)."""
+        acc = session.config.timing.extra.get("_server_timing_accumulator")
+        summary: dict[str, Any] = {}
+        if isinstance(acc, ServerTimingAccumulator):
+            summary = acc.summary_dict()
+        final_text = obs.text_preview("".join(final_text_parts))
+        summary["batch_summary"] = batch_agg
+        summary["text"] = {
+            "final_synthesized_text": final_text,
+            "total_segments": session.segments_done,
+        }
+        LifecycleLogger.emit(
+            session_id=session.session_id,
+            phase="session.summary",
+            request_id=session.config.timing.request_id or None,
+            turn_id=session.config.timing.turn_id or None,
+            session_level=session.config.observability_level,
+            **summary,
+        )
+        ttft = summary.get("ttft", {})
+        ttft_ms = ttft.get("create_to_first_raw_ms")
+        infer_ms = summary.get("pipeline_ms", {}).get("inference_ms")
+        cache = summary.get("cache", {})
+        logger.info(
+            "session=%s DONE ttft=%sms infer=%sms batch=%d/%d vad_trim=%sms cache=%s segs=%d \"%s\"",
+            session.session_id,
+            ttft_ms, infer_ms,
+            batch_agg["batched"], batch_agg["segments"],
+            summary.get("prefix_trimmed_ms", 0.0),
+            "HIT" if cache.get("prefix_cache_hit") else "MISS",
+            session.segments_done, final_text,
+        )
 
     def _cleanup_session(self, session_id: str, *, expected: Optional[Session] = None) -> None:
         # Identity guard: a cancelled consumer task unwinds and runs this
@@ -508,10 +595,31 @@ class FrontendInterface:
     ) -> None:
         if not actions:
             return
+        self._emit_split_decisions(session)
         self._record_segment_text(actions, session)
         await self._dispatcher.dispatch_segment_actions(session, actions)
         await self._emit_text_token_events(session, actions)
         await self._emit_text_boundary_events(session, actions)
+
+    def _emit_split_decisions(self, session: Session) -> None:
+        """Drain the spliter's buffered L2 split-decision records and emit them
+        as ``split_decision`` lifecycle events with session context (answers
+        "为什么这么切"). No-op unless the session is at L2/DEBUG or above."""
+        sp = session.spliter
+        if sp is None:
+            return
+        for d in sp.drain_split_decisions():
+            d = dict(d)
+            d.pop("obs", None)
+            d["text_preview"] = obs.text_preview(d.get("text_preview", ""))
+            LifecycleLogger.emit(
+                session_id=session.session_id,
+                phase="split_decision",
+                request_id=session.config.timing.request_id or None,
+                session_level=session.config.observability_level,
+                min_level=obs.ObsLevel.DEBUG,
+                **d,
+            )
 
     def _record_segment_text(self, actions: list, session: Session) -> None:
         for sa in actions:
