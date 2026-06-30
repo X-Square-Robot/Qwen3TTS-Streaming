@@ -1,5 +1,9 @@
 # Qwen3-TTS 引擎可观测性目标
 
+> 本文定义**计时/生命周期维度**的目标与字段语义（"要观测什么"）。
+> 其分层落地（四层模型 daily/debug/dump、控制面、debug 决策日志、dump 举证、升级排查链）见 [[observability_tiers]]；
+> 完整指标目录见 [[observability_metrics_catalog]]。
+
 ## 背景
 
 近期的延迟排查暴露了当前独立引擎和远程 worker 架构中的一个顽疾：

@@ -3,7 +3,7 @@
 > 编写日期：2026-06-30
 > 状态：**索引/综述**——这是理解全引擎的入口地图，链接到各细分文档，不重复其内容
 > 用途：**防止反复调研**。后续要理解"某个设计为什么这么干、缺陷在哪、能不能避免"，先读本文，再按链接深入
-> 关联：[[engine_decisions]] [[decode_fsm]] [[mixed_precision_plan]] [[trt_llm_runtime_route_report]] [[frontend_segmentation_pipeline]] [[observability_goals]] [[realtime_audio]] [[vad_design_goals]] · 投资调查 `docs/dev/investigation/streaming_hallucination.md`、`code2wav_state_size.md`
+> 关联：[[engine_decisions]] [[decode_fsm]] [[mixed_precision_plan]] [[trt_llm_runtime_route_report]] [[frontend_segmentation_pipeline]] [[observability_goals]] [[observability_tiers]] [[realtime_audio]] [[vad_design_goals]] · 投资调查 `docs/dev/investigation/streaming_hallucination.md`、`code2wav_state_size.md`
 
 ---
 
