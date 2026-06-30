@@ -127,7 +127,7 @@ class SessionConfig:
     ref_warnings: list[str] = field(default_factory=list)
     ref_preprocess_runtime: str = ""
     x_vector_only: bool = False
-    input_mode: InputMode = InputMode.LONG_SEGMENT
+    input_mode: InputMode = InputMode.AUTO
     group_policy: GroupPolicy = GroupPolicy.AUTO
     audio: AudioConfig = field(default_factory=AudioConfig)
     output_policy: OutputPolicyConfig = field(default_factory=OutputPolicyConfig)

@@ -535,7 +535,7 @@ def _start_request_from_stream_request(request) -> SessionStartRequest:
     if request.WhichOneof("request") == "start":
         cfg, output_policy, timing = _session_contract_from_proto(
             request.start.config,
-            default_mode=InputMode.LONG_SEGMENT,
+            default_mode=InputMode.AUTO,
         )
         return SessionStartRequest(
             session_id=request.start.session_id,
@@ -552,10 +552,10 @@ def _start_request_from_stream_request(request) -> SessionStartRequest:
         ref_audio=init.ref_audio,
         ref_text=init.ref_text,
         x_vector_only=getattr(init, "x_vector_only", False),
-        input_mode=getattr(init, "input_mode", tts_pb2.INPUT_MODE_LONG_SEGMENT),
+        input_mode=getattr(init, "input_mode", tts_pb2.INPUT_MODE_UNSPECIFIED),
         group_policy=getattr(init, "group_policy", tts_pb2.GROUP_POLICY_AUTO),
         audio=getattr(init, "audio", None),
-        default_mode=InputMode.LONG_SEGMENT,
+        default_mode=InputMode.AUTO,
     )
     return SessionStartRequest(session_id=init.session_id, config=cfg, output_policy=output_policy, timing=timing)
 
