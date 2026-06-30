@@ -1,6 +1,6 @@
 #!/bin/bash
 # ===========================================================================
-#  autorun.sh — Intelligent launcher for Qwen3-TTS Triton pipeline
+#  autorun.sh — Intelligent launcher for Qwen3TTS-Streaming pipeline
 #
 #  Smart entry point that orchestrates the build/deploy phases:
 #    Phase A (setup):   Environment + model export       → setup_env.sh
@@ -1148,7 +1148,7 @@ show_run_banner() {
 
     echo ""
     echo -e "${_CLR_BLUE}╔══════════════════════════════════════════════════════════╗${_CLR_RESET}"
-    echo -e "${_CLR_BLUE}║     Qwen3-TTS Triton — ${phase_name}${_CLR_RESET}"
+    echo -e "${_CLR_BLUE}║     Qwen3TTS-Streaming — ${phase_name}${_CLR_RESET}"
     echo -e "${_CLR_BLUE}╚══════════════════════════════════════════════════════════╝${_CLR_RESET}"
     echo ""
     echo "  模式:      $description"

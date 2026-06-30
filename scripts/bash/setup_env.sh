@@ -1,6 +1,6 @@
 #!/bin/bash
 # ===========================================================================
-#  setup_env.sh — Phase A: Build environment setup for Qwen3-TTS Triton
+#  setup_env.sh — Phase A: Build environment setup for Qwen3TTS-Streaming
 #
 #  Sets up the environment needed to export model components to ONNX / TRT
 #  and prepare everything for the final Triton deployment image.
@@ -65,7 +65,7 @@ MODEL_DIR="${WORKDIR}/models"
 show_banner() {
     echo ""
     echo -e "${_CLR_BLUE}╔══════════════════════════════════════════════════════════╗${_CLR_RESET}"
-    echo -e "${_CLR_BLUE}║     Qwen3-TTS Triton — Phase A: Environment Setup      ║${_CLR_RESET}"
+    echo -e "${_CLR_BLUE}║     Qwen3TTS-Streaming — Phase A: Environment Setup      ║${_CLR_RESET}"
     echo -e "${_CLR_BLUE}╚══════════════════════════════════════════════════════════╝${_CLR_RESET}"
     echo ""
     echo "  Workspace:       $WORKDIR"

@@ -1,0 +1,23 @@
+.git
+.gitignore
+.pytest_cache
+.mypy_cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.log
+.DS_Store
+
+# Large runtime artifacts are mounted into containers and should not enter build context.
+workspace/
+
+# Local virtualenvs / tool caches
+.venv/
+venv/
+env/
+
+# Editor metadata
+.idea/
+.vscode/

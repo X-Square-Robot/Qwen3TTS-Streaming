@@ -1,4 +1,4 @@
-# Qwen3-TTS Triton — Development Makefile
+# Qwen3TTS-Streaming — Development Makefile
 #
 # Usage:
 #   make proto          Regenerate protobuf Python files from proto/tts.proto

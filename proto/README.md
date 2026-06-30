@@ -1,6 +1,6 @@
 # Protocol Definitions
 
-This directory is the **single source of truth** for protocol definitions used by the Qwen3-TTS Triton project.
+This directory is the **single source of truth** for protocol definitions used by the Qwen3TTS-Streaming project.
 
 ## Files
 

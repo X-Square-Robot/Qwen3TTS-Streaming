@@ -1,6 +1,6 @@
 # 用户文档
 
-> 面向所有使用 Qwen3-TTS Triton 的人
+> 面向所有使用 Qwen3TTS-Streaming 的人
 
 | 文档 | 说明 |
 |------|------|

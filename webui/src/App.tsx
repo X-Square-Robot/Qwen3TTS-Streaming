@@ -242,7 +242,7 @@ export default function App() {
     <main className="app-shell">
       <header className="topbar">
         <div>
-          <h1>Qwen3-TTS Triton</h1>
+          <h1>Qwen3TTS-Streaming</h1>
           <p>token streaming demo · LLM upstream simulation</p>
         </div>
         <div className="headline-metrics">
