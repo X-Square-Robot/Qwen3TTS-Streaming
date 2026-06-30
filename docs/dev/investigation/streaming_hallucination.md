@@ -611,3 +611,262 @@
 1. 之前修复的 prefill bug 是否是主要的引擎侧因素，
 2. 剩余问题现在是否仅可在确切不良用例上复现，而非通用 4a/story 回归，或
 3. 本地展开奇偶恢复后是否仍有独立的服务/运行时问题。
+
+## 2026-06-29 混合精度（CP=fp32）引擎复查
+
+### 背景
+
+构建了一版混合精度引擎：talker backbone 保持 bf16，code_predictor（CP）改为
+fp32（`--cp-precision fp32`，对应历史发现 #15 的对照结论）。预期 CP 数值不稳定
+被消除后流式幻觉应消失，但 `short` badcase 仍间歇性幻觉（~10s 句子膨胀到 40.32s
+= 504 步 `max_seq_len(512)` overflow、无自然 EOS）。
+
+### 复现方法（确定性 session_id → 确定性种子）
+
+- 引擎采样种子 = `blake2b(base_seed=0, session_id, segment_idx)`
+  （`engine/backend/executor.py:_stable_sampling_seed`）。因此**固定 session_id
+  即固定种子即可复现的 rollout**。`tests/repeat_case.py` 给 session_id 追加了时间戳，
+  导致不可复现；改用确定性 id 扫描（`workspace/halluc_probe.py`）。
+- 扫描 `halluprobe-0001..0040` 即命中可复现幻觉：**`halluprobe-0007` / `0008`
+  稳定产出 504 步 overflow**（多次重跑完全一致）。
+
+### dump 捕获
+
+- 通过 compose override（`workspace/compose.dump.yaml`）给 docker 引擎注入
+  `ENGINE_DUMP_*` 并挂载 `/dumps`，**保留 `engine.yaml` 采样配置
+  （do_sample=true, temperature=0.9, top_k=50, repetition_penalty=1.05）**——
+  注意不要用 `run_engine_dump.py` 的 greedy 默认值，否则 rollout 不复现。
+- 驱动 `halluprobe-0007` 捕获 1 prefill + 504 decode 共 505 个 `.pt`。dump 输入含
+  `gumbel_noise` / `cp_gumbel_noise`，因此原型重放采样**按构造对齐种子**。
+
+### 与原型逐步对比（`workspace/scan_dump_divergence.py`，复活并修复
+`analyze_engine_dump.py`）
+
+把每步 dump 的输入喂入官方 PyTorch fused talker（`build_talker_unified_fused_module`），
+对比 `full_codec`：
+
+- **首次分歧在 decode step 1，CP stage 7**（stage 0–6 完全一致）。
+- 引擎 CP 现在更贴近 **fp32** 原型而非 bf16（例：step3 与 fp32 匹配到 stage 11、
+  与 bf16 只到 stage 6；step4 fp32→stage 7、bf16→stage 5）——**说明 CP→fp32 确实
+  生效**。
+- 但 step 1 stage 7 处 **fp32 与 bf16 原型本身也互不一致**（1641 vs 57），即该
+  stage 是高熵近平局点。
+
+### 根因定位（`workspace/compare_step1_hidden.py`，含 hidden/logits 的 step1 dump）
+
+| 对比 | 引擎 vs fp32 原型 | 引擎 vs bf16 原型 |
+|------|------|------|
+| talker `hidden` | cos=0.99990916，**max_abs=0.295** | cos=0.99989，max_abs=0.25 |
+| talker `logits` | cos=0.99997，max_abs=0.21 | cos=0.99997，max_abs=0.19 |
+| talker token0(stage0) | id=1995，top1−top2 margin=**3.625**（非平局，匹配） | 同左 |
+| `full_codec` 首分歧 | stage 7 | stage 7 |
+
+结论链：
+
+1. **talker backbone（bf16 TRT）的 hidden 不是 bit-exact**：相对 fp32 原型
+   max_abs≈0.3（cos 0.9999）；相对 torch bf16 也有 max_abs≈0.25，说明 **TRT bf16
+   talker ≠ torch bf16 talker**（kernel/累加差异），引擎 hidden 自成一系，与两个
+   原型都不同。
+2. talker token0 本身鲁棒（margin 3.6）→ stage 0 一致。
+3. 该 ~0.3 的 hidden 扰动传入 CP；CP 虽已 fp32（孤立测试正确，见 #15），但其**输入
+   是被 bf16 talker 扰动过的 hidden**，叠加 CP 尾部 stage 7 本就近平局
+   （temp=0.9 高熵、fp32/bf16 原型在此都翻转），导致 **step 1 stage 7 argmax 翻转**。
+4. 单个翻转的子码级联：step 2 起 talker token0 也开始分歧，rollout 走入永不发 EOS
+   的区域 → 504 步 overflow → 40.32s 幻觉。
+
+### 决定性对照：原型不会跑飞，只有 bf16 引擎跑飞（`workspace/prototype_rollout.py`）
+
+用独立的 **fp32** PyTorch rollout 驱动官方 fused talker，**与引擎共享同一前缀状态与
+同一随机流**（每步 gumbel 取自引擎 dump，轨迹无关；轨迹相关的反馈
+input_embeds/token_counts/past_kv 用原型自身输出，文本嵌入
+`text_embed[k]=engine_input_embeds[k]−engine_codec_sum[k−1]` 从 dump 还原）。唯一变量
+是 decode 算术（fp32 原型 vs dump 里的 bf16 引擎）。
+
+结果：
+
+- **原型（fp32）在 step 126 自然发 EOS**（≈正常 ~10s，落在健康样本 113–130 chunk 区间内）。
+- **引擎（bf16）从不发 EOS，跑到 504 步 cap = 40.32s 幻觉**。
+- token0 首次分歧在 step 2（与 step1 CP stage7 翻转级联一致）。
+
+即：**原型不跑飞**。两者起点与随机流完全一致，差别只在 bf16 decode 算术 → 结论是
+**这是引擎侧 bf16 精度问题放大成 runaway，而非上游模型不稳定**（至少对该 seed）。
+注意原型这里还沿用了引擎的 bf16 prefill KV 作为公共起点仍能正常收敛，说明问题在
+**bf16 decode 累积**，不在 prefill。
+
+### 排除 KV-cache 轮转/拷贝/裁剪 bug（`workspace/check_kv_rotation.py`）
+
+仅用 dump 验证"每轮输入是否一致"（不需模型）。对每个 decode step k≥2 检查输入是否
+等于上一步输出该有的样子：
+
+- `talker_past_kv[k][..., :L_{k-1}, :] == talker_past_kv[k-1]`（前缀保持）
+- `talker_past_kv[k][..., L_{k-1}:, :] == talker_new_kv[k-1]`（增量追加）
+- `token_counts[k] == updated_token_counts[k-1]`
+- `position_ids` 每步 +1
+
+结果（全 504 步，bf16 正确拷贝应 bit-exact）：
+
+- step1 `past_kv == prefill new_kv`：max_abs=**0.0**
+- 全程 talker_past_kv 拷贝误差最坏：**0.0**；token_counts 反馈最坏：**0.0**；
+  不一致步数：**0**。
+- 第三个反馈输入 `input_embeds`(= 上步 codec_sum + 文本/pad 嵌入)：文本相消
+  `input_embeds[k]−codec_sum[k−1]` 在前 ~32 步随文本 token 变化（共 31 个文本 token，
+  与日志一致），约 step33 起稳定，pad 阶段(40..504)该 pad 嵌入**恒定**（最大漂移
+  0.0039 = bf16 噪声）。
+
+→ **引擎 KV pool 的 scatter/gather/pingpong 轮转是无损的，每轮输入完全一致**。
+所以分歧不是"错误拷贝/错误裁剪/精度丢失"导致的输入污染，而是**每步 talker/CP 的
+bf16 算术**本身产出不同（再正确地前馈下去）。这也与决定性 rollout 自洽：给同样
+（正确轮转的）输入、只换 fp32 算术，就能正常终止。
+
+注：此检查针对 **talker KV**（驱动 codec/EOS、即 runaway 的那条链）。c2w 缓存（带
+sliding window + pingpong）只影响 wav 合成、不回馈 talker，故与"无 EOS 跑飞"无关。
+
+### 当前判断
+
+- **CP→fp32 是必要但不充分**。残余分歧由 **bf16 talker backbone 的 hidden 误差**
+  从 CP 输入端进入，而非 CP 算术本身。用户"backbone 不应与原型分叉"的假设不成立：
+  bf16（且 TRT）backbone 确实与原型分叉（max_abs≈0.3）。
+- stage 7 是模型固有的近平局点（fp32/bf16 原型自身在此翻转），因此对任何微小扰动
+  都敏感——这是 bf16 放大的固有脆弱性，不是单纯的导出/算子 bug。
+- 决定性 rollout 表明 **fp32 decode 能正常终止而 bf16 decode 跑飞**，因此把 talker
+  decode 路径提到 fp32（或更高精度）预期可消除该幻觉。
+  **（下节实测推翻了这条预期——见"全 fp32 引擎实测"。）**
+
+### 全 fp32 引擎实测：精度不是根因，只是"洗牌"（构建并对比）
+
+构建了一版**全 fp32** fused 引擎（`ENGINE_DTYPE=fp32`，backbone+cp+code2wav 均 fp32，
+trtexec 172s，引擎 7.0G，运行时 `I/O dtype consistency check passed: manifest=fp32`），
+在**同一组 40 个确定性 session**(`halluprobe-0001..0040`) 上与原 bf16(cp=fp32) 引擎对比：
+
+| 引擎 | 幻觉 session | 比例 |
+|------|------|------|
+| bf16(cp=fp32) | 0007, 0008, 0027, 0031, 0037 | **5/40** |
+| 全 fp32 | 0002, 0006, 0008, 0010, 0029, 0033, 0038 | **7/40** |
+| 交集 | **仅 0008** | |
+
+- fp32 **修好了** 4 个(0007/0027/0031/0037)，但**新弄坏了** 6 个
+  (0002/0006/0010/0029/0033/0038)。
+- 两个集合几乎不相交（只有 0008 共有）；总比例没下降（5→7，n=40 下统计上无差别，
+  ~12–18%）。
+- 单独看 0007 会被误导：fp32 确实修好 0007（9.44s，与 rollout 预测的 ~126 步吻合），
+  但这是**该 seed 的偶然**，不是种群级修复。
+
+**结论修正**：talker 提 fp32 **不能消除流式幻觉**，只是改变了"哪些 seed 跑飞"。
+幻觉的本质是**采样/模型层面的不稳定**——temperature=0.9 下，对该短文本约 12–18% 的
+随机种子会进入永不发 EOS 的轨迹、跑到 512 cap。任何微小扰动(bf16↔fp32、TRT tactic)
+只是把不同 seed 推进/推出"坏吸引盆"，不改变发生率。0008 在 bf16/fp32 下都跑飞，是
+与精度无关的固有不稳定（呼应发现 #1/#11：官方流式在部分情况本就不发 EOS）。
+
+**真正该做的缓解方向**（精度无关）：
+
+1. EOS / 长度控制：对 token0 的 EOS 决策降温、或设最大音频步数后强制收尾（已有
+   overflow 强制 EOS，但听感差）。
+2. 采样策略：降低 talker token0 采样温度 / 调 top_k / 加更强 repetition 控制，压低
+   进入坏吸引盆的概率。
+3. 运行期检测-重采样：检测到 runaway（步数远超 EMA 预期）就换种子重跑该 segment。
+4. 与上游确认官方推荐的流式终止策略。
+
+CP→fp32 仍建议保留（发现 #15：CP bf16 在孤立测试本身数值不稳定），但要明确它**不是**
+幻觉的总解。
+
+复现/对比脚本：`workspace/halluc_probe.py`（同一组确定性 seed 扫描）；构建命令
+`ENGINE_DTYPE=fp32 bash scripts/bash/build_engines.sh --variant custom-1.7b`。
+
+### 决定性结论：原型本身也有同样的幻觉，是模型/采样参数问题（`workspace/proto_rate.py`）
+
+为区分"原型参数问题"还是"我们导图与原型不一致"，在**纯 fp32 PyTorch** 下跑官方权重
+fused talker 的自回归 rollout：每个 session 用引擎相同的种子
+（`_stable_sampling_seed(0, "halluprobe-NNNN", 0)`）自己生成 Gumbel 流
+（复刻 `_build_sampling_noise`），prefill 状态与文本/pad 嵌入 schedule 与种子无关、复用
+halluc_0007 dump，只有 Gumbel 随种子变。统计 504 步内是否自然发 EOS。
+
+三方在**同一组 40 个 seed** 上的幻觉率：
+
+| 实现 | 幻觉 | 比例 | 幻觉 seed |
+|------|------|------|------|
+| bf16 引擎(cp=fp32) | 5/40 | 12.5% | 0007 0008 0027 0031 0037 |
+| 全 fp32 引擎 | 7/40 | 17.5% | 0002 0006 0008 0010 0029 0033 0038 |
+| **fp32 PyTorch 原型** | **4/40** | **10%** | **0013 0017 0030 0034** |
+
+- 三者比例统计上一致（10–18%，n=40 噪声内），但幻觉 seed 集合**几乎两两不相交**
+  （原型的 0013/0017/0030/0034 不在任何引擎集合里；引擎反复跑飞的 0008 在原型下
+  EOS@119 正常）。
+- 验证：原型对 0007 自然 EOS@115（与 fp32 引擎 118 步、dump-gumbel rollout 126 步
+  同量级；差异来自 prefill 那一次采样 draw 的偏移与 TRT/TF32 vs PyTorch 数值）。
+
+**结论**：**原型本身就以 ~10–18% 的比例跑飞**——这正是用户假设里的"原型参数问题，
+之前只是没随机到原型的坏区域"。因此幻觉**不是导图/TRT 引入的不一致**，而是
+**temperature=0.9 + top_k=50 这套采样参数下模型固有的不稳定**：总有约 1/6 ~ 1/8 的
+随机种子落入"永不发 EOS"的吸引盆，bf16/fp32/TRT/PyTorch 只决定具体哪些 seed 落入，
+不改变发生率。这与发现 #1/#11（官方流式在部分情况本就不发 EOS）一致，并把它量化了。
+
+→ 修复必须在**采样/终止策略**层面（见上节 1–4），换精度/查导图都无济于事。
+
+注：纯 fp32 原型 rollout 沿用引擎 bf16 prefill 作为公共起点、且 Gumbel 流相对引擎有
+一次 prefill draw 的偏移；这些不影响"原型幻觉率 ≈ 引擎幻觉率"这一比率级结论。
+
+### 终极对照：用官方未改动代码跑"这个自训 checkpoint"，照样幻觉（`workspace/official_baseline.py`）
+
+> **重要更正**：`workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice` 是软链到
+> `/home/train/tts/qwen3-tts/trained/zehan/0601_trained_model`——**我们自己训练的
+> checkpoint**，不是官方发布权重。引擎、我方串接原型、以及下面这个"官方代码 baseline"
+> 用的全是这个自训权重。所以本节验证的是：**这个自训 checkpoint 经过最干净的路径
+> （官方未改动推理代码、fp32、无导出/TRT/我方脚本）是否仍幻觉**。官方发布权重未在此对比
+> （用户要求先聚焦这个 checkpoint）。
+
+上节的"原型"是**我们脚本串起来的** fused module（官方子模块 + 我们的拓扑/unroll，
+即导出对象）。为区分"我们串脚本漏移植了策略"还是"这个 checkpoint 的权重本身有问题"，
+直接驱动**官方未改动**的高层 API
+`Qwen3TTSModel.generate_custom_voice`(→`Qwen3TTSForConditionalGeneration.generate`)：
+fp32、`non_streaming_mode=False`(流式，匹配我方管线)、`max_new_tokens=512`(与引擎
+512 cap 对齐)、speaker=`001`(= 我方 `serena` 因不在 spk_id_map 而回退到的默认音色，
+见 engine.yaml `default_speaker:"001"`)，40 个种子各 torch seed。
+
+官方采样默认值与我方引擎**完全一致**：do_sample=True, top_k=50, top_p=1.0,
+temperature=0.9, repetition_penalty=1.05, subtalker_dosample=True。eos_token_id=2150。
+
+四方在同一组 40 seed 上的幻觉率（>18s 即 runaway）：
+
+（四方都用同一个**自训 checkpoint** `zehan/0601_trained_model`，speaker=`001`）
+
+| 实现 | 幻觉 | 比例 | 幻觉 seed |
+|------|------|------|------|
+| bf16 引擎(cp=fp32) | 5/40 | 12.5% | 0007 0008 0027 0031 0037 |
+| 全 fp32 引擎 | 7/40 | 17.5% | 0002 0006 0008 0010 0029 0033 0038 |
+| 我方 fp32 PyTorch 串接原型 | 4/40 | 10% | 0013 0017 0030 0034 |
+| **官方未改动代码 + 自训 ckpt(fp32)** | **6/40** | **15%** | **0003 0013 0014 0025 0026 0032** |
+
+- **四方比例统计上一致（10–18%）**；具体坏 seed 集合因采样实现/精度不同而异，但
+  官方代码路径与我方串接原型**共享 0013**（两条 PyTorch fp32 路径都判 0013 跑飞），相互印证。
+- 官方代码路径 max 时长 40.88s、median 9.72s，与引擎现象完全同构。
+
+**结论（回答用户二分）**：**这个自训 checkpoint 经过官方未改动代码（fp32、无导出/TRT/
+我方脚本）照样以 ~15% 跑飞**。因此**不是**"我方漏移植了某段官方策略导致导图/引擎出错"——
+我方串接脚本、ONNX 导出、TRT 引擎都**忠实继承**了这个权重的固有行为。问题定位在
+**这个自训 checkpoint 的权重 + 官方推荐流式采样参数(temp=0.9/top_k=50/rep_penalty=1.05)**：
+约 1/6~1/8 的随机种子无法自然发 EOS。
+
+**尚未回答**：是 Qwen3-TTS 本身就这样，还是**这次训练（0601）把权重训坏了**——需用
+**官方发布的 1.7B CustomVoice 权重**（`/home/train/tts/qwen3-tts/official/...`，本地已有）
+跑同一测试对比。用户当前要求先聚焦这个 checkpoint，故暂未跑官方权重。
+
+**可行动方向**：换精度/查导图/逐行对官方代码都无效（已验证）；要么在**采样/终止策略**上
+缓解（EMA 提前收尾、token0 EOS 降温、runaway 检测重采样），要么如果对比发现是训练训坏的，
+**重训/换 checkpoint**。
+
+脚本：`workspace/official_baseline.py`（官方仓库率）、`workspace/proto_rate.py`
+（我方串接原型率）、`workspace/halluc_probe.py`（引擎率）。
+
+### 建议的下一步
+
+1. 把 talker backbone（至少 talker→CP 的 hidden / `codec_head` logits 路径）也提到
+   fp32，验证 step1 stage7 分歧是否消失（预期：与 fp32 原型逐步对齐）。
+2. 若无法全 fp32：评估降低 CP 尾部采样熵（该近平局点由 temp=0.9 触发）对幻觉率的
+   影响——但会改变模型行为。
+3. 仍需一次**纯 PyTorch rollout**（同文本同种子）确认原型自身在该 seed 上是否也跑飞，
+   以区分"引擎放大"与"上游不稳定"。逐步重放因 step≥2 喂的是引擎漂移后的状态，无法
+   单独回答此问题。
+
+复现脚本（均在 `workspace/`，gitignored）：`halluc_probe.py`、`compose.dump.yaml`、
+`scan_dump_divergence.py`、`compare_step1_hidden.py`、`analyze_engine_dump.py`
+（从 git `ae77d68^` 复活并修复 import）。
