@@ -1,0 +1,29 @@
+name: ✨ 功能 / 改进建议
+description: 提出新功能或改进想法
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢建议！请先搜索是否已有相同提案。较开放的讨论也欢迎走 Discussions。
+  - type: textarea
+    attributes:
+      label: 动机 / 痛点
+      description: 你遇到了什么问题，或现有方案有何不足？
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 期望的方案
+      description: 你希望它如何工作？
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 替代方案
+      description: 你考虑过的其他做法（可选）。
+  - type: textarea
+    attributes:
+      label: 补充说明
+      description: 受影响的子系统（engine / client / demo_api / scripts 等）、参考资料或其他背景（可选）。

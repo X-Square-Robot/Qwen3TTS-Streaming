@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 提问 / 使用讨论
+    url: https://github.com/X-Square-Robot/Qwen3TTS-Streaming/discussions
+    about: 使用问题、部署疑问、想法交流请走 Discussions，而非 issue。
+  - name: 🔒 安全漏洞报告
+    url: https://github.com/X-Square-Robot/Qwen3TTS-Streaming/security/advisories/new
+    about: 安全漏洞请勿公开提交 issue，改用私密漏洞报告（见 SECURITY.md）。
+  - name: 📦 上游模型问题（Qwen3-TTS）
+    url: https://github.com/QwenLM/Qwen3-TTS
+    about: 模型权重 / 推理质量本身的问题请向上游 Qwen3-TTS 反馈。

@@ -1,0 +1,51 @@
+name: 🐞 Bug 报告
+description: 报告一个可复现的问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请先搜索是否已有相同 issue。
+        ⚠️ 本项目为 v0.1 工程预览，**流式模式仍可能出现幻觉/重复/漏读**（见
+        [已知限制](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/blob/main/docs/user/known_limitations.md)）——这类已知现象无需单独报告。
+        如涉及**安全漏洞**，请勿在此公开，改走 [SECURITY.md](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/blob/main/SECURITY.md)。
+  - type: checkboxes
+    attributes:
+      label: 前置检查
+      options:
+        - label: 我已搜索过现有 issue，未发现重复
+          required: true
+        - label: 该问题不属于「已知限制」中描述的流式质量现象
+          required: true
+  - type: textarea
+    attributes:
+      label: 问题描述
+      description: 清晰描述出现了什么、你期望发生什么。
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 复现步骤
+      description: 尽量给出可复现的命令 / 配置 / 输入文本（含 variant、gateway、engine-mode）。
+      placeholder: |
+        1. bash scripts/bash/autorun.sh ... -m custom-1.7b
+        2. 调用 ... 接口，输入文本 "..."
+        3. 观察到 ...
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 运行环境
+      description: GPU 型号、驱动/CUDA 版本、NGC 容器版本、部署方式（standalone / triton / engine-docker）、commit hash。
+      placeholder: |
+        - GPU: RTX 4090 / 驱动 550.x / CUDA 12.x
+        - 部署: compose.sh up --gateway engine --engine-mode trt
+        - commit: <git rev-parse HEAD>
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 日志 / 报错
+      description: 相关日志、堆栈或截图。请删除其中的敏感信息。
+      render: shell
