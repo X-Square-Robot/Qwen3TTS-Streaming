@@ -32,8 +32,8 @@ Qwen3-TTS Triton 是一个**工程预览版**项目：把官方 Qwen3-TTS PyTorc
 ## 快速开始
 
 ```bash
-git clone --recursive https://github.com/user/Qwen3-TTS-Triton.git
-cd Qwen3-TTS-Triton
+git clone --recursive https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git
+cd Qwen3TTS-Streaming
 
 # 交互模式
 bash scripts/bash/autorun.sh
@@ -238,7 +238,7 @@ standalone engine 同时支持 gRPC 和 WebSocket。WebSocket 控制帧示例：
 ## 项目结构
 
 ```text
-Qwen3-TTS-Triton/
+Qwen3TTS-Streaming/
 ├── engine/                     # 推理引擎：frontend/backend/gateway/core
 ├── client/                     # 独立 Python SDK 包 (pip install qwen3-tts-client)
 │   ├── src/qwen3tts/  #   客户端实现与传输适配器

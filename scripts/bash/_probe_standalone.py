@@ -3,7 +3,7 @@
 #  _probe_standalone.py — Self-contained target profile probe
 #
 #  Designed to be copy-pasted into a target host that does NOT have access
-#  to the qwen3-tts-triton repo (e.g. an Aliyun DSW container without SSH).
+#  to the qwen3tts-streaming repo (e.g. an Aliyun DSW container without SSH).
 #  Only depends on python3 and nvidia-smi.
 #
 #  Outputs the SAME schema as scripts/bash/probe_target.sh, so the result

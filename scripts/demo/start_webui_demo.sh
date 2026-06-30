@@ -147,7 +147,7 @@ DETECTED_TRITON_SLOTS=""
 
 detect_running_triton_slots() {
   if command -v docker >/dev/null 2>&1; then
-    docker inspect qwen3-tts-triton \
+    docker inspect qwen3tts-streaming \
       --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
       | awk -F= '$1 == "MAX_BATCH_SLOTS" {print $2; exit}'
   fi

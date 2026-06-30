@@ -1,6 +1,6 @@
 # 前端文本切分流水线重设计（auto 模式 / Spliter 统一 / KV 水位安全网）
 
-> 分支：`rime`
+> 分支：`main`
 > 编写日期：2026-06-30
 > 状态：**设计稿**（多轮讨论的共识与决策记录，待实现）
 > 范围：`engine/frontend/`（interface / spliter / driver / dispatcher / reorder）+ `proto/tts.proto` 输入模式 + `engine/backend/` 的 KV 水位上报

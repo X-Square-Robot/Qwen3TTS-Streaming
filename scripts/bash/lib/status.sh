@@ -188,7 +188,7 @@ PY
 # ---------------------------------------------------------------------------
 detect_phase_c_status() {
     local repo_root="${1:-$(git rev-parse --show-toplevel 2>/dev/null || echo ".")}"
-    local container_name="${2:-qwen3-tts-triton}"
+    local container_name="${2:-qwen3tts-streaming}"
 
     # Check standalone engine first
     local engine_st

@@ -1986,7 +1986,7 @@ TTS 纯计算首包 — 自适应首包优化 (10 frames, B=1):
 ## 14. 目录结构
 
 ```
-Qwen3-TTS-Triton/
+Qwen3TTS-Streaming/
 ├── docs/
 │   └── architecture.md                 # 本文档
 │

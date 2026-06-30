@@ -54,7 +54,7 @@ bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway engine-docker
 ```bash
 bash scripts/bash/autorun.sh remote-build -m custom-1.7b \
   --target-profile target_profile.json \
-  --remote-host user@prod-gpu-host \
+  --remote-host user@your-gpu-host \
   --remote-workdir /tmp/qwen3-engine-build
 ```
 

@@ -1,13 +1,13 @@
-# CLAUDE.md — Qwen3-TTS-Triton 项目指引
+# CLAUDE.md — Qwen3TTS-Streaming 项目指引
 
 ## 项目概述
 
-Qwen3-TTS-Triton 将官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运行时，围绕 Triton Inference Server / standalone engine 实现流式 TTS 推理，包含 prefix cache、连续批处理、前端分词和 WebUI 演示。
+Qwen3TTS-Streaming 将官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运行时，围绕 Triton Inference Server / standalone engine 实现流式 TTS 推理，包含 prefix cache、连续批处理、前端分词和 WebUI 演示。
 
 ## 目录结构
 
 ```
-Qwen3-TTS-Triton/
+Qwen3TTS-Streaming/
 ├── engine/              # 推理引擎核心（frontend/backend/gateway/core/interface）
 ├── client/              # 独立 Python SDK 包 (pip install qwen3-tts-client)
 │   ├── src/qwen3tts/     # 客户端实现与传输适配器

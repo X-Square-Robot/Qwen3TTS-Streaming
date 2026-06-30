@@ -86,8 +86,6 @@ _DEFAULT_BASE_REF_TEXT = (
 _DEFAULT_BASE_REF_AUDIO_CANDIDATES = (
     os.environ.get("ENGINE_DEFAULT_REF_AUDIO_PATH", ""),
     os.environ.get("ENGINE_DEFAULT_BASE_REF_AUDIO_PATH", ""),
-    "/models/Qwen3-TTS-Triton/workspace/default_refs/base_ref.wav",
-    "/home/zehan/workspace/Qwen3-TTS-Triton/workspace/default_refs/base_ref.wav",
     "workspace/default_refs/base_ref.wav",
 )
 

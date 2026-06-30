@@ -8,7 +8,7 @@
 # Python CLI here.
 
 [project]
-name = "qwen3-tts-triton"
+name = "qwen3tts-streaming"
 version = "0.1.0"
 description = "Qwen3-TTS Triton inference system"
 requires-python = ">=3.10"
@@ -43,7 +43,7 @@ engine = [
     "pyyaml>=6.0",
 ]
 dev = [
-    "qwen3-tts-triton[test,client,demo]",
+    "qwen3tts-streaming[test,client,demo]",
 ]
 
 [build-system]

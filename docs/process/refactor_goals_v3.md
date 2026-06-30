@@ -14,7 +14,7 @@
 ### 0.1 目录扁平，没有归属层级
 
 ```
-Qwen3-TTS-Triton/
+Qwen3TTS-Streaming/
 ├── engine/           ← 核心产品代码
 ├── client/           ← 独立 SDK 包
 ├── demo_api/         ← WebUI 后端
@@ -108,7 +108,7 @@ Qwen3-TTS-Triton/
 
 ## 1. 总体目标
 
-**将 Qwen3-TTS-Triton 从「一堆相关代码的集合」治理为「一个有清晰层次的产品项目」。**
+**将 Qwen3TTS-Streaming 从「一堆相关代码的集合」治理为「一个有清晰层次的产品项目」。**
 
 核心原则：
 
@@ -130,7 +130,7 @@ Qwen3-TTS-Triton/
 **目标结构**：
 
 ```
-Qwen3-TTS-Triton/
+Qwen3TTS-Streaming/
 ├── src/                        # 所有产品代码
 │   ├── engine/                 #   推理引擎（从根目录迁入）
 │   ├── client/                 #   Python SDK（保持独立 pyproject.toml）

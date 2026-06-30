@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified audio comparison tool for Qwen3-TTS-Triton.
+"""Unified audio comparison tool for Qwen3TTS-Streaming.
 
 Merges the functionality of nine legacy scripts into one CLI with subcommands:
 

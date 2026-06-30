@@ -1,1 +1,1 @@
-# Tests for Qwen3-TTS-Triton deployment.
+# Tests for Qwen3TTS-Streaming deployment.

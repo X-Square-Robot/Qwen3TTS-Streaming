@@ -28,7 +28,7 @@
 #    TRITON_GRPC_PORT      gRPC port   (default: 8001)
 #    TRITON_HTTP_PORT      HTTP port   (default: 8000)
 #    TRITON_METRICS_PORT   Metrics port (default: 8002)
-#    CONTAINER_NAME        Container name (default: qwen3-tts-triton)
+#    CONTAINER_NAME        Container name (default: qwen3tts-streaming)
 #    MODEL_REPO_DIR        Override model_repository path
 #    TRITON_GPU_DEVICE     Runtime GPU device (auto | N | cuda:N)
 #    TRITON_MAX_BATCH_SLOTS Runtime active decode slots
@@ -46,7 +46,7 @@ _NGC_VERIFY_MANIFEST=1
 # ── Defaults ──
 EXPORTED_DIR="${REPO_ROOT}/workspace/exported"
 MODEL_REPO_DIR="${MODEL_REPO_DIR:-${REPO_ROOT}/workspace/model_repository}"
-CONTAINER_NAME="${CONTAINER_NAME:-qwen3-tts-triton}"
+CONTAINER_NAME="${CONTAINER_NAME:-qwen3tts-streaming}"
 VARIANT=""
 MODEL_VERSION="${MODEL_VERSION:-${ENGINE_MODEL_VERSION:-1}}"
 ENGINE_MODE="${ENGINE_MODE:-trt}"
@@ -79,7 +79,7 @@ Options:
   --engine-mode onnx|trt Use ONNX or TensorRT engines (default: trt)
   --image <uri>          Override NGC container image
   --repo-dir <path>      Override model_repository output path
-  --container <name>     Container name (default: qwen3-tts-triton)
+  --container <name>     Container name (default: qwen3tts-streaming)
   --device <N|auto>      Runtime GPU device for Triton
   --max-batch <N>        Runtime active decode slots
   --max-seq-len <N>      Runtime max sequence length
@@ -105,14 +105,14 @@ generate_dockerfile() {
 #  Dockerfile.triton — Self-contained Qwen3-TTS Triton deployment image
 #
 #  Base: NVIDIA Triton full py3 image (onnxruntime + tensorrt + python).
-#  Build: bash scripts/bash/build_triton.sh build --tag qwen3-tts-triton:latest
+#  Build: bash scripts/bash/build_triton.sh build --tag qwen3tts-streaming:latest
 #  Run:   docker run --gpus all -p 8000:8000 -p 8001:8001 -p 8002:8002 <tag>
 # ===========================================================================
 
 ARG BASE_IMAGE=nvcr.io/nvidia/tritonserver:25.05-py3
 FROM ${BASE_IMAGE}
 
-LABEL maintainer="Qwen3-TTS-Triton"
+LABEL maintainer="Qwen3TTS-Streaming"
 LABEL description="Qwen3-TTS streaming TTS inference with Triton"
 
 # Model repository
@@ -129,7 +129,7 @@ CMD ["--model-repository=/models", "--strict-model-config=false", "--log-verbose
 DOCKERFILE
 
     log_info "Generated: $dockerfile"
-    log_info "Build with: bash scripts/bash/build_triton.sh build --tag qwen3-tts-triton:latest"
+    log_info "Build with: bash scripts/bash/build_triton.sh build --tag qwen3tts-streaming:latest"
 }
 
 # ── Argument parsing ──
@@ -458,7 +458,7 @@ cmd_run() {
     log_info "  gRPC endpoint:    localhost:${TRITON_GRPC_PORT}"
     log_info "  HTTP endpoint:    localhost:${TRITON_HTTP_PORT}"
     log_info "  Metrics endpoint: localhost:${TRITON_METRICS_PORT}/metrics"
-    log_info "  Container:        ${CONTAINER_NAME:-qwen3-tts-triton}"
+    log_info "  Container:        ${CONTAINER_NAME:-qwen3tts-streaming}"
     echo ""
     log_info "Stop server: bash scripts/bash/build_triton.sh stop"
 }
@@ -473,7 +473,7 @@ cmd_build_image() {
 
 cmd_build() {
     if [ -z "$BUILD_TAG" ]; then
-        BUILD_TAG="qwen3-tts-triton:latest"
+        BUILD_TAG="qwen3tts-streaming:latest"
         log_info "Using default image tag: $BUILD_TAG"
     fi
 

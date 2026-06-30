@@ -609,7 +609,7 @@ cmd_run_triton() {
                 manifest_tag=$(resolve_manifest_ngc_tag "$MODEL_REPO_DIR" "$MODEL_VERSION" 2>/dev/null || true)
             fi
             if [ -n "$manifest_tag" ]; then
-                triton_image="qwen3-tts-triton:${manifest_tag}"
+                triton_image="qwen3tts-streaming:${manifest_tag}"
                 log_info "Using Triton image from Phase B manifest: $triton_image"
             fi
         fi
