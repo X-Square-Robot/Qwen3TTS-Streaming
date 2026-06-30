@@ -16,6 +16,7 @@ namespace. Import them explicitly when you need them::
 from .analyzers import LatencyAnalyzer, TimelineReconstructor
 from .error_report import ErrorTimingReport
 from .segment_timing import SegmentTimingReport
+from .session_diagnostics import SessionDiagnostics
 from .timing import ServerTimingReport
 
 __all__ = (
@@ -23,5 +24,6 @@ __all__ = (
     "LatencyAnalyzer",
     "SegmentTimingReport",
     "ServerTimingReport",
+    "SessionDiagnostics",
     "TimelineReconstructor",
 )

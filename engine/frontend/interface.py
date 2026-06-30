@@ -454,8 +454,16 @@ class FrontendInterface:
                         total_segments=session.segments_done,
                         total_audio_bytes=session.total_audio_bytes,
                     )
+                    # Surface the L1 batch / text facts to the client protocol
+                    # (done_meta merges these), enabling L0 client self-analysis.
+                    done_metrics = dict(result.metrics or {})
+                    done_metrics["server_batch_summary"] = json.dumps(
+                        batch_agg, ensure_ascii=False)
+                    done_metrics["server_final_synthesized_text"] = obs.text_preview(
+                        "".join(final_text_parts))
+                    done_metrics["server_total_segments"] = str(session.segments_done)
                     if on_done:
-                        await on_done(session.session_id, result.metrics)
+                        await on_done(session.session_id, done_metrics)
                     break
 
                 elif result.type == ResultType.ERROR:
