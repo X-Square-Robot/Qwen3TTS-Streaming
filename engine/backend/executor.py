@@ -33,6 +33,7 @@ from .batch_helper import (
     uniform_past_seq_lens,
 )
 from .debug_dump import EngineDebugDumper
+from ..core.lifecycle import LifecycleLogger
 from .kv_cache_pool import KVCachePool, ModelConfig, SlotKVState
 
 logger = logging.getLogger(__name__)
@@ -529,6 +530,20 @@ class Executor:
             weights_dir=self._weights_dir,
             device=self._device,
         )
+        if self._debug_dumper.enabled:
+            # L3: mark where the tensor dump lands so a log grep can locate the
+            # dump products. Per-step tensors + slot_rows (frame_idx/text_idx/
+            # full_codec/eos/sampling_seed) align with the L2 decision records
+            # via session_id, forming the decision→evidence closure.
+            LifecycleLogger.emit(
+                session_id="-",
+                phase="dump_enabled",
+                dump_dir=str(getattr(self._debug_dumper, "_dir", "")),
+                do_sample=self._do_sample,
+                temperature=self._temperature,
+                repetition_penalty=self._repetition_penalty,
+                random_seed=self._random_seed,
+            )
 
         logger.info(
             "Executor created (device=%s, max_batch=%d, max_seq=%d)",
@@ -1559,6 +1574,9 @@ class Executor:
             "slot_past_len_before": [int(s.past_len) for s in slots],
             "slot_frame_idx_before": [int(s.frame_idx) for s in slots],
             "slot_text_idx_before": [int(s.text_idx) for s in slots],
+            # L3 step_decision↔tensor alignment: the per-slot sampling seed that
+            # produced this step's Gumbel noise (None until first decode step).
+            "slot_sampling_seeds": [getattr(s, "sampling_seed", None) for s in slots],
             "slot_trailing_len": [len(s.trailing) for s in slots],
             "slot_has_next_embed": [s.next_embed is not None for s in slots],
             "slot_has_last_codec_sum": [s.last_codec_sum is not None for s in slots],

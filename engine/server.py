@@ -1116,6 +1116,19 @@ def main():
     )
     logging.getLogger().setLevel(obs.to_logging_level(obs.global_level()))
 
+    # L3: at the dump level, auto-enable the EngineDebugDumper from config so the
+    # single `observability.level: dump` knob drives the tensor dumper (it reads
+    # ENGINE_DUMP_* at construction). Explicit ENGINE_DUMP_* env always wins.
+    if obs.global_level() >= obs.ObsLevel.DUMP and cfg.observability.dump_dir:
+        os.environ.setdefault("ENGINE_DUMP_DIR", cfg.observability.dump_dir)
+        os.environ.setdefault("ENGINE_DUMP_LIMIT", str(cfg.observability.dump_limit))
+        os.environ.setdefault(
+            "ENGINE_DUMP_INCLUDE_WAV",
+            "true" if cfg.observability.dump_include_wav else "false",
+        )
+        if cfg.observability.dump_sessions:
+            os.environ.setdefault("ENGINE_DUMP_SESSIONS", cfg.observability.dump_sessions)
+
     if cfg.paths.model_package_dir:
         apply_model_package_paths(
             cfg,
