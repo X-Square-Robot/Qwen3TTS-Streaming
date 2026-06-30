@@ -7,7 +7,7 @@ tritonclient, or any other heavy runtime — only stdlib and dataclasses.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -15,9 +15,11 @@ from typing import Any
 # Audio format
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class AudioFormat:
     """PCM audio format descriptor carried in every audio-bearing message."""
+
     encoding: str = "pcm_f32"
     sample_rate: int = 24000
     channels: int = 1
@@ -27,10 +29,11 @@ class AudioFormat:
 # Synthesis config
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class VADPolicy:
     enabled: bool = False
-    strategy: str = "disabled"   # "disabled" | "energy" | "tenvad"
+    strategy: str = "disabled"  # "disabled" | "energy" | "tenvad"
     implementation: str = ""
     config: dict[str, Any] = field(default_factory=dict)
     # Direct VAD parameters
@@ -64,6 +67,7 @@ class TimingContext:
 @dataclass
 class SynthesisConfig:
     """Full TTS request configuration."""
+
     task_type: str = "custom_voice"
     language: str = "auto"
     speaker: str = ""
@@ -83,9 +87,11 @@ class SynthesisConfig:
 # Stream messages
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class StreamEvent:
     """A non-audio event in a TTS stream (text token, boundary, done, …)."""
+
     type: str = ""
     session_id: str = ""
     segment_id: int = -1
@@ -98,6 +104,7 @@ class StreamEvent:
 @dataclass(frozen=True)
 class AudioChunk:
     """A single PCM audio chunk in a TTS stream."""
+
     pcm_bytes: bytes = b""
     audio: AudioFormat = field(default_factory=AudioFormat)
     chunk_index: int = 0
@@ -109,6 +116,7 @@ class AudioChunk:
 @dataclass(frozen=True)
 class StreamTextChunk:
     """A text chunk to send into an open stream."""
+
     text: str = ""
     seq_no: int | None = None
     client_timestamp_ms: int | None = None
@@ -117,6 +125,7 @@ class StreamTextChunk:
 # ---------------------------------------------------------------------------
 # Session lifecycle requests
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class SessionStartRequest:
@@ -141,9 +150,11 @@ class StreamCancelRequest:
 # Result types
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class BytesResult:
     """Non-streaming result: concatenated audio bytes + metadata."""
+
     audio_bytes: bytes = b""
     audio_format: AudioFormat = field(default_factory=AudioFormat)
     session_id: str = ""
@@ -156,6 +167,7 @@ class BytesResult:
 @dataclass
 class ArrayResult:
     """Non-streaming result: numpy float32 array + metadata."""
+
     audio_array: Any = None  # numpy.ndarray, lazy-imported
     audio_format: AudioFormat = field(default_factory=AudioFormat)
     session_id: str = ""
@@ -168,6 +180,7 @@ class ArrayResult:
 # ---------------------------------------------------------------------------
 # Capabilities
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class Capabilities:
@@ -188,6 +201,7 @@ class Capabilities:
 @dataclass
 class DetectedTransport:
     """Result of transport auto-detection."""
+
     transport: str = ""
     requested_endpoint: str = ""
     resolved_endpoint: str = ""
@@ -199,6 +213,7 @@ class DetectedTransport:
 # ---------------------------------------------------------------------------
 # Serialization helpers
 # ---------------------------------------------------------------------------
+
 
 def capabilities_from_mapping(payload: dict[str, Any]) -> Capabilities:
     """Build a Capabilities from a raw JSON-like dict."""
@@ -212,13 +227,28 @@ def capabilities_from_mapping(payload: dict[str, Any]) -> Capabilities:
         max_batch_size=int(payload.get("max_batch_size", 0) or 0),
         max_input_len=int(payload.get("max_input_len", 0) or 0),
         max_seq_len=int(payload.get("max_seq_len", 0) or 0),
-        ref_audio_max_duration_sec=float(payload.get("ref_audio_max_duration_sec", 0) or 0),
+        ref_audio_max_duration_sec=float(
+            payload.get("ref_audio_max_duration_sec", 0) or 0
+        ),
         protocol_version=str(payload.get("protocol_version", "") or ""),
-        extra={k: v for k, v in payload.items()
-               if k not in {"variant", "loaded_model_type", "default_speaker",
-                            "fallback_speaker", "speakers", "languages",
-                            "max_batch_size", "max_input_len", "max_seq_len",
-                            "ref_audio_max_duration_sec", "protocol_version"}},
+        extra={
+            k: v
+            for k, v in payload.items()
+            if k
+            not in {
+                "variant",
+                "loaded_model_type",
+                "default_speaker",
+                "fallback_speaker",
+                "speakers",
+                "languages",
+                "max_batch_size",
+                "max_input_len",
+                "max_seq_len",
+                "ref_audio_max_duration_sec",
+                "protocol_version",
+            }
+        },
     )
 
 
@@ -230,14 +260,16 @@ def serialize_output_policy(policy: OutputPolicy) -> dict[str, Any]:
         "config": dict(policy.vad.config),
     }
     if policy.vad.strategy not in ("disabled", ""):
-        vad_dict.update({
-            "chunk_ms": int(policy.vad.chunk_ms),
-            "begin_threshold": float(policy.vad.begin_threshold),
-            "begin_count": int(policy.vad.begin_count),
-            "end_threshold": float(policy.vad.end_threshold),
-            "end_count": int(policy.vad.end_count),
-            "start_margin_ms": int(policy.vad.start_margin_ms),
-        })
+        vad_dict.update(
+            {
+                "chunk_ms": int(policy.vad.chunk_ms),
+                "begin_threshold": float(policy.vad.begin_threshold),
+                "begin_count": int(policy.vad.begin_count),
+                "end_threshold": float(policy.vad.end_threshold),
+                "end_count": int(policy.vad.end_count),
+                "start_margin_ms": int(policy.vad.start_margin_ms),
+            }
+        )
     return {
         "vad_policy": vad_dict,
         "chunk_ms": int(policy.chunk_ms),

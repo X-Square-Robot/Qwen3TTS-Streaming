@@ -90,10 +90,7 @@ class TestLoadConfig:
         assert cfg.reference_cache.max_entries == 16
 
     def test_yaml_file(self):
-        try:
-            import yaml
-        except ImportError:
-            pytest.skip("PyYAML not installed")
+        pytest.importorskip("yaml")
 
         content = "scheduler:\n  max_batch_size: 16\n"
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -241,7 +238,9 @@ class TestModelManifest:
         assert arch.engine_profile.max_batch_size == 64
         assert arch.engine_profile.max_input_len == 128
         assert arch.engine_profile.max_seq_len == 512
-        assert arch.engine_profile.builder_image == "nvcr.io/nvidia/tritonserver:26.02-py3"
+        assert (
+            arch.engine_profile.builder_image == "nvcr.io/nvidia/tritonserver:26.02-py3"
+        )
 
     def test_manifest_searches_variant_parent_from_engine_subdir(self, tmp_path):
         manifest = {
@@ -266,8 +265,14 @@ class TestModelPackagePaths:
         assert paths.engine_dir == "/models/tts_orchestrator/1/runtime"
         assert paths.weights_dir == "/models/tts_orchestrator/1/weights"
         assert paths.tokenizer_dir == "/models/tts_orchestrator/1/tokenizer"
-        assert paths.manifest_path == "/models/tts_orchestrator/1/runtime/triton_manifest.json"
-        assert paths.runtime_artifact_path == "/models/tts_orchestrator/1/runtime/model.plan"
+        assert (
+            paths.manifest_path
+            == "/models/tts_orchestrator/1/runtime/triton_manifest.json"
+        )
+        assert (
+            paths.runtime_artifact_path
+            == "/models/tts_orchestrator/1/runtime/model.plan"
+        )
 
     def test_manifest_can_describe_extensible_package_layout(self, tmp_path):
         package = tmp_path / "tts_orchestrator" / "1"
@@ -312,6 +317,7 @@ class TestToModelConfig:
 # Helper
 # ---------------------------------------------------------------------------
 
+
 class _patch_env:
     def __init__(self, env_vars: dict):
         self._vars = env_vars
@@ -339,4 +345,7 @@ def test_dict_to_config_parses_string_bools():
     assert cfg2.sampling.do_sample is True
 
     # real bools still pass through
-    assert _dict_to_config({"prefix_cache": {"enabled": False}}).prefix_cache.enabled is False
+    assert (
+        _dict_to_config({"prefix_cache": {"enabled": False}}).prefix_cache.enabled
+        is False
+    )

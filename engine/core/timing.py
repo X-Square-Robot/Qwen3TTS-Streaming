@@ -72,7 +72,9 @@ class ServerTimingAccumulator:
         """Convert a monotonic timestamp to epoch milliseconds."""
         return int(self.base_epoch_ms + (monotonic - self.base_monotonic) * 1000)
 
-    def _derived_ms(self, start: Optional[float], end: Optional[float]) -> Optional[float]:
+    def _derived_ms(
+        self, start: Optional[float], end: Optional[float]
+    ) -> Optional[float]:
         """Compute a derived duration in milliseconds."""
         if start is None or end is None:
             return None
@@ -86,23 +88,43 @@ class ServerTimingAccumulator:
         """
         d = self._derived_ms
         ttft = {
-            "prefill_ms": d(self.prefill_started_monotonic, self.prefill_completed_monotonic),
-            "dequeue_to_first_raw_ms": d(self.first_text_dequeued_monotonic, self.first_raw_audio_monotonic),
-            "create_to_first_raw_ms": d(self.session_created_monotonic, self.first_raw_audio_monotonic),
+            "prefill_ms": d(
+                self.prefill_started_monotonic, self.prefill_completed_monotonic
+            ),
+            "dequeue_to_first_raw_ms": d(
+                self.first_text_dequeued_monotonic, self.first_raw_audio_monotonic
+            ),
+            "create_to_first_raw_ms": d(
+                self.session_created_monotonic, self.first_raw_audio_monotonic
+            ),
         }
         pipeline = {
-            "engine_queue_ms": d(self.first_text_enqueued_monotonic, self.first_text_dequeued_monotonic),
-            "inference_ms": d(self.first_text_dequeued_monotonic, self.first_raw_audio_monotonic),
-            "gating_ms": d(self.first_raw_audio_monotonic, self.first_effective_audio_monotonic),
+            "engine_queue_ms": d(
+                self.first_text_enqueued_monotonic, self.first_text_dequeued_monotonic
+            ),
+            "inference_ms": d(
+                self.first_text_dequeued_monotonic, self.first_raw_audio_monotonic
+            ),
+            "gating_ms": d(
+                self.first_raw_audio_monotonic, self.first_effective_audio_monotonic
+            ),
         }
-        round2 = lambda m: {k: round(v, 2) for k, v in m.items() if v is not None}
+
+        def round2(m):
+            return {k: round(v, 2) for k, v in m.items() if v is not None}
+
         out: dict[str, Any] = {
             "ttft": round2(ttft),
             "pipeline_ms": round2(pipeline),
-            "cache": {"prefix_cache_hit": self.cache_hit, "cache_tokens_reused": self.cache_tokens_reused},
+            "cache": {
+                "prefix_cache_hit": self.cache_hit,
+                "cache_tokens_reused": self.cache_tokens_reused,
+            },
             "vad_policy": self.vad_policy,
             "prefix_trim_applied": self.prefix_trim_applied,
-            "prefix_trimmed_ms": round(self.prefix_trimmed_ms, 2) if self.prefix_trim_applied else 0.0,
+            "prefix_trimmed_ms": round(self.prefix_trimmed_ms, 2)
+            if self.prefix_trim_applied
+            else 0.0,
         }
         if self.total_audio_ms > 0:
             out["total_audio_ms"] = round(self.total_audio_ms, 1)
@@ -128,7 +150,10 @@ class ServerTimingAccumulator:
             ("server_prefill_started_epoch_ms", self.prefill_started_monotonic),
             ("server_prefill_completed_epoch_ms", self.prefill_completed_monotonic),
             ("server_first_raw_audio_epoch_ms", self.first_raw_audio_monotonic),
-            ("server_first_effective_audio_epoch_ms", self.first_effective_audio_monotonic),
+            (
+                "server_first_effective_audio_epoch_ms",
+                self.first_effective_audio_monotonic,
+            ),
         ]
         for key, mono in epoch_fields:
             if mono is not None:
@@ -136,32 +161,63 @@ class ServerTimingAccumulator:
 
         # Explicitly set epoch timestamps (from asyncio thread)
         if self.request_received_epoch_ms is not None:
-            meta["server_request_received_epoch_ms"] = str(self.request_received_epoch_ms)
+            meta["server_request_received_epoch_ms"] = str(
+                self.request_received_epoch_ms
+            )
         if self.session_created_epoch_ms is not None:
             meta["server_session_created_epoch_ms"] = str(self.session_created_epoch_ms)
         if self.first_text_received_epoch_ms is not None:
-            meta["server_first_text_received_epoch_ms"] = str(self.first_text_received_epoch_ms)
+            meta["server_first_text_received_epoch_ms"] = str(
+                self.first_text_received_epoch_ms
+            )
 
         # -- Derived durations --
         derived_fields: list[tuple[str, Optional[float], Optional[float]]] = [
-            ("server_session_create_to_first_raw_audio_ms",
-             self.session_created_monotonic, self.first_raw_audio_monotonic),
-            ("server_session_create_to_first_effective_audio_ms",
-             self.session_created_monotonic, self.first_effective_audio_monotonic),
-            ("server_first_text_enqueue_to_first_raw_audio_ms",
-             self.first_text_enqueued_monotonic, self.first_raw_audio_monotonic),
-            ("server_first_text_enqueue_to_first_effective_audio_ms",
-             self.first_text_enqueued_monotonic, self.first_effective_audio_monotonic),
-            ("server_first_text_dequeue_to_first_raw_audio_ms",
-             self.first_text_dequeued_monotonic, self.first_raw_audio_monotonic),
-            ("server_first_text_dequeue_to_first_effective_audio_ms",
-             self.first_text_dequeued_monotonic, self.first_effective_audio_monotonic),
-            ("server_engine_queue_wait_ms",
-             self.first_text_enqueued_monotonic, self.first_text_dequeued_monotonic),
-            ("server_engine_prefill_ms",
-             self.prefill_started_monotonic, self.prefill_completed_monotonic),
-            ("server_first_raw_to_first_effective_audio_ms",
-             self.first_raw_audio_monotonic, self.first_effective_audio_monotonic),
+            (
+                "server_session_create_to_first_raw_audio_ms",
+                self.session_created_monotonic,
+                self.first_raw_audio_monotonic,
+            ),
+            (
+                "server_session_create_to_first_effective_audio_ms",
+                self.session_created_monotonic,
+                self.first_effective_audio_monotonic,
+            ),
+            (
+                "server_first_text_enqueue_to_first_raw_audio_ms",
+                self.first_text_enqueued_monotonic,
+                self.first_raw_audio_monotonic,
+            ),
+            (
+                "server_first_text_enqueue_to_first_effective_audio_ms",
+                self.first_text_enqueued_monotonic,
+                self.first_effective_audio_monotonic,
+            ),
+            (
+                "server_first_text_dequeue_to_first_raw_audio_ms",
+                self.first_text_dequeued_monotonic,
+                self.first_raw_audio_monotonic,
+            ),
+            (
+                "server_first_text_dequeue_to_first_effective_audio_ms",
+                self.first_text_dequeued_monotonic,
+                self.first_effective_audio_monotonic,
+            ),
+            (
+                "server_engine_queue_wait_ms",
+                self.first_text_enqueued_monotonic,
+                self.first_text_dequeued_monotonic,
+            ),
+            (
+                "server_engine_prefill_ms",
+                self.prefill_started_monotonic,
+                self.prefill_completed_monotonic,
+            ),
+            (
+                "server_first_raw_to_first_effective_audio_ms",
+                self.first_raw_audio_monotonic,
+                self.first_effective_audio_monotonic,
+            ),
         ]
         for key, start, end in derived_fields:
             val = self._derived_ms(start, end)
@@ -169,7 +225,9 @@ class ServerTimingAccumulator:
                 meta[key] = f"{val:.3f}"
 
         # -- Policy / result fields --
-        meta["server_prefix_trim_applied"] = "true" if self.prefix_trim_applied else "false"
+        meta["server_prefix_trim_applied"] = (
+            "true" if self.prefix_trim_applied else "false"
+        )
         if self.prefix_trim_applied:
             meta["server_prefix_trimmed_ms"] = f"{self.prefix_trimmed_ms:.3f}"
         meta["server_vad_policy"] = self.vad_policy
@@ -185,7 +243,9 @@ class ServerTimingAccumulator:
         if self.raw_first_text_preview:
             meta["server_raw_first_text_preview"] = self.raw_first_text_preview
         if self.normalized_first_text_preview:
-            meta["server_normalized_first_text_preview"] = self.normalized_first_text_preview
+            meta["server_normalized_first_text_preview"] = (
+                self.normalized_first_text_preview
+            )
         if self.text_coalesced:
             meta["server_text_coalesced"] = "true"
         if self.text_progress_protected:

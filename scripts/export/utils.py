@@ -4,11 +4,10 @@ Shared utilities and reusable nn.Modules for ONNX export scripts.
 
 import os
 import sys
-import json
 import logging
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict
 
 import torch
 import torch.nn as nn
@@ -76,12 +75,10 @@ def auto_detect_device() -> str:
 
     for i in range(n_gpus):
         free, total = torch.cuda.mem_get_info(i)
-        free_gb = free / (1024 ** 3)
-        total_gb = total / (1024 ** 3)
+        free_gb = free / (1024**3)
+        total_gb = total / (1024**3)
         name = torch.cuda.get_device_name(i)
-        logger.info(
-            f"  GPU {i}: {name}  free={free_gb:.1f} GiB / {total_gb:.1f} GiB"
-        )
+        logger.info(f"  GPU {i}: {name}  free={free_gb:.1f} GiB / {total_gb:.1f} GiB")
         if free_gb > best_free:
             best_free = free_gb
             best_idx = i
@@ -94,9 +91,7 @@ def auto_detect_device() -> str:
         return "cpu"
 
     device = f"cuda:{best_idx}"
-    logger.info(
-        f"Selected GPU {best_idx} ({best_free:.1f} GiB free) → using {device}"
-    )
+    logger.info(f"Selected GPU {best_idx} ({best_free:.1f} GiB free) → using {device}")
     return device
 
 
@@ -120,10 +115,7 @@ def resolve_dtype(dtype_str: str) -> torch.dtype:
     """Map a CLI dtype string (e.g. 'bf16') to torch.dtype."""
     dt = DTYPE_MAP.get(dtype_str.lower())
     if dt is None:
-        raise ValueError(
-            f"Unknown dtype '{dtype_str}'. "
-            f"Available: bf16, fp16, fp32"
-        )
+        raise ValueError(f"Unknown dtype '{dtype_str}'. Available: bf16, fp16, fp32")
     return dt
 
 
@@ -138,20 +130,32 @@ def to_numpy(tensor: torch.Tensor) -> np.ndarray:
 def add_common_args(parser) -> None:
     """Add --device, --dtype, --models-dir, --output-dir to an ArgumentParser."""
     parser.add_argument(
-        "--device", type=str, default=None,
+        "--device",
+        type=str,
+        default=None,
         help="Device: cpu | cuda | cuda:0 | cuda:1 ... (default: auto-select GPU with most free VRAM)",
     )
     parser.add_argument(
-        "--dtype", type=str, default="bf16",
+        "--dtype",
+        type=str,
+        default="bf16",
         choices=["bf16", "fp16", "fp32"],
         help="Target precision for embedding weights and TRT builder (e.g. trtexec --bf16). "
-             "ONNX graph float I/O for fused export remains fp32 unless a script overrides it; "
-             "triton_io_float_dtype in triton_manifest.json must match engine I/O.",
+        "ONNX graph float I/O for fused export remains fp32 unless a script overrides it; "
+        "triton_io_float_dtype in triton_manifest.json must match engine I/O.",
     )
-    parser.add_argument("--models-dir", type=str, default=None,
-                        help="Models directory (default: workspace/models)")
-    parser.add_argument("--output-dir", type=str, default=None,
-                        help="Output directory (default: workspace/exported)")
+    parser.add_argument(
+        "--models-dir",
+        type=str,
+        default=None,
+        help="Models directory (default: workspace/models)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Output directory (default: workspace/exported)",
+    )
 
 
 def resolve_model_path(variant: str, models_dir: Optional[str] = None) -> Path:
@@ -209,7 +213,9 @@ def _patch_decoder_rotary_from_weights(decoder) -> None:
     """When decoder_config was None at load, RoPE inv_freq is loaded from checkpoint and can have
     a different head_dim than the built attention layers. Rebuild rotary_emb.inv_freq so
     cos/sin have shape [..., head_dim] matching the attention layer's query_states."""
-    if not hasattr(decoder, "pre_transformer") or not hasattr(decoder.pre_transformer, "layers"):
+    if not hasattr(decoder, "pre_transformer") or not hasattr(
+        decoder.pre_transformer, "layers"
+    ):
         return
     layers = decoder.pre_transformer.layers
     if not layers:
@@ -234,7 +240,8 @@ def _patch_decoder_rotary_from_weights(decoder) -> None:
     rope_theta = float(getattr(cfg, "rope_theta", 10000.0))
     device = rotary.inv_freq.device
     inv_freq = 1.0 / (
-        rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim)
+        rope_theta
+        ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim)
     )
     rotary.register_buffer("inv_freq", inv_freq, persistent=False)
     if hasattr(rotary, "attention_scaling"):
@@ -245,7 +252,9 @@ def _patch_decoder_rotary_from_weights(decoder) -> None:
             rotary.attention_scaling = 1.0
     logger.info(
         "Patched decoder rotary_emb.inv_freq: head_dim=%s (inv_freq len %s -> %s)",
-        head_dim, current_len, expected_len,
+        head_dim,
+        current_len,
+        expected_len,
     )
 
 
@@ -272,14 +281,24 @@ class Conv1dInsertZeros(nn.Module):
         super().__init__()
         in_ch = transconv.in_channels
         out_ch = transconv.out_channels
-        K = transconv.kernel_size[0] if isinstance(transconv.kernel_size, (tuple, list)) else transconv.kernel_size
-        S = transconv.stride[0] if isinstance(transconv.stride, (tuple, list)) else transconv.stride
+        K = (
+            transconv.kernel_size[0]
+            if isinstance(transconv.kernel_size, (tuple, list))
+            else transconv.kernel_size
+        )
+        S = (
+            transconv.stride[0]
+            if isinstance(transconv.stride, (tuple, list))
+            else transconv.stride
+        )
         self.stride = S
         self.kernel_size = K
         self.out_channels = out_ch
         self.right_pad = K - S  # same as CausalTransConvNet
 
-        self.conv = nn.Conv1d(in_ch, out_ch, K, padding=0, bias=transconv.bias is not None)
+        self.conv = nn.Conv1d(
+            in_ch, out_ch, K, padding=0, bias=transconv.bias is not None
+        )
         # Conv1d needs (out_ch, in_ch, K). PyTorch ConvTranspose flips kernel along K.
         W_tc = transconv.weight.data  # (in_ch, out_ch, K)
         self.conv.weight.data = W_tc.permute(1, 0, 2).flip(-1).contiguous()
@@ -294,10 +313,16 @@ class Conv1dInsertZeros(nn.Module):
             up = x
         else:
             # Build interleaved zeros without in-place scatter to keep ONNX/TRT graph functional.
-            zeros = torch.zeros(B, C, L, self.stride - 1, dtype=x.dtype, device=x.device)
-            up_full = torch.cat([x.reshape(B, C, L, 1), zeros], dim=-1).reshape(B, C, L * self.stride)
+            zeros = torch.zeros(
+                B, C, L, self.stride - 1, dtype=x.dtype, device=x.device
+            )
+            up_full = torch.cat([x.reshape(B, C, L, 1), zeros], dim=-1).reshape(
+                B, C, L * self.stride
+            )
             up = up_full[..., :L_up]
-        up = torch.nn.functional.pad(up, (self.kernel_size - 1, self.kernel_size - 1), mode="constant", value=0)
+        up = torch.nn.functional.pad(
+            up, (self.kernel_size - 1, self.kernel_size - 1), mode="constant", value=0
+        )
         return self.conv(up)
 
 
@@ -313,14 +338,24 @@ class Conv1dSubPixel(nn.Module):
         super().__init__()
         in_ch = transconv.in_channels
         out_ch = transconv.out_channels
-        K = transconv.kernel_size[0] if isinstance(transconv.kernel_size, (tuple, list)) else transconv.kernel_size
-        S = transconv.stride[0] if isinstance(transconv.stride, (tuple, list)) else transconv.stride
+        K = (
+            transconv.kernel_size[0]
+            if isinstance(transconv.kernel_size, (tuple, list))
+            else transconv.kernel_size
+        )
+        S = (
+            transconv.stride[0]
+            if isinstance(transconv.stride, (tuple, list))
+            else transconv.stride
+        )
         self.stride = S
         self.kernel_size = K
         self.out_channels = out_ch
         self.right_pad = K - S  # same as CausalTransConvNet; 0 when K==S
 
-        self.conv = nn.Conv1d(in_ch, out_ch * S, K, padding=0, bias=transconv.bias is not None)
+        self.conv = nn.Conv1d(
+            in_ch, out_ch * S, K, padding=0, bias=transconv.bias is not None
+        )
         self._copy_weights_from_transpose(transconv)
 
     def _copy_weights_from_transpose(self, tc: nn.ConvTranspose1d):
@@ -328,7 +363,11 @@ class Conv1dSubPixel(nn.Module):
         kernel so output[i*S+k] += input[i]*w[k]. Causal: we need input[t-m]*w.
         Cross-corr gives input[t+k]*w[k], so we flip: w_conv[m] = w_tc[K-1-(s+m*S)]."""
         S = tc.stride[0] if isinstance(tc.stride, (tuple, list)) else tc.stride
-        K = tc.kernel_size[0] if isinstance(tc.kernel_size, (tuple, list)) else tc.kernel_size
+        K = (
+            tc.kernel_size[0]
+            if isinstance(tc.kernel_size, (tuple, list))
+            else tc.kernel_size
+        )
         in_ch, out_ch = tc.in_channels, tc.out_channels
         W_tc = tc.weight.data  # (in_ch, out_ch, K)
         W_conv = self.conv.weight.data  # (out_ch*S, in_ch, K)
@@ -383,10 +422,16 @@ def patch_decoder_transconv_for_trt(decoder: nn.Module) -> int:
     return n
 
 
-def load_speech_tokenizer(tokenizer_path: Path, device: str = "cpu", dtype: torch.dtype = torch.float32):
+def load_speech_tokenizer(
+    tokenizer_path: Path, device: str = "cpu", dtype: torch.dtype = torch.float32
+):
     """Load the speech tokenizer (encoder + decoder) from the tokenizer checkpoint."""
-    from qwen_tts.core.tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2Model
-    from qwen_tts.core.tokenizer_12hz.configuration_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2Config
+    from qwen_tts.core.tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 import (
+        Qwen3TTSTokenizerV2Model,
+    )
+    from qwen_tts.core.tokenizer_12hz.configuration_qwen3_tts_tokenizer_v2 import (
+        Qwen3TTSTokenizerV2Config,
+    )
     from transformers import AutoConfig, AutoModel
 
     AutoConfig.register("qwen3_tts_tokenizer_12hz", Qwen3TTSTokenizerV2Config)
@@ -406,9 +451,13 @@ def load_speech_tokenizer(tokenizer_path: Path, device: str = "cpu", dtype: torc
     return model
 
 
-def verify_onnx(onnx_path: str, test_inputs: Dict[str, np.ndarray],
-                 torch_outputs: Dict[str, np.ndarray],
-                 atol: float = 1e-4, rtol: float = 1e-3) -> bool:
+def verify_onnx(
+    onnx_path: str,
+    test_inputs: Dict[str, np.ndarray],
+    torch_outputs: Dict[str, np.ndarray],
+    atol: float = 1e-4,
+    rtol: float = 1e-3,
+) -> bool:
     """Verify ONNX model output against PyTorch reference."""
     import onnxruntime as ort
 
@@ -513,7 +562,8 @@ def _onnx_save_safe(onnx_model, onnx_path: str) -> None:
         ext_data_path = os.path.basename(onnx_path) + ".data"
         _remove_stale_data_file(onnx_path)
         onnx.save_model(
-            onnx_model, onnx_path,
+            onnx_model,
+            onnx_path,
             save_as_external_data=True,
             all_tensors_to_one_file=True,
             location=ext_data_path,
@@ -550,9 +600,7 @@ def _consolidate_onnx_external_data(onnx_path: str) -> None:
         del model
         return
 
-    logger.info(
-        f"  Consolidating {len(ext_locations)} per-tensor files → {data_file}"
-    )
+    logger.info(f"  Consolidating {len(ext_locations)} per-tensor files → {data_file}")
     del model
 
     model = onnx.load(onnx_path, load_external_data=True)
@@ -604,7 +652,10 @@ def _onnx_check_safe(onnx_path: str) -> None:
             else:
                 onnx.checker.check_model(onnx_path)
         except Exception as e:
-            if "doesn't exist or is not accessible" in str(e) or "ValidationError" in type(e).__name__:
+            if (
+                "doesn't exist or is not accessible" in str(e)
+                or "ValidationError" in type(e).__name__
+            ):
                 logger.warning(
                     "ONNX checker failed (external data path); model may still work: %s",
                     e,
@@ -679,9 +730,13 @@ def _traceable_sdpa_mask(
     """
     q_length = cache_position.shape[0]
     q_pos = cache_position.unsqueeze(1)
-    kv_pos = torch.arange(kv_length, device=cache_position.device).unsqueeze(0) + kv_offset
+    kv_pos = (
+        torch.arange(kv_length, device=cache_position.device).unsqueeze(0) + kv_offset
+    )
     causal_mask = kv_pos <= q_pos
-    causal_mask = causal_mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, q_length, kv_length)
+    causal_mask = (
+        causal_mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, q_length, kv_length)
+    )
 
     if attention_mask is not None and attention_mask.ndim == 2:
         pad = attention_mask[:, -kv_length:].bool()
@@ -699,7 +754,6 @@ def _patch_vmap_mask():
     manager swaps it out for the duration of ONNX export.
     """
     try:
-        from transformers import masking_utils
         from transformers.masking_utils import AttentionMaskInterface
     except ImportError:
         yield
@@ -824,6 +878,7 @@ def export_onnx(
             onnx.checker.check_model(onnx_path)
         except Exception as e:
             from google.protobuf.message import EncodeError
+
             if isinstance(e, EncodeError):
                 _onnx_check_safe(onnx_path)
             else:
@@ -840,7 +895,9 @@ def export_onnx(
     ext_data = onnx_path + ".data"
     if os.path.exists(ext_data):
         ext_mb = os.path.getsize(ext_data) / (1024 * 1024)
-        logger.info(f"  File size: {file_size_mb:.1f} MB + {ext_mb:.1f} MB external data")
+        logger.info(
+            f"  File size: {file_size_mb:.1f} MB + {ext_mb:.1f} MB external data"
+        )
     else:
         logger.info(f"  File size: {file_size_mb:.1f} MB")
 
@@ -848,6 +905,7 @@ def export_onnx(
 # ---------------------------------------------------------------------------
 #  Reusable nn.Modules for fused ONNX export (used by 04a, 04b, 05)
 # ---------------------------------------------------------------------------
+
 
 class CodePredictorUnrolled(nn.Module):
     """All Code Predictor stages fully unrolled into a single forward pass (no KV Cache).
@@ -891,7 +949,9 @@ class CodePredictorUnrolled(nn.Module):
             return hidden_states
         batch, num_kv_heads, seq_len, head_dim = hidden_states.shape
         hidden_states = hidden_states.reshape(batch, num_kv_heads, 1, seq_len, head_dim)
-        hidden_states = hidden_states.expand(batch, num_kv_heads, n_rep, seq_len, head_dim)
+        hidden_states = hidden_states.expand(
+            batch, num_kv_heads, n_rep, seq_len, head_dim
+        )
         return hidden_states.reshape(batch, num_kv_heads * n_rep, seq_len, head_dim)
 
     def _apply_rotary_pos_emb(
@@ -917,23 +977,39 @@ class CodePredictorUnrolled(nn.Module):
         batch, seq_len = hidden_states.shape[:2]
         hidden_shape = (batch, seq_len, -1, attn_module.head_dim)
 
-        query_states = attn_module.q_norm(attn_module.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        key_states = attn_module.k_norm(attn_module.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        value_states = attn_module.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        query_states = attn_module.q_norm(
+            attn_module.q_proj(hidden_states).view(hidden_shape)
+        ).transpose(1, 2)
+        key_states = attn_module.k_norm(
+            attn_module.k_proj(hidden_states).view(hidden_shape)
+        ).transpose(1, 2)
+        value_states = (
+            attn_module.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        )
 
         cos, sin = position_embeddings
-        query_states, key_states = self._apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = self._apply_rotary_pos_emb(
+            query_states, key_states, cos, sin
+        )
 
         key_states = self._repeat_kv(key_states, attn_module.num_key_value_groups)
         value_states = self._repeat_kv(value_states, attn_module.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * attn_module.scaling
+        attn_weights = (
+            torch.matmul(query_states, key_states.transpose(2, 3)) * attn_module.scaling
+        )
         if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask[:, :, :, : key_states.shape[-2]]
-        attn_weights = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(value_states.dtype)
+            attn_weights = (
+                attn_weights + attention_mask[:, :, :, : key_states.shape[-2]]
+            )
+        attn_weights = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
+            value_states.dtype
+        )
 
         attn_output = torch.matmul(attn_weights, value_states)
-        attn_output = attn_output.transpose(1, 2).reshape(batch, seq_len, attn_module.o_proj.in_features)
+        attn_output = attn_output.transpose(1, 2).reshape(
+            batch, seq_len, attn_module.o_proj.in_features
+        )
         return attn_module.o_proj(attn_output)
 
     def _run_layer(

@@ -20,7 +20,7 @@ import numpy as np
 from qwen3tts_protocol.schemas import RunMetrics, RunResult, TraceEvent
 from qwen3tts_protocol.triton_types import (
     TtsRequest,
-    build_action_payload,
+    build_action_payload,  # noqa: F401  # 再导出：供 demo_api 其他模块 / 测试使用
     build_payload,
 )
 from qwen3tts_protocol.audio import decode_obj
@@ -42,11 +42,17 @@ def _load_triton_client():
     return grpcclient
 
 
-def probe_ready(endpoint: str = DEFAULT_TRITON_GRPC, model_name: str = DEFAULT_TRITON_MODEL) -> bool:
+def probe_ready(
+    endpoint: str = DEFAULT_TRITON_GRPC, model_name: str = DEFAULT_TRITON_MODEL
+) -> bool:
     grpcclient = _load_triton_client()
     client = grpcclient.InferenceServerClient(url=endpoint)
     try:
-        return bool(client.is_server_live() and client.is_server_ready() and client.is_model_ready(model_name))
+        return bool(
+            client.is_server_live()
+            and client.is_server_ready()
+            and client.is_model_ready(model_name)
+        )
     finally:
         # Close the gRPC channel — probe_ready runs on every /capabilities hit.
         try:
@@ -69,7 +75,11 @@ async def measure_once(
     audio_parts: list[bytes] = []
     first_audio_ms: float | None = None
     total_ms: float | None = None
-    audio_format = {"encoding": request.audio_encoding, "sample_rate": request.sample_rate, "channels": 1}
+    audio_format = {
+        "encoding": request.audio_encoding,
+        "sample_rate": request.sample_rate,
+        "channels": 1,
+    }
 
     async for item in stream_once(
         request,
@@ -117,7 +127,9 @@ async def measure_once(
 
     audio_duration_ms = None
     if audio_bytes and audio_format.get("encoding") == "pcm_f32":
-        audio_duration_ms = audio_bytes / 4.0 / float(audio_format.get("sample_rate", 24000)) * 1000.0
+        audio_duration_ms = (
+            audio_bytes / 4.0 / float(audio_format.get("sample_rate", 24000)) * 1000.0
+        )
 
     return RunResult(
         run_id=run_id,
@@ -176,7 +188,9 @@ async def stream_once(
     def emit(item: dict[str, Any]) -> None:
         loop.call_soon_threadsafe(queue.put_nowait, item)
 
-    def callback(result, error) -> None:  # pragma: no cover - exercised against live Triton
+    def callback(
+        result, error
+    ) -> None:  # pragma: no cover - exercised against live Triton
         nonlocal first_audio_seen, audio_format
         now_ms = (time.perf_counter() - started) * 1000.0
         if error:
@@ -209,7 +223,10 @@ async def stream_once(
                             backend="triton_trt_streaming",
                             type="request_started",
                             t_ms=0.0,
-                            meta={"audio_format": dict(audio_format), "source_event": "start"},
+                            meta={
+                                "audio_format": dict(audio_format),
+                                "source_event": "start",
+                            },
                         ),
                     }
                 )
@@ -222,7 +239,9 @@ async def stream_once(
                 if not first_audio_seen:
                     first_audio_seen = True
                     trace_type = "first_audio_chunk"
-                event_meta.update({"bytes": len(raw_audio), "audio_format": dict(audio_format)})
+                event_meta.update(
+                    {"bytes": len(raw_audio), "audio_format": dict(audio_format)}
+                )
                 emit(
                     {
                         "kind": "event",
@@ -236,7 +255,12 @@ async def stream_once(
                     }
                 )
                 emit({"kind": "audio", "audio": bytes(raw_audio), "t_ms": now_ms})
-            elif event_type in {"warning", "text_token", "text_boundary_commit", "segment_end"}:
+            elif event_type in {
+                "warning",
+                "text_token",
+                "text_boundary_commit",
+                "segment_end",
+            }:
                 emit(
                     {
                         "kind": "event",
@@ -251,9 +275,19 @@ async def stream_once(
                     }
                 )
             elif event_type == "error":
-                emit({"kind": "error", "message": str(payload.get("message") or "Triton error"), "t_ms": now_ms})
+                emit(
+                    {
+                        "kind": "error",
+                        "message": str(payload.get("message") or "Triton error"),
+                        "t_ms": now_ms,
+                    }
+                )
                 return
-            if is_final_arr is not None and is_final_arr.size and bool(is_final_arr.flatten()[0]):
+            if (
+                is_final_arr is not None
+                and is_final_arr.size
+                and bool(is_final_arr.flatten()[0])
+            ):
                 emit(
                     {
                         "kind": "event",
@@ -262,7 +296,10 @@ async def stream_once(
                             backend="triton_trt_streaming",
                             type="done",
                             t_ms=now_ms,
-                            meta={"audio_format": dict(audio_format), "source_event": event_type},
+                            meta={
+                                "audio_format": dict(audio_format),
+                                "source_event": event_type,
+                            },
                         ),
                     }
                 )

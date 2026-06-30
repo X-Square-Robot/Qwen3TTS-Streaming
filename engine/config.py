@@ -20,7 +20,10 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +37,11 @@ except ImportError:
 # Model architecture (from manifest, not engine.yaml)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class EngineProfileConfig:
     """TensorRT profile limits recorded in triton_manifest.json."""
+
     engine_mode: str = ""
     engine_dtype: str = ""
     triton_io_float_dtype: str = ""
@@ -61,6 +66,7 @@ class ModelArchConfig:
     resolved model package runtime directory instead of requiring manual
     architecture configuration.
     """
+
     variant: str = ""
     num_layers: int = 28
     hidden_size: int = 2048
@@ -85,9 +91,11 @@ class ModelArchConfig:
 # Engine config dataclasses (engine.yaml)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class PathsConfig:
     """File paths — resolved relative to repo root or absolute."""
+
     model_package_dir: str = ""
     tokenizer_dir: str = ""
     weights_dir: str = ""
@@ -97,6 +105,7 @@ class PathsConfig:
 @dataclass(frozen=True)
 class ModelPackagePaths:
     """Resolved paths inside a Triton-compatible model package."""
+
     package_dir: str
     engine_dir: str
     weights_dir: str
@@ -109,6 +118,7 @@ class ModelPackagePaths:
 @dataclass
 class ServerConfig:
     """gRPC server settings."""
+
     port: int = 50051
     websocket_port: int = 0
     websocket_path: str = "/v1/ws"
@@ -121,6 +131,7 @@ class ServerConfig:
 @dataclass
 class SchedulerConfig:
     """Decode batch scheduling parameters."""
+
     max_batch_size: int = 48
     max_seq_len: int = 512
     # MLFQ
@@ -143,6 +154,7 @@ class SchedulerConfig:
 @dataclass
 class PrefixCacheConfig:
     """Cross-request prefix KV cache."""
+
     enabled: bool = True
     max_entries: int = 16
     max_prefix_len: int = 512
@@ -151,6 +163,7 @@ class PrefixCacheConfig:
 @dataclass
 class ReferenceCacheConfig:
     """Cross-request reference-audio feature cache."""
+
     enabled: bool = True
     max_entries: int = 16
 
@@ -158,6 +171,7 @@ class ReferenceCacheConfig:
 @dataclass
 class SpliterConfig:
     """Text segmentation / Spliter parameters."""
+
     ema_ratio_initial: float = 5.5
     ema_alpha: float = 0.1
     ema_overflow_alpha: float = 0.5
@@ -175,6 +189,7 @@ class SpliterConfig:
 @dataclass
 class SamplingConfig:
     """Decode sampling parameters (defaults, overridable per-request)."""
+
     do_sample: bool = False
     temperature: float = 0.9
     repetition_penalty: float = 1.05
@@ -185,6 +200,7 @@ class SamplingConfig:
 @dataclass
 class PrefillConfig:
     """Prefill / CustomVoice speaker defaults (see engine.yaml)."""
+
     default_speaker: str = "vivian"
     fallback_speaker: str = "vivian"
 
@@ -196,6 +212,7 @@ class ReferencesConfig:
     ``entries`` is intentionally kept as a raw mapping so deployments can add
     reference ids without changing this dataclass.
     """
+
     default: str = ""
     entries: dict = field(default_factory=dict)
 
@@ -210,11 +227,12 @@ class ObservabilityConfig:
     ``text_capture`` governs synthesized-text logging privacy.
     The ``dump_*`` fields feed the L3 dumper (equivalent to ENGINE_DUMP_*).
     """
+
     level: str = "daily"
     max_session_level: str = "daily"
-    text_capture: str = "preview"          # disabled | preview | hashed | full
+    text_capture: str = "preview"  # disabled | preview | hashed | full
     text_preview_chars: int = 64
-    health_interval_sec: float = 30.0      # engine.health periodic gauge cadence (0=off)
+    health_interval_sec: float = 30.0  # engine.health periodic gauge cadence (0=off)
     dump_dir: str = ""
     dump_limit: int = 0
     dump_include_wav: bool = True
@@ -224,6 +242,7 @@ class ObservabilityConfig:
 @dataclass
 class EngineConfig:
     """Top-level engine configuration (no model architecture)."""
+
     paths: PathsConfig = field(default_factory=PathsConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
@@ -253,6 +272,7 @@ _CONFIG_SECTION_NAMES = (
     "observability",
 )
 
+
 def _deep_update(base: dict, override: dict) -> dict:
     """Recursively merge override into base dict."""
     for k, v in override.items():
@@ -272,14 +292,14 @@ def _apply_env_overrides(raw: dict) -> dict:
     for key, val in os.environ.items():
         if not key.startswith(prefix):
             continue
-        body = key[len(prefix):].lower()
+        body = key[len(prefix) :].lower()
         section = ""
         field_name = ""
         for candidate in sorted(_CONFIG_SECTION_NAMES, key=len, reverse=True):
             candidate_prefix = f"{candidate}_"
             if body.startswith(candidate_prefix):
                 section = candidate
-                field_name = body[len(candidate_prefix):]
+                field_name = body[len(candidate_prefix) :]
                 break
         if not section:
             parts = body.split("_", 1)
@@ -606,7 +626,9 @@ def load_model_manifest(
             except (ValueError, TypeError):
                 logger.warning("Cannot set engine_profile.%s = %r", key, value)
     elif manifest_data:
-        logger.info("Manifest has no engine_profile section; runtime profile validation is disabled")
+        logger.info(
+            "Manifest has no engine_profile section; runtime profile validation is disabled"
+        )
 
     applied = []
     for k, v in arch_section.items():
@@ -651,14 +673,18 @@ def _detect_from_tokenizer(tokenizer_dir: str) -> dict:
     detected = {k: v for k, v in detected.items() if v is not None}
 
     if detected:
-        logger.info("Auto-detected from %s: %s", config_path.name,
-                     ", ".join(f"{k}={v}" for k, v in detected.items()))
+        logger.info(
+            "Auto-detected from %s: %s",
+            config_path.name,
+            ", ".join(f"{k}={v}" for k, v in detected.items()),
+        )
     return detected
 
 
 # ---------------------------------------------------------------------------
 # Public: convert to backend ModelConfig
 # ---------------------------------------------------------------------------
+
 
 def torch_dtype(dtype_str: str) -> torch.dtype:
     import torch
@@ -677,6 +703,7 @@ def to_model_config(arch: ModelArchConfig, cfg: EngineConfig):
     bf16, so the executor must pass bf16 tensors.
     """
     from .backend.kv_cache_pool import ModelConfig
+
     io_dtype_str = arch.engine_profile.triton_io_float_dtype or arch.dtype
     return ModelConfig(
         num_layers=arch.num_layers,

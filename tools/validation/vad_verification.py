@@ -10,14 +10,12 @@ Validates the 5 items from docs/vad_design_goals.md §6:
 
 import math
 import time
-from typing import Optional
 
 import numpy as np
 
 from engine.interface.vad import (
     TTSVADConfig,
     VADMode,
-    VADState,
     create_vad_processor,
     EnergyVADProcessor,
     TenVADProcessor,
@@ -29,18 +27,22 @@ SR = 24000
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def make_silence(ms: int) -> np.ndarray:
     return np.zeros(int(SR * ms / 1000), dtype=np.int16)
+
 
 def make_tone(ms: int, freq: float = 440.0, amp: float = 0.5) -> np.ndarray:
     n = int(SR * ms / 1000)
     t = np.linspace(0, ms / 1000, n, endpoint=False)
     return (amp * np.sin(2 * math.pi * freq * t) * 32767).astype(np.int16)
 
+
 def make_noise(ms: int, amp: float = 0.01, seed: int = 42) -> np.ndarray:
     rng = np.random.RandomState(seed)
     n = int(SR * ms / 1000)
     return np.clip(amp * rng.randn(n) * 32767, -32768, 32767).astype(np.int16)
+
 
 def make_breath(ms: int) -> np.ndarray:
     """Simulate a breath sound: filtered noise with formant-like characteristics."""
@@ -50,20 +52,21 @@ def make_breath(ms: int) -> np.ndarray:
     # Simple low-pass via moving average to simulate breath spectral shape
     kernel_size = 20
     kernel = np.ones(kernel_size) / kernel_size
-    breath = np.convolve(noise, kernel, mode='same')
+    breath = np.convolve(noise, kernel, mode="same")
     breath = breath / (np.max(np.abs(breath)) + 1e-10) * 0.05
     return (breath * 32767).astype(np.int16)
 
-def make_unvoiced_consonant(ms: int, consonant: str = 's') -> np.ndarray:
+
+def make_unvoiced_consonant(ms: int, consonant: str = "s") -> np.ndarray:
     """Simulate unvoiced consonant (s, f, sh) - high-frequency noise burst."""
     rng = np.random.RandomState(456)
     n = int(SR * ms / 1000)
     noise = rng.randn(n)
-    if consonant in ('s', 'f'):
+    if consonant in ("s", "f"):
         # High-pass: differencing
         filtered = np.diff(noise, prepend=0) * 0.5
     else:  # sh - slightly lower frequency
-        filtered = np.convolve(noise, [0.3, 0.5, 0.3], mode='same')
+        filtered = np.convolve(noise, [0.3, 0.5, 0.3], mode="same")
     filtered = filtered / (np.max(np.abs(filtered)) + 1e-10) * 0.15
     return (filtered * 32767).astype(np.int16)
 
@@ -72,13 +75,14 @@ def make_unvoiced_consonant(ms: int, consonant: str = 's') -> np.ndarray:
 # Verify #1: TenVAD ONNX Performance Benchmark
 # ===========================================================================
 
+
 def verify_tenvad_performance():
     print("=" * 70)
     print("VERIFY #1: TenVAD ONNX Performance Benchmark")
     print("=" * 70)
 
     try:
-        from ten_vad import TenVad
+        from ten_vad import TenVad  # noqa: F401  # 仅探测 ten_vad 包是否可导入
     except ImportError:
         print("  SKIP: ten_vad package not installed")
         return
@@ -114,11 +118,13 @@ def verify_tenvad_performance():
         rtf = elapsed / duration_sec
         per_chunk_ms = (elapsed / n_chunks) * 1000
 
-        print(f"  Energy VAD benchmark (10s audio, 80ms chunks):")
-        print(f"    Total compute:  {elapsed*1000:.1f}ms")
+        print("  Energy VAD benchmark (10s audio, 80ms chunks):")
+        print(f"    Total compute:  {elapsed * 1000:.1f}ms")
         print(f"    Per-chunk:      {per_chunk_ms:.3f}ms")
         print(f"    RTF:            {rtf:.4f}")
-        print(f"    Verdict:        {'PASS' if rtf < 0.01 else 'OK'} (energy VAD is lightweight)")
+        print(
+            f"    Verdict:        {'PASS' if rtf < 0.01 else 'OK'} (energy VAD is lightweight)"
+        )
         print()
         return
 
@@ -151,11 +157,13 @@ def verify_tenvad_performance():
 
     print(f"  Audio duration:    {duration_sec:.1f}s")
     print(f"  Frames processed:  {n_frames}")
-    print(f"  Total compute:     {elapsed*1000:.1f}ms")
+    print(f"  Total compute:     {elapsed * 1000:.1f}ms")
     print(f"  Per-frame:         {per_frame_ms:.3f}ms")
     print(f"  RTF:               {rtf:.4f}")
-    print(f"  Verdict:           {'PASS' if rtf < 0.1 else 'WARN: RTF > 0.1, may need optimization'}")
-    print(f"  (RTF < 0.1 means VAD uses < 10% of real-time budget)")
+    print(
+        f"  Verdict:           {'PASS' if rtf < 0.1 else 'WARN: RTF > 0.1, may need optimization'}"
+    )
+    print("  (RTF < 0.1 means VAD uses < 10% of real-time budget)")
     print()
 
     # Also benchmark with realistic TTS chunk sizes (80ms)
@@ -168,13 +176,16 @@ def verify_tenvad_performance():
         proc.process_chunk(chunk_80ms)
     elapsed_80 = time.perf_counter() - start
     rtf_80 = elapsed_80 / duration_sec
-    print(f"  With 80ms chunks:  RTF={rtf_80:.4f}, per-chunk={(elapsed_80/n_chunks)*1000:.3f}ms")
+    print(
+        f"  With 80ms chunks:  RTF={rtf_80:.4f}, per-chunk={(elapsed_80 / n_chunks) * 1000:.3f}ms"
+    )
     print()
 
 
 # ===========================================================================
 # Verify #2: end_count Optimal Values
 # ===========================================================================
+
 
 def verify_end_count():
     print("=" * 70)
@@ -221,12 +232,16 @@ def verify_end_count():
 
         breath_preserved_ms = breath_result.size / SR * 1000
         breath_total_ms = breath.size / SR * 1000
-        breath_pct = breath_preserved_ms / breath_total_ms * 100 if breath_total_ms > 0 else 0
+        breath_pct = (
+            breath_preserved_ms / breath_total_ms * 100 if breath_total_ms > 0 else 0
+        )
 
         end_ms = end_count * 16
-        print(f"  end_count={end_count:2d} ({end_ms:4d}ms): "
-              f"noise_leak={leak_pct:5.1f}% ({noise_leaked_ms:6.1f}ms), "
-              f"breath_preserved={breath_pct:5.1f}% ({breath_preserved_ms:5.1f}ms)")
+        print(
+            f"  end_count={end_count:2d} ({end_ms:4d}ms): "
+            f"noise_leak={leak_pct:5.1f}% ({noise_leaked_ms:6.1f}ms), "
+            f"breath_preserved={breath_pct:5.1f}% ({breath_preserved_ms:5.1f}ms)"
+        )
 
     print()
     print("  Trade-off: higher end_count → more breath preserved but more noise leaked")
@@ -238,6 +253,7 @@ def verify_end_count():
 # Verify #3: Energy Mode Threshold Calibration
 # ===========================================================================
 
+
 def verify_energy_thresholds():
     print("=" * 70)
     print("VERIFY #3: Energy Mode Threshold Calibration")
@@ -248,22 +264,22 @@ def verify_energy_thresholds():
 
     # Score various audio types
     test_signals = [
-        ("Absolute silence",      make_silence(16)),
-        ("Very low noise",       make_noise(16, amp=0.001)),
+        ("Absolute silence", make_silence(16)),
+        ("Very low noise", make_noise(16, amp=0.001)),
         ("Low noise (hallucination)", make_noise(16, amp=0.01)),
-        ("Moderate noise",       make_noise(16, amp=0.05)),
-        ("Breath sound",         make_breath(16)),
-        ("Soft speech (0.1)",    make_tone(16, amp=0.1)),
-        ("Normal speech (0.3)",  make_tone(16, amp=0.3)),
-        ("Loud speech (0.5)",    make_tone(16, amp=0.5)),
-        ("Very loud (0.8)",      make_tone(16, amp=0.8)),
-        ("Unvoiced 's'",         make_unvoiced_consonant(16, 's')),
-        ("Unvoiced 'f'",         make_unvoiced_consonant(16, 'f')),
-        ("Unvoiced 'sh'",        make_unvoiced_consonant(16, 'sh')),
+        ("Moderate noise", make_noise(16, amp=0.05)),
+        ("Breath sound", make_breath(16)),
+        ("Soft speech (0.1)", make_tone(16, amp=0.1)),
+        ("Normal speech (0.3)", make_tone(16, amp=0.3)),
+        ("Loud speech (0.5)", make_tone(16, amp=0.5)),
+        ("Very loud (0.8)", make_tone(16, amp=0.8)),
+        ("Unvoiced 's'", make_unvoiced_consonant(16, "s")),
+        ("Unvoiced 'f'", make_unvoiced_consonant(16, "f")),
+        ("Unvoiced 'sh'", make_unvoiced_consonant(16, "sh")),
     ]
 
     print(f"  {'Signal':<30s} {'Score':>6s} {'dB (est)':>9s}  Verdict")
-    print(f"  {'-'*30} {'-'*6} {'-'*9}  {'-'*20}")
+    print(f"  {'-' * 30} {'-' * 6} {'-' * 9}  {'-' * 20}")
 
     for name, frame in test_signals:
         score = proc._score_frame(frame)
@@ -282,7 +298,9 @@ def verify_energy_thresholds():
 
     print()
     print("  Recommended thresholds based on this calibration:")
-    print("    begin_threshold=0.3  (~-56dB): catches normal speech + unvoiced consonants")
+    print(
+        "    begin_threshold=0.3  (~-56dB): catches normal speech + unvoiced consonants"
+    )
     print("    end_threshold=0.2    (~-64dB): allows breath but stops on silence/noise")
     print()
 
@@ -290,6 +308,7 @@ def verify_energy_thresholds():
 # ===========================================================================
 # Verify #4: start_margin Impact on Unvoiced Consonants
 # ===========================================================================
+
 
 def verify_start_margin():
     print("=" * 70)
@@ -312,7 +331,7 @@ def verify_start_margin():
 
         # 200ms silence → 100ms 's' consonant → 500ms vowel
         silence = make_silence(200)
-        consonant = make_unvoiced_consonant(100, 's')
+        consonant = make_unvoiced_consonant(100, "s")
         vowel = make_tone(500, amp=0.5)
 
         proc.process_chunk(silence)
@@ -325,19 +344,24 @@ def verify_start_margin():
         consonant_emitted_ms = consonant_result.size / SR * 1000
         consonant_total_ms = consonant.size / SR * 1000
 
-        print(f"  margin={margin_ms:2d}ms: "
-              f"consonant_emitted={consonant_emitted_ms:5.1f}ms/{consonant_total_ms:.0f}ms, "
-              f"total_emitted={total_emitted/SR*1000:.0f}ms/{total_input/SR*1000:.0f}ms, "
-              f"prefix_trimmed={proc.metrics.prefix_trimmed_samples/SR*1000:.0f}ms")
+        print(
+            f"  margin={margin_ms:2d}ms: "
+            f"consonant_emitted={consonant_emitted_ms:5.1f}ms/{consonant_total_ms:.0f}ms, "
+            f"total_emitted={total_emitted / SR * 1000:.0f}ms/{total_input / SR * 1000:.0f}ms, "
+            f"prefix_trimmed={proc.metrics.prefix_trimmed_samples / SR * 1000:.0f}ms"
+        )
 
     print()
-    print("  Recommended: start_margin_ms=20 (good balance of onset preservation vs delay)")
+    print(
+        "  Recommended: start_margin_ms=20 (good balance of onset preservation vs delay)"
+    )
     print()
 
 
 # ===========================================================================
 # Verify #5: 24→16kHz Downsampling Quality
 # ===========================================================================
+
 
 def verify_downsampling():
     print("=" * 70)
@@ -368,7 +392,7 @@ def verify_downsampling():
     ]
 
     print(f"  {'Signal':<15s} {'TenVAD prob':>11s}  {'Energy score':>12s}")
-    print(f"  {'-'*15} {'-'*11}  {'-'*12}")
+    print(f"  {'-' * 15} {'-' * 11}  {'-' * 12}")
 
     energy_cfg = TTSVADConfig(mode=VADMode.ENERGY)
     energy_proc = EnergyVADProcessor(energy_cfg, sample_rate=SR)
@@ -404,29 +428,34 @@ def verify_downsampling():
     # Method 1: Linear interpolation (our implementation)
     proc.reset()
     for i in range(0, len(audio_24k), 384):
-        chunk = audio_24k[i:i+384]
+        chunk = audio_24k[i : i + 384]
         if chunk.size < 384:
             padded = np.zeros(384, dtype=np.int16)
-            padded[:chunk.size] = chunk
+            padded[: chunk.size] = chunk
             chunk = padded
         proc.process_chunk(chunk)
 
     # Method 2: scipy resample (reference)
     try:
         from scipy.signal import resample
-        audio_16k_scipy = resample(audio_24k.astype(np.float64), int(len(audio_24k) * 16000 / SR))
+
+        audio_16k_scipy = resample(
+            audio_24k.astype(np.float64), int(len(audio_24k) * 16000 / SR)
+        )
         audio_16k_scipy = np.clip(audio_16k_scipy, -32768, 32767).astype(np.int16)
 
         # Run TenVad directly on scipy-resampled audio
         vad_ref = TenVad(hop_size=256, threshold=0.5)
         ref_probs = []
         for i in range(0, len(audio_16k_scipy) - 256, 256):
-            chunk = audio_16k_scipy[i:i+256]
+            chunk = audio_16k_scipy[i : i + 256]
             prob, flags = vad_ref.process(chunk)
             ref_probs.append(prob)
 
         avg_ref = np.mean(ref_probs) if ref_probs else 0
-        print(f"    scipy resample:  avg TenVAD prob = {avg_ref:.4f} ({len(ref_probs)} frames)")
+        print(
+            f"    scipy resample:  avg TenVAD prob = {avg_ref:.4f} ({len(ref_probs)} frames)"
+        )
     except ImportError:
         print("    scipy not available for reference comparison")
 

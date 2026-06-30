@@ -84,6 +84,7 @@ def _append_c2w_delta(
 # TRT Engine wrapper
 # ---------------------------------------------------------------------------
 
+
 class TRTEngine:
     """Thin wrapper around a TensorRT plan loaded via torch.
 
@@ -138,8 +139,11 @@ class TRTEngine:
             )
         self._cache_io_names()
         self._cache_output_dtypes()
-        logger.info("Loaded TRT engine: %s (%d I/O tensors)",
-                     plan_path.name, self._engine.num_io_tensors)
+        logger.info(
+            "Loaded TRT engine: %s (%d I/O tensors)",
+            plan_path.name,
+            self._engine.num_io_tensors,
+        )
 
     def _format_load_failure(self, plan_path: Path, reason: str) -> str:
         memory_hint = ""
@@ -148,8 +152,8 @@ class TRTEngine:
                 free_bytes, total_bytes = torch.cuda.mem_get_info(self._device)
                 memory_hint = (
                     f" GPU memory on {self._device}: "
-                    f"free={free_bytes / (1024 ** 2):.0f} MiB, "
-                    f"total={total_bytes / (1024 ** 2):.0f} MiB."
+                    f"free={free_bytes / (1024**2):.0f} MiB, "
+                    f"total={total_bytes / (1024**2):.0f} MiB."
                 )
             except Exception:
                 memory_hint = ""
@@ -178,6 +182,7 @@ class TRTEngine:
     def _cache_output_dtypes(self) -> None:
         """Cache output tensor dtypes once at load time."""
         import tensorrt as trt
+
         for i in range(self._engine.num_io_tensors):
             name = self._engine.get_tensor_name(i)
             if self._engine.get_tensor_mode(name) == trt.TensorIOMode.OUTPUT:
@@ -198,7 +203,9 @@ class TRTEngine:
         return inputs, outputs
 
     def get_input_profile_max_shape(
-        self, name: str, profile_idx: int = 0,
+        self,
+        name: str,
+        profile_idx: int = 0,
     ) -> Optional[tuple[int, ...]]:
         """Return the max profile shape for an input tensor if available."""
         if self._engine is None:
@@ -251,7 +258,9 @@ class TRTEngine:
             valid_input_names = self._input_names
 
         if valid_input_names:
-            missing_inputs = sorted(name for name in valid_input_names if name not in inputs)
+            missing_inputs = sorted(
+                name for name in valid_input_names if name not in inputs
+            )
             if missing_inputs:
                 raise RuntimeError(
                     "TRT inference missing required inputs: "
@@ -305,20 +314,32 @@ class TRTEngine:
             dtype_torch = self._output_dtypes.get(name, torch.float32)
 
             override = output_overrides.get(name) if output_overrides else None
-            if override is not None and override.shape == shape and override.dtype == dtype_torch:
+            if (
+                override is not None
+                and override.shape == shape
+                and override.dtype == dtype_torch
+            ):
                 out_tensor = override
             elif use_cache:
                 existing = self._output_buffers.get(name)
-                if existing is not None and existing.shape == shape and existing.dtype == dtype_torch:
+                if (
+                    existing is not None
+                    and existing.shape == shape
+                    and existing.dtype == dtype_torch
+                ):
                     out_tensor = existing
                 else:
                     out_tensor = torch.empty(
-                        shape, dtype=dtype_torch, device=self._device,
+                        shape,
+                        dtype=dtype_torch,
+                        device=self._device,
                     )
                     self._output_buffers[name] = out_tensor
             else:
                 out_tensor = torch.empty(
-                    shape, dtype=dtype_torch, device=self._device,
+                    shape,
+                    dtype=dtype_torch,
+                    device=self._device,
                 )
 
             ctx.set_tensor_address(name, out_tensor.data_ptr())
@@ -339,6 +360,7 @@ class TRTEngine:
     @staticmethod
     def _trt_to_torch_dtype(trt_dtype) -> torch.dtype:
         import tensorrt as trt
+
         mapping = {
             trt.float32: torch.float32,
             trt.float16: torch.float16,
@@ -355,9 +377,11 @@ class TRTEngine:
 # GPU Future — handle to in-flight computation
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class GPUFuture:
     """Handle to async GPU work.  Call wait() to synchronize."""
+
     _compute_stream: Any = None
     _raw: Dict[str, torch.Tensor] = field(default_factory=dict)
     _slots: List[SlotKVState] = field(default_factory=list)
@@ -405,14 +429,18 @@ class GPUFuture:
         conv_tensors = [raw.get(n) for n in self._c2w_conv_output_names]
         transconv_tensors = [raw.get(n) for n in self._c2w_transconv_output_names]
         for row_idx in range(batch_size):
-            split_c2w_conv.append([
-                t[row_idx:row_idx + 1] if t is not None else None
-                for t in conv_tensors
-            ])
-            split_c2w_transconv.append([
-                t[row_idx:row_idx + 1] if t is not None else None
-                for t in transconv_tensors
-            ])
+            split_c2w_conv.append(
+                [
+                    t[row_idx : row_idx + 1] if t is not None else None
+                    for t in conv_tensors
+                ]
+            )
+            split_c2w_transconv.append(
+                [
+                    t[row_idx : row_idx + 1] if t is not None else None
+                    for t in transconv_tensors
+                ]
+            )
 
         codec_eos_id = self._codec_eos_id
         eos_flags = []
@@ -462,6 +490,7 @@ class StepOutput:
     directly into each slot's write buffers.  The engine loop only needs
     to call ``slot.flip_c2w_buffers()`` — no copy or clone required.
     """
+
     slots: List[SlotKVState]
     eos_flags: List[bool]
     audio_chunks: List[Optional[bytes]]
@@ -470,7 +499,9 @@ class StepOutput:
     original_past_lens: List[int] = field(default_factory=list)
     padded_past_len: int = 0
     split_c2w_conv: List[List[Optional[torch.Tensor]]] = field(default_factory=list)
-    split_c2w_transconv: List[List[Optional[torch.Tensor]]] = field(default_factory=list)
+    split_c2w_transconv: List[List[Optional[torch.Tensor]]] = field(
+        default_factory=list
+    )
     codec_sum: Optional[torch.Tensor] = None
     updated_tc: Optional[torch.Tensor] = None
     used_pingpong: bool = False
@@ -479,6 +510,7 @@ class StepOutput:
 # ---------------------------------------------------------------------------
 # Executor
 # ---------------------------------------------------------------------------
+
 
 class Executor:
     """Manages TRT engines and CUDA streams for pipelined decode.
@@ -547,7 +579,9 @@ class Executor:
 
         logger.info(
             "Executor created (device=%s, max_batch=%d, max_seq=%d)",
-            self._device, max_batch_size, max_seq_len,
+            self._device,
+            max_batch_size,
+            max_seq_len,
         )
 
     @property
@@ -583,7 +617,8 @@ class Executor:
                     self._manifest = json.load(f)
         if self._engine_dir and fused_plan is not None:
             self._fused_engine = TRTEngine(
-                str(fused_plan), self._device,
+                str(fused_plan),
+                self._device,
             )
             self._fused_engine.load()
             self._apply_runtime_profile_limits()
@@ -606,7 +641,7 @@ class Executor:
 
     def set_embedding_weights(self, weights) -> None:
         self._embedding_weights = weights
-        if hasattr(weights, 'codec_eos_id'):
+        if hasattr(weights, "codec_eos_id"):
             self._codec_eos_id = int(weights.codec_eos_id)
             logger.info("codec_eos_id set to %d from weights", self._codec_eos_id)
 
@@ -708,7 +743,9 @@ class Executor:
 
         logger.info(
             "I/O dtype consistency check passed: manifest=%s, engine=%s (via %s)",
-            manifest_dtype, actual_dtype, representative_name,
+            manifest_dtype,
+            actual_dtype,
+            representative_name,
         )
 
     def _validate_prefill_len(self, seq: int, stage: str) -> None:
@@ -738,23 +775,35 @@ class Executor:
                 return (m.group(1), int(m.group(2)))
             return (name, -1)
 
-        def _ordered(names: list[str], prefix: str, layout_names: list[str]) -> list[str]:
-            from_layout = [n for n in layout_names if n.startswith(prefix) and n in names]
+        def _ordered(
+            names: list[str], prefix: str, layout_names: list[str]
+        ) -> list[str]:
+            from_layout = [
+                n for n in layout_names if n.startswith(prefix) and n in names
+            ]
             if from_layout:
                 return from_layout
             return sorted((n for n in names if n.startswith(prefix)), key=_natural_key)
 
         self._c2w_conv_input_names = _ordered(
-            input_names, "c2w_conv_state_", layout_inputs,
+            input_names,
+            "c2w_conv_state_",
+            layout_inputs,
         )
         self._c2w_transconv_input_names = _ordered(
-            input_names, "c2w_transconv_overlap_", layout_inputs,
+            input_names,
+            "c2w_transconv_overlap_",
+            layout_inputs,
         )
         self._c2w_conv_output_names = _ordered(
-            output_names, "c2w_new_conv_state_", layout_outputs,
+            output_names,
+            "c2w_new_conv_state_",
+            layout_outputs,
         )
         self._c2w_transconv_output_names = _ordered(
-            output_names, "c2w_new_transconv_overlap_", layout_outputs,
+            output_names,
+            "c2w_new_transconv_overlap_",
+            layout_outputs,
         )
 
         eng = self._fused_engine._engine
@@ -808,13 +857,15 @@ class Executor:
         if len(conv_states) != len(self._c2w_conv_input_names):
             logger.warning(
                 "Skipping Code2Wav warm state: conv state count %d != expected %d",
-                len(conv_states), len(self._c2w_conv_input_names),
+                len(conv_states),
+                len(self._c2w_conv_input_names),
             )
             return False
         if len(transconv_states) != len(self._c2w_transconv_input_names):
             logger.warning(
                 "Skipping Code2Wav warm state: transconv state count %d != expected %d",
-                len(transconv_states), len(self._c2w_transconv_input_names),
+                len(transconv_states),
+                len(self._c2w_transconv_input_names),
             )
             return False
 
@@ -889,7 +940,9 @@ class Executor:
         _wait_stream_for_current(stream, self._device)
         with torch.cuda.stream(stream):
             raw = self._fused_engine.infer(
-                inputs, out_names, stream,
+                inputs,
+                out_names,
+                stream,
             )
 
         stream.synchronize()
@@ -932,14 +985,17 @@ class Executor:
                 self._kv_pool.scatter_c2w_kv([slot.slot_id], c2w_kv)
             slot.c2w_kv = c2w_kv
         slot.c2w_conv_states = [raw[n].clone() for n in self._c2w_conv_output_names]
-        slot.c2w_transconv_states = [raw[n].clone() for n in self._c2w_transconv_output_names]
+        slot.c2w_transconv_states = [
+            raw[n].clone() for n in self._c2w_transconv_output_names
+        ]
         slot.init_pingpong_buffers()
 
         slot.frame_idx = int(slot.frame_idx) + FUSED_CHUNK_T
         slot.token_counts = raw.get(
             "updated_token_counts",
-            torch.zeros(1, self._config.codec_vocab_size,
-                        device=self._device, dtype=torch.int64),
+            torch.zeros(
+                1, self._config.codec_vocab_size, device=self._device, dtype=torch.int64
+            ),
         )
         codec_sum = raw.get("codec_sum")
         if codec_sum is not None:
@@ -952,7 +1008,10 @@ class Executor:
         prefill_eos = False
         if wav is not None:
             prefill_audio = wav.cpu().float().reshape(-1).numpy().tobytes()
-        if full_codec is not None and int(full_codec[0, 0].item()) == self._codec_eos_id:
+        if (
+            full_codec is not None
+            and int(full_codec[0, 0].item()) == self._codec_eos_id
+        ):
             prefill_eos = True
         return prefill_audio, prefill_eos
 
@@ -997,7 +1056,9 @@ class Executor:
         _wait_stream_for_current(stream, self._device)
         with torch.cuda.stream(stream):
             raw = self._fused_engine.infer(
-                inputs, out_names, stream,
+                inputs,
+                out_names,
+                stream,
             )
 
         stream.synchronize()
@@ -1079,7 +1140,9 @@ class Executor:
         _wait_stream_for_current(stream, self._device)
         with torch.cuda.stream(stream):
             raw = self._fused_engine.infer(
-                inputs, out_names, stream,
+                inputs,
+                out_names,
+                stream,
             )
 
         stream.synchronize()
@@ -1130,7 +1193,9 @@ class Executor:
                 self._kv_pool.scatter_c2w_kv([slot.slot_id], c2w_kv)
             slot.c2w_kv = c2w_kv
         slot.c2w_conv_states = [raw[n].clone() for n in self._c2w_conv_output_names]
-        slot.c2w_transconv_states = [raw[n].clone() for n in self._c2w_transconv_output_names]
+        slot.c2w_transconv_states = [
+            raw[n].clone() for n in self._c2w_transconv_output_names
+        ]
         slot.init_pingpong_buffers()
 
         slot.frame_idx = int(slot.frame_idx) + FUSED_CHUNK_T
@@ -1154,7 +1219,10 @@ class Executor:
         prefill_eos = False
         if wav is not None:
             prefill_audio = wav.cpu().float().reshape(-1).numpy().tobytes()
-        if full_codec is not None and int(full_codec[0, 0].item()) == self._codec_eos_id:
+        if (
+            full_codec is not None
+            and int(full_codec[0, 0].item()) == self._codec_eos_id
+        ):
             prefill_eos = True
         return prefill_audio, prefill_eos
 
@@ -1169,10 +1237,10 @@ class Executor:
         The CUDA kernels run on self._compute_stream.  Call future.wait()
         to synchronize and get results.
         """
-        batch_size = len(slots)
 
         input_embeds = torch.cat(
-            [s.next_embed.to(self._config.dtype) for s in slots], dim=0,
+            [s.next_embed.to(self._config.dtype) for s in slots],
+            dim=0,
         )
 
         original_past_lens = [s.past_len for s in slots]
@@ -1190,18 +1258,25 @@ class Executor:
 
         if self._kv_pool is not None and self._kv_pool._preallocate:
             batched_talker_kv = self._kv_pool.gather_talker_kv(
-                slot_ids, max_past_len,
+                slot_ids,
+                max_past_len,
             )
             past_seq_lens = torch.tensor(
-                original_past_lens, device=self._device, dtype=torch.long,
+                original_past_lens,
+                device=self._device,
+                dtype=torch.long,
             )
         else:
             session_kv = [s.talker_kv for s in slots]
             batched_talker_kv, past_seq_lens = pad_packed_kv(
-                session_kv, device=self._device, dtype=self._config.dtype,
+                session_kv,
+                device=self._device,
+                dtype=self._config.dtype,
             )
 
-        padded_past_len = int(batched_talker_kv.shape[3]) if batched_talker_kv is not None else 0
+        padded_past_len = (
+            int(batched_talker_kv.shape[3]) if batched_talker_kv is not None else 0
+        )
 
         inputs = self._build_fused_inputs(
             input_embeds=input_embeds,
@@ -1225,7 +1300,9 @@ class Executor:
         _wait_stream_for_current(self._compute_stream, self._device)
         with torch.cuda.stream(self._compute_stream):
             raw = self._fused_engine.infer(
-                inputs, out_names, self._compute_stream,
+                inputs,
+                out_names,
+                self._compute_stream,
                 output_overrides=output_overrides,
             )
 
@@ -1257,7 +1334,8 @@ class Executor:
         )
 
     def _build_pingpong_overrides(
-        self, slots: List[SlotKVState],
+        self,
+        slots: List[SlotKVState],
     ) -> Optional[Dict[str, torch.Tensor]]:
         """Build output_overrides dict for ping-pong zero-copy.
 
@@ -1288,7 +1366,9 @@ class Executor:
         if slot.sampling_generator is not None:
             return slot.sampling_generator
 
-        identity = slot.session_id if slot.session_id is not None else f"slot:{slot.slot_id}"
+        identity = (
+            slot.session_id if slot.session_id is not None else f"slot:{slot.slot_id}"
+        )
         seed = _stable_sampling_seed(
             self._random_seed,
             identity,
@@ -1312,13 +1392,18 @@ class Executor:
         for slot in slots:
             gen = self._slot_sampling_generator(slot)
             gumbel_u = torch.rand(
-                1, cfg.logits_topk,
-                device=self._device, dtype=torch.float32,
+                1,
+                cfg.logits_topk,
+                device=self._device,
+                dtype=torch.float32,
                 generator=gen,
             ).clamp(1e-8, 1.0)
             cp_gumbel_u = torch.rand(
-                1, cfg.cp_num_stages, cfg.logits_topk,
-                device=self._device, dtype=torch.float32,
+                1,
+                cfg.cp_num_stages,
+                cfg.logits_topk,
+                device=self._device,
+                dtype=torch.float32,
                 generator=gen,
             ).clamp(1e-8, 1.0)
             gumbel_rows.append(-torch.log(-torch.log(gumbel_u)))
@@ -1351,75 +1436,126 @@ class Executor:
             if past_seq_lens is None:
                 past_seq_lens = uniform_past_seq_lens(batch, 0, self._device)
             attn_bias = padded_attention_bias(
-                past_seq_lens, seq, _FUSED_DUMMY_PAST_LEN,
-                self._device, cfg.dtype,
+                past_seq_lens,
+                seq,
+                _FUSED_DUMMY_PAST_LEN,
+                self._device,
+                cfg.dtype,
             )
         else:
-            padded_past_len = int(batched_talker_kv.shape[3]) if batched_talker_kv is not None else 0
+            padded_past_len = (
+                int(batched_talker_kv.shape[3]) if batched_talker_kv is not None else 0
+            )
             attn_bias = padded_attention_bias(
-                past_seq_lens, seq, padded_past_len,
-                self._device, cfg.dtype,
+                past_seq_lens,
+                seq,
+                padded_past_len,
+                self._device,
+                cfg.dtype,
             )
 
-        position_ids = torch.stack([
-            torch.arange(s.past_len, s.past_len + seq,
-                         device=self._device, dtype=torch.int64)
-            .unsqueeze(0).expand(3, seq)
-            for s in slots
-        ], dim=0).unsqueeze(-1)
+        position_ids = torch.stack(
+            [
+                torch.arange(
+                    s.past_len, s.past_len + seq, device=self._device, dtype=torch.int64
+                )
+                .unsqueeze(0)
+                .expand(3, seq)
+                for s in slots
+            ],
+            dim=0,
+        ).unsqueeze(-1)
 
-        cache_position = torch.stack([
-            torch.full((FUSED_CHUNK_T,), s.frame_idx, device=self._device, dtype=torch.float32)
-            for s in slots
-        ], dim=0)
+        cache_position = torch.stack(
+            [
+                torch.full(
+                    (FUSED_CHUNK_T,),
+                    s.frame_idx,
+                    device=self._device,
+                    dtype=torch.float32,
+                )
+                for s in slots
+            ],
+            dim=0,
+        )
 
-        tc = torch.cat([
-            s.token_counts if s.token_counts is not None
-            else torch.zeros(1, cfg.codec_vocab_size,
-                             device=self._device, dtype=torch.int64)
-            for s in slots
-        ], dim=0)
+        tc = torch.cat(
+            [
+                s.token_counts
+                if s.token_counts is not None
+                else torch.zeros(
+                    1, cfg.codec_vocab_size, device=self._device, dtype=torch.int64
+                )
+                for s in slots
+            ],
+            dim=0,
+        )
 
         if sampling_mode == "disabled":
             gumbel = torch.zeros(
-                batch, cfg.logits_topk,
-                device=self._device, dtype=torch.float32,
+                batch,
+                cfg.logits_topk,
+                device=self._device,
+                dtype=torch.float32,
             )
             cp_gumbel = torch.zeros(
-                batch, cfg.cp_num_stages, cfg.logits_topk,
-                device=self._device, dtype=torch.float32,
+                batch,
+                cfg.cp_num_stages,
+                cfg.logits_topk,
+                device=self._device,
+                dtype=torch.float32,
             )
             temperature = torch.ones(
-                batch, 1, device=self._device, dtype=torch.float32,
+                batch,
+                1,
+                device=self._device,
+                dtype=torch.float32,
             )
             penalty = torch.ones(
-                batch, 1, device=self._device, dtype=torch.float32,
+                batch,
+                1,
+                device=self._device,
+                dtype=torch.float32,
             )
         elif self._do_sample:
             gumbel, cp_gumbel = self._build_sampling_noise(slots)
             temperature = torch.full(
-                (batch, 1), self._temperature,
-                device=self._device, dtype=torch.float32,
+                (batch, 1),
+                self._temperature,
+                device=self._device,
+                dtype=torch.float32,
             )
             penalty = torch.full(
-                (batch, 1), self._repetition_penalty,
-                device=self._device, dtype=torch.float32,
+                (batch, 1),
+                self._repetition_penalty,
+                device=self._device,
+                dtype=torch.float32,
             )
         else:
             gumbel = torch.zeros(
-                batch, cfg.logits_topk,
-                device=self._device, dtype=torch.float32,
+                batch,
+                cfg.logits_topk,
+                device=self._device,
+                dtype=torch.float32,
             )
             cp_gumbel = torch.zeros(
-                batch, cfg.cp_num_stages, cfg.logits_topk,
-                device=self._device, dtype=torch.float32,
+                batch,
+                cfg.cp_num_stages,
+                cfg.logits_topk,
+                device=self._device,
+                dtype=torch.float32,
             )
             temperature = torch.ones(
-                batch, 1, device=self._device, dtype=torch.float32,
+                batch,
+                1,
+                device=self._device,
+                dtype=torch.float32,
             )
             penalty = torch.full(
-                (batch, 1), self._repetition_penalty,
-                device=self._device, dtype=torch.float32,
+                (batch, 1),
+                self._repetition_penalty,
+                device=self._device,
+                dtype=torch.float32,
             )
 
         d: Dict[str, torch.Tensor] = {
@@ -1437,9 +1573,13 @@ class Executor:
         # --- Talker KV (packed) ---
         if use_dummy_kv:
             d["talker_past_kv"] = torch.zeros(
-                batch, cfg.num_layers * 2, cfg.kv_heads,
-                _FUSED_DUMMY_PAST_LEN, cfg.head_dim,
-                device=self._device, dtype=cfg.dtype,
+                batch,
+                cfg.num_layers * 2,
+                cfg.kv_heads,
+                _FUSED_DUMMY_PAST_LEN,
+                cfg.head_dim,
+                device=self._device,
+                dtype=cfg.dtype,
             )
         else:
             d["talker_past_kv"] = batched_talker_kv.contiguous()
@@ -1456,9 +1596,7 @@ class Executor:
         per_slot_c2w_lens = []
         for s in slots:
             if s.c2w_kv is not None:
-                per_slot_c2w_lens.append(
-                    min(int(s.c2w_kv.shape[3]), c2w_max_past)
-                )
+                per_slot_c2w_lens.append(min(int(s.c2w_kv.shape[3]), c2w_max_past))
             else:
                 per_slot_c2w_lens.append(0)
         c2w_past_len = max(per_slot_c2w_lens) if per_slot_c2w_lens else 0
@@ -1468,8 +1606,12 @@ class Executor:
         c2w_key_total = c2w_past_len + FUSED_CHUNK_T
 
         c2w_attn = torch.zeros(
-            batch, 1, FUSED_CHUNK_T, c2w_key_total,
-            device=self._device, dtype=cfg.dtype,
+            batch,
+            1,
+            FUSED_CHUNK_T,
+            c2w_key_total,
+            device=self._device,
+            dtype=cfg.dtype,
         )
         for bi, sl in enumerate(per_slot_c2w_lens):
             pad_cols = c2w_past_len - sl
@@ -1488,8 +1630,13 @@ class Executor:
                     kv = kv[:, :, :, -c2w_max_past:, :]
             else:
                 kv = torch.zeros(
-                    1, c2w_d1, c2w_d2, c2w_past_len, c2w_head,
-                    device=self._device, dtype=cfg.dtype,
+                    1,
+                    c2w_d1,
+                    c2w_d2,
+                    c2w_past_len,
+                    c2w_head,
+                    device=self._device,
+                    dtype=cfg.dtype,
                 )
             d["c2w_past_kv"] = kv.contiguous()
         else:
@@ -1501,8 +1648,13 @@ class Executor:
                         kv = kv[:, :, :, -c2w_max_past:, :]
                 else:
                     kv = torch.zeros(
-                        1, c2w_d1, c2w_d2, 0, c2w_head,
-                        device=self._device, dtype=cfg.dtype,
+                        1,
+                        c2w_d1,
+                        c2w_d2,
+                        0,
+                        c2w_head,
+                        device=self._device,
+                        dtype=cfg.dtype,
                     )
                 pad_cols = c2w_past_len - sl
                 if pad_cols > 0:
@@ -1518,7 +1670,8 @@ class Executor:
                     d[name] = slots[0].c2w_conv_states[idx].contiguous()
                 else:
                     d[name] = torch.cat(
-                        [s.c2w_conv_states[idx] for s in slots], dim=0,
+                        [s.c2w_conv_states[idx] for s in slots],
+                        dim=0,
                     ).contiguous()
             else:
                 shape = list(self._c2w_conv_shapes[idx])
@@ -1532,7 +1685,8 @@ class Executor:
                     d[name] = slots[0].c2w_transconv_states[idx].contiguous()
                 else:
                     d[name] = torch.cat(
-                        [s.c2w_transconv_states[idx] for s in slots], dim=0,
+                        [s.c2w_transconv_states[idx] for s in slots],
+                        dim=0,
                     ).contiguous()
             else:
                 shape = list(self._c2w_transconv_shapes[idx])
@@ -1543,9 +1697,14 @@ class Executor:
 
     def _build_output_names(self) -> List[str]:
         names = [
-            "wav", "codec_sum", "full_codec", "hidden", "logits",
+            "wav",
+            "codec_sum",
+            "full_codec",
+            "hidden",
+            "logits",
             "updated_token_counts",
-            "talker_new_kv", "c2w_new_kv",
+            "talker_new_kv",
+            "c2w_new_kv",
         ]
         names.extend(self._c2w_conv_output_names)
         names.extend(self._c2w_transconv_output_names)
@@ -1581,8 +1740,7 @@ class Executor:
             "slot_has_next_embed": [s.next_embed is not None for s in slots],
             "slot_has_last_codec_sum": [s.last_codec_sum is not None for s in slots],
             "slot_c2w_len_before": [
-                int(s.c2w_kv.shape[3]) if s.c2w_kv is not None else 0
-                for s in slots
+                int(s.c2w_kv.shape[3]) if s.c2w_kv is not None else 0 for s in slots
             ],
             "original_talker_past_lens": [int(v) for v in original_past_lens],
             "padded_talker_past_len": int(padded_talker_past_len),
@@ -1590,7 +1748,9 @@ class Executor:
             "c2w_conv_output_names": list(self._c2w_conv_output_names),
             "c2w_transconv_input_names": list(self._c2w_transconv_input_names),
             "c2w_transconv_output_names": list(self._c2w_transconv_output_names),
-            "output_override_names": sorted(output_overrides.keys()) if output_overrides else [],
+            "output_override_names": sorted(output_overrides.keys())
+            if output_overrides
+            else [],
             "config": {
                 "num_layers": int(self._config.num_layers),
                 "kv_heads": int(self._config.kv_heads),
@@ -1630,13 +1790,20 @@ class Executor:
 
         try:
             dummy_embeds = torch.randn(
-                1, 4, cfg.hidden_size,
-                device=self._device, dtype=cfg.dtype,
+                1,
+                4,
+                cfg.hidden_size,
+                device=self._device,
+                dtype=cfg.dtype,
             )
             _ = self.prefill(dummy_slot, dummy_embeds)
 
             dummy_slot.next_embed = torch.randn(
-                1, 1, cfg.hidden_size, device=self._device, dtype=torch.float32,
+                1,
+                1,
+                cfg.hidden_size,
+                device=self._device,
+                dtype=torch.float32,
             )
 
             for i in range(n_rounds):
@@ -1644,7 +1811,8 @@ class Executor:
                 output = future.wait()
                 if self._kv_pool._preallocate and output.batch_talker_kv is not None:
                     self._kv_pool.scatter_talker_kv_delta(
-                        [dummy_slot.slot_id], output.batch_talker_kv,
+                        [dummy_slot.slot_id],
+                        output.batch_talker_kv,
                         [dummy_slot.past_len],
                     )
                 elif output.batch_talker_kv is not None:

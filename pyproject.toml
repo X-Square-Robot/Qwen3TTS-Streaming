@@ -65,3 +65,25 @@ markers = [
     "docker: requires Docker daemon",
     "slow: tests that take more than a few seconds",
 ]
+
+[tool.ruff]
+# 不 lint 不属于本仓库的代码：third_party/ 是上游 Qwen3-TTS 子模块（不可修改），
+# workspace/ 是运行时产物。其余 gitignore 内容 ruff 默认已跳过。
+extend-exclude = ["third_party", "workspace"]
+
+[tool.ruff.lint.per-file-ignores]
+# 库代码（engine/ client/src/ demo_api/）保持严格；以下为辅助代码的合理放宽。
+# tools/：手动验证 / benchmark / 冻结 repro 工具（非 pytest，见 CLAUDE.md），
+#   容许脚本式紧凑写法与调试中间量。
+"tools/**" = ["E402", "E701", "E702", "F841"]
+# scripts/：导出与辅助脚本，sys.path 引导后再 import；设备/精度探测中间量。
+"scripts/**" = ["E402", "F841"]
+# tests/：fixture / 路径引导后 import；断言用的中间量。
+"tests/**" = ["E402", "F841"]
+"client/tests/**" = ["F841"]
+# model_repository/：Triton BLS 模型，运行时注入 import 路径。
+"model_repository/**" = ["E402"]
+# 再导出枢纽：从共享协议层 qwen3tts_protocol 拉名字再暴露给 engine.interface 其余模块，
+# 本文件内不直接使用属有意再导出（详见各文件注释）。
+"engine/interface/protocol.py" = ["F401"]
+"engine/interface/types.py" = ["F401"]

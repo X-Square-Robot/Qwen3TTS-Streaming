@@ -4,6 +4,10 @@ import json
 
 from ..core.types import OutputPolicyConfig, TimingConfig, VADConfig
 from .types import OutputPolicy, StreamEvent, TimingContext
+
+# 再导出枢纽：从共享协议层 qwen3tts_protocol 拉取并对 engine.interface 其余模块再暴露。
+# 这些名字在本文件内不直接使用，但被 output.py / __init__.py / gateway 等 import，
+# 属有意再导出（per-file-ignore F401 见 pyproject.toml）。
 from qwen3tts_protocol.protocol import (
     PROTOCOL_VERSION,
     SUPPORTED_OUTPUT_POLICY_FEATURES,
@@ -36,11 +40,15 @@ def serialize_stream_event(event: StreamEvent) -> dict[str, object]:
 
 
 def output_policy_json(policy: OutputPolicy) -> str:
-    return json.dumps(serialize_output_policy(policy), ensure_ascii=False, sort_keys=True)
+    return json.dumps(
+        serialize_output_policy(policy), ensure_ascii=False, sort_keys=True
+    )
 
 
 def timing_context_json(timing: TimingContext) -> str:
-    return json.dumps(serialize_timing_context(timing), ensure_ascii=False, sort_keys=True)
+    return json.dumps(
+        serialize_timing_context(timing), ensure_ascii=False, sort_keys=True
+    )
 
 
 def to_core_output_policy(policy: OutputPolicy) -> OutputPolicyConfig:

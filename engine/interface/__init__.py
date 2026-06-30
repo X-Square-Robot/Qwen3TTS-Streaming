@@ -1,6 +1,11 @@
 """Canonical external session/interface contract helpers."""
 
-from .output import OutputPipeline, build_done_event, build_forward_event, build_start_event
+from .output import (
+    OutputPipeline,
+    build_done_event,
+    build_forward_event,
+    build_start_event,
+)
 from .protocol import (
     PROTOCOL_VERSION,
     SUPPORTED_OUTPUT_POLICY_FEATURES,
@@ -52,7 +57,7 @@ __all__ = (
     "StreamCancelRequest",
     "StreamEvent",
     "StreamTextChunk",
-    "TENVADProcessor",
+    "TenVADProcessor",
     "TTSVADConfig",
     "TTSVADProcessor",
     "TimingContext",

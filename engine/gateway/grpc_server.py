@@ -56,12 +56,12 @@ from ..interface.vad import (
     TTSVADConfig,
     VADMode,
     create_vad_processor,
-    vad_config_from_dict,
 )
 from . import tts_pb2, tts_pb2_grpc
 
 if TYPE_CHECKING:
     from ..server import TTSEngine
+    from ..interface.vad import TTSVADProcessor
 
 
 _GRPC_AUDIO_QUEUE_MAXSIZE = int(
@@ -163,36 +163,54 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                 )
 
             # Convert back to float32 bytes for OutputPipeline
-            filtered_f32 = (filtered_int16.astype(np.float32) / 32767.0)
+            filtered_f32 = filtered_int16.astype(np.float32) / 32767.0
             filtered_bytes = filtered_f32.tobytes()
 
             frame = pipeline.convert_audio_chunk(filtered_bytes)
-            await audio_queue.put(("audio", _make_audio_response(frame.pcm_bytes, frame.audio, meta=frame.meta)))
+            await audio_queue.put(
+                (
+                    "audio",
+                    _make_audio_response(frame.pcm_bytes, frame.audio, meta=frame.meta),
+                )
+            )
 
         async def on_event(sid, event: dict):
-            await audio_queue.put((
-                "event",
-                _make_event_response_from_contract(
-                    build_forward_event(sid, event, start_request)
-                ),
-            ))
+            await audio_queue.put(
+                (
+                    "event",
+                    _make_event_response_from_contract(
+                        build_forward_event(sid, event, start_request)
+                    ),
+                )
+            )
 
         async def on_done(sid, metrics):
             # Flush any remaining audio from VAD
             final_int16 = vad_processor.flush()
             if final_int16.size > 0:
-                final_f32 = (final_int16.astype(np.float32) / 32767.0)
+                final_f32 = final_int16.astype(np.float32) / 32767.0
                 final_bytes = final_f32.tobytes()
                 frame = pipeline.convert_audio_chunk(final_bytes)
-                await audio_queue.put(("audio", _make_audio_response(frame.pcm_bytes, frame.audio, meta=frame.meta)))
+                await audio_queue.put(
+                    (
+                        "audio",
+                        _make_audio_response(
+                            frame.pcm_bytes, frame.audio, meta=frame.meta
+                        ),
+                    )
+                )
 
             _drain_vad_transitions()
             # Inject VAD observability into metrics
             _inject_vad_metrics(vad_processor, pipeline, metrics)
-            await audio_queue.put((
-                "event",
-                _make_event_response_from_contract(build_done_event(sid, metrics, pipeline)),
-            ))
+            await audio_queue.put(
+                (
+                    "event",
+                    _make_event_response_from_contract(
+                        build_done_event(sid, metrics, pipeline)
+                    ),
+                )
+            )
 
         await self._engine.start_session(
             session_id,
@@ -206,10 +224,14 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
         vad_processor.enable_transition_recording(
             obs.is_enabled(obs.ObsLevel.DEBUG, config.observability_level)
         )
-        await audio_queue.put((
-            "event",
-            _make_event_response_from_contract(build_start_event(session_id, start_request)),
-        ))
+        await audio_queue.put(
+            (
+                "event",
+                _make_event_response_from_contract(
+                    build_start_event(session_id, start_request)
+                ),
+            )
+        )
         logger.info("gRPC session started: %s", session_id)
         return session_id
 
@@ -232,7 +254,8 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
         while True:
             try:
                 msg_type_q, payload = await asyncio.wait_for(
-                    audio_queue.get(), timeout=timeout,
+                    audio_queue.get(),
+                    timeout=timeout,
                 )
             except asyncio.TimeoutError:
                 logger.warning("gRPC session %s: audio wait timeout", session_id)
@@ -277,12 +300,16 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             logger.info("gRPC oneshot cancelled: %s", session_id)
         except Exception as e:
             logger.error("gRPC oneshot error: %s: %s", session_id, e)
-            yield _make_event_response(event_type="error", session_id=session_id or "", message=str(e))
+            yield _make_event_response(
+                event_type="error", session_id=session_id or "", message=str(e)
+            )
         finally:
             if session_id:
                 await self._engine.cancel(session_id)
 
-        yield _make_event_response(event_type="done", session_id=session_id or "", message="Stream ended")
+        yield _make_event_response(
+            event_type="done", session_id=session_id or "", message="Stream ended"
+        )
 
     async def SynthesizeStream(self, request_iterator, context):
         """Handle one bidirectional stream.
@@ -303,7 +330,9 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
         start_request: SessionStartRequest | None = None
         request_task: asyncio.Task | None = None
         audio_task: asyncio.Task | None = None
-        pump_task = asyncio.create_task(self._pump_requests(request_iterator, request_queue))
+        pump_task = asyncio.create_task(
+            self._pump_requests(request_iterator, request_queue)
+        )
 
         try:
             while True:
@@ -316,7 +345,9 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                 if not wait_set:
                     break
 
-                done, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(
+                    wait_set, return_when=asyncio.FIRST_COMPLETED
+                )
 
                 # Flush any ready audio BEFORE handling a control frame, so a
                 # parked chunk is not reordered behind chunks the request branch
@@ -349,7 +380,9 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
 
                         if msg_type in {"start", "init"}:
                             start_request = _start_request_from_stream_request(request)
-                            start_req = request.start if msg_type == "start" else request.init
+                            start_req = (
+                                request.start if msg_type == "start" else request.init
+                            )
                             session_id = await self._create_session(
                                 start_req.session_id,
                                 start_request=start_request,
@@ -358,24 +391,42 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
 
                         elif msg_type == "text":
                             if session_id:
-                                if start_request is not None and request.text.client_timestamp_ms > 0:
-                                    start_request.timing.client_text_ts_ms = int(request.text.client_timestamp_ms)
+                                if (
+                                    start_request is not None
+                                    and request.text.client_timestamp_ms > 0
+                                ):
+                                    start_request.timing.client_text_ts_ms = int(
+                                        request.text.client_timestamp_ms
+                                    )
                                 if not first_text_received:
                                     first_text_received = True
                                     LifecycleLogger.emit(
                                         session_id=session_id,
                                         phase="text.first_received",
                                         transport="grpc",
-                                        request_id=(start_request.timing.request_id
-                                                    if start_request else None) or None,
-                                        client_text_ts_ms=request.text.client_timestamp_ms or None,
+                                        request_id=(
+                                            start_request.timing.request_id
+                                            if start_request
+                                            else None
+                                        )
+                                        or None,
+                                        client_text_ts_ms=request.text.client_timestamp_ms
+                                        or None,
                                     )
-                                await self._engine.push_text_input(session_id, request.text.text)
+                                await self._engine.push_text_input(
+                                    session_id, request.text.text
+                                )
 
                         elif msg_type in {"end", "done"}:
                             if session_id:
-                                if start_request is not None and msg_type == "end" and request.end.client_timestamp_ms > 0:
-                                    start_request.timing.client_end_ts_ms = int(request.end.client_timestamp_ms)
+                                if (
+                                    start_request is not None
+                                    and msg_type == "end"
+                                    and request.end.client_timestamp_ms > 0
+                                ):
+                                    start_request.timing.client_end_ts_ms = int(
+                                        request.end.client_timestamp_ms
+                                    )
                                 await self._engine.mark_input_complete(session_id)
                             got_done = True
 
@@ -401,7 +452,9 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             logger.info("gRPC stream cancelled: %s", session_id)
         except Exception as e:
             logger.error("gRPC stream error: %s: %s", session_id, e)
-            yield _make_event_response(event_type="error", session_id=session_id or "", message=str(e))
+            yield _make_event_response(
+                event_type="error", session_id=session_id or "", message=str(e)
+            )
         finally:
             for task in (request_task, audio_task, pump_task):
                 if task is not None and not task.done():
@@ -415,7 +468,9 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             if session_id:
                 await self._engine.cancel(session_id)
 
-        yield _make_event_response(event_type="done", session_id=session_id or "", message="Stream ended")
+        yield _make_event_response(
+            event_type="done", session_id=session_id or "", message="Stream ended"
+        )
 
 
 def _make_audio_response(
@@ -459,9 +514,7 @@ def _make_event_response(
             sample_rate=audio_format.sample_rate,
             channels=audio_format.channels,
         )
-    return tts_pb2.SynthesizeResponse(
-        event=tts_pb2.StreamEvent(**kwargs)
-    )
+    return tts_pb2.SynthesizeResponse(event=tts_pb2.StreamEvent(**kwargs))
 
 
 def _make_event_response_from_contract(event) -> tts_pb2.SynthesizeResponse:
@@ -500,16 +553,22 @@ def _make_capabilities_response(cap: dict) -> tts_pb2.GetCapabilitiesResponse:
     return tts_pb2.GetCapabilitiesResponse(
         variant=str(cap.get("variant", "") or ""),
         loaded_model_type=str(cap.get("loaded_model_type", "") or ""),
-        declared_supported_task_types=list(cap.get("declared_supported_task_types", ()) or ()),
+        declared_supported_task_types=list(
+            cap.get("declared_supported_task_types", ()) or ()
+        ),
         supported_input_modes=[
-            _input_mode_to_proto(value) for value in cap.get("supported_input_modes", ()) or ()
+            _input_mode_to_proto(value)
+            for value in cap.get("supported_input_modes", ()) or ()
         ],
         supported_group_policies=[
-            _group_policy_to_proto(value) for value in cap.get("supported_group_policies", ()) or ()
+            _group_policy_to_proto(value)
+            for value in cap.get("supported_group_policies", ()) or ()
         ],
         supported_audio_formats=[
             tts_pb2.AudioFormat(
-                encoding=_audio_encoding_to_proto(_audio_encoding_from_name(fmt.get("encoding", ""))),
+                encoding=_audio_encoding_to_proto(
+                    _audio_encoding_from_name(fmt.get("encoding", ""))
+                ),
                 sample_rate=int(fmt.get("sample_rate", ENGINE_SAMPLE_RATE)),
                 channels=int(fmt.get("channels", 1)),
             )
@@ -520,12 +579,17 @@ def _make_capabilities_response(cap: dict) -> tts_pb2.GetCapabilitiesResponse:
         speaker_encoder_available=bool(cap.get("speaker_encoder_available", False)),
         ref_codec_available=bool(cap.get("ref_codec_available", False)),
         icl_available=bool(cap.get("icl_available", False)),
-        ref_audio_max_duration_sec=float(cap.get("ref_audio_max_duration_sec", 0.0) or 0.0),
-        ref_c2w_warm_state_available=bool(cap.get("ref_c2w_warm_state_available", False)),
+        ref_audio_max_duration_sec=float(
+            cap.get("ref_audio_max_duration_sec", 0.0) or 0.0
+        ),
+        ref_c2w_warm_state_available=bool(
+            cap.get("ref_c2w_warm_state_available", False)
+        ),
         ref_codec_reason=str(cap.get("ref_codec_reason", "") or ""),
         protocol_version=str(cap.get("protocol_version", "") or ""),
         supported_output_policy_features=[
-            str(value) for value in cap.get("supported_output_policy_features", ()) or ()
+            str(value)
+            for value in cap.get("supported_output_policy_features", ()) or ()
         ],
         supported_vad_strategies=[
             str(value) for value in cap.get("supported_vad_strategies", ()) or ()
@@ -537,7 +601,8 @@ def _make_capabilities_response(cap: dict) -> tts_pb2.GetCapabilitiesResponse:
 
 
 def _queue_message_to_response(
-    msg_type_q: str, payload,
+    msg_type_q: str,
+    payload,
 ) -> tts_pb2.SynthesizeResponse | None:
     if msg_type_q == "audio":
         return payload
@@ -555,7 +620,9 @@ def _is_done_response(response: tts_pb2.SynthesizeResponse) -> bool:
     return which == "status" and response.status.event in {"done", "error"}
 
 
-async def serve(engine: TTSEngine, port: int = 50051, *, stop_event: asyncio.Event) -> None:
+async def serve(
+    engine: TTSEngine, port: int = 50051, *, stop_event: asyncio.Event
+) -> None:
     """Start gRPC aio server. Call from within an asyncio event loop.
 
     Waits on ``stop_event`` then calls ``server.stop()`` so SIGINT/SIGTERM can shut
@@ -563,7 +630,6 @@ async def serve(engine: TTSEngine, port: int = 50051, *, stop_event: asyncio.Eve
     asyncio task cancellation.
     """
     try:
-        import grpc
         from grpc import aio as grpc_aio
     except ImportError:
         logger.error("grpcio not installed. Run: pip install grpcio grpcio-tools")
@@ -611,7 +677,12 @@ def _start_request_from_stream_request(request) -> SessionStartRequest:
         audio=getattr(init, "audio", None),
         default_mode=InputMode.AUTO,
     )
-    return SessionStartRequest(session_id=init.session_id, config=cfg, output_policy=output_policy, timing=timing)
+    return SessionStartRequest(
+        session_id=init.session_id,
+        config=cfg,
+        output_policy=output_policy,
+        timing=timing,
+    )
 
 
 def _session_config_from_oneshot_request(request) -> SessionConfig:
@@ -694,9 +765,15 @@ def _session_config_from_legacy_fields(**kwargs) -> SessionConfig:
     return _session_contract_from_legacy_fields(**kwargs)[0]
 
 
-def _session_contract_from_proto(proto_cfg, *, default_mode: InputMode) -> tuple[SessionConfig, object, object]:
-    output_policy = _output_policy_from_proto(proto_cfg.output_policy if proto_cfg.HasField("output_policy") else None)
-    timing = _timing_context_from_proto(proto_cfg.timing if proto_cfg.HasField("timing") else None)
+def _session_contract_from_proto(
+    proto_cfg, *, default_mode: InputMode
+) -> tuple[SessionConfig, object, object]:
+    output_policy = _output_policy_from_proto(
+        proto_cfg.output_policy if proto_cfg.HasField("output_policy") else None
+    )
+    timing = _timing_context_from_proto(
+        proto_cfg.timing if proto_cfg.HasField("timing") else None
+    )
     protocol_version = str(getattr(proto_cfg, "protocol_version", "") or "").strip()
     if protocol_version and "client_protocol_version" not in timing.extra:
         timing.extra["client_protocol_version"] = protocol_version
@@ -708,9 +785,13 @@ def _session_contract_from_proto(proto_cfg, *, default_mode: InputMode) -> tuple
         ref_audio=proto_cfg.ref_audio or None,
         ref_text=proto_cfg.ref_text or None,
         x_vector_only=bool(proto_cfg.x_vector_only),
-        input_mode=_input_mode_from_proto(proto_cfg.input_mode, default_mode=default_mode),
+        input_mode=_input_mode_from_proto(
+            proto_cfg.input_mode, default_mode=default_mode
+        ),
         group_policy=_group_policy_from_proto(proto_cfg.group_policy),
-        audio=_audio_config_from_proto(proto_cfg.audio if proto_cfg.HasField("audio") else None),
+        audio=_audio_config_from_proto(
+            proto_cfg.audio if proto_cfg.HasField("audio") else None
+        ),
         output_policy=to_core_output_policy(output_policy),
         timing=to_core_timing_context(timing),
     )
@@ -849,13 +930,17 @@ def _validate_audio_config(audio: AudioConfig) -> None:
     if audio.channels != 1:
         raise ValueError(f"Unsupported channel count: {audio.channels} (mono only)")
     if audio.sample_rate not in (16000, 24000):
-        raise ValueError(f"Unsupported sample_rate: {audio.sample_rate} (expected 16000 or 24000)")
+        raise ValueError(
+            f"Unsupported sample_rate: {audio.sample_rate} (expected 16000 or 24000)"
+        )
     if audio.encoding not in (AudioEncoding.PCM_F32, AudioEncoding.PCM_S16LE):
         raise ValueError(f"Unsupported audio encoding: {audio.encoding}")
 
 
 def _convert_audio_chunk(pcm_bytes: bytes, audio_config: AudioConfig) -> bytes:
-    start_request = SessionStartRequest(session_id="", config=SessionConfig(audio=audio_config))
+    start_request = SessionStartRequest(
+        session_id="", config=SessionConfig(audio=audio_config)
+    )
     return OutputPipeline(start_request).convert_audio_chunk(pcm_bytes).pcm_bytes
 
 
@@ -882,7 +967,8 @@ def _build_vad_config(session_config: SessionConfig) -> TTSVADConfig:
         start_margin_ms=vad.start_margin_ms,
         # Pass through any extra config from the config dict
         **{
-            k: v for k, v in vad.config.items()
+            k: v
+            for k, v in vad.config.items()
             if k in ("preemphasis", "tenvad_hop_size", "tenvad_threshold")
         },
     )
