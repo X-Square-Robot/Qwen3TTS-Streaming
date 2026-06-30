@@ -525,7 +525,13 @@ class Spliter:
             self._presplit_thresholds = thresholds
         idx, driver = self._create_driver(thresholds)
         if key is None:
-            group_idx, local_idx = idx, 0            # streaming: each segment its own group
+            # Streaming: each segment is its own group. Allocate from the shared
+            # _next_group_idx (NOT segment_idx) so streaming and offline group ids
+            # never collide when auto mixes both paths in one session. In a
+            # pure-streaming session this still equals segment_idx (counters move
+            # in lockstep), so behavior is unchanged.
+            group_idx, local_idx = self._next_group_idx, 0
+            self._next_group_idx += 1
         else:
             group_idx, local_idx = key, self._group_next_local.get(key, 0)
         self._seg_coords[idx] = (group_idx, local_idx)
@@ -566,6 +572,40 @@ class Spliter:
         """
         for tok in self._coerce_tokens(tokens):
             self._pending.append(_PendingToken(tok, None, boundary=False))
+        return self._drive_events()
+
+    def feed_auto(
+        self, tokens: List[SegmentToken],
+    ) -> List[SegmentAction]:
+        """Auto mode: route a packet by size; Stage 1 engages only when long.
+
+        Stage 1 (offline pre-split) adds value only through *global foresight*,
+        which exists only when a packet is longer than one segment can hold. For
+        a small streaming packet, Stage 1 sees no more than the driver would, so
+        it is transparent: the tokens stream (``group_idx=None``) and coalesce
+        across packets exactly like plain streaming, and the driver segments
+        them. A long packet (more tokens than one segment's capacity) is
+        pre-split with foresight, yielding offline-quality L1 boundaries.
+
+        Quality therefore scales with packet size, with no buffering latency:
+        the client implicitly chooses the optimization scope by how much text it
+        hands over per packet.
+        """
+        coerced = self._coerce_tokens(tokens)
+        if not coerced:
+            return []
+        # Online capacity from the live EMA ratio + KV budget, minus what the
+        # in-flight segment already holds: the gate couples the pipeline's
+        # in-flight state (consistent with Stage 0), so the question is whether
+        # the packet fits the *remaining* room, not an empty segment.
+        capacity = self._make_thresholds().force_split_at
+        active = self._get_active_driver_idx()
+        occupied = self._drivers[active].token_count if active is not None else 0
+        if len(coerced) > capacity - occupied:
+            self._enqueue_presplit_groups(coerced)   # won't fit remaining room: Stage 1 foresight
+        else:
+            for tok in coerced:                       # fits: transparent stream (coalesce)
+                self._pending.append(_PendingToken(tok, None, boundary=False))
         return self._drive_events()
 
     def input_done(self) -> List[SegmentAction]:

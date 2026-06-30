@@ -29,6 +29,7 @@ class SessionState(Enum):
 
 
 class InputMode(Enum):
+    AUTO = "auto"            # engine decides per-packet: Stage 1 engages only for long packets
     TOKEN = "token"
     CLAUSE = "clause"
     LONG_SEGMENT = "long_segment"

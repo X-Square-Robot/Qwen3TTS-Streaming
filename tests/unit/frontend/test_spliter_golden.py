@@ -148,6 +148,68 @@ def test_concurrency_backpressure_gates_at_max_concurrent():
     assert sp._next_segment_idx == 2
 
 
+def test_auto_long_packet_engages_stage1_global_optimal():
+    """Auto mode: a packet longer than one segment is pre-split with foresight,
+    yielding the SAME global-optimal L1 cut as offline set_full_text."""
+    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
+    segs = _summarize(sp.feed_auto(_toks(SIGNATURE)))   # 20 tokens > force_split_at(15)
+
+    assert [(s["seg"], s["group"], s["text"]) for s in segs] == [
+        (0, 0, "你好吗？"),
+        (1, 1, "明天天气不错，有没有什么想吃的"),
+    ]
+    # Matches the offline path exactly — Stage 1 had full foresight over the packet.
+    off = _summarize(Spliter(engine_max_decode_len=100, ema_ratio=10.0).set_full_text(_toks(SIGNATURE)))
+    assert [(s["seg"], s["group"], s["text"]) for s in segs] == \
+           [(s["seg"], s["group"], s["text"]) for s in off]
+
+
+def test_auto_token_by_token_is_transparent_streaming():
+    """Auto mode: each 1-token packet is small, so Stage 1 is transparent and
+    the tokens stream/coalesce — identical to plain feed_tokens (incl. L2-snap,
+    which is the irreducible no-foresight cost of a true token stream)."""
+    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
+    acc = []
+    for t in _toks(SIGNATURE):
+        acc.extend(sp.feed_auto([t]))
+    acc.extend(sp.input_done())
+    segs = _summarize(acc)
+
+    assert [(s["seg"], s["group"], s["text"]) for s in segs] == [
+        (0, 0, "你好吗？明天天气不错，"),
+        (1, 1, "有没有什么想吃的？"),
+    ]
+
+
+def test_auto_short_packet_does_not_overfragment():
+    """Auto mode: a short complete packet streams transparently (driver
+    coalesces) rather than flushing a tiny segment per L1."""
+    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
+    acc = sp.feed_auto(_toks("你好。"))
+    acc.extend(sp.input_done())
+    segs = _summarize(acc)
+
+    assert [(s["seg"], s["text"]) for s in segs] == [(0, "你好。")]
+
+
+def test_auto_mixed_streaming_then_long_packet_no_group_collision():
+    """Auto mode mixing streaming + offline in one session must not collide
+    group ids. A small streaming residual (its own group) followed by a long
+    packet that engages Stage 1 (occupancy-aware gate) must yield distinct
+    group ids — streaming and offline groups share one _next_group_idx
+    namespace. Regression guard for the namespace-collision bug."""
+    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
+    a1 = sp.feed_auto(_toks("今天天气真的很不错"))           # 9 tok, no L1 → streams (group 0)
+    a2 = sp.feed_auto(_toks("，我们出去玩吧。好不好呀？"))   # won't fit remaining room → Stage 1
+
+    groups_by_seg: dict[int, int] = {}
+    for sa in a1 + a2:
+        groups_by_seg.setdefault(sa.segment_idx, sa.group_idx)
+
+    assert groups_by_seg[0] == 0, groups_by_seg                     # streaming residual, own group
+    assert all(g != 0 for s, g in groups_by_seg.items() if s != 0), groups_by_seg  # no collision
+
+
 def test_emoji_whole_keycap_in_one_packet_is_stripped():
     """A complete keycap sequence in one packet strips cleanly (base digit too)."""
     assert strip_emoji("第1️⃣步完成✅。") == "第步完成。"

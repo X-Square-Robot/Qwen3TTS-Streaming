@@ -211,7 +211,9 @@ class FrontendInterface:
             return
 
         spliter: Spliter = session.spliter
-        if mode == InputMode.LONG_SEGMENT and session.config.group_policy != GroupPolicy.NONE:
+        if mode == InputMode.AUTO:
+            seg_actions = spliter.feed_auto(tokens)
+        elif mode == InputMode.LONG_SEGMENT and session.config.group_policy != GroupPolicy.NONE:
             seg_actions = spliter.push_group_tokens(tokens)
         else:
             seg_actions = spliter.feed_tokens(tokens)
