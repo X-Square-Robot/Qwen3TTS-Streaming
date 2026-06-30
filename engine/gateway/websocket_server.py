@@ -53,8 +53,6 @@ from ..interface import (
     to_core_timing_context,
 )
 from ..interface.vad import (
-    TTSVADConfig,
-    VADMode,
     create_vad_processor,
 )
 from .grpc_server import _build_vad_config, _inject_vad_metrics
@@ -90,15 +88,21 @@ class WebSocketGateway:
         self._engine = engine
 
     async def handle_capabilities(self, request):
-        return web.json_response(normalize_capabilities(self._engine.describe_capabilities()))
+        return web.json_response(
+            normalize_capabilities(self._engine.describe_capabilities())
+        )
 
     async def handle_websocket(self, request):
         ws = web.WebSocketResponse(heartbeat=_WEBSOCKET_HEARTBEAT_SEC)
         await ws.prepare(request)
 
         session_id = None
-        outbound_queue: asyncio.Queue = asyncio.Queue(maxsize=_WEBSOCKET_AUDIO_QUEUE_MAXSIZE)
-        request_queue: asyncio.Queue = asyncio.Queue(maxsize=_WEBSOCKET_REQUEST_QUEUE_MAXSIZE)
+        outbound_queue: asyncio.Queue = asyncio.Queue(
+            maxsize=_WEBSOCKET_AUDIO_QUEUE_MAXSIZE
+        )
+        request_queue: asyncio.Queue = asyncio.Queue(
+            maxsize=_WEBSOCKET_REQUEST_QUEUE_MAXSIZE
+        )
         got_cancel = False
         connection_closed = False
         start_request: SessionStartRequest | None = None
@@ -113,11 +117,15 @@ class WebSocketGateway:
                 if outbound_task is None and session_id and not got_cancel:
                     outbound_task = asyncio.create_task(outbound_queue.get())
 
-                wait_set = {task for task in (request_task, outbound_task) if task is not None}
+                wait_set = {
+                    task for task in (request_task, outbound_task) if task is not None
+                }
                 if not wait_set:
                     break
 
-                done, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(
+                    wait_set, return_when=asyncio.FIRST_COMPLETED
+                )
 
                 # Flush any ready outbound frame BEFORE handling a control frame,
                 # so a parked chunk is not reordered behind frames the request
@@ -148,14 +156,18 @@ class WebSocketGateway:
                             await ws.send_json(
                                 {
                                     "type": "capabilities",
-                                    "capabilities": normalize_capabilities(self._engine.describe_capabilities()),
+                                    "capabilities": normalize_capabilities(
+                                        self._engine.describe_capabilities()
+                                    ),
                                 }
                             )
                             continue
 
                         if msg_type == "start":
                             if session_id is not None:
-                                raise ValueError("websocket session has already been started")
+                                raise ValueError(
+                                    "websocket session has already been started"
+                                )
                             start_request = _start_request_from_ws_message(
                                 message,
                                 default_mode=InputMode.AUTO,
@@ -168,7 +180,9 @@ class WebSocketGateway:
 
                         elif msg_type == "oneshot":
                             if session_id is not None:
-                                raise ValueError("websocket session has already been started")
+                                raise ValueError(
+                                    "websocket session has already been started"
+                                )
                             start_request = _start_request_from_ws_message(
                                 message,
                                 default_mode=InputMode.FULL_TEXT,
@@ -183,7 +197,9 @@ class WebSocketGateway:
                             )
                             text = str(message.get("text", "") or "")
                             if not text:
-                                raise ValueError("oneshot request requires non-empty 'text'")
+                                raise ValueError(
+                                    "oneshot request requires non-empty 'text'"
+                                )
                             start_request.initial_text = text
                             await self._engine.push_text_input(session_id, text)
                             await self._engine.mark_input_complete(session_id)
@@ -192,9 +208,13 @@ class WebSocketGateway:
                             if not session_id:
                                 raise ValueError("received 'text' before 'start'")
                             if start_request is not None:
-                                client_ts_ms = _coerce_ws_int(message.get("client_timestamp_ms"), 0)
+                                client_ts_ms = _coerce_ws_int(
+                                    message.get("client_timestamp_ms"), 0
+                                )
                                 if client_ts_ms > 0:
-                                    start_request.timing.client_text_ts_ms = client_ts_ms
+                                    start_request.timing.client_text_ts_ms = (
+                                        client_ts_ms
+                                    )
                             await self._engine.push_text_input(
                                 session_id,
                                 str(message.get("text", "") or ""),
@@ -204,7 +224,9 @@ class WebSocketGateway:
                             if not session_id:
                                 raise ValueError("received 'end' before 'start'")
                             if start_request is not None:
-                                client_ts_ms = _coerce_ws_int(message.get("client_timestamp_ms"), 0)
+                                client_ts_ms = _coerce_ws_int(
+                                    message.get("client_timestamp_ms"), 0
+                                )
                                 if client_ts_ms > 0:
                                     start_request.timing.client_end_ts_ms = client_ts_ms
                             await self._engine.mark_input_complete(session_id)
@@ -216,9 +238,13 @@ class WebSocketGateway:
                             connection_closed = True
 
                         else:
-                            raise ValueError(f"unsupported websocket message type: '{msg_type or '<empty>'}'")
+                            raise ValueError(
+                                f"unsupported websocket message type: '{msg_type or '<empty>'}'"
+                            )
 
-                        async for frame in self._drain_available_messages(outbound_queue):
+                        async for frame in self._drain_available_messages(
+                            outbound_queue
+                        ):
                             await _send_frame(ws, frame)
                             if _is_terminal_frame(frame):
                                 return ws
@@ -267,6 +293,7 @@ class WebSocketGateway:
 
         # Create server timing accumulator for cross-thread observability
         import time as _time
+
         timing_acc = ServerTimingAccumulator()
         timing_acc.request_received_epoch_ms = int(round(_time.time() * 1000.0))
         timing_acc.session_created_epoch_ms = timing_acc.request_received_epoch_ms
@@ -289,6 +316,7 @@ class WebSocketGateway:
 
         # Create per-session VAD processor from config
         from .grpc_server import ENGINE_SAMPLE_RATE
+
         vad_config = _build_vad_config(config)
         vad_processor = create_vad_processor(vad_config, sample_rate=ENGINE_SAMPLE_RATE)
 
@@ -304,7 +332,7 @@ class WebSocketGateway:
             if filtered_int16.size == 0:
                 return
 
-            filtered_f32 = (filtered_int16.astype(np.float32) / 32767.0)
+            filtered_f32 = filtered_int16.astype(np.float32) / 32767.0
             filtered_bytes = filtered_f32.tobytes()
 
             frame = pipeline.convert_audio_chunk(filtered_bytes)
@@ -314,14 +342,16 @@ class WebSocketGateway:
 
         async def on_event(sid: str, event: dict) -> None:
             await outbound_queue.put(
-                _make_event_frame_from_contract(build_forward_event(sid, event, start_request))
+                _make_event_frame_from_contract(
+                    build_forward_event(sid, event, start_request)
+                )
             )
 
         async def on_done(sid: str, metrics: dict) -> None:
             # Flush any remaining audio from VAD
             final_int16 = vad_processor.flush()
             if final_int16.size > 0:
-                final_f32 = (final_int16.astype(np.float32) / 32767.0)
+                final_f32 = final_int16.astype(np.float32) / 32767.0
                 final_bytes = final_f32.tobytes()
                 frame = pipeline.convert_audio_chunk(final_bytes)
                 await outbound_queue.put(
@@ -331,7 +361,9 @@ class WebSocketGateway:
             # Inject VAD observability into metrics
             _inject_vad_metrics(vad_processor, pipeline, metrics)
             await outbound_queue.put(
-                _make_event_frame_from_contract(build_done_event(sid, metrics, pipeline))
+                _make_event_frame_from_contract(
+                    build_done_event(sid, metrics, pipeline)
+                )
             )
 
         await self._engine.start_session(
@@ -342,7 +374,9 @@ class WebSocketGateway:
             on_event=on_event,
         )
         await outbound_queue.put(
-            _make_event_frame_from_contract(build_start_event(session_id, start_request))
+            _make_event_frame_from_contract(
+                build_start_event(session_id, start_request)
+            )
         )
         logger.info("WebSocket session started: %s", session_id)
         return session_id
@@ -358,13 +392,17 @@ class WebSocketGateway:
                     try:
                         payload = json.loads(msg.data)
                     except json.JSONDecodeError as exc:
-                        raise ValueError(f"invalid websocket JSON payload: {exc}") from exc
+                        raise ValueError(
+                            f"invalid websocket JSON payload: {exc}"
+                        ) from exc
                     if not isinstance(payload, dict):
                         raise ValueError("websocket payload must be a JSON object")
                     await request_queue.put(("request", payload))
                     continue
                 if msg.type == WSMsgType.BINARY:
-                    raise ValueError("binary client frames are not supported; send JSON control messages only")
+                    raise ValueError(
+                        "binary client frames are not supported; send JSON control messages only"
+                    )
                 if msg.type == WSMsgType.ERROR:
                     raise msg.data
         except Exception as exc:
@@ -436,7 +474,9 @@ def _make_event_frame_from_contract(event) -> dict[str, Any]:
         message=str(payload.get("message", "") or ""),
         audio_format=(
             AudioConfig(
-                encoding=_audio_encoding_from_ws_value(str(audio.get("encoding", "pcm_f32"))),
+                encoding=_audio_encoding_from_ws_value(
+                    str(audio.get("encoding", "pcm_f32"))
+                ),
                 sample_rate=int(audio.get("sample_rate", 24000)),
                 channels=int(audio.get("channels", 1)),
             )
@@ -521,7 +561,9 @@ def _start_request_from_ws_message(
         ref_audio=_decode_optional_base64(raw.get("ref_audio")),
         ref_text=_optional_str(raw.get("ref_text")),
         x_vector_only=_coerce_ws_bool(raw.get("x_vector_only", False)),
-        input_mode=_input_mode_from_ws_value(raw.get("input_mode"), default_mode=default_mode),
+        input_mode=_input_mode_from_ws_value(
+            raw.get("input_mode"), default_mode=default_mode
+        ),
         group_policy=_group_policy_from_ws_value(raw.get("group_policy")),
         audio=_audio_config_from_ws_value(raw.get("audio")),
         output_policy=to_core_output_policy(output_policy),
@@ -700,7 +742,9 @@ def _validate_audio_config(audio: AudioConfig) -> None:
     if audio.channels != 1:
         raise ValueError(f"Unsupported channel count: {audio.channels} (mono only)")
     if audio.sample_rate not in (16000, 24000):
-        raise ValueError(f"Unsupported sample_rate: {audio.sample_rate} (expected 16000 or 24000)")
+        raise ValueError(
+            f"Unsupported sample_rate: {audio.sample_rate} (expected 16000 or 24000)"
+        )
     if audio.encoding not in (AudioEncoding.PCM_F32, AudioEncoding.PCM_S16LE):
         raise ValueError(f"Unsupported audio encoding: {audio.encoding}")
 

@@ -30,41 +30,48 @@ PROTOCOL_VERSION = "tts-session-v2alpha1"
 # Supported feature / strategy sets
 # ---------------------------------------------------------------------------
 
-SUPPORTED_OUTPUT_POLICY_FEATURES = frozenset({
-    "vad_policy",
-    "chunk_ms",
-    "packet_format",
-    "emit_text_events",
-    # Legacy fields (backward compatibility)
-    "request_context",
-    "timing_context",
-})
+SUPPORTED_OUTPUT_POLICY_FEATURES = frozenset(
+    {
+        "vad_policy",
+        "chunk_ms",
+        "packet_format",
+        "emit_text_events",
+        # Legacy fields (backward compatibility)
+        "request_context",
+        "timing_context",
+    }
+)
 
-SUPPORTED_TIMING_FIELDS = frozenset({
-    "request_id",
-    "turn_id",
-    "client_request_ts_ms",
-    "client_text_ts_ms",
-    "client_end_ts_ms",
-    # Server-side timing fields (backward compatibility)
-    "server_ttft_ms",
-    "server_first_audio_epoch_ms",
-    "server_session_create_to_first_raw_audio_ms",
-})
+SUPPORTED_TIMING_FIELDS = frozenset(
+    {
+        "request_id",
+        "turn_id",
+        "client_request_ts_ms",
+        "client_text_ts_ms",
+        "client_end_ts_ms",
+        # Server-side timing fields (backward compatibility)
+        "server_ttft_ms",
+        "server_first_audio_epoch_ms",
+        "server_session_create_to_first_raw_audio_ms",
+    }
+)
 
-SUPPORTED_VAD_STRATEGIES = frozenset({
-    "disabled",
-    "energy",
-    "tenvad",
-    # Legacy aliases (backward compatibility)
-    "prefix_trim",
-    "two_stage",
-    "silence_aware",
-})
+SUPPORTED_VAD_STRATEGIES = frozenset(
+    {
+        "disabled",
+        "energy",
+        "tenvad",
+        # Legacy aliases (backward compatibility)
+        "prefix_trim",
+        "two_stage",
+        "silence_aware",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Capabilities normalization
 # ---------------------------------------------------------------------------
+
 
 def normalize_capabilities(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalize a raw capabilities dict into the canonical protocol format.
@@ -83,7 +90,9 @@ def normalize_capabilities(raw: dict[str, Any]) -> dict[str, Any]:
 
     # Supported features
     if "supported_output_policy_features" not in cap:
-        cap["supported_output_policy_features"] = sorted(SUPPORTED_OUTPUT_POLICY_FEATURES)
+        cap["supported_output_policy_features"] = sorted(
+            SUPPORTED_OUTPUT_POLICY_FEATURES
+        )
     else:
         existing = cap["supported_output_policy_features"]
         if isinstance(existing, (list, set, frozenset)):

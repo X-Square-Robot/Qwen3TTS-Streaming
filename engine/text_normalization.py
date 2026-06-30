@@ -128,11 +128,7 @@ def strip_emoji(text: str) -> str:
         keycap_len = _keycap_sequence_len(text, i)
         if keycap_len:
             next_ch = _next_non_emoji_char(text, i + keycap_len)
-            if (
-                out
-                and _is_ascii_word_char(out[-1])
-                and _is_ascii_word_char(next_ch)
-            ):
+            if out and _is_ascii_word_char(out[-1]) and _is_ascii_word_char(next_ch):
                 out.append(" ")
             i += keycap_len
             continue
@@ -143,11 +139,7 @@ def strip_emoji(text: str) -> str:
             continue
 
         next_ch = _next_non_emoji_char(text, i + 1)
-        if (
-            out
-            and _is_ascii_word_char(out[-1])
-            and _is_ascii_word_char(next_ch)
-        ):
+        if out and _is_ascii_word_char(out[-1]) and _is_ascii_word_char(next_ch):
             out.append(" ")
 
         i += 1

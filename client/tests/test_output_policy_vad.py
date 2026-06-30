@@ -86,7 +86,9 @@ class TestEngineGrpcVadMapping:
         from qwen3tts._adapters.engine_grpc import _output_policy_to_proto
 
         proto = _output_policy_to_proto(
-            OutputPolicy(vad=VADPolicy(enabled=True, strategy="tenvad", config={"k": "v"}))
+            OutputPolicy(
+                vad=VADPolicy(enabled=True, strategy="tenvad", config={"k": "v"})
+            )
         )
 
         assert proto.vad_policy.strategy == "tenvad"
@@ -101,8 +103,15 @@ class TestEngineGrpcVadMapping:
         from qwen3tts._adapters.engine_grpc import _output_policy_to_proto
 
         proto = _output_policy_to_proto(
-            OutputPolicy(vad=VADPolicy(enabled=True, strategy="tenvad",
-                                       begin_threshold=0.9, end_count=99, chunk_ms=8))
+            OutputPolicy(
+                vad=VADPolicy(
+                    enabled=True,
+                    strategy="tenvad",
+                    begin_threshold=0.9,
+                    end_count=99,
+                    chunk_ms=8,
+                )
+            )
         )
         cfg = dict(proto.vad_policy.config)
         assert cfg["begin_threshold"] == "0.9"

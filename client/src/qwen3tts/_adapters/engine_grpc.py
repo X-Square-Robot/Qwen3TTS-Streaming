@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import queue
 import threading
-import time
 from typing import Any
 
-from qwen3tts_protocol import AudioChunk, AudioFormat, BytesResult, Capabilities, SessionStartRequest, StreamEvent
+from qwen3tts_protocol import (
+    AudioChunk,
+    AudioFormat,
+    BytesResult,
+    Capabilities,
+    SessionStartRequest,
+    StreamEvent,
+)
 
-from .._internal.utils import build_bytes_result, capabilities_from_payload, decode_stream_event
+from .._internal.utils import (
+    build_bytes_result,
+    capabilities_from_payload,
+    decode_stream_event,
+)
 from .._proto import tts_pb2, tts_pb2_grpc
 from ..constants import TRANSPORT_ENGINE_GRPC
 from ..exceptions import DependencyMissingError
@@ -27,7 +37,9 @@ def _require_grpc():
 class EngineGrpcAdapter:
     transport_name = TRANSPORT_ENGINE_GRPC
 
-    def __init__(self, endpoint: str, *, timeout: float, metadata=None, headers=None) -> None:
+    def __init__(
+        self, endpoint: str, *, timeout: float, metadata=None, headers=None
+    ) -> None:
         self.endpoint = endpoint
         self.timeout = timeout
         self.metadata = metadata
@@ -43,7 +55,9 @@ class EngineGrpcAdapter:
         grpc, channel = self._channel()
         try:
             stub = tts_pb2_grpc.TTSServiceStub(channel)
-            response = stub.GetCapabilities(tts_pb2.GetCapabilitiesRequest(), timeout=self.timeout)
+            response = stub.GetCapabilities(
+                tts_pb2.GetCapabilitiesRequest(), timeout=self.timeout
+            )
             return capabilities_from_payload(_capabilities_message_to_dict(response))
         finally:
             channel.close()
@@ -68,7 +82,9 @@ class EngineGrpcAdapter:
                     audio_parts.append(bytes(response.audio.pcm_data))
                     audio_format = AudioFormat(
                         encoding=_audio_encoding_from_proto(response.audio.encoding),
-                        sample_rate=int(response.audio.sample_rate or audio_format.sample_rate),
+                        sample_rate=int(
+                            response.audio.sample_rate or audio_format.sample_rate
+                        ),
                         channels=int(response.audio.channels or audio_format.channels),
                     )
                 elif which == "event":
@@ -96,16 +112,30 @@ class EngineGrpcAdapter:
 
 
 class EngineGrpcStreamSession(BaseStreamSession):
-    def __init__(self, adapter: EngineGrpcAdapter, grpc, channel, start_request: SessionStartRequest) -> None:
-        super().__init__(session_id=start_request.session_id, transport=adapter.transport_name)
+    def __init__(
+        self,
+        adapter: EngineGrpcAdapter,
+        grpc,
+        channel,
+        start_request: SessionStartRequest,
+    ) -> None:
+        super().__init__(
+            session_id=start_request.session_id, transport=adapter.transport_name
+        )
         self._adapter = adapter
         self._grpc = grpc
         self._channel = channel
         self._stub = tts_pb2_grpc.TTSServiceStub(channel)
         self._start_request = start_request
         self._request_queue: queue.Queue[object] = queue.Queue()
-        self._stream = self._stub.SynthesizeStream(self._request_iter(), timeout=adapter.timeout)
-        self._reader = threading.Thread(target=self._reader_loop, name=f"grpc-session-{self.session_id}", daemon=True)
+        self._stream = self._stub.SynthesizeStream(
+            self._request_iter(), timeout=adapter.timeout
+        )
+        self._reader = threading.Thread(
+            target=self._reader_loop,
+            name=f"grpc-session-{self.session_id}",
+            daemon=True,
+        )
         self._reader.start()
 
     def _request_iter(self):
@@ -130,11 +160,22 @@ class EngineGrpcStreamSession(BaseStreamSession):
                         AudioChunk(
                             pcm_bytes=bytes(response.audio.pcm_data),
                             audio=AudioFormat(
-                                encoding=_audio_encoding_from_proto(response.audio.encoding),
-                                sample_rate=int(response.audio.sample_rate or self._start_request.config.audio.sample_rate),
-                                channels=int(response.audio.channels or self._start_request.config.audio.channels),
+                                encoding=_audio_encoding_from_proto(
+                                    response.audio.encoding
+                                ),
+                                sample_rate=int(
+                                    response.audio.sample_rate
+                                    or self._start_request.config.audio.sample_rate
+                                ),
+                                channels=int(
+                                    response.audio.channels
+                                    or self._start_request.config.audio.channels
+                                ),
                             ),
-                            meta={str(k): str(v) for k, v in dict(response.audio.meta or {}).items()},
+                            meta={
+                                str(k): str(v)
+                                for k, v in dict(response.audio.meta or {}).items()
+                            },
                         )
                     )
                 elif which == "event":
@@ -149,7 +190,13 @@ class EngineGrpcStreamSession(BaseStreamSession):
         finally:
             self._channel.close()
 
-    def send_text(self, text: str, *, seq_no: int | None = None, client_timestamp_ms: int | None = None) -> None:
+    def send_text(
+        self,
+        text: str,
+        *,
+        seq_no: int | None = None,
+        client_timestamp_ms: int | None = None,
+    ) -> None:
         self._check_send_open()
         self._request_queue.put(
             tts_pb2.SynthesizeRequest(
@@ -166,7 +213,9 @@ class EngineGrpcStreamSession(BaseStreamSession):
         self._mark_send_closed()
         self._request_queue.put(
             tts_pb2.SynthesizeRequest(
-                end=tts_pb2.EndRequest(client_timestamp_ms=int(client_timestamp_ms or 0))
+                end=tts_pb2.EndRequest(
+                    client_timestamp_ms=int(client_timestamp_ms or 0)
+                )
             )
         )
         self._request_queue.put(None)

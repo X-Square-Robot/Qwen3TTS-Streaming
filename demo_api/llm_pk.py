@@ -172,7 +172,9 @@ async def _run_pk(
     def emit(item: dict[str, Any]) -> None:
         loop.call_soon_threadsafe(queue.put_nowait, item)
 
-    def callback(result, error) -> None:  # pragma: no cover - exercised against live Triton
+    def callback(
+        result, error
+    ) -> None:  # pragma: no cover - exercised against live Triton
         now_ms = (time.perf_counter() - started) * 1000.0
         if error:
             emit({"kind": "error", "message": str(error), "t_ms": now_ms})
@@ -242,7 +244,9 @@ async def _run_pk(
         body_json = json.dumps(body, ensure_ascii=False)
         req_input = grpcclient.InferInput("request", [1], "BYTES")
         req_input.set_data_from_numpy(np.array([body_json], dtype=object))
-        client.async_stream_infer(model_name=model_name, inputs=[req_input], outputs=outputs)
+        client.async_stream_infer(
+            model_name=model_name, inputs=[req_input], outputs=outputs
+        )
 
     deadline = time.perf_counter() + timeout_sec
 
@@ -315,7 +319,12 @@ async def _run_pk(
                             meta={"bytes": len(audio_bytes_value)},
                         )
                     )
-            elif event_type in {"warning", "text_token", "text_boundary_commit", "segment_end"}:
+            elif event_type in {
+                "warning",
+                "text_token",
+                "text_boundary_commit",
+                "segment_end",
+            }:
                 events.append(
                     TraceEvent(
                         run_id=run_id,
@@ -336,7 +345,10 @@ async def _run_pk(
                         backend=backend,
                         type="done",
                         t_ms=now_ms,
-                        meta={"audio_format": dict(audio_format), "source_event": event_type},
+                        meta={
+                            "audio_format": dict(audio_format),
+                            "source_event": event_type,
+                        },
                     )
                 )
 
@@ -439,7 +451,10 @@ async def _run_pk(
     audio_duration_ms: float | None = None
     if raw_audio and audio_format.get("encoding") == "pcm_f32":
         audio_duration_ms = (
-            len(raw_audio) / 4.0 / float(audio_format.get("sample_rate", 24000)) * 1000.0
+            len(raw_audio)
+            / 4.0
+            / float(audio_format.get("sample_rate", 24000))
+            * 1000.0
         )
 
     return RunResult(

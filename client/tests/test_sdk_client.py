@@ -4,7 +4,6 @@ import pytest
 
 from qwen3tts import SessionStartRequest, SynthesisConfig, TTSClient
 from qwen3tts.audio import decode_audio_bytes_to_array
-from qwen3tts.exceptions import DependencyMissingError
 
 
 class _FakeAdapter:
@@ -30,31 +29,49 @@ class _FakeAdapter:
 
     def open_stream(self, start_request):
         self.start_requests.append(start_request)
+
         class _Session:
             def __init__(self):
                 self.session_id = start_request.session_id
                 self.transport = "fake"
+
             def send_text(self, text, *, seq_no=None, client_timestamp_ms=None):
                 pass
+
             def end(self, *, client_timestamp_ms=None):
                 pass
+
             def cancel(self, reason=""):
                 pass
+
             def iter_messages(self):
                 return iter(())
+
         return _Session()
 
 
 def test_synthesize_bytes_uses_session_start_request():
-    client = TTSClient(endpoint="fake", adapter=_FakeAdapter(), detected=type("D", (), {"transport": "fake", "probe_report": []})())
-    result = client.synthesize_bytes("hello", request=SynthesisConfig(task_type="custom_voice"))
+    client = TTSClient(
+        endpoint="fake",
+        adapter=_FakeAdapter(),
+        detected=type("D", (), {"transport": "fake", "probe_report": []})(),
+    )
+    result = client.synthesize_bytes(
+        "hello", request=SynthesisConfig(task_type="custom_voice")
+    )
     assert result.transport == "fake"
     assert len(result.audio_bytes) == 8
 
 
 def test_synthesize_array_returns_numpy_when_available():
-    client = TTSClient(endpoint="fake", adapter=_FakeAdapter(), detected=type("D", (), {"transport": "fake", "probe_report": []})())
-    result = client.synthesize_array("hello", request=SynthesisConfig(task_type="custom_voice"))
+    client = TTSClient(
+        endpoint="fake",
+        adapter=_FakeAdapter(),
+        detected=type("D", (), {"transport": "fake", "probe_report": []})(),
+    )
+    result = client.synthesize_array(
+        "hello", request=SynthesisConfig(task_type="custom_voice")
+    )
     assert result.audio_array.shape[0] == 2
 
 
@@ -65,6 +82,12 @@ def test_decode_audio_bytes_to_array_rejects_unknown_encoding():
 
 def test_open_stream_delegates_to_adapter():
     adapter = _FakeAdapter()
-    client = TTSClient(endpoint="fake", adapter=adapter, detected=type("D", (), {"transport": "fake", "probe_report": []})())
-    session = client.open_stream(SessionStartRequest(session_id="sid", config=SynthesisConfig()))
+    client = TTSClient(
+        endpoint="fake",
+        adapter=adapter,
+        detected=type("D", (), {"transport": "fake", "probe_report": []})(),
+    )
+    session = client.open_stream(
+        SessionStartRequest(session_id="sid", config=SynthesisConfig())
+    )
     assert session.session_id == "sid"

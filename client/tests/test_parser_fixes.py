@@ -15,10 +15,16 @@ from qwen3tts._internal.utils import decode_stream_event
 class TestSegmentIdDecode:
     def test_segment_id_zero_is_preserved(self):
         # 0 is a legitimate first-segment id, not the "no segment" sentinel.
-        assert decode_stream_event({"type": "segment_start", "segment_id": 0}).segment_id == 0
+        assert (
+            decode_stream_event({"type": "segment_start", "segment_id": 0}).segment_id
+            == 0
+        )
 
     def test_segment_id_nonzero_is_preserved(self):
-        assert decode_stream_event({"type": "segment_start", "segment_id": 3}).segment_id == 3
+        assert (
+            decode_stream_event({"type": "segment_start", "segment_id": 3}).segment_id
+            == 3
+        )
 
     def test_missing_segment_id_defaults_to_sentinel(self):
         assert decode_stream_event({"type": "done"}).segment_id == -1

@@ -94,10 +94,9 @@ def _artifact_fixed_bytes(variant_dir: Path) -> int:
     if fused_engine.is_file():
         fused_bytes = _file_size(fused_engine)
     else:
-        fused_bytes = (
-            _file_size(variant_dir / "talker_code2wav_fused.onnx")
-            + _file_size(variant_dir / "talker_code2wav_fused.onnx.data")
-        )
+        fused_bytes = _file_size(
+            variant_dir / "talker_code2wav_fused.onnx"
+        ) + _file_size(variant_dir / "talker_code2wav_fused.onnx.data")
 
     # EmbeddingWeights loads .pt tensors on GPU.  Keep .npz out because they are
     # export/intermediate compatibility files and are not loaded by runtime.
@@ -137,18 +136,12 @@ def _manifest_arch(manifest: dict[str, Any]) -> dict[str, Any]:
             "codec_vocab_size", talker.get("vocab_size"), default=3072
         ),
         "logits_topk": pick("logits_topk", c2w.get("logits_topk"), default=50),
-        "cp_num_stages": pick(
-            "cp_num_stages", c2w.get("cp_num_stages"), default=15
-        ),
+        "cp_num_stages": pick("cp_num_stages", c2w.get("cp_num_stages"), default=15),
         "n_c2w_layers": pick(
             "n_c2w_layers", c2w.get("num_code2wav_hidden_layers"), default=8
         ),
-        "c2w_kv_heads": pick(
-            "c2w_kv_heads", c2w.get("c2w_kv_heads"), default=16
-        ),
-        "c2w_head_dim": pick(
-            "c2w_head_dim", c2w.get("c2w_head_dim"), default=64
-        ),
+        "c2w_kv_heads": pick("c2w_kv_heads", c2w.get("c2w_kv_heads"), default=16),
+        "c2w_head_dim": pick("c2w_head_dim", c2w.get("c2w_head_dim"), default=64),
         "c2w_sliding_window": pick(
             "c2w_sliding_window", c2w.get("c2w_sliding_window"), default=72
         ),
@@ -207,12 +200,7 @@ def _variant_estimate(
     # builds batched C2W KV/states, and keeps cached output buffers.
     talker_delta = num_layers * 2 * kv_heads * 1 * head_dim * dtype_bytes
     c2w_delta = n_c2w * 2 * c2w_heads * FUSED_CHUNK_T * c2w_head * dtype_bytes
-    logits_scratch = (
-        50 * 4
-        + 15 * 50 * 4
-        + hidden_size * dtype_bytes
-        + vocab * 8
-    )
+    logits_scratch = 50 * 4 + 15 * 50 * 4 + hidden_size * dtype_bytes + vocab * 8
     transient = (
         talker_kv
         + c2w_batch_kv
@@ -298,7 +286,11 @@ def suggest_profile(
     batch_cap = int(os.environ.get("QWEN3_PROFILE_MAX_BATCH_CAP", "128"))
 
     available_mib = memory_mib * usable_fraction - fixed_mib - runtime_reserve_mib
-    raw_capacity = int(math.floor(available_mib / per_lane_peak_mib)) if per_lane_peak_mib > 0 else 0
+    raw_capacity = (
+        int(math.floor(available_mib / per_lane_peak_mib))
+        if per_lane_peak_mib > 0
+        else 0
+    )
     supported = [tier for tier in PROFILE_TIERS if tier <= batch_cap]
     # Guard against a batch_cap below the smallest tier (would IndexError).
     batch = supported[0] if supported else min(PROFILE_TIERS)
@@ -330,7 +322,9 @@ def main() -> None:
     parser.add_argument("--engine-dtype", default="bf16")
     parser.add_argument("--max-input-len", type=int, default=128)
     parser.add_argument("--max-seq-len", type=int, default=512)
-    parser.add_argument("--format", choices=("plain", "json", "summary"), default="plain")
+    parser.add_argument(
+        "--format", choices=("plain", "json", "summary"), default="plain"
+    )
     args = parser.parse_args()
 
     variants = [v for v in args.variants.split(",") if v]

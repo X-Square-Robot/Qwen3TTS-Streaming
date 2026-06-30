@@ -6,6 +6,7 @@ Checks that after running:
 
 the expected files and config fields exist. Skips if workspace/exported/<variant> not present.
 """
+
 import json
 from pathlib import Path
 
@@ -64,9 +65,7 @@ def test_config_has_hidden_act(weights_dir):
     with open(cfg_path) as f:
         cfg = json.load(f)
     if "hidden_act" not in cfg:
-        pytest.skip(
-            "config.json missing hidden_act — re-run export_01_embeddings.py"
-        )
+        pytest.skip("config.json missing hidden_act — re-run export_01_embeddings.py")
     assert cfg["hidden_act"] in ("silu", "gelu", "quick_gelu"), (
         f"Unexpected hidden_act: {cfg['hidden_act']}"
     )

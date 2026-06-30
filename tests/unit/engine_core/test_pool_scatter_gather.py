@@ -12,11 +12,19 @@ DTYPE = torch.float32
 @pytest.fixture
 def pool():
     cfg = ModelConfig(
-        num_layers=2, kv_heads=2, head_dim=4, max_seq_len=16,
-        n_c2w_layers=2, c2w_kv_heads=2, c2w_head_dim=4, c2w_sliding_window=8,
+        num_layers=2,
+        kv_heads=2,
+        head_dim=4,
+        max_seq_len=16,
+        n_c2w_layers=2,
+        c2w_kv_heads=2,
+        c2w_head_dim=4,
+        c2w_sliding_window=8,
         dtype=DTYPE,
     )
-    return KVCachePool(max_slots=4, config=cfg, device=torch.device("cpu"), preallocate=True)
+    return KVCachePool(
+        max_slots=4, config=cfg, device=torch.device("cpu"), preallocate=True
+    )
 
 
 class TestScatterPrefillKV:
@@ -70,14 +78,20 @@ class TestScatterTalkerKV:
         pool.scatter_prefill_kv(s0.slot_id, kv0, 3)
         pool.scatter_prefill_kv(s1.slot_id, kv1, 3)
 
-        present_kv = torch.cat([
-            torch.full((1, 4, 2, 4, 4), 10.0),
-            torch.full((1, 4, 2, 4, 4), 20.0),
-        ], dim=0)
+        present_kv = torch.cat(
+            [
+                torch.full((1, 4, 2, 4, 4), 10.0),
+                torch.full((1, 4, 2, 4, 4), 20.0),
+            ],
+            dim=0,
+        )
 
         pool.scatter_talker_kv(
-            [s0.slot_id, s1.slot_id], present_kv,
-            original_past_lens=[3, 3], padded_past_len=3, seq=1,
+            [s0.slot_id, s1.slot_id],
+            present_kv,
+            original_past_lens=[3, 3],
+            padded_past_len=3,
+            seq=1,
         )
 
         g0 = pool.gather_talker_kv([s0.slot_id], 4)
@@ -93,14 +107,20 @@ class TestScatterTalkerKV:
         pool.scatter_prefill_kv(s0.slot_id, kv0, 2)
         pool.scatter_prefill_kv(s1.slot_id, kv1, 4)
 
-        present_kv = torch.cat([
-            torch.full((1, 4, 2, 5, 4), 10.0),
-            torch.full((1, 4, 2, 5, 4), 20.0),
-        ], dim=0)
+        present_kv = torch.cat(
+            [
+                torch.full((1, 4, 2, 5, 4), 10.0),
+                torch.full((1, 4, 2, 5, 4), 20.0),
+            ],
+            dim=0,
+        )
 
         pool.scatter_talker_kv(
-            [s0.slot_id, s1.slot_id], present_kv,
-            original_past_lens=[2, 4], padded_past_len=4, seq=1,
+            [s0.slot_id, s1.slot_id],
+            present_kv,
+            original_past_lens=[2, 4],
+            padded_past_len=4,
+            seq=1,
         )
 
         g0 = pool.gather_talker_kv([s0.slot_id], 3)
@@ -113,10 +133,13 @@ class TestScatterC2WKV:
     def test_scatter_c2w(self, pool):
         s0 = pool.allocate("s0")
         s1 = pool.allocate("s1")
-        present = torch.cat([
-            torch.full((1, 4, 2, 5, 4), 10.0),
-            torch.full((1, 4, 2, 5, 4), 20.0),
-        ], dim=0)
+        present = torch.cat(
+            [
+                torch.full((1, 4, 2, 5, 4), 10.0),
+                torch.full((1, 4, 2, 5, 4), 20.0),
+            ],
+            dim=0,
+        )
         pool.scatter_c2w_kv([s0.slot_id, s1.slot_id], present)
 
         g0 = pool.gather_c2w_kv([s0.slot_id], 5)
@@ -156,8 +179,11 @@ class TestScatterC2WKVDelta:
 class TestStepOutputFields:
     def test_step_output_has_batch_kv(self):
         from engine.backend.executor import StepOutput
+
         out = StepOutput(
-            slots=[], eos_flags=[], audio_chunks=[],
+            slots=[],
+            eos_flags=[],
+            audio_chunks=[],
             batch_talker_kv=torch.zeros(2, 4, 2, 5, 4),
             batch_c2w_kv=torch.zeros(2, 4, 2, 3, 4),
             original_past_lens=[3, 4],

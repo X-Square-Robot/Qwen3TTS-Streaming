@@ -15,9 +15,11 @@ from typing import Any
 # Triton request type
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class TtsRequest:
     """High-level TTS request parameters for the Triton orchestrator."""
+
     text: str
     speaker: str = "Serena"
     language: str = "auto"
@@ -32,6 +34,7 @@ class TtsRequest:
 # ---------------------------------------------------------------------------
 # Payload builders
 # ---------------------------------------------------------------------------
+
 
 def build_payload(request: TtsRequest) -> dict[str, Any]:
     """Build a Triton ``request`` payload dict from a TtsRequest.

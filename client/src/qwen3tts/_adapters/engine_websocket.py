@@ -4,7 +4,6 @@ import json
 import socket
 import threading
 import time
-from typing import Any
 
 from qwen3tts_protocol import (
     AudioChunk,
@@ -19,7 +18,6 @@ from qwen3tts_protocol import (
 
 from .._internal.raw_websocket import (
     RawWebSocketConnection,
-    RawWebSocketError,
     ws_close,
     ws_connect,
     ws_recv_frame,
@@ -58,7 +56,9 @@ class EngineWebSocketAdapter:
             ws_send_json(conn, {"type": "get_capabilities"})
             deadline = time.perf_counter() + self.timeout
             while time.perf_counter() < deadline:
-                conn.sock.settimeout(max(0.05, min(0.2, deadline - time.perf_counter())))
+                conn.sock.settimeout(
+                    max(0.05, min(0.2, deadline - time.perf_counter()))
+                )
                 opcode, payload = ws_recv_frame(conn)
                 if opcode == 0x9:
                     ws_send_frame(conn, opcode=0xA, payload=payload)
@@ -67,7 +67,9 @@ class EngineWebSocketAdapter:
                     continue
                 message = json.loads(payload.decode("utf-8"))
                 if message.get("type") != "capabilities":
-                    raise ProtocolError(f"unexpected websocket response type: {message.get('type')!r}")
+                    raise ProtocolError(
+                        f"unexpected websocket response type: {message.get('type')!r}"
+                    )
                 return capabilities_from_payload(message.get("capabilities", {}))
             raise TimeoutError("websocket capabilities request timed out")
         finally:
@@ -161,11 +163,17 @@ def _iter_conn_messages(
 
 
 class EngineWebSocketStreamSession(BaseStreamSession):
-    def __init__(self, *, adapter: EngineWebSocketAdapter, start_request: SessionStartRequest) -> None:
-        super().__init__(session_id=start_request.session_id, transport=adapter.transport_name)
+    def __init__(
+        self, *, adapter: EngineWebSocketAdapter, start_request: SessionStartRequest
+    ) -> None:
+        super().__init__(
+            session_id=start_request.session_id, transport=adapter.transport_name
+        )
         self._adapter = adapter
         self._start_request = start_request
-        self._conn = ws_connect(adapter.endpoint, timeout=adapter.timeout, headers=adapter.headers)
+        self._conn = ws_connect(
+            adapter.endpoint, timeout=adapter.timeout, headers=adapter.headers
+        )
         ws_send_json(
             self._conn,
             {
@@ -174,12 +182,16 @@ class EngineWebSocketStreamSession(BaseStreamSession):
                 "config": synthesis_config_to_mapping(start_request.config),
             },
         )
-        self._reader = threading.Thread(target=self._reader_loop, name=f"ws-session-{self.session_id}", daemon=True)
+        self._reader = threading.Thread(
+            target=self._reader_loop, name=f"ws-session-{self.session_id}", daemon=True
+        )
         self._reader.start()
 
     def _reader_loop(self) -> None:
         try:
-            for message in _iter_conn_messages(self._conn, timeout=self._adapter.timeout):
+            for message in _iter_conn_messages(
+                self._conn, timeout=self._adapter.timeout
+            ):
                 self._put_message(message)
         except Exception as exc:
             self._put_message(

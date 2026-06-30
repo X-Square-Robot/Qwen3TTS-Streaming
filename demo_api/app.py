@@ -26,8 +26,17 @@ DEFAULT_LANGUAGE = os.environ.get("QWEN_DEMO_DEFAULT_LANGUAGE", "auto")
 DEFAULT_MS_PER_TOKEN = float(os.environ.get("QWEN_DEMO_DEFAULT_MS_PER_TOKEN", "30"))
 TRITON_GRPC = os.environ.get("QWEN_DEMO_TRITON_GRPC", "localhost:8001")
 TRITON_MODEL = os.environ.get("QWEN_DEMO_TRITON_MODEL", "tts_orchestrator")
-TRITON_MAX_BATCH_SLOTS = int(os.environ.get("QWEN_DEMO_TRITON_MAX_BATCH_SLOTS", os.environ.get("TRITON_MAX_BATCH_SLOTS", "128")))
-TRITON_MAX_SESSIONS = int(os.environ.get("QWEN_DEMO_TRITON_MAX_SESSIONS", os.environ.get("TRITON_MAX_SESSIONS", "128")))
+TRITON_MAX_BATCH_SLOTS = int(
+    os.environ.get(
+        "QWEN_DEMO_TRITON_MAX_BATCH_SLOTS",
+        os.environ.get("TRITON_MAX_BATCH_SLOTS", "128"),
+    )
+)
+TRITON_MAX_SESSIONS = int(
+    os.environ.get(
+        "QWEN_DEMO_TRITON_MAX_SESSIONS", os.environ.get("TRITON_MAX_SESSIONS", "128")
+    )
+)
 
 RELEASE_METADATA = {
     "stage": "engineering_preview",
@@ -52,7 +61,9 @@ async def cors_middleware(request: web.Request, handler):
         response = web.Response(status=204)
     else:
         response = await handler(request)
-    response.headers["Access-Control-Allow-Origin"] = os.environ.get("QWEN_DEMO_CORS_ORIGIN", "*")
+    response.headers["Access-Control-Allow-Origin"] = os.environ.get(
+        "QWEN_DEMO_CORS_ORIGIN", "*"
+    )
     response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "content-type"
     return response
@@ -102,7 +113,9 @@ async def handle_capabilities(request: web.Request) -> web.Response:
                 "text": default_request.get("text") or DEFAULT_TEXT,
                 "speaker": default_request.get("speaker") or DEFAULT_SPEAKER,
                 "language": default_request.get("language") or DEFAULT_LANGUAGE,
-                "ms_per_token": float(default_request.get("ms_per_token") or DEFAULT_MS_PER_TOKEN),
+                "ms_per_token": float(
+                    default_request.get("ms_per_token") or DEFAULT_MS_PER_TOKEN
+                ),
             },
             "backends": [
                 {
@@ -221,7 +234,9 @@ async def handle_trt_live(request: web.Request) -> web.StreamResponse:
                 await ws.send_json({"type": "error", "message": f"invalid JSON: {exc}"})
                 continue
             if payload.get("type") != "speak":
-                await ws.send_json({"type": "error", "message": "expected message type 'speak'"})
+                await ws.send_json(
+                    {"type": "error", "message": "expected message type 'speak'"}
+                )
                 continue
             await _stream_trt_live(ws, payload)
         elif message.type == WSMsgType.ERROR:
@@ -341,7 +356,9 @@ def _tts_request_from_body(body: dict[str, Any]) -> TtsRequest:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Qwen3TTS-Streaming WebUI demo API")
     parser.add_argument("--host", default=os.environ.get("QWEN_DEMO_HOST", "0.0.0.0"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("QWEN_DEMO_PORT", "7860")))
+    parser.add_argument(
+        "--port", type=int, default=int(os.environ.get("QWEN_DEMO_PORT", "7860"))
+    )
     args = parser.parse_args()
     web.run_app(create_app(), host=args.host, port=args.port)
 

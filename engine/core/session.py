@@ -125,6 +125,7 @@ class Session:
     def first_audio_at(self) -> Optional[float]:
         """Deprecated: use ``first_raw_audio_at`` instead."""
         import warnings
+
         warnings.warn(
             "Session.first_audio_at is deprecated; use first_raw_audio_at",
             DeprecationWarning,
@@ -156,6 +157,7 @@ class Session:
     def first_audio_latency_ms(self) -> Optional[float]:
         """Deprecated: use ``session_create_to_first_raw_audio_ms`` instead."""
         import warnings
+
         warnings.warn(
             "Session.first_audio_latency_ms is deprecated; "
             "use session_create_to_first_raw_audio_ms",

@@ -86,7 +86,11 @@ def test_infer_stream_sequence_accumulates_audio_across_requests():
             self._values = {
                 "event_type": np.array([event_type], dtype=object),
                 "event_json": np.array(
-                    [json.dumps(payload or {}, ensure_ascii=False) if payload is not None else ""],
+                    [
+                        json.dumps(payload or {}, ensure_ascii=False)
+                        if payload is not None
+                        else ""
+                    ],
                     dtype=object,
                 ),
                 "audio_chunk": np.array([audio], dtype=object),
@@ -122,7 +126,9 @@ def test_infer_stream_sequence_accumulates_audio_across_requests():
 
         def async_stream_infer(self, model_name, inputs, outputs):
             raw = inputs[0].data.reshape(-1)[0]
-            payload = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))
+            payload = json.loads(
+                raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+            )
             sent_payloads.append(payload)
             action = payload.get("action", "synthesize")
             if action == "init":
@@ -141,7 +147,11 @@ def test_infer_stream_sequence_accumulates_audio_across_requests():
                 )
             elif action == "append_text":
                 self.callback(
-                    _Result("audio", {"meta": {"phase": "token"}}, np.array([0.5], dtype=np.float32).tobytes()),
+                    _Result(
+                        "audio",
+                        {"meta": {"phase": "token"}},
+                        np.array([0.5], dtype=np.float32).tobytes(),
+                    ),
                     None,
                 )
             elif action == "text_complete":

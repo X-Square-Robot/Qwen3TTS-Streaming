@@ -16,7 +16,9 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 try:
-    from qwen_tts.core.tokenizer_12hz import modeling_qwen3_tts_tokenizer_v2 as qwen_tokenizer_v2
+    from qwen_tts.core.tokenizer_12hz import (
+        modeling_qwen3_tts_tokenizer_v2 as qwen_tokenizer_v2,
+    )
 except Exception:
     qwen_tokenizer_v2 = None
 
@@ -35,7 +37,9 @@ class SlidingWindowKVCache:
         window_size: int = 72,
     ):
         self._past = list(past_key_values)
-        self._delta: list[Tuple[torch.Tensor, torch.Tensor] | None] = [None] * len(self._past)
+        self._delta: list[Tuple[torch.Tensor, torch.Tensor] | None] = [None] * len(
+            self._past
+        )
         self.window_size = window_size
 
     def update(
@@ -142,6 +146,7 @@ def resolve_code2wav_state_batch_size(batch_size: int) -> int:
     # Static-state-batch workaround removed: keep state batch fully dynamic with request batch.
     return batch_size
 
+
 def num_code2wav_hidden_layers(decoder: nn.Module) -> int:
     """Match the actual pre_transformer depth (checkpoint may disagree with config)."""
     pt = getattr(decoder, "pre_transformer", None)
@@ -168,7 +173,9 @@ def get_initial_state_shapes(
     latent_dim = cfg.latent_dim
     decoder_dim = cfg.decoder_dim
     num_kv_heads = cfg.num_key_value_heads
-    head_dim = getattr(cfg, "head_dim", getattr(cfg, "hidden_size", 512) // cfg.num_attention_heads)
+    head_dim = getattr(
+        cfg, "head_dim", getattr(cfg, "hidden_size", 512) // cfg.num_attention_heads
+    )
     B = batch_size
     state_B = batch_size if conv_state_batch_size is None else conv_state_batch_size
     n_layers = num_code2wav_hidden_layers(decoder)
@@ -182,10 +189,10 @@ def get_initial_state_shapes(
     shapes.append(("conv_state_3", (state_B, latent_dim, 6)))
     for block_idx in range(4):
         out_dim = decoder_dim // (2 ** (block_idx + 1))
-        shapes.append((f"conv_state_{4+block_idx*3+0}", (state_B, out_dim, 6)))
-        shapes.append((f"conv_state_{4+block_idx*3+1}", (state_B, out_dim, 18)))
-        shapes.append((f"conv_state_{4+block_idx*3+2}", (state_B, out_dim, 54)))
-    shapes.append(("conv_state_16", (state_B, decoder_dim // (2 ** 4), 6)))
+        shapes.append((f"conv_state_{4 + block_idx * 3 + 0}", (state_B, out_dim, 6)))
+        shapes.append((f"conv_state_{4 + block_idx * 3 + 1}", (state_B, out_dim, 18)))
+        shapes.append((f"conv_state_{4 + block_idx * 3 + 2}", (state_B, out_dim, 54)))
+    shapes.append(("conv_state_16", (state_B, decoder_dim // (2**4), 6)))
     for block_idx in range(4):
         out_dim = decoder_dim // (2 ** (block_idx + 1))
         rp = [8, 5, 4, 3][block_idx]
@@ -193,7 +200,9 @@ def get_initial_state_shapes(
     return shapes
 
 
-def create_initial_states(decoder: nn.Module, device: torch.device, dtype: torch.dtype, batch_size: int = 1):
+def create_initial_states(
+    decoder: nn.Module, device: torch.device, dtype: torch.dtype, batch_size: int = 1
+):
     """Create zero-initialized state tensors for the streaming wrapper."""
     shapes = get_initial_state_shapes(
         decoder,
@@ -228,7 +237,9 @@ def freeze_quantizer_codebooks_for_export(decoder: nn.Module) -> None:
             if codebook is None:
                 continue
             with torch.no_grad():
-                embedding = codebook.embedding_sum / codebook.cluster_usage.clamp(min=codebook.epsilon).unsqueeze(1)
+                embedding = codebook.embedding_sum / codebook.cluster_usage.clamp(
+                    min=codebook.epsilon
+                ).unsqueeze(1)
             if hasattr(codebook, "inference_embedding"):
                 codebook.inference_embedding = embedding
             else:
@@ -236,7 +247,9 @@ def freeze_quantizer_codebooks_for_export(decoder: nn.Module) -> None:
             if not hasattr(codebook, "_orig_decode_for_export"):
                 codebook._orig_decode_for_export = codebook.decode
 
-            def _decode_with_frozen_embedding(self, codes: torch.Tensor) -> torch.Tensor:
+            def _decode_with_frozen_embedding(
+                self, codes: torch.Tensor
+            ) -> torch.Tensor:
                 return F.embedding(codes, self.inference_embedding)
 
             codebook.decode = types.MethodType(_decode_with_frozen_embedding, codebook)
@@ -263,7 +276,9 @@ def _build_rvq_embedding_table(rvq: nn.Module) -> torch.Tensor | None:
         emb = getattr(codebook, "inference_embedding", None)
         if emb is None:
             with torch.no_grad():
-                emb = codebook.embedding_sum / codebook.cluster_usage.clamp(min=codebook.epsilon).unsqueeze(1)
+                emb = codebook.embedding_sum / codebook.cluster_usage.clamp(
+                    min=codebook.epsilon
+                ).unsqueeze(1)
         emb_list.append(emb.detach())
     if not emb_list:
         return None
@@ -290,12 +305,15 @@ def _build_decoder_rope_embeddings_export(
     hidden_states: torch.Tensor,
     position_ids: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    inv_freq = rotary_emb.inv_freq.to(device=hidden_states.device, dtype=torch.float32).reshape(1, 1, -1)
+    inv_freq = rotary_emb.inv_freq.to(
+        device=hidden_states.device, dtype=torch.float32
+    ).reshape(1, 1, -1)
     pos = position_ids.unsqueeze(-1)
 
     device_type = (
         hidden_states.device.type
-        if isinstance(hidden_states.device.type, str) and hidden_states.device.type != "mps"
+        if isinstance(hidden_states.device.type, str)
+        and hidden_states.device.type != "mps"
         else "cpu"
     )
     with torch.autocast(device_type=device_type, enabled=False):
@@ -315,7 +333,9 @@ def _apply_rotary_pos_emb_export(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     cos = cos.unsqueeze(1)
     sin = sin.unsqueeze(1)
-    query_states = (query_states * cos) + (_rotate_half_export(query_states, half_dim) * sin)
+    query_states = (query_states * cos) + (
+        _rotate_half_export(query_states, half_dim) * sin
+    )
     key_states = (key_states * cos) + (_rotate_half_export(key_states, half_dim) * sin)
     return query_states, key_states
 
@@ -334,9 +354,15 @@ def _run_decoder_attention_export(
     num_heads = attn_module.q_proj.out_features // attn_module.head_dim
     num_kv_heads = attn_module.k_proj.out_features // attn_module.head_dim
 
-    query_states = attn_module.q_proj(hidden_states).reshape(batch, seq_len, num_heads, attn_module.head_dim)
-    key_states = attn_module.k_proj(hidden_states).reshape(batch, seq_len, num_kv_heads, attn_module.head_dim)
-    value_states = attn_module.v_proj(hidden_states).reshape(batch, seq_len, num_kv_heads, attn_module.head_dim)
+    query_states = attn_module.q_proj(hidden_states).reshape(
+        batch, seq_len, num_heads, attn_module.head_dim
+    )
+    key_states = attn_module.k_proj(hidden_states).reshape(
+        batch, seq_len, num_kv_heads, attn_module.head_dim
+    )
+    value_states = attn_module.v_proj(hidden_states).reshape(
+        batch, seq_len, num_kv_heads, attn_module.head_dim
+    )
 
     query_states = attn_module.q_norm(query_states).transpose(1, 2)
     key_states = attn_module.k_norm(key_states).transpose(1, 2)
@@ -350,17 +376,23 @@ def _run_decoder_attention_export(
         sin,
         attn_module.head_dim // 2,
     )
-    key_states, value_states = cache.update(key_states, value_states, attn_module.layer_idx, cache_kwargs=None)
+    key_states, value_states = cache.update(
+        key_states, value_states, attn_module.layer_idx, cache_kwargs=None
+    )
 
     key_states = _repeat_kv_export(key_states, attn_module.num_key_value_groups)
     value_states = _repeat_kv_export(value_states, attn_module.num_key_value_groups)
 
-    attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * attn_module.scaling
+    attn_weights = (
+        torch.matmul(query_states, key_states.transpose(2, 3)) * attn_module.scaling
+    )
     attn_weights = attn_weights + attention_mask
     attn_weights = F.softmax(attn_weights, dim=-1)
 
     attn_output = torch.matmul(attn_weights, value_states)
-    attn_output = attn_output.transpose(1, 2).reshape(batch, seq_len, attn_module.o_proj.in_features)
+    attn_output = attn_output.transpose(1, 2).reshape(
+        batch, seq_len, attn_module.o_proj.in_features
+    )
     return attn_module.o_proj(attn_output)
 
 
@@ -504,7 +536,9 @@ def patch_decoder_attention_mask_slice_for_export() -> None:
             attn_weights = attn_weights + attention_mask
 
         attn_weights = nn.functional.softmax(attn_weights, dim=-1)
-        attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+        attn_weights = nn.functional.dropout(
+            attn_weights, p=dropout, training=module.training
+        )
         attn_output = torch.matmul(attn_weights, value_states)
         attn_output = attn_output.transpose(1, 2).contiguous()
         return attn_output, attn_weights
@@ -521,7 +555,9 @@ def patch_decoder_rope_reshape_for_export() -> None:
     if _ROPE_RESHAPE_PATCHED or qwen_tokenizer_v2 is None:
         return
 
-    rope_cls = getattr(qwen_tokenizer_v2, "Qwen3TTSTokenizerV2DecoderRotatoryEmbedding", None)
+    rope_cls = getattr(
+        qwen_tokenizer_v2, "Qwen3TTSTokenizerV2DecoderRotatoryEmbedding", None
+    )
     apply_rope = getattr(qwen_tokenizer_v2, "apply_rotary_pos_emb", None)
     rotate_half = getattr(qwen_tokenizer_v2, "rotate_half", None)
     if rope_cls is None or apply_rope is None or rotate_half is None:
@@ -531,10 +567,18 @@ def patch_decoder_rope_reshape_for_export() -> None:
     def _rope_forward_reshape(self, x, position_ids):
         bsz = int(position_ids.shape[0])
         seq = int(position_ids.shape[1])
-        inv_freq = self.inv_freq.to(device=x.device, dtype=torch.float32).reshape(1, 1, -1)  # [1,1,D]
-        pos = position_ids.to(device=x.device, dtype=torch.float32).reshape(bsz, seq, 1)  # [B,T,1]
+        inv_freq = self.inv_freq.to(device=x.device, dtype=torch.float32).reshape(
+            1, 1, -1
+        )  # [1,1,D]
+        pos = position_ids.to(device=x.device, dtype=torch.float32).reshape(
+            bsz, seq, 1
+        )  # [B,T,1]
 
-        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+        device_type = (
+            x.device.type
+            if isinstance(x.device.type, str) and x.device.type != "mps"
+            else "cpu"
+        )
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = pos * inv_freq  # [B,T,D]
             emb = torch.cat((freqs, freqs), dim=-1)
@@ -542,7 +586,9 @@ def patch_decoder_rope_reshape_for_export() -> None:
             sin = emb.sin() * self.attention_scaling
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
-    def _apply_rotary_pos_emb_reshape(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    def _apply_rotary_pos_emb_reshape(
+        q, k, cos, sin, position_ids=None, unsqueeze_dim=1
+    ):
         del position_ids, unsqueeze_dim
         # q/k: [B, H, T, D], cos/sin: [B, T, D]
         bsz = int(cos.shape[0])
@@ -577,7 +623,9 @@ def patch_decoder_snakebeta_for_export(decoder: nn.Module) -> None:
 
         channels = int(module.alpha.numel())
 
-        def _snakebeta_forward(self, hidden_states: torch.Tensor, _channels: int = channels) -> torch.Tensor:
+        def _snakebeta_forward(
+            self, hidden_states: torch.Tensor, _channels: int = channels
+        ) -> torch.Tensor:
             alpha = torch.exp(self.alpha.reshape(1, _channels, 1))
             # exp(beta) is strictly positive, so exp(-beta) is the same scaling
             # as 1 / exp(beta) without the extra broadcast + reciprocal chain.
@@ -619,7 +667,9 @@ class Code2WavStreamingWrapper(nn.Module):
         self.hidden_size = getattr(cfg, "hidden_size", 512)
         self.latent_dim = cfg.latent_dim
         self.num_kv_heads = cfg.num_key_value_heads
-        self.head_dim = getattr(cfg, "head_dim", self.hidden_size // cfg.num_attention_heads)
+        self.head_dim = getattr(
+            cfg, "head_dim", self.hidden_size // cfg.num_attention_heads
+        )
         self._use_direct_quantizer_decode = True
         self._rvq_first_proj = None
         self._rvq_rest_proj = None
@@ -661,10 +711,18 @@ class Code2WavStreamingWrapper(nn.Module):
         rvq_rest = getattr(quantizer, "rvq_rest", None)
         first_table = _build_rvq_embedding_table(rvq_first)
         rest_table = _build_rvq_embedding_table(rvq_rest) if n_aco > 0 else None
-        first_proj = getattr(rvq_first, "output_proj", None) if rvq_first is not None else None
-        rest_proj = getattr(rvq_rest, "output_proj", None) if rvq_rest is not None else None
+        first_proj = (
+            getattr(rvq_first, "output_proj", None) if rvq_first is not None else None
+        )
+        rest_proj = (
+            getattr(rvq_rest, "output_proj", None) if rvq_rest is not None else None
+        )
 
-        if first_table is None or first_proj is None or (n_aco > 0 and (rest_table is None or rest_proj is None)):
+        if (
+            first_table is None
+            or first_proj is None
+            or (n_aco > 0 and (rest_table is None or rest_proj is None))
+        ):
             self._use_direct_quantizer_decode = False
             return
 
@@ -675,7 +733,9 @@ class Code2WavStreamingWrapper(nn.Module):
         self._rvq_rest_proj = rest_proj
         _upsert_buffer("_idx_sem", torch.arange(0, n_sem, dtype=torch.long))
         if n_aco > 0:
-            _upsert_buffer("_idx_aco", torch.arange(n_sem, n_sem + n_aco, dtype=torch.long))
+            _upsert_buffer(
+                "_idx_aco", torch.arange(n_sem, n_sem + n_aco, dtype=torch.long)
+            )
 
     @staticmethod
     def _decode_rvq_from_table(
@@ -695,8 +755,14 @@ class Code2WavStreamingWrapper(nn.Module):
 
     def _decode_quantizer_direct(self, codes: torch.Tensor) -> torch.Tensor:
         codes_sem = torch.index_select(codes, 1, self._idx_sem)
-        quantized = self._decode_rvq_from_table(self._rvq_first_table, self._rvq_first_proj, codes_sem)
-        if self._idx_aco is not None and self._rvq_rest_table is not None and self._rvq_rest_proj is not None:
+        quantized = self._decode_rvq_from_table(
+            self._rvq_first_table, self._rvq_first_proj, codes_sem
+        )
+        if (
+            self._idx_aco is not None
+            and self._rvq_rest_table is not None
+            and self._rvq_rest_proj is not None
+        ):
             codes_aco = torch.index_select(codes, 1, self._idx_aco)
             quantized = quantized + self._decode_rvq_from_table(
                 self._rvq_rest_table,
@@ -720,7 +786,9 @@ class Code2WavStreamingWrapper(nn.Module):
         """
         B = codes.shape[0]
         device = codes.device
-        dtype = codes.dtype if codes.dtype.is_floating_point else torch.get_default_dtype()
+        dtype = (
+            codes.dtype if codes.dtype.is_floating_point else torch.get_default_dtype()
+        )
 
         # Unpack states
         kv_list = [(states[2 * i], states[2 * i + 1]) for i in range(self.num_layers)]
@@ -747,7 +815,9 @@ class Code2WavStreamingWrapper(nn.Module):
 
         hidden = self.decoder.pre_transformer.input_proj(hidden)  # [B, 4, hidden_size]
         # position_ids [1, 4] to match transformer's expectation (same as cache_position.unsqueeze(0))
-        position_ids = cache_position.unsqueeze(0) if cache_position.dim() == 1 else cache_position
+        position_ids = (
+            cache_position.unsqueeze(0) if cache_position.dim() == 1 else cache_position
+        )
         if position_ids.shape[0] != B:
             position_ids = position_ids.expand(B, -1)
         position_embeddings = _build_decoder_rope_embeddings_export(

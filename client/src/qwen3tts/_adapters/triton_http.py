@@ -7,9 +7,19 @@ from typing import Any
 
 import requests
 
-from qwen3tts_protocol import AudioChunk, AudioFormat, Capabilities, SessionStartRequest, StreamEvent
+from qwen3tts_protocol import (
+    AudioChunk,
+    AudioFormat,
+    Capabilities,
+    SessionStartRequest,
+    StreamEvent,
+)
 
-from .._internal.utils import build_bytes_result, capabilities_from_payload, synthesis_config_to_mapping
+from .._internal.utils import (
+    build_bytes_result,
+    capabilities_from_payload,
+    synthesis_config_to_mapping,
+)
 from .._session import BaseStreamSession
 from ..constants import DEFAULT_MODEL_VERSION, TRANSPORT_TRITON_HTTP
 
@@ -35,10 +45,14 @@ class TritonHttpAdapter:
     def get_capabilities(self) -> Capabilities:
         infer_url = self._infer_url()
         payload = self._infer_payload({"action": "capabilities"})
-        response = requests.post(infer_url, json=payload, timeout=self.timeout, headers=self.headers)
+        response = requests.post(
+            infer_url, json=payload, timeout=self.timeout, headers=self.headers
+        )
         caps = _parse_capabilities_from_http_response(response)
         if caps is None:
-            raise RuntimeError(f"triton-http capabilities probe failed: HTTP {response.status_code} {response.text[:300]}")
+            raise RuntimeError(
+                f"triton-http capabilities probe failed: HTTP {response.status_code} {response.text[:300]}"
+            )
         return capabilities_from_payload(caps)
 
     def synthesize_bytes(self, text: str, *, request):
@@ -51,7 +65,9 @@ class TritonHttpAdapter:
             headers=self.headers,
         )
         if response.status_code != 200:
-            raise RuntimeError(f"triton-http infer failed: HTTP {response.status_code} {response.text[:300]}")
+            raise RuntimeError(
+                f"triton-http infer failed: HTTP {response.status_code} {response.text[:300]}"
+            )
         body = response.json()
         outputs = {item.get("name"): item for item in body.get("outputs", [])}
         audio_field = _first_output_scalar(outputs.get("audio_chunk"))
@@ -62,7 +78,10 @@ class TritonHttpAdapter:
             meta = {}
         raw_bytes = b""
         if audio_field:
-            if str(meta.get("audio_chunk_encoding", "") or "").strip().lower() == "base64":
+            if (
+                str(meta.get("audio_chunk_encoding", "") or "").strip().lower()
+                == "base64"
+            ):
                 raw_bytes = base64.b64decode(str(audio_field))
             elif isinstance(audio_field, str):
                 raw_bytes = audio_field.encode("utf-8")
@@ -71,7 +90,9 @@ class TritonHttpAdapter:
         audio_meta = meta.get("audio_format", {}) or {}
         audio_format = AudioFormat(
             encoding=str(audio_meta.get("encoding", request.config.audio.encoding)),
-            sample_rate=int(audio_meta.get("sample_rate", request.config.audio.sample_rate)),
+            sample_rate=int(
+                audio_meta.get("sample_rate", request.config.audio.sample_rate)
+            ),
             channels=int(audio_meta.get("channels", request.config.audio.channels)),
         )
         events = []
@@ -98,7 +119,9 @@ class TritonHttpAdapter:
     def open_stream(self, start_request: SessionStartRequest):
         return TritonHttpBufferedSession(self, start_request)
 
-    def _request_payload_for_text(self, request: SessionStartRequest, text: str) -> dict[str, Any]:
+    def _request_payload_for_text(
+        self, request: SessionStartRequest, text: str
+    ) -> dict[str, Any]:
         payload = synthesis_config_to_mapping(request.config)
         payload["text"] = text
         payload["session_id"] = request.session_id
@@ -107,7 +130,9 @@ class TritonHttpAdapter:
                 "vad_policy": {
                     "enabled": bool(request.output_policy.vad.enabled),
                     "strategy": str(request.output_policy.vad.strategy or "disabled"),
-                    "implementation": str(request.output_policy.vad.implementation or ""),
+                    "implementation": str(
+                        request.output_policy.vad.implementation or ""
+                    ),
                     "config": dict(request.output_policy.vad.config or {}),
                 },
                 "chunk_ms": int(request.output_policy.chunk_ms or 0),
@@ -200,14 +225,24 @@ def _parse_capabilities_from_http_response(response) -> dict[str, Any] | None:
 
 
 class TritonHttpBufferedSession(BaseStreamSession):
-    def __init__(self, adapter: TritonHttpAdapter, start_request: SessionStartRequest) -> None:
-        super().__init__(session_id=start_request.session_id, transport=adapter.transport_name)
+    def __init__(
+        self, adapter: TritonHttpAdapter, start_request: SessionStartRequest
+    ) -> None:
+        super().__init__(
+            session_id=start_request.session_id, transport=adapter.transport_name
+        )
         self._adapter = adapter
         self._start_request = start_request
         self._text_parts: list[str] = []
         self.degraded_to_oneshot = True
 
-    def send_text(self, text: str, *, seq_no: int | None = None, client_timestamp_ms: int | None = None) -> None:
+    def send_text(
+        self,
+        text: str,
+        *,
+        seq_no: int | None = None,
+        client_timestamp_ms: int | None = None,
+    ) -> None:
         self._check_send_open()
         self._text_parts.append(text)
 
@@ -216,14 +251,20 @@ class TritonHttpBufferedSession(BaseStreamSession):
         self._mark_send_closed()
         if client_timestamp_ms is not None:
             self._start_request.timing.client_end_ts_ms = int(client_timestamp_ms)
-        worker = threading.Thread(target=self._run_degraded_oneshot, name=f"triton-http-{self.session_id}", daemon=True)
+        worker = threading.Thread(
+            target=self._run_degraded_oneshot,
+            name=f"triton-http-{self.session_id}",
+            daemon=True,
+        )
         worker.start()
 
     def cancel(self, reason: str = "") -> None:
         if self._send_closed:
             return
         self._mark_send_closed()
-        self._put_message(StreamEvent(type="done", session_id=self.session_id, message=reason))
+        self._put_message(
+            StreamEvent(type="done", session_id=self.session_id, message=reason)
+        )
 
     def _run_degraded_oneshot(self) -> None:
         try:
@@ -233,7 +274,10 @@ class TritonHttpBufferedSession(BaseStreamSession):
                 type="start",
                 session_id=self.session_id,
                 audio=result.audio_format,
-                meta={"degraded_to_oneshot": "true", "transport_warning": "triton-http-buffered-stream"},
+                meta={
+                    "degraded_to_oneshot": "true",
+                    "transport_warning": "triton-http-buffered-stream",
+                },
             )
             self._put_message(start_event)
             if result.audio_bytes:
@@ -256,7 +300,11 @@ class TritonHttpBufferedSession(BaseStreamSession):
                         meta={"degraded_to_oneshot": "true"},
                     )
                 )
-            final_event = result.events[-1] if result.events else StreamEvent(type="done", session_id=self.session_id)
+            final_event = (
+                result.events[-1]
+                if result.events
+                else StreamEvent(type="done", session_id=self.session_id)
+            )
             final_meta = dict(final_event.meta)
             final_meta["degraded_to_oneshot"] = "true"
             self._put_message(
@@ -268,4 +316,6 @@ class TritonHttpBufferedSession(BaseStreamSession):
                 )
             )
         except Exception as exc:
-            self._put_message(StreamEvent(type="error", session_id=self.session_id, message=str(exc)))
+            self._put_message(
+                StreamEvent(type="error", session_id=self.session_id, message=str(exc))
+            )

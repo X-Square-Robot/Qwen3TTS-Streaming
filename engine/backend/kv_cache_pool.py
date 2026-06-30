@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 import torch
 
@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ModelConfig:
     """Model architecture parameters for KV cache sizing."""
+
     # Talker (1.7b defaults; 0.6b: hidden=1536, head_dim=64, vocab=2176)
     num_layers: int = 28
     kv_heads: int = 8
@@ -57,7 +58,9 @@ class ModelConfig:
 
     @property
     def num_c2w_states(self) -> int:
-        return 2 * self.n_c2w_layers + self.n_c2w_conv_states + self.n_c2w_transconv_states
+        return (
+            2 * self.n_c2w_layers + self.n_c2w_conv_states + self.n_c2w_transconv_states
+        )
 
 
 @dataclass
@@ -73,6 +76,7 @@ class SlotKVState:
     prefill time.  After each decode step the read/write sets are swapped
     via pointer swap (zero-copy for batch=1, copy_-only for batch>1).
     """
+
     slot_id: int
     session_id: Optional[str] = None
     segment_idx: int = -1
@@ -140,10 +144,12 @@ class SlotKVState:
     def flip_c2w_buffers(self) -> None:
         """Swap read/write buffer pointers (zero-copy pointer swap)."""
         self.c2w_conv_states, self._c2w_conv_write = (
-            self._c2w_conv_write, self.c2w_conv_states
+            self._c2w_conv_write,
+            self.c2w_conv_states,
         )
         self.c2w_transconv_states, self._c2w_transconv_write = (
-            self._c2w_transconv_write, self.c2w_transconv_states
+            self._c2w_transconv_write,
+            self.c2w_transconv_states,
         )
 
     def copy_c2w_and_flip(
@@ -214,28 +220,38 @@ class KVCachePool:
         logger.info(
             "KV pool initialized: %d slots, ~%.1f MB/slot (talker KV), "
             "preallocated=%s, device=%s",
-            max_slots, self._estimate_slot_mb(), preallocate, device,
+            max_slots,
+            self._estimate_slot_mb(),
+            preallocate,
+            device,
         )
 
     def _init_pool_tensors(self) -> None:
         c = self._config
         self._talker_kv_pool = torch.zeros(
-            self._max_slots, c.num_layers * 2, c.kv_heads,
-            c.max_seq_len, c.head_dim,
-            device=self._device, dtype=c.dtype,
+            self._max_slots,
+            c.num_layers * 2,
+            c.kv_heads,
+            c.max_seq_len,
+            c.head_dim,
+            device=self._device,
+            dtype=c.dtype,
         )
         self._c2w_kv_pool = torch.zeros(
-            self._max_slots, c.n_c2w_layers * 2, c.c2w_kv_heads,
-            c.c2w_sliding_window, c.c2w_head_dim,
-            device=self._device, dtype=c.dtype,
+            self._max_slots,
+            c.n_c2w_layers * 2,
+            c.c2w_kv_heads,
+            c.c2w_sliding_window,
+            c.c2w_head_dim,
+            device=self._device,
+            dtype=c.dtype,
         )
 
     def _estimate_slot_mb(self) -> float:
         c = self._config
         bytes_per_elem = 2 if c.dtype == torch.bfloat16 else 4
         kv_bytes = (
-            c.num_layers * 2 * c.kv_heads * c.head_dim
-            * c.max_seq_len * bytes_per_elem
+            c.num_layers * 2 * c.kv_heads * c.head_dim * c.max_seq_len * bytes_per_elem
         )
         return kv_bytes / (1024 * 1024)
 
@@ -338,7 +354,10 @@ class KVCachePool:
         """
         c = self._config
         slot.token_counts = torch.zeros(
-            1, c.codec_vocab_size, device=self._device, dtype=torch.int64,
+            1,
+            c.codec_vocab_size,
+            device=self._device,
+            dtype=torch.int64,
         )
         logger.debug("Initialized KV tensors for slot %d", slot.slot_id)
 
@@ -355,7 +374,10 @@ class KVCachePool:
         slot.sampling_generator = None
 
     def scatter_prefill_kv(
-        self, slot_id: int, kv: torch.Tensor, seq_len: int,
+        self,
+        slot_id: int,
+        kv: torch.Tensor,
+        seq_len: int,
     ) -> None:
         """Write prefill KV output directly to the pool.
 
@@ -369,7 +391,9 @@ class KVCachePool:
         self._talker_kv_pool[slot_id, :, :, :seq_len, :] = kv[0, :, :, :seq_len, :]
 
     def scatter_prefill_c2w_kv(
-        self, slot_id: int, kv: torch.Tensor,
+        self,
+        slot_id: int,
+        kv: torch.Tensor,
     ) -> None:
         """Write prefill C2W KV output directly to the pool."""
         if self._c2w_kv_pool is None:
@@ -382,7 +406,9 @@ class KVCachePool:
     # ------------------------------------------------------------------
 
     def gather_talker_kv(
-        self, slot_ids: list[int], max_past_len: int,
+        self,
+        slot_ids: list[int],
+        max_past_len: int,
     ) -> torch.Tensor:
         """Gather talker KV for a batch from the pre-allocated pool.
 
@@ -414,16 +440,21 @@ class KVCachePool:
             if new_total <= orig_pl:
                 continue
             if uniform or orig_pl >= padded_past_len:
-                self._talker_kv_pool[slot_id, :, :, :new_total, :] = \
-                    present_kv[i, :, :, :new_total, :]
+                self._talker_kv_pool[slot_id, :, :, :new_total, :] = present_kv[
+                    i, :, :, :new_total, :
+                ]
             else:
-                self._talker_kv_pool[slot_id, :, :, :orig_pl, :] = \
-                    present_kv[i, :, :, :orig_pl, :]
-                self._talker_kv_pool[slot_id, :, :, orig_pl:new_total, :] = \
-                    present_kv[i, :, :, padded_past_len:padded_past_len + seq, :]
+                self._talker_kv_pool[slot_id, :, :, :orig_pl, :] = present_kv[
+                    i, :, :, :orig_pl, :
+                ]
+                self._talker_kv_pool[slot_id, :, :, orig_pl:new_total, :] = present_kv[
+                    i, :, :, padded_past_len : padded_past_len + seq, :
+                ]
 
     def gather_c2w_kv(
-        self, slot_ids: list[int], max_c2w_len: int,
+        self,
+        slot_ids: list[int],
+        max_c2w_len: int,
     ) -> torch.Tensor:
         """Gather C2W KV from the pre-allocated pool."""
         if self._c2w_kv_pool is None:
@@ -432,7 +463,9 @@ class KVCachePool:
         return self._c2w_kv_pool[ids, :, :, :max_c2w_len, :].contiguous()
 
     def scatter_c2w_kv(
-        self, slot_ids: list[int], present_kv: torch.Tensor,
+        self,
+        slot_ids: list[int],
+        present_kv: torch.Tensor,
     ) -> None:
         """Write C2W KV back to the pool (sliding window, per-slot cropping).
 
@@ -443,7 +476,7 @@ class KVCachePool:
             raise RuntimeError("Pool not pre-allocated")
         c2w_max_past = self._config.c2w_sliding_window - 1
         for i, slot_id in enumerate(slot_ids):
-            kv = present_kv[i:i+1]
+            kv = present_kv[i : i + 1]
             s_len = kv.shape[3]
             if s_len > c2w_max_past:
                 # Crop to sliding window for this slot
@@ -467,9 +500,9 @@ class KVCachePool:
                 continue
             write_len = min(delta_len, cap - orig_pl)
             end = orig_pl + write_len
-            self._talker_kv_pool[slot_id, :, :, orig_pl:end, :] = (
-                delta_kv[i, :, :, :write_len, :]
-            )
+            self._talker_kv_pool[slot_id, :, :, orig_pl:end, :] = delta_kv[
+                i, :, :, :write_len, :
+            ]
 
     def scatter_c2w_kv_delta(
         self,
@@ -488,11 +521,11 @@ class KVCachePool:
             keep_past = min(orig_pl, max(0, window - delta_len))
             write_len = min(delta_len, window)
             if keep_past > 0:
-                self._c2w_kv_pool[slot_id, :, :, :keep_past, :] = (
-                    self._c2w_kv_pool[slot_id, :, :, orig_pl - keep_past:orig_pl, :]
-                )
-            self._c2w_kv_pool[slot_id, :, :, keep_past:keep_past + write_len, :] = (
-                delta_kv[i, :, :, delta_len - write_len:, :]
+                self._c2w_kv_pool[slot_id, :, :, :keep_past, :] = self._c2w_kv_pool[
+                    slot_id, :, :, orig_pl - keep_past : orig_pl, :
+                ]
+            self._c2w_kv_pool[slot_id, :, :, keep_past : keep_past + write_len, :] = (
+                delta_kv[i, :, :, delta_len - write_len :, :]
             )
 
     # ------------------------------------------------------------------
@@ -500,7 +533,8 @@ class KVCachePool:
     # ------------------------------------------------------------------
 
     def find_eviction_candidate(
-        self, max_idle_sec: float = 10.0,
+        self,
+        max_idle_sec: float = 10.0,
     ) -> Optional[SlotKVState]:
         """Find the least-recently-active occupied slot that exceeds idle limit.
 
@@ -527,7 +561,10 @@ class KVCachePool:
         evicted_session = slot.session_id
         logger.warning(
             "Force-evicting slot %d (session=%s, idle=%.1fs, past_len=%d)",
-            slot_id, evicted_session, slot.idle_seconds, slot.past_len,
+            slot_id,
+            evicted_session,
+            slot.idle_seconds,
+            slot.past_len,
         )
         self.release(slot_id)
         return evicted_session

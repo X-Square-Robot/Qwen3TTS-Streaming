@@ -117,8 +117,13 @@ class ReferenceAudioProcessor:
         cache_tag: str = "",
     ) -> ReferenceAudioFeatures:
         if not self._support.available:
-            raise RuntimeError(self._support.reason or "reference-audio preprocessing is unavailable")
-        if require_ref_codec and self._support.speech_tokenizer_codec_fused_path is None:
+            raise RuntimeError(
+                self._support.reason or "reference-audio preprocessing is unavailable"
+            )
+        if (
+            require_ref_codec
+            and self._support.speech_tokenizer_codec_fused_path is None
+        ):
             raise RuntimeError(
                 "speech_tokenizer_codec_fused_trt_missing: "
                 "speech_tokenizer_codec_fused TensorRT engine is required for Base ICL mode"
@@ -177,7 +182,9 @@ class ReferenceAudioProcessor:
                             f"invalid_ref_audio: reference audio duration {duration_sec:.2f}s "
                             f"exceeds {max_duration_sec:.2f}s"
                         )
-                    ref_codec_sum_vec, ref_audio_codes = self._run_speech_tokenizer_codec(wav_24k)
+                    ref_codec_sum_vec, ref_audio_codes = (
+                        self._run_speech_tokenizer_codec(wav_24k)
+                    )
                 finally:
                     self._release_codec_engine()
 
@@ -244,7 +251,9 @@ class ReferenceAudioProcessor:
         speech_tokenizer_codec_fused = _first_existing(
             engine_dir / "speech_tokenizer_codec_fused.engine",
             engine_dir / "speech_tokenizer_codec_fused" / "model.plan",
-            engine_dir / "speech_tokenizer_codec_fused" / "speech_tokenizer_codec_fused.engine",
+            engine_dir
+            / "speech_tokenizer_codec_fused"
+            / "speech_tokenizer_codec_fused.engine",
         )
         ref_codec_reason = ""
         if speech_tokenizer_codec_fused is None:
@@ -300,7 +309,9 @@ class ReferenceAudioProcessor:
         return ReferenceAudioSupport(
             available=True,
             speaker_encoder_path=speaker_encoder,
-            speech_tokenizer_encoder_path=speech_tokenizer_encoder if speech_tokenizer_encoder.is_file() else None,
+            speech_tokenizer_encoder_path=speech_tokenizer_encoder
+            if speech_tokenizer_encoder.is_file()
+            else None,
             speech_tokenizer_codec_fused_path=speech_tokenizer_codec_fused,
             code2wav_decoder_path=code2wav_decoder,
             ref_codec_reason=ref_codec_reason,
@@ -321,7 +332,9 @@ class ReferenceAudioProcessor:
             _artifact_fingerprint(self._support.speaker_encoder_path),
         ]
         if require_ref_codec:
-            parts.append(_artifact_fingerprint(self._support.speech_tokenizer_codec_fused_path))
+            parts.append(
+                _artifact_fingerprint(self._support.speech_tokenizer_codec_fused_path)
+            )
             parts.append(_artifact_fingerprint(self._support.code2wav_decoder_path))
         return "|".join(parts)
 
@@ -430,7 +443,9 @@ class ReferenceAudioProcessor:
             device = torch.device("cuda", self._device_id)
             current = torch.cuda.current_stream(device)
             if getattr(current, "cuda_stream", None) == getattr(
-                self._stream, "cuda_stream", None,
+                self._stream,
+                "cuda_stream",
+                None,
             ):
                 return
             self._stream.wait_stream(current)
@@ -584,7 +599,9 @@ class ReferenceAudioProcessor:
         trans_names = _indexed_names(input_names, "transconv_overlap_")
         conv_out_names = _indexed_names(output_names, "new_conv_state_")
         trans_out_names = _indexed_names(output_names, "new_transconv_overlap_")
-        if len(conv_names) != len(conv_out_names) or len(trans_names) != len(trans_out_names):
+        if len(conv_names) != len(conv_out_names) or len(trans_names) != len(
+            trans_out_names
+        ):
             raise RuntimeError(
                 "code2wav_decoder.engine state input/output layout is inconsistent: "
                 f"conv {len(conv_names)}->{len(conv_out_names)}, "
@@ -630,7 +647,7 @@ class ReferenceAudioProcessor:
 
         actual_past = 0
         for start in range(0, warm_frames, 4):
-            chunk = codes[:, :, start:start + 4].contiguous()
+            chunk = codes[:, :, start : start + 4].contiguous()
             # The standalone decoder consumes 4 codec frames at a time and
             # keeps a 72-frame sliding attention window, so past+chunk must
             # not exceed 72 for the causal mask shape.
@@ -639,14 +656,18 @@ class ReferenceAudioProcessor:
                 kv_v = [t[:, :, -68:, :].contiguous() for t in kv_v]
             past_len = int(kv_k[0].shape[2])
             attn = torch.zeros(
-                1, 1, 4, past_len + 4,
+                1,
+                1,
+                4,
+                past_len + 4,
                 device=device,
                 dtype=state_dtype,
             )
             if actual_past == 0:
                 attn[:, :, :, :past_len] = float("-inf")
             cache_position = torch.arange(
-                start, start + 4,
+                start,
+                start + 4,
                 device=device,
                 dtype=torch.float32,
             ).reshape(1, 4)
@@ -674,8 +695,14 @@ class ReferenceAudioProcessor:
                 )
             self._stream.synchronize()
 
-            new_k = [out[f"present_kv_{i}_k"].detach().clone().contiguous() for i in range(n_layers)]
-            new_v = [out[f"present_kv_{i}_v"].detach().clone().contiguous() for i in range(n_layers)]
+            new_k = [
+                out[f"present_kv_{i}_k"].detach().clone().contiguous()
+                for i in range(n_layers)
+            ]
+            new_v = [
+                out[f"present_kv_{i}_v"].detach().clone().contiguous()
+                for i in range(n_layers)
+            ]
             if actual_past == 0 and new_k[0].shape[2] > 4:
                 new_k = [t[:, :, 1:, :].contiguous() for t in new_k]
                 new_v = [t[:, :, 1:, :].contiguous() for t in new_v]
@@ -683,18 +710,27 @@ class ReferenceAudioProcessor:
                 new_k = [t[:, :, -72:, :].contiguous() for t in new_k]
                 new_v = [t[:, :, -72:, :].contiguous() for t in new_v]
             kv_k, kv_v = new_k, new_v
-            conv_states = [out[name].detach().clone().contiguous() for name in conv_out_names]
-            trans_states = [out[name].detach().clone().contiguous() for name in trans_out_names]
+            conv_states = [
+                out[name].detach().clone().contiguous() for name in conv_out_names
+            ]
+            trans_states = [
+                out[name].detach().clone().contiguous() for name in trans_out_names
+            ]
             actual_past = min(actual_past + 4, 72)
 
         # The fused step has chunk_T=1, so its max C2W past is sliding_window - 1.
         if kv_k[0].shape[2] > 71:
             kv_k = [t[:, :, -71:, :].contiguous() for t in kv_k]
             kv_v = [t[:, :, -71:, :].contiguous() for t in kv_v]
-        packed = torch.stack(
-            [item for pair in zip(kv_k, kv_v) for item in pair],
-            dim=1,
-        ).detach().cpu().contiguous()
+        packed = (
+            torch.stack(
+                [item for pair in zip(kv_k, kv_v) for item in pair],
+                dim=1,
+            )
+            .detach()
+            .cpu()
+            .contiguous()
+        )
         return (
             packed,
             [t.detach().cpu().contiguous() for t in conv_states],
@@ -750,7 +786,9 @@ def _validate_reference_audio_quality(
         warnings.append("reference audio is near-silent")
     clipping_ratio = float(np.mean(np.abs(audio) >= 0.999)) if audio.size else 0.0
     if clipping_ratio > 0.01:
-        warnings.append(f"reference audio clipping ratio is high ({clipping_ratio:.2%})")
+        warnings.append(
+            f"reference audio clipping ratio is high ({clipping_ratio:.2%})"
+        )
     return warnings
 
 
@@ -776,7 +814,9 @@ def _count_indexed(names: list[str], prefix: str, suffix: str) -> int:
     return max(indices) + 1
 
 
-def _profile_shape(engine, name: str, *, past_len: Optional[int] = None) -> tuple[int, ...]:
+def _profile_shape(
+    engine, name: str, *, past_len: Optional[int] = None
+) -> tuple[int, ...]:
     shape = list(engine._engine.get_tensor_shape(name))
     shape = [1 if int(dim) < 0 else int(dim) for dim in shape]
     if past_len is not None and len(shape) >= 3:
@@ -803,7 +843,9 @@ def _decode_wav_bytes(data: bytes) -> tuple[np.ndarray, int]:
 
     if channels > 1:
         audio = audio.reshape(-1, channels).mean(axis=1)
-    return np.ascontiguousarray(np.clip(audio, -1.0, 1.0), dtype=np.float32), sample_rate
+    return np.ascontiguousarray(
+        np.clip(audio, -1.0, 1.0), dtype=np.float32
+    ), sample_rate
 
 
 def _decode_pcm_samples(raw: bytes, sample_width: int) -> np.ndarray:
@@ -826,7 +868,7 @@ def _decode_wav_bytes_riff(data: bytes) -> tuple[np.ndarray, int, int]:
     raw: bytes | None = None
     offset = 12
     while offset + 8 <= len(data):
-        chunk_id = data[offset:offset + 4]
+        chunk_id = data[offset : offset + 4]
         chunk_size = struct.unpack_from("<I", data, offset + 4)[0]
         chunk_start = offset + 8
         chunk_end = chunk_start + chunk_size
@@ -843,10 +885,12 @@ def _decode_wav_bytes_riff(data: bytes) -> tuple[np.ndarray, int, int]:
     if len(fmt) < 16:
         raise ValueError("invalid WAV fmt chunk")
 
-    format_tag, channels, sample_rate, _, block_align, bits_per_sample = struct.unpack_from(
-        "<HHIIHH",
-        fmt,
-        0,
+    format_tag, channels, sample_rate, _, block_align, bits_per_sample = (
+        struct.unpack_from(
+            "<HHIIHH",
+            fmt,
+            0,
+        )
     )
     if format_tag == 0xFFFE and len(fmt) >= 40:
         # WAVE_FORMAT_EXTENSIBLE stores the real format tag in the first two
@@ -901,7 +945,9 @@ def _mel_spectrogram_24k(audio: np.ndarray, *, device):
     hop_size = 256
     win_size = 1024
     padding = (n_fft - hop_size) // 2
-    y = torch.nn.functional.pad(y.unsqueeze(1), (padding, padding), mode="reflect").squeeze(1)
+    y = torch.nn.functional.pad(
+        y.unsqueeze(1), (padding, padding), mode="reflect"
+    ).squeeze(1)
     window = torch.hann_window(win_size, device=device)
     spec = torch.stft(
         y,
@@ -963,7 +1009,9 @@ def _hz_to_mel(frequencies) -> np.ndarray:
     min_log_mel = min_log_hz / f_sp
     logstep = np.log(6.4) / 27.0
     log_t = frequencies >= min_log_hz
-    log_mels = min_log_mel + np.log(np.maximum(frequencies, min_log_hz) / min_log_hz) / logstep
+    log_mels = (
+        min_log_mel + np.log(np.maximum(frequencies, min_log_hz) / min_log_hz) / logstep
+    )
     return np.asarray(np.where(log_t, log_mels, mels))
 
 

@@ -4,12 +4,22 @@ import base64
 import json
 import queue
 import threading
-import time
 from typing import Any
 
-from qwen3tts_protocol import AudioChunk, AudioFormat, BytesResult, Capabilities, SessionStartRequest, StreamEvent
+from qwen3tts_protocol import (
+    AudioChunk,
+    AudioFormat,
+    BytesResult,
+    Capabilities,
+    SessionStartRequest,
+    StreamEvent,
+)
 
-from .._internal.utils import build_bytes_result, capabilities_from_payload, synthesis_config_to_mapping
+from .._internal.utils import (
+    build_bytes_result,
+    capabilities_from_payload,
+    synthesis_config_to_mapping,
+)
 from .._session import BaseStreamSession
 from ..constants import DEFAULT_TRITON_GRPC_MODEL, TRANSPORT_TRITON_GRPC
 from ..exceptions import DependencyMissingError
@@ -55,7 +65,9 @@ class TritonGrpcAdapter:
             raise RuntimeError(f"triton model {self.model_name!r} is not ready")
         payload = {"action": "capabilities"}
         req_input = grpcclient.InferInput("request", [1], "BYTES")
-        req_input.set_data_from_numpy(np.array([json.dumps(payload, ensure_ascii=False)], dtype=object))
+        req_input.set_data_from_numpy(
+            np.array([json.dumps(payload, ensure_ascii=False)], dtype=object)
+        )
         audio_out, event_type_out, event_json_out, final_out = _outputs(grpcclient)
         done = threading.Event()
         caps_holder: list[dict[str, Any]] = []
@@ -105,7 +117,9 @@ class TritonGrpcAdapter:
             return capabilities_from_payload(caps_holder[-1])
         if errors:
             raise RuntimeError(errors[0])
-        return capabilities_from_payload({"variant": "triton", "loaded_model_type": self.model_name})
+        return capabilities_from_payload(
+            {"variant": "triton", "loaded_model_type": self.model_name}
+        )
 
     def synthesize_bytes(self, text: str, *, request) -> BytesResult:
         session = self.open_stream(request)
@@ -138,16 +152,28 @@ class TritonGrpcAdapter:
 
 
 class TritonGrpcStreamSession(BaseStreamSession):
-    def __init__(self, adapter: TritonGrpcAdapter, start_request: SessionStartRequest) -> None:
-        super().__init__(session_id=start_request.session_id, transport=adapter.transport_name)
+    def __init__(
+        self, adapter: TritonGrpcAdapter, start_request: SessionStartRequest
+    ) -> None:
+        super().__init__(
+            session_id=start_request.session_id, transport=adapter.transport_name
+        )
         self._adapter = adapter
         self._start_request = start_request
         self._send_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
-        self._worker = threading.Thread(target=self._run, name=f"triton-grpc-{self.session_id}", daemon=True)
+        self._worker = threading.Thread(
+            target=self._run, name=f"triton-grpc-{self.session_id}", daemon=True
+        )
         self._worker.start()
         self._send_queue.put(_build_stream_request("start", start_request))
 
-    def send_text(self, text: str, *, seq_no: int | None = None, client_timestamp_ms: int | None = None) -> None:
+    def send_text(
+        self,
+        text: str,
+        *,
+        seq_no: int | None = None,
+        client_timestamp_ms: int | None = None,
+    ) -> None:
         self._check_send_open()
         payload = {
             "action": "append_text",
@@ -219,16 +245,28 @@ class TritonGrpcStreamSession(BaseStreamSession):
             if event_type == "start":
                 audio_meta = payload.get("audio_format") or payload.get("audio") or {}
                 current_audio_format = AudioFormat(
-                    encoding=str(audio_meta.get("encoding", current_audio_format.encoding)),
-                    sample_rate=int(audio_meta.get("sample_rate", current_audio_format.sample_rate)),
-                    channels=int(audio_meta.get("channels", current_audio_format.channels)),
+                    encoding=str(
+                        audio_meta.get("encoding", current_audio_format.encoding)
+                    ),
+                    sample_rate=int(
+                        audio_meta.get("sample_rate", current_audio_format.sample_rate)
+                    ),
+                    channels=int(
+                        audio_meta.get("channels", current_audio_format.channels)
+                    ),
                 )
                 self._put_message(
                     StreamEvent(
                         type="start",
-                        session_id=str(payload.get("session_id", self.session_id) or self.session_id),
+                        session_id=str(
+                            payload.get("session_id", self.session_id)
+                            or self.session_id
+                        ),
                         audio=current_audio_format,
-                        meta={str(k): str(v) for k, v in dict(payload.get("meta") or {}).items()},
+                        meta={
+                            str(k): str(v)
+                            for k, v in dict(payload.get("meta") or {}).items()
+                        },
                     )
                 )
             elif event_type == "audio":
@@ -237,18 +275,27 @@ class TritonGrpcStreamSession(BaseStreamSession):
                     AudioChunk(
                         pcm_bytes=raw_bytes,
                         audio=current_audio_format,
-                        meta={str(k): str(v) for k, v in dict(payload.get("meta") or {}).items()},
+                        meta={
+                            str(k): str(v)
+                            for k, v in dict(payload.get("meta") or {}).items()
+                        },
                     )
                 )
             elif event_type:
                 self._put_message(
                     StreamEvent(
                         type=event_type if event_type != "end" else "done",
-                        session_id=str(payload.get("session_id", self.session_id) or self.session_id),
+                        session_id=str(
+                            payload.get("session_id", self.session_id)
+                            or self.session_id
+                        ),
                         segment_id=int(payload.get("segment_id", -1)),
                         text=str(payload.get("text", "") or ""),
                         message=str(payload.get("message", "") or ""),
-                        meta={str(k): str(v) for k, v in dict(payload.get("meta") or {}).items()},
+                        meta={
+                            str(k): str(v)
+                            for k, v in dict(payload.get("meta") or {}).items()
+                        },
                     )
                 )
             if is_final or event_type in {"end", "error"}:
@@ -261,7 +308,11 @@ class TritonGrpcStreamSession(BaseStreamSession):
                 if request_payload is None:
                     break
                 req_input = grpcclient.InferInput("request", [1], "BYTES")
-                req_input.set_data_from_numpy(np.array([json.dumps(request_payload, ensure_ascii=False)], dtype=object))
+                req_input.set_data_from_numpy(
+                    np.array(
+                        [json.dumps(request_payload, ensure_ascii=False)], dtype=object
+                    )
+                )
                 client.async_stream_infer(
                     model_name=self._adapter.model_name,
                     inputs=[req_input],
@@ -273,7 +324,9 @@ class TritonGrpcStreamSession(BaseStreamSession):
         finally:
             client.stop_stream()
         if errors:
-            self._put_message(StreamEvent(type="error", session_id=self.session_id, message=errors[0]))
+            self._put_message(
+                StreamEvent(type="error", session_id=self.session_id, message=errors[0])
+            )
         elif not self._closed:
             # The stream ended without an explicit end/error event (e.g. the
             # engine set is_final on an audio chunk). Emit a terminal so the
@@ -290,7 +343,9 @@ def _outputs(grpcclient):
     )
 
 
-def _build_stream_request(action: str, start_request: SessionStartRequest) -> dict[str, Any]:
+def _build_stream_request(
+    action: str, start_request: SessionStartRequest
+) -> dict[str, Any]:
     config = synthesis_config_to_mapping(start_request.config)
     config["session_id"] = start_request.session_id
     config["action"] = "init" if action == "start" else action
@@ -299,11 +354,15 @@ def _build_stream_request(action: str, start_request: SessionStartRequest) -> di
             "vad_policy": {
                 "enabled": bool(start_request.output_policy.vad.enabled),
                 "strategy": str(start_request.output_policy.vad.strategy or "disabled"),
-                "implementation": str(start_request.output_policy.vad.implementation or ""),
+                "implementation": str(
+                    start_request.output_policy.vad.implementation or ""
+                ),
                 "config": dict(start_request.output_policy.vad.config or {}),
             },
             "chunk_ms": int(start_request.output_policy.chunk_ms or 0),
-            "packet_format": str(start_request.output_policy.packet_format or "raw_pcm"),
+            "packet_format": str(
+                start_request.output_policy.packet_format or "raw_pcm"
+            ),
             "emit_text_events": bool(start_request.output_policy.emit_text_events),
             "config": dict(start_request.output_policy.config or {}),
         }
@@ -338,7 +397,10 @@ def _decode_audio_bytes_field(value: Any, payload: dict[str, Any]) -> bytes:
     if isinstance(value, (bytes, bytearray)):
         return bytes(value)
     if isinstance(value, str):
-        if str(payload.get("audio_chunk_encoding", "") or "").strip().lower() == "base64":
+        if (
+            str(payload.get("audio_chunk_encoding", "") or "").strip().lower()
+            == "base64"
+        ):
             return base64.b64decode(value)
         return value.encode("utf-8")
     return bytes(value)

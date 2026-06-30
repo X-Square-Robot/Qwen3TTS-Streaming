@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from qwen3tts_protocol import ArrayResult, BytesResult, SessionStartRequest, SynthesisConfig
+from qwen3tts_protocol import (
+    ArrayResult,
+    BytesResult,
+    SessionStartRequest,
+    SynthesisConfig,
+)
 
 from ._adapters.engine_grpc import EngineGrpcAdapter
 from ._adapters.engine_websocket import EngineWebSocketAdapter
@@ -64,14 +69,25 @@ class TTSClient:
     def get_capabilities(self):
         return self._adapter.get_capabilities()
 
-    def synthesize_bytes(self, text: str, *, request: SynthesisConfig | None = None) -> BytesResult:
+    def synthesize_bytes(
+        self, text: str, *, request: SynthesisConfig | None = None
+    ) -> BytesResult:
         config = request or SynthesisConfig()
-        start = SessionStartRequest(session_id="", config=config, output_policy=config.output_policy, timing=config.timing_context)
+        start = SessionStartRequest(
+            session_id="",
+            config=config,
+            output_policy=config.output_policy,
+            timing=config.timing_context,
+        )
         return self._adapter.synthesize_bytes(text, request=start)
 
-    def synthesize_array(self, text: str, *, request: SynthesisConfig | None = None) -> ArrayResult:
+    def synthesize_array(
+        self, text: str, *, request: SynthesisConfig | None = None
+    ) -> ArrayResult:
         result = self.synthesize_bytes(text, request=request)
-        audio_array = decode_audio_bytes_to_array(result.audio_bytes, encoding=result.audio_format.encoding)
+        audio_array = decode_audio_bytes_to_array(
+            result.audio_bytes, encoding=result.audio_format.encoding
+        )
         return ArrayResult(
             audio_format=result.audio_format,
             session_id=result.session_id,
@@ -89,7 +105,8 @@ class TTSClient:
         if start_request.output_policy is None or start_request.timing is None:
             start_request = replace(
                 start_request,
-                output_policy=start_request.output_policy or start_request.config.output_policy,
+                output_policy=start_request.output_policy
+                or start_request.config.output_policy,
                 timing=start_request.timing or start_request.config.timing_context,
             )
         return self._adapter.open_stream(start_request)
@@ -108,7 +125,9 @@ def _build_adapter(
     if transport == TRANSPORT_ENGINE_WEBSOCKET:
         return EngineWebSocketAdapter(endpoint, timeout=timeout, headers=headers)
     if transport == TRANSPORT_ENGINE_GRPC:
-        return EngineGrpcAdapter(endpoint, timeout=timeout, metadata=metadata, headers=headers)
+        return EngineGrpcAdapter(
+            endpoint, timeout=timeout, metadata=metadata, headers=headers
+        )
     if transport == TRANSPORT_TRITON_GRPC:
         return TritonGrpcAdapter(
             endpoint,

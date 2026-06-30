@@ -66,7 +66,9 @@ def test_default_vad_policy_is_disabled_and_noop_contract_only():
     policy = parse_output_policy({})
     timing = parse_timing_context({})
 
-    cfg = SessionConfig(audio=AudioConfig(sample_rate=24000, encoding=AudioEncoding.PCM_F32))
+    cfg = SessionConfig(
+        audio=AudioConfig(sample_rate=24000, encoding=AudioEncoding.PCM_F32)
+    )
     start = SessionStartRequest(
         session_id="sid",
         config=cfg,
@@ -79,7 +81,10 @@ def test_default_vad_policy_is_disabled_and_noop_contract_only():
     assert policy.vad.strategy == "disabled"
     assert event["meta"]["vad_enabled"] == "false"
     assert event["meta"]["vad_strategy"] == "disabled"
-    assert json.loads(event["meta"]["output_policy_json"])["vad_policy"]["enabled"] is False
+    assert (
+        json.loads(event["meta"]["output_policy_json"])["vad_policy"]["enabled"]
+        is False
+    )
 
 
 def test_output_pipeline_emits_server_timing_contract():
@@ -90,14 +95,18 @@ def test_output_pipeline_emits_server_timing_contract():
             "client_request_ts_ms": 1710000000000,
         }
     )
-    cfg = SessionConfig(audio=AudioConfig(sample_rate=24000, encoding=AudioEncoding.PCM_S16LE))
+    cfg = SessionConfig(
+        audio=AudioConfig(sample_rate=24000, encoding=AudioEncoding.PCM_S16LE)
+    )
     start = SessionStartRequest(
         session_id="sid",
         config=cfg,
         output_policy=parse_output_policy({}),
         timing=timing,
     )
-    pipeline = OutputPipeline(start, request_received_monotonic=1.0, request_received_epoch_ms=1000)
+    pipeline = OutputPipeline(
+        start, request_received_monotonic=1.0, request_received_epoch_ms=1000
+    )
 
     frame = pipeline.convert_audio_chunk(bytes([0, 0, 0, 0]))
     done = serialize_stream_event(build_done_event("sid", {}, pipeline))
@@ -131,7 +140,7 @@ def test_server_timing_emits_distinct_session_created_keys():
     acc = ServerTimingAccumulator()
     acc.base_monotonic = 1000.0
     acc.base_epoch_ms = 1_700_000_000_000
-    acc.session_created_monotonic = 1000.0           # -> base_epoch_ms exactly
+    acc.session_created_monotonic = 1000.0  # -> base_epoch_ms exactly
     acc.session_created_epoch_ms = 1_700_000_009_999  # distinct explicit value
 
     meta = acc.to_meta_dict()

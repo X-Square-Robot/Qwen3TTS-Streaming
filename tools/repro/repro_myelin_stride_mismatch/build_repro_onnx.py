@@ -38,7 +38,9 @@ def _clean_export_env(static_state_batch: int | None) -> dict[str, str]:
     return env
 
 
-def export_code2wav(repo_root: Path, out_dir: Path, static_state_batch: int | None) -> Path:
+def export_code2wav(
+    repo_root: Path, out_dir: Path, static_state_batch: int | None
+) -> Path:
     env = _clean_export_env(static_state_batch)
 
     cmd = [

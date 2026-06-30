@@ -106,7 +106,9 @@ def triton_io_float_pbtxt_from_manifest(manifest: Dict[str, Any]) -> str:
     (see trt_fused_io_formats.py). Missing key defaults to fp32 for backward compatibility;
     export_09 writes triton_io_float_dtype (default bf16) into triton_manifest.json.
     """
-    raw = manifest.get("triton_io_float_dtype") or manifest.get("onnx_io_dtype") or "fp32"
+    raw = (
+        manifest.get("triton_io_float_dtype") or manifest.get("onnx_io_dtype") or "fp32"
+    )
     return to_triton_dtype(normalize_triton_io_float_dtype(str(raw)))
 
 
@@ -142,7 +144,7 @@ instance_group [
 
 def render_speaker_encoder_trt(engine_dtype: str) -> str:
     ft = to_triton_dtype(engine_dtype)
-    return f'''name: "speaker_encoder"
+    return f"""name: "speaker_encoder"
 backend: "tensorrt"
 max_batch_size: 0
 
@@ -156,11 +158,11 @@ output [
 instance_group [
   {{ count: 1  kind: KIND_GPU  gpus: [ 0 ] }}
 ]
-'''
+"""
 
 
 def render_speech_tokenizer_encoder_trt() -> str:
-    return '''name: "speech_tokenizer_encoder"
+    return """name: "speech_tokenizer_encoder"
 backend: "tensorrt"
 max_batch_size: 0
 
@@ -174,7 +176,7 @@ output [
 instance_group [
   { count: 1  kind: KIND_GPU  gpus: [ 0 ] }
 ]
-'''
+"""
 
 
 def render_talker_unified_trt(talker: Dict[str, Any], engine_dtype: str) -> str:
@@ -191,7 +193,7 @@ def render_talker_unified_trt(talker: Dict[str, Any], engine_dtype: str) -> str:
         "max_batch_size: 0",
         "",
         "input [",
-        f"  {{ name: \"input_embeds\"  data_type: {ft}  dims: [ -1, -1, {H} ] }}",
+        f'  {{ name: "input_embeds"  data_type: {ft}  dims: [ -1, -1, {H} ] }}',
         "]",
         "input [",
         '  { name: "position_ids"  data_type: TYPE_INT64  dims: [ -1, 3, -1, 1 ] }',
@@ -275,7 +277,9 @@ def _c2w_state_shape_to_triton_dims(name: str, shape: List[int]) -> str:
     return _manifest_shape_to_triton_dims(s)
 
 
-def render_talker_code2wav_fused_trt(manifest: Dict[str, Any], engine_dtype: str) -> str:
+def render_talker_code2wav_fused_trt(
+    manifest: Dict[str, Any], engine_dtype: str
+) -> str:
     """
     Full I/O for TensorRT backend: empty input/output causes
     'failed to specify the dimensions of all input tensors or values of all input shape tensors'.
@@ -304,7 +308,11 @@ def render_talker_code2wav_fused_trt(manifest: Dict[str, Any], engine_dtype: str
     n_c2w_layers = int(c2w.get("num_code2wav_hidden_layers", 8))
     c2w_kv_heads = int(c2w.get("c2w_kv_heads", kv))
     c2w_head_dim = int(c2w.get("c2w_head_dim", hd))
-    cp_num_stages = int(c2w.get("cp_num_stages", manifest.get("architecture", {}).get("cp_num_stages", 15)))
+    cp_num_stages = int(
+        c2w.get(
+            "cp_num_stages", manifest.get("architecture", {}).get("cp_num_stages", 15)
+        )
+    )
 
     init_shapes: List[List[int]] = []
     for row in init_shapes_raw:
@@ -328,13 +336,13 @@ def render_talker_code2wav_fused_trt(manifest: Dict[str, Any], engine_dtype: str
         "max_batch_size: 0",
         "",
         "input [",
-        f"  {{ name: \"input_embeds\"  data_type: {io_ft}  dims: [ -1, -1, {H} ] }}",
+        f'  {{ name: "input_embeds"  data_type: {io_ft}  dims: [ -1, -1, {H} ] }}',
         "]",
         "input [",
         '  { name: "position_ids"  data_type: TYPE_INT64  dims: [ -1, 3, -1, 1 ] }',
         "]",
         "input [",
-        f"  {{ name: \"attention_bias\"  data_type: {io_ft}  dims: [ -1, 1, -1, -1 ] }}",
+        f'  {{ name: "attention_bias"  data_type: {io_ft}  dims: [ -1, 1, -1, -1 ] }}',
         "]",
         "input [",
         f'  {{ name: "token_counts"  data_type: TYPE_INT64  dims: [ -1, {v} ] }}',
@@ -355,7 +363,7 @@ def render_talker_code2wav_fused_trt(manifest: Dict[str, Any], engine_dtype: str
         '  { name: "cache_position"  data_type: TYPE_FP32  dims: [ -1, -1 ] }',
         "]",
         "input [",
-        f"  {{ name: \"c2w_attention_bias\"  data_type: {io_ft}  dims: [ -1, 1, -1, -1 ] }}",
+        f'  {{ name: "c2w_attention_bias"  data_type: {io_ft}  dims: [ -1, 1, -1, -1 ] }}',
         "]",
     ]
     if packed_kv:
@@ -453,7 +461,7 @@ def _dims_pbtxt(tup: Tuple[int, ...]) -> str:
 
 def render_code2wav_streaming(engine_mode: str, engine_dtype: str) -> str:
     if engine_mode == "onnx":
-        return '''name: "code2wav"
+        return """name: "code2wav"
 backend: "onnxruntime"
 max_batch_size: 0
 
@@ -467,7 +475,7 @@ input [
 instance_group [
   { count: 1  kind: KIND_GPU  gpus: [ 0 ] }
 ]
-'''
+"""
     ft = to_triton_dtype(engine_dtype)
     parts: List[str] = [
         'name: "code2wav"',
@@ -494,11 +502,15 @@ instance_group [
         parts.append("]")
     for name, a, b, c in _CONV_SPECS:
         parts.append("input [")
-        parts.append(f'  {{ name: "{name}"  data_type: {ft}  dims: [ {_dims_pbtxt((a, b, c))} ] }}')
+        parts.append(
+            f'  {{ name: "{name}"  data_type: {ft}  dims: [ {_dims_pbtxt((a, b, c))} ] }}'
+        )
         parts.append("]")
     for name, a, b, c in _TRANSCONV_SPECS:
         parts.append("input [")
-        parts.append(f'  {{ name: "{name}"  data_type: {ft}  dims: [ {_dims_pbtxt((a, b, c))} ] }}')
+        parts.append(
+            f'  {{ name: "{name}"  data_type: {ft}  dims: [ {_dims_pbtxt((a, b, c))} ] }}'
+        )
         parts.append("]")
     parts.append("output [")
     parts.append(f'  {{ name: "wav"  data_type: {ft}  dims: [ -1, 7680 ] }}')
@@ -737,7 +749,9 @@ def _manifest_model_version(manifest: Dict[str, Any]) -> str:
 def model_has_engine(model_dir: Path, model_version: str) -> Tuple[bool, bool]:
     """Returns (has_plan, has_onnx)."""
     version_dir = model_dir / model_version
-    return (version_dir / "model.plan").is_file(), (version_dir / "model.onnx").is_file()
+    return (version_dir / "model.plan").is_file(), (
+        version_dir / "model.onnx"
+    ).is_file()
 
 
 def generate_configs(
@@ -747,9 +761,7 @@ def generate_configs(
     engine_dtype: Optional[str] = None,
 ) -> None:
     emode = engine_mode.lower().strip()
-    ed = normalize_engine_dtype(
-        engine_dtype or manifest.get("engine_dtype") or "bf16"
-    )
+    ed = normalize_engine_dtype(engine_dtype or manifest.get("engine_dtype") or "bf16")
     variant = str(manifest.get("variant", "unknown"))
     talker = manifest.get("talker") or {}
     orch = manifest.get("orchestrator") or {}
@@ -823,7 +835,9 @@ def generate_configs(
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--manifest", type=Path, required=True, help="Path to triton_manifest.json")
+    p.add_argument(
+        "--manifest", type=Path, required=True, help="Path to triton_manifest.json"
+    )
     p.add_argument(
         "--output-repo",
         type=Path,

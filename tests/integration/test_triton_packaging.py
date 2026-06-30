@@ -26,12 +26,15 @@ from triton_manifest_io import build_manifest_for_export, load_manifest  # noqa:
 
 
 FIXTURE_MANIFEST = REPO_ROOT / "tools" / "data" / "triton_manifest_custom_1_7b.json"
-FIXTURE_LAYOUT = REPO_ROOT / "workspace" / "exported" / "custom-1.7b" / "code2wav_state_layout.json"
+FIXTURE_LAYOUT = (
+    REPO_ROOT / "workspace" / "exported" / "custom-1.7b" / "code2wav_state_layout.json"
+)
 
 
 # ---------------------------------------------------------------------------
 #  Helpers for assembly tests
 # ---------------------------------------------------------------------------
+
 
 def _write_custom_export(exported_dir: Path) -> None:
     variant_dir = exported_dir / "custom-1.7b"
@@ -100,14 +103,25 @@ def _write_custom_export(exported_dir: Path) -> None:
     (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
 
 
-def _assemble(exported_dir: Path, repo_dir: Path, variant: str, engine_mode: str) -> None:
+def _assemble(
+    exported_dir: Path, repo_dir: Path, variant: str, engine_mode: str
+) -> None:
     cmd = """
 set -euo pipefail
 source "{REPO_ROOT}/scripts/bash/lib/triton.sh"
 assemble_model_repo "$1" "$2" "$3" "$4" "1"
 """.format(REPO_ROOT=REPO_ROOT)
     subprocess.run(
-        ["bash", "-c", cmd, "bash", str(exported_dir), variant, str(repo_dir), engine_mode],
+        [
+            "bash",
+            "-c",
+            cmd,
+            "bash",
+            str(exported_dir),
+            variant,
+            str(repo_dir),
+            engine_mode,
+        ],
         cwd=REPO_ROOT,
         check=True,
     )
@@ -167,7 +181,7 @@ def test_render_orchestrator_http_custom_variant():
     }
     text = render_orchestrator_http("custom-1.7b", orch)
     assert 'name: "tts_orchestrator_http"' in text
-    assert 'kind: KIND_CPU' in text
+    assert "kind: KIND_CPU" in text
     assert 'string_value: "tts_orchestrator"' in text
     assert 'name: "audio_chunk"' in text
 
@@ -225,8 +239,13 @@ def test_build_manifest_for_export_roundtrip():
 
 
 def test_triton_io_float_dtype_from_manifest_defaults_fp32():
-    assert triton_io_float_pbtxt_from_manifest({}) == "TYPE_FP32"  # missing key defaults fp32
-    assert triton_io_float_pbtxt_from_manifest({"triton_io_float_dtype": "bf16"}) == "TYPE_BF16"
+    assert (
+        triton_io_float_pbtxt_from_manifest({}) == "TYPE_FP32"
+    )  # missing key defaults fp32
+    assert (
+        triton_io_float_pbtxt_from_manifest({"triton_io_float_dtype": "bf16"})
+        == "TYPE_BF16"
+    )
 
 
 def test_generate_configs_minimal_repo(tmp_path):
@@ -243,7 +262,7 @@ def test_generate_configs_minimal_repo(tmp_path):
     assert "tts_orchestrator" in orch_cfg
     assert "custom-1.7b" in orch_cfg
     assert 'key: "model_package_dir"' in orch_cfg
-    assert '/models/tts_orchestrator/1' in orch_cfg
+    assert "/models/tts_orchestrator/1" in orch_cfg
     assert 'name: "tts_orchestrator_http"' in orch_http_cfg
     assert 'string_value: "tts_orchestrator"' in orch_http_cfg
     assert not (tmp_path / "talker_code2wav_fused" / "config.pbtxt").exists()
@@ -253,8 +272,12 @@ def test_generate_configs_uses_package_version(tmp_path):
     if not FIXTURE_MANIFEST.is_file():
         pytest.fail("missing fixture manifest")
     manifest = json.loads(FIXTURE_MANIFEST.read_text(encoding="utf-8"))
-    manifest.setdefault("package", {})["model_package_dir"] = "/models/tts_orchestrator/2"
-    manifest.setdefault("orchestrator", {})["model_package_dir"] = "/models/tts_orchestrator/2"
+    manifest.setdefault("package", {})["model_package_dir"] = (
+        "/models/tts_orchestrator/2"
+    )
+    manifest.setdefault("orchestrator", {})["model_package_dir"] = (
+        "/models/tts_orchestrator/2"
+    )
 
     # Minimal fake repo for version 2: only the versioned orchestrator package is present.
     (tmp_path / "tts_orchestrator" / "2" / "runtime").mkdir(parents=True)
@@ -265,7 +288,7 @@ def test_generate_configs_uses_package_version(tmp_path):
 
     orch_cfg = (tmp_path / "tts_orchestrator" / "config.pbtxt").read_text()
     orch_http_cfg = (tmp_path / "tts_orchestrator_http" / "config.pbtxt").read_text()
-    assert '/models/tts_orchestrator/2' in orch_cfg
+    assert "/models/tts_orchestrator/2" in orch_cfg
     assert 'name: "tts_orchestrator_http"' in orch_http_cfg
     assert 'string_value: "tts_orchestrator"' in orch_http_cfg
 
@@ -294,6 +317,8 @@ def test_custom_trt_package_excludes_verification_and_icl_assets(tmp_path):
     assert not (package_dir / "tokenizer" / "code2wav_decoder.engine").exists()
     assert not (repo_dir / "speech_tokenizer_encoder").exists()
 
-    manifest = json.loads((runtime_dir / "triton_manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (runtime_dir / "triton_manifest.json").read_text(encoding="utf-8")
+    )
     optional_assets = manifest["package"]["optional_assets"]
     assert optional_assets == {}

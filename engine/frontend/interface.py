@@ -41,12 +41,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_WHITESPACE_TO_STRIP = str.maketrans({
-    "\n": "",
-    "\r": "",
-    "\t": " ",
-    "\u3000": "",
-})
+_WHITESPACE_TO_STRIP = str.maketrans(
+    {
+        "\n": "",
+        "\r": "",
+        "\t": " ",
+        "\u3000": "",
+    }
+)
 
 
 def _normalize_tts_text(text: str) -> str:
@@ -149,16 +151,17 @@ class FrontendInterface:
 
         # Resolve per-session observability level (raise-only override of the
         # global floor, clamped to max_session_level — see observability_tiers §3).
-        requested_level = (
-            config.output_policy.config.get("obs_level")
-            or config.timing.extra.get("obs_level")
-        )
+        requested_level = config.output_policy.config.get(
+            "obs_level"
+        ) or config.timing.extra.get("obs_level")
         obs_level_clamped = False
         if requested_level is not None:
             effective, obs_level_clamped = obs.resolve_session_level(requested_level)
             config.observability_level = effective
         session_level = config.observability_level
-        active_level = session_level if session_level is not None else obs.global_level()
+        active_level = (
+            session_level if session_level is not None else obs.global_level()
+        )
         session.spliter.enable_decision_recording(active_level >= obs.ObsLevel.DEBUG)
 
         # Emit lifecycle events
@@ -172,10 +175,15 @@ class FrontendInterface:
             group_policy=config.group_policy.value,
             task_type=config.task_type or None,
             vad_strategy=config.output_policy.vad.strategy or "disabled",
-            protocol_version=str(config.timing.extra.get("client_protocol_version", "")),
+            protocol_version=str(
+                config.timing.extra.get("client_protocol_version", "")
+            ),
             obs_level=active_level.name.lower(),
-            **({"obs_level_clamped": True, "obs_level_requested": str(requested_level)}
-               if obs_level_clamped else {}),
+            **(
+                {"obs_level_clamped": True, "obs_level_requested": str(requested_level)}
+                if obs_level_clamped
+                else {}
+            ),
         )
         LifecycleLogger.emit(
             session_id=session_id,
@@ -192,7 +200,9 @@ class FrontendInterface:
             acc.session_created_monotonic = session.created_at
 
         task = asyncio.create_task(
-            self._consume_results(session, on_audio=on_audio, on_done=on_done, on_event=on_event)
+            self._consume_results(
+                session, on_audio=on_audio, on_done=on_done, on_event=on_event
+            )
         )
         self._consumer_tasks[session_id] = task
 
@@ -259,7 +269,10 @@ class FrontendInterface:
         spliter: Spliter = session.spliter
         if mode == InputMode.AUTO:
             seg_actions = spliter.feed_auto(tokens)
-        elif mode == InputMode.LONG_SEGMENT and session.config.group_policy != GroupPolicy.NONE:
+        elif (
+            mode == InputMode.LONG_SEGMENT
+            and session.config.group_policy != GroupPolicy.NONE
+        ):
             seg_actions = spliter.push_group_tokens(tokens)
         else:
             seg_actions = spliter.feed_tokens(tokens)
@@ -308,7 +321,10 @@ class FrontendInterface:
             session._emoji_carry = ""
             await self._ingest_streaming_text(session, body)
 
-        if mode == InputMode.LONG_SEGMENT and session.config.group_policy != GroupPolicy.NONE:
+        if (
+            mode == InputMode.LONG_SEGMENT
+            and session.config.group_policy != GroupPolicy.NONE
+        ):
             await self._dispatcher.maybe_send_session_tokens_done(session)
             return
 
@@ -340,7 +356,9 @@ class FrontendInterface:
                     # Propagate raw audio timestamp from engine thread
                     if result.metrics and "first_raw_audio_at" in result.metrics:
                         try:
-                            session.first_raw_audio_at = float(result.metrics["first_raw_audio_at"])
+                            session.first_raw_audio_at = float(
+                                result.metrics["first_raw_audio_at"]
+                            )
                         except (ValueError, TypeError):
                             pass
 
@@ -357,19 +375,34 @@ class FrontendInterface:
                 elif result.type == ResultType.PREFILL_DONE:
                     # Propagate prefill timing from engine thread
                     if result.metrics:
-                        if "prefill_started_at" in result.metrics and session.prefill_started_at is None:
+                        if (
+                            "prefill_started_at" in result.metrics
+                            and session.prefill_started_at is None
+                        ):
                             try:
-                                session.prefill_started_at = float(result.metrics["prefill_started_at"])
+                                session.prefill_started_at = float(
+                                    result.metrics["prefill_started_at"]
+                                )
                             except (ValueError, TypeError):
                                 pass
-                        if "prefill_completed_at" in result.metrics and session.prefill_completed_at is None:
+                        if (
+                            "prefill_completed_at" in result.metrics
+                            and session.prefill_completed_at is None
+                        ):
                             try:
-                                session.prefill_completed_at = float(result.metrics["prefill_completed_at"])
+                                session.prefill_completed_at = float(
+                                    result.metrics["prefill_completed_at"]
+                                )
                             except (ValueError, TypeError):
                                 pass
-                        if "first_text_dequeued_at" in result.metrics and session.first_text_dequeued_at is None:
+                        if (
+                            "first_text_dequeued_at" in result.metrics
+                            and session.first_text_dequeued_at is None
+                        ):
                             try:
-                                session.first_text_dequeued_at = float(result.metrics["first_text_dequeued_at"])
+                                session.first_text_dequeued_at = float(
+                                    result.metrics["first_text_dequeued_at"]
+                                )
                             except (ValueError, TypeError):
                                 pass
 
@@ -379,7 +412,9 @@ class FrontendInterface:
                             {
                                 "type": "prefill_done",
                                 "segment_idx": result.segment_idx,
-                                "text": session.segment_texts.get(result.segment_idx, ""),
+                                "text": session.segment_texts.get(
+                                    result.segment_idx, ""
+                                ),
                                 "meta": {
                                     str(k): str(v)
                                     for k, v in (result.metrics or {}).items()
@@ -411,7 +446,9 @@ class FrontendInterface:
                         SegmentOrderMeta(seg_idx, 0, True),
                     )
                     ready = reorder.mark_done(
-                        meta.group_idx, meta.local_idx, group_final=meta.group_final,
+                        meta.group_idx,
+                        meta.local_idx,
+                        group_final=meta.group_final,
                     )
                     if ready and on_audio:
                         for chunk in ready:
@@ -438,7 +475,9 @@ class FrontendInterface:
                         overflow = result.metrics.get("overflow", False)
                         if audio_steps > 0 and text_tokens > 0:
                             session.spliter.update_ratio(
-                                audio_steps, text_tokens, overflow=overflow,
+                                audio_steps,
+                                text_tokens,
+                                overflow=overflow,
                             )
 
                     if on_event:
@@ -449,16 +488,28 @@ class FrontendInterface:
                         # Add segment-level timing observability
                         metrics["segment_id"] = str(seg_idx)
                         if segment_text:
-                            preview = segment_text[:64] + "..." if len(segment_text) > 64 else segment_text
+                            preview = (
+                                segment_text[:64] + "..."
+                                if len(segment_text) > 64
+                                else segment_text
+                            )
                             metrics["segment_text_preview"] = preview
                         if "audio_steps" in (result.metrics or {}):
-                            metrics["segment_decode_steps"] = str(result.metrics["audio_steps"])
+                            metrics["segment_decode_steps"] = str(
+                                result.metrics["audio_steps"]
+                            )
                         if "text_tokens" in (result.metrics or {}):
-                            metrics["segment_text_tokens"] = str(result.metrics["text_tokens"])
+                            metrics["segment_text_tokens"] = str(
+                                result.metrics["text_tokens"]
+                            )
                         if "cache_hit" in (result.metrics or {}):
-                            metrics["segment_cache_hit"] = str(result.metrics["cache_hit"])
+                            metrics["segment_cache_hit"] = str(
+                                result.metrics["cache_hit"]
+                            )
                         if "prefill_duration_ms" in (result.metrics or {}):
-                            metrics["segment_prefill_ms"] = str(result.metrics["prefill_duration_ms"])
+                            metrics["segment_prefill_ms"] = str(
+                                result.metrics["prefill_duration_ms"]
+                            )
                         session.segment_token_emitted_count.pop(seg_idx, None)
                         session.text_boundary_emitted.discard(seg_idx)
                         await on_event(
@@ -488,7 +539,9 @@ class FrontendInterface:
                                 "type": "warning",
                                 "segment_idx": result.segment_idx,
                                 "message": result.warning_msg or "",
-                                "text": session.segment_texts.get(result.segment_idx, ""),
+                                "text": session.segment_texts.get(
+                                    result.segment_idx, ""
+                                ),
                             },
                         )
 
@@ -508,17 +561,20 @@ class FrontendInterface:
                     # (done_meta merges these), enabling L0 client self-analysis.
                     done_metrics = dict(result.metrics or {})
                     done_metrics["server_batch_summary"] = json.dumps(
-                        batch_agg, ensure_ascii=False)
+                        batch_agg, ensure_ascii=False
+                    )
                     done_metrics["server_final_synthesized_text"] = obs.text_preview(
-                        "".join(final_text_parts))
+                        "".join(final_text_parts)
+                    )
                     done_metrics["server_total_segments"] = str(session.segments_done)
                     if on_done:
                         await on_done(session.session_id, done_metrics)
                     break
 
                 elif result.type == ResultType.ERROR:
-                    logger.error("Session %s error: %s",
-                                 session.session_id, result.error_msg)
+                    logger.error(
+                        "Session %s error: %s", session.session_id, result.error_msg
+                    )
                     session.state = SessionState.DONE
                     # Emit structured error lifecycle event
                     LifecycleLogger.emit(
@@ -537,7 +593,10 @@ class FrontendInterface:
                         "segments_completed": str(session.segments_done),
                     }
                     if on_done:
-                        await on_done(session.session_id, {"error": result.error_msg, **error_meta})
+                        await on_done(
+                            session.session_id,
+                            {"error": result.error_msg, **error_meta},
+                        )
                     break
 
         except asyncio.CancelledError:
@@ -546,7 +605,10 @@ class FrontendInterface:
             self._cleanup_session(session.session_id, expected=session)
 
     def _emit_session_summary(
-        self, session: Session, batch_agg: dict, final_text_parts: list,
+        self,
+        session: Session,
+        batch_agg: dict,
+        final_text_parts: list,
     ) -> None:
         """Emit the L1 ``session.summary`` line: one structured record + one
         human-readable line answering the five daily questions (TTFT / link
@@ -574,16 +636,21 @@ class FrontendInterface:
         infer_ms = summary.get("pipeline_ms", {}).get("inference_ms")
         cache = summary.get("cache", {})
         logger.info(
-            "session=%s DONE ttft=%sms infer=%sms batch=%d/%d vad_trim=%sms cache=%s segs=%d \"%s\"",
+            'session=%s DONE ttft=%sms infer=%sms batch=%d/%d vad_trim=%sms cache=%s segs=%d "%s"',
             session.session_id,
-            ttft_ms, infer_ms,
-            batch_agg["batched"], batch_agg["segments"],
+            ttft_ms,
+            infer_ms,
+            batch_agg["batched"],
+            batch_agg["segments"],
             summary.get("prefix_trimmed_ms", 0.0),
             "HIT" if cache.get("prefix_cache_hit") else "MISS",
-            session.segments_done, final_text,
+            session.segments_done,
+            final_text,
         )
 
-    def _cleanup_session(self, session_id: str, *, expected: Optional[Session] = None) -> None:
+    def _cleanup_session(
+        self, session_id: str, *, expected: Optional[Session] = None
+    ) -> None:
         # Identity guard: a cancelled consumer task unwinds and runs this
         # `finally` only later, after the event loop resumes it. If the same
         # session_id was re-created in the meantime (create_session cancels the
@@ -608,20 +675,39 @@ class FrontendInterface:
                 summary["session_create_to_first_raw_audio_ms"] = round(
                     session.session_create_to_first_raw_audio_ms, 3
                 )
-            if session.first_raw_audio_at is not None and session.first_text_enqueued_at is not None:
+            if (
+                session.first_raw_audio_at is not None
+                and session.first_text_enqueued_at is not None
+            ):
                 summary["first_text_enqueue_to_first_raw_audio_ms"] = round(
-                    (session.first_raw_audio_at - session.first_text_enqueued_at) * 1000, 3
+                    (session.first_raw_audio_at - session.first_text_enqueued_at)
+                    * 1000,
+                    3,
                 )
-            if session.first_raw_audio_at is not None and session.first_text_dequeued_at is not None:
+            if (
+                session.first_raw_audio_at is not None
+                and session.first_text_dequeued_at is not None
+            ):
                 summary["first_text_dequeue_to_first_raw_audio_ms"] = round(
-                    (session.first_raw_audio_at - session.first_text_dequeued_at) * 1000, 3
+                    (session.first_raw_audio_at - session.first_text_dequeued_at)
+                    * 1000,
+                    3,
                 )
-            if session.prefill_completed_at is not None and session.prefill_started_at is not None:
+            if (
+                session.prefill_completed_at is not None
+                and session.prefill_started_at is not None
+            ):
                 summary["engine_prefill_ms"] = round(
-                    (session.prefill_completed_at - session.prefill_started_at) * 1000, 3
+                    (session.prefill_completed_at - session.prefill_started_at) * 1000,
+                    3,
                 )
-            if session.first_raw_audio_at is not None and session.first_text_dequeued_at is not None:
-                summary["first_raw_to_first_effective_audio_ms"] = 0.0  # will be updated by output pipeline
+            if (
+                session.first_raw_audio_at is not None
+                and session.first_text_dequeued_at is not None
+            ):
+                summary["first_raw_to_first_effective_audio_ms"] = (
+                    0.0  # will be updated by output pipeline
+                )
 
             # Emit session.completed lifecycle event
             LifecycleLogger.emit(
@@ -669,7 +755,11 @@ class FrontendInterface:
         for d in sp.drain_split_decisions():
             d = dict(d)
             # offline pre-split → split_decision; streaming FSM → driver_transition.
-            phase = "driver_transition" if d.get("obs") == "driver_transition" else "split_decision"
+            phase = (
+                "driver_transition"
+                if d.get("obs") == "driver_transition"
+                else "split_decision"
+            )
             d.pop("obs", None)
             if "text_preview" in d:
                 d["text_preview"] = obs.text_preview(d.get("text_preview", ""))
@@ -684,7 +774,10 @@ class FrontendInterface:
 
     def _record_segment_text(self, actions: list, session: Session) -> None:
         for sa in actions:
-            if sa.token_text and sa.action.type in (ActionType.PREFILL, ActionType.DECODE):
+            if sa.token_text and sa.action.type in (
+                ActionType.PREFILL,
+                ActionType.DECODE,
+            ):
                 session.segment_texts[sa.segment_idx] = (
                     session.segment_texts.get(sa.segment_idx, "") + sa.token_text
                 )
@@ -749,12 +842,18 @@ class FrontendInterface:
 
     def _prepare_session_config(self, config: SessionConfig) -> None:
         """Canonicalize session-level prompt text once at session creation."""
-        config.instruct_spec = self._tokenize_prompt_text(config.instruct, field_name="instruct")
+        config.instruct_spec = self._tokenize_prompt_text(
+            config.instruct, field_name="instruct"
+        )
         config.instruct = config.instruct_spec.text if config.instruct_spec else None
-        config.ref_text_spec = self._tokenize_prompt_text(config.ref_text, field_name="ref_text")
+        config.ref_text_spec = self._tokenize_prompt_text(
+            config.ref_text, field_name="ref_text"
+        )
         config.ref_text = config.ref_text_spec.text if config.ref_text_spec else None
 
-    def _tokenize_prompt_text(self, text: Optional[str], *, field_name: str) -> Optional[TokenizedText]:
+    def _tokenize_prompt_text(
+        self, text: Optional[str], *, field_name: str
+    ) -> Optional[TokenizedText]:
         raw_text = text or ""
         normalized = _normalize_tts_text(raw_text).strip()
         self._log_tokenization_debug(

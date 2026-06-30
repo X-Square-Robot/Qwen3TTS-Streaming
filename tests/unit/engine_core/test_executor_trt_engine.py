@@ -215,6 +215,7 @@ def test_infer_raises_when_output_shape_remains_dynamic():
 #  I/O dtype consistency validation tests
 # ---------------------------------------------------------------------------
 
+
 class TestIODtypeConsistency:
     """Tests for TrtExecutor._validate_io_dtype_consistency()."""
 
@@ -242,16 +243,12 @@ class TestIODtypeConsistency:
 
     def test_passes_when_dtypes_match(self):
         """No error when manifest bf16 matches engine bf16."""
-        executor = self._make_executor_with_manifest(
-            {"triton_io_float_dtype": "bf16"}
-        )
+        executor = self._make_executor_with_manifest({"triton_io_float_dtype": "bf16"})
         executor._validate_io_dtype_consistency()  # should not raise
 
     def test_raises_on_mismatch(self):
         """RuntimeError when manifest fp32 but engine is bf16."""
-        executor = self._make_executor_with_manifest(
-            {"triton_io_float_dtype": "fp32"}
-        )
+        executor = self._make_executor_with_manifest({"triton_io_float_dtype": "fp32"})
         with pytest.raises(RuntimeError, match="does not match engine actual"):
             executor._validate_io_dtype_consistency()
 

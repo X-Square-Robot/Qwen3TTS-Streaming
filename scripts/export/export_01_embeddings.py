@@ -19,7 +19,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
 
 # Allow importing from scripts/python (for CodecEmbeddingSum)
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -46,7 +45,9 @@ logger = logging.getLogger("onnx_export")
 
 def _cast_state_dict(state_dict: dict, dtype: torch.dtype) -> dict:
     """Cast all float tensors in a state_dict to the target dtype."""
-    return {k: v.to(dtype) if v.is_floating_point() else v for k, v in state_dict.items()}
+    return {
+        k: v.to(dtype) if v.is_floating_point() else v for k, v in state_dict.items()
+    }
 
 
 def export_embeddings(
@@ -72,19 +73,20 @@ def export_embeddings(
     path = out_dir / "text_embedding.pt"
     torch.save(text_emb, path)
     n_params = sum(p.numel() for p in talker.model.text_embedding.parameters())
-    logger.info(f"  text_embedding.pt: {n_params/1e6:.1f}M params, saved to {path}")
+    logger.info(f"  text_embedding.pt: {n_params / 1e6:.1f}M params, saved to {path}")
 
     # 2. Text Projection (ResizeMLP)
     text_proj = _cast_state_dict(talker.text_projection.state_dict(), dtype)
     path = out_dir / "text_projection.pt"
     torch.save(text_proj, path)
     n_params = sum(p.numel() for p in talker.text_projection.parameters())
-    logger.info(f"  text_projection.pt: {n_params/1e6:.1f}M params, saved to {path}")
+    logger.info(f"  text_projection.pt: {n_params / 1e6:.1f}M params, saved to {path}")
 
     # 3. Codec Embeddings
     codec_embs = {
         "talker_codec_embedding": _cast_state_dict(
-            talker.model.codec_embedding.state_dict(), dtype),
+            talker.model.codec_embedding.state_dict(), dtype
+        ),
         "code_predictor_codec_embeddings": [
             _cast_state_dict(emb.state_dict(), dtype)
             for emb in talker.code_predictor.model.codec_embedding
@@ -98,8 +100,8 @@ def export_embeddings(
         for emb in talker.code_predictor.model.codec_embedding
     )
     logger.info(
-        f"  codec_embeddings.pt: talker={n_talker/1e6:.1f}M + "
-        f"code_predictor={n_cp/1e6:.1f}M params, saved to {path}"
+        f"  codec_embeddings.pt: talker={n_talker / 1e6:.1f}M + "
+        f"code_predictor={n_cp / 1e6:.1f}M params, saved to {path}"
     )
 
     # 3b. Pre-stacked 3D codec embedding (for optimized gather+sum, §2.1)
@@ -110,7 +112,9 @@ def export_embeddings(
     )
     path_3d = out_dir / "codec_embeddings_3d.pt"
     torch.save(stacked.cpu(), path_3d)
-    logger.info(f"  codec_embeddings_3d.pt: shape={tuple(stacked.shape)}, saved to {path_3d}")
+    logger.info(
+        f"  codec_embeddings_3d.pt: shape={tuple(stacked.shape)}, saved to {path_3d}"
+    )
     # Lightweight deploy: numpy format for BLS (cupy load)
     path_3d_npz = out_dir / "codec_embeddings_3d.npz"
     np.savez_compressed(
@@ -131,7 +135,13 @@ def export_embeddings(
         text_embedding_runtime.eval()
         text_projection_runtime.eval()
         special_ids = torch.tensor(
-            [[config.tts_pad_token_id, config.tts_bos_token_id, config.tts_eos_token_id]],
+            [
+                [
+                    config.tts_pad_token_id,
+                    config.tts_bos_token_id,
+                    config.tts_eos_token_id,
+                ]
+            ],
             device=device,
         )
         special_text_embed = text_embedding_runtime(special_ids)
@@ -150,7 +160,9 @@ def export_embeddings(
     }
     path = out_dir / "special_embeddings.pt"
     torch.save(special, path)
-    logger.info(f"  special_embeddings.pt: shape={tts_pad_embed.shape}, saved to {path}")
+    logger.info(
+        f"  special_embeddings.pt: shape={tts_pad_embed.shape}, saved to {path}"
+    )
     # Lightweight deploy: numpy format for BLS (no torch)
     path_special_npz = out_dir / "special_embeddings.npz"
     np.savez(
@@ -166,18 +178,22 @@ def export_embeddings(
     path = out_dir / "codec_head.pt"
     torch.save(codec_head, path)
     n_params = sum(p.numel() for p in talker.codec_head.parameters())
-    logger.info(f"  codec_head.pt: {n_params/1e6:.1f}M params, saved to {path}")
+    logger.info(f"  codec_head.pt: {n_params / 1e6:.1f}M params, saved to {path}")
 
     # 6. Code Predictor lm_heads (num_code_groups-1 heads, needed for fallback mode)
-    lm_heads = [_cast_state_dict(head.state_dict(), dtype)
-                for head in talker.code_predictor.lm_head]
+    lm_heads = [
+        _cast_state_dict(head.state_dict(), dtype)
+        for head in talker.code_predictor.lm_head
+    ]
     path = out_dir / "code_predictor_lm_heads.pt"
     torch.save(lm_heads, path)
     n_params = sum(
         sum(p.numel() for p in head.parameters())
         for head in talker.code_predictor.lm_head
     )
-    logger.info(f"  code_predictor_lm_heads.pt: {n_params/1e6:.1f}M params ({len(lm_heads)} heads)")
+    logger.info(
+        f"  code_predictor_lm_heads.pt: {n_params / 1e6:.1f}M params ({len(lm_heads)} heads)"
+    )
 
     # 7. Model config metadata
     metadata = {
@@ -193,7 +209,8 @@ def export_embeddings(
         "talker_num_heads": talker.config.num_attention_heads,
         "talker_num_kv_heads": talker.config.num_key_value_heads,
         "talker_head_dim": getattr(
-            talker.config, "head_dim",
+            talker.config,
+            "head_dim",
             talker.config.hidden_size // talker.config.num_attention_heads,
         ),
         "num_code_groups": talker.config.num_code_groups,
@@ -232,8 +249,12 @@ def export_embeddings(
 def main():
     setup_logging()
     parser = argparse.ArgumentParser(description="Export Embedding weights")
-    parser.add_argument("--variant", type=str, default=None,
-                        help="Model variant. Default: export all variants")
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default=None,
+        help="Model variant. Default: export all variants",
+    )
     add_common_args(parser)
     args = parser.parse_args()
 
@@ -247,7 +268,9 @@ def main():
             logger.error(f"Unknown variant: {variant}")
             continue
         try:
-            path = export_embeddings(variant, args.models_dir, args.output_dir, device, dtype)
+            path = export_embeddings(
+                variant, args.models_dir, args.output_dir, device, dtype
+            )
             logger.info(f"[{variant}] Embeddings exported to: {path}")
         except FileNotFoundError as e:
             logger.warning(f"[{variant}] Skipped: {e}")

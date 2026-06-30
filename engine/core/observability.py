@@ -81,7 +81,7 @@ def to_logging_level(level: ObsLevel) -> int:
 
 _global_level: ObsLevel = ObsLevel.DAILY
 _max_session_level: ObsLevel = ObsLevel.DAILY
-_text_capture: str = "preview"          # disabled | preview | hashed | full
+_text_capture: str = "preview"  # disabled | preview | hashed | full
 _text_preview_chars: int = 64
 _health_interval_sec: float = 30.0
 
@@ -104,7 +104,9 @@ def configure(
     _health_interval_sec = float(health_interval_sec)
     logger.info(
         "Observability configured: global=%s max_session=%s text_capture=%s",
-        _global_level.name, _max_session_level.name, _text_capture,
+        _global_level.name,
+        _max_session_level.name,
+        _text_capture,
     )
 
 

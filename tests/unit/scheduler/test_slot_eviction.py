@@ -11,10 +11,18 @@ from engine.backend.kv_cache_pool import KVCachePool, ModelConfig, SlotKVState
 @pytest.fixture
 def pool():
     cfg = ModelConfig(
-        num_layers=2, kv_heads=2, head_dim=4, max_seq_len=16,
-        n_c2w_layers=2, c2w_kv_heads=2, c2w_head_dim=4, c2w_sliding_window=8,
+        num_layers=2,
+        kv_heads=2,
+        head_dim=4,
+        max_seq_len=16,
+        n_c2w_layers=2,
+        c2w_kv_heads=2,
+        c2w_head_dim=4,
+        c2w_sliding_window=8,
     )
-    return KVCachePool(max_slots=4, config=cfg, device=torch.device("cpu"), preallocate=False)
+    return KVCachePool(
+        max_slots=4, config=cfg, device=torch.device("cpu"), preallocate=False
+    )
 
 
 class TestSlotActivity:

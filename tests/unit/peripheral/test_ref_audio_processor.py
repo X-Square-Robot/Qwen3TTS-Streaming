@@ -130,7 +130,9 @@ def test_codec_profile_max_duration_prefers_trt_profile():
             assert name == "waveform"
             return (1, 1, 144_000)
 
-    assert ReferenceAudioProcessor._infer_codec_max_duration_sec(_FakeCodecEngine()) == 6.0
+    assert (
+        ReferenceAudioProcessor._infer_codec_max_duration_sec(_FakeCodecEngine()) == 6.0
+    )
 
 
 def test_codec_profile_max_duration_falls_back_to_8s():
@@ -138,7 +140,9 @@ def test_codec_profile_max_duration_falls_back_to_8s():
         def get_input_profile_max_shape(self, name):
             return None
 
-    assert ReferenceAudioProcessor._infer_codec_max_duration_sec(_FakeCodecEngine()) == 8.0
+    assert (
+        ReferenceAudioProcessor._infer_codec_max_duration_sec(_FakeCodecEngine()) == 8.0
+    )
 
 
 def test_decode_wav_bytes_supports_ieee_float_wav():

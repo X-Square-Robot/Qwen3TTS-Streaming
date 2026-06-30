@@ -17,11 +17,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from pathlib import Path
 
 import pytest
 
-from tests.conftest import REPO_ROOT, TOKENIZER_DIR, WEIGHTS_DIR, VARIANT
+from tests.conftest import REPO_ROOT, TOKENIZER_DIR, VARIANT
 
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -37,6 +36,7 @@ SKIP_NO_TOKENIZER = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 # 1. Spliter unit tests (pure CPU, no async, no GPU)
 # ---------------------------------------------------------------------------
+
 
 class TestSpliter:
     """Test the Spliter text segmentation logic."""
@@ -75,10 +75,7 @@ class TestSpliter:
 
         th = compute_thresholds(remaining_kv=500, ema_ratio=5.0)
         assert (
-            th.min_tokens_l1
-            < th.min_tokens_l2
-            < th.min_tokens_l3
-            < th.force_split_at
+            th.min_tokens_l1 < th.min_tokens_l2 < th.min_tokens_l3 < th.force_split_at
         )
         assert th.min_tokens_l1 >= 1
         assert th.force_split_at <= 500
@@ -129,7 +126,9 @@ class TestSpliter:
 
         segments = spliter.pre_split(tokens)
         assert len(segments) >= 2
-        assert segments[0][-1].punct_level == 2, "no L1 fits -> fall back to L2 boundary"
+        assert segments[0][-1].punct_level == 2, (
+            "no L1 fits -> fall back to L2 boundary"
+        )
 
     def test_streaming_feed_tokens(self):
         """Streaming mode: feed tokens one by one, expect segment actions."""
@@ -195,8 +194,16 @@ class TestSpliter:
         a1 = spliter.push_group_tokens([(1, "你好"), (2, "。")])
         a2 = spliter.push_group_tokens([(3, "世界"), (4, "。")])
 
-        groups1 = {a.group_idx for a in a1 if a.action.type in (ActionType.PREFILL, ActionType.DECODE)}
-        groups2 = {a.group_idx for a in a2 if a.action.type in (ActionType.PREFILL, ActionType.DECODE)}
+        groups1 = {
+            a.group_idx
+            for a in a1
+            if a.action.type in (ActionType.PREFILL, ActionType.DECODE)
+        }
+        groups2 = {
+            a.group_idx
+            for a in a2
+            if a.action.type in (ActionType.PREFILL, ActionType.DECODE)
+        }
 
         assert groups1 == {0}
         assert groups2 == {1}
@@ -205,6 +212,7 @@ class TestSpliter:
 # ---------------------------------------------------------------------------
 # 2. AudioReorder tests
 # ---------------------------------------------------------------------------
+
 
 class TestAudioReorder:
     def test_in_order(self):
@@ -235,6 +243,7 @@ class TestAudioReorder:
 # ---------------------------------------------------------------------------
 # 3. Tokenizer test
 # ---------------------------------------------------------------------------
+
 
 class TestTokenizer:
     @SKIP_NO_TOKENIZER
@@ -268,13 +277,16 @@ class TestTokenizer:
         decodes = [a for a in actions if a.action.type == ActionType.DECODE]
         assert len(prefills) >= 1, "Should have at least one PREFILL"
         assert len(decodes) >= 1, "Should have DECODE actions"
-        print(f"\nTokens: {len(tokens)}, Prefills: {len(prefills)}, "
-              f"Decodes: {len(decodes)}, Segments: {spliter.current_segment_idx}")
+        print(
+            f"\nTokens: {len(tokens)}, Prefills: {len(prefills)}, "
+            f"Decodes: {len(decodes)}, Segments: {spliter.current_segment_idx}"
+        )
 
 
 # ---------------------------------------------------------------------------
 # 4. Prefill boundary tests
 # ---------------------------------------------------------------------------
+
 
 class TestPrefillBuilderBoundary:
     @SKIP_NO_TOKENIZER
@@ -308,9 +320,15 @@ class TestPrefillBuilderBoundary:
                 self.default_speaker = "vivian"
                 self.fallback_speaker = "vivian"
                 self.codec_embeddings_3d = None
-                self.tts_pad_embed = torch.full((1, 1, self.hidden_size), 1, dtype=torch.bfloat16)
-                self.tts_bos_embed = torch.full((1, 1, self.hidden_size), 2, dtype=torch.bfloat16)
-                self.tts_eos_embed = torch.full((1, 1, self.hidden_size), 3, dtype=torch.bfloat16)
+                self.tts_pad_embed = torch.full(
+                    (1, 1, self.hidden_size), 1, dtype=torch.bfloat16
+                )
+                self.tts_bos_embed = torch.full(
+                    (1, 1, self.hidden_size), 2, dtype=torch.bfloat16
+                )
+                self.tts_eos_embed = torch.full(
+                    (1, 1, self.hidden_size), 3, dtype=torch.bfloat16
+                )
 
             def _embed(self, token_ids: torch.Tensor, scale: float) -> torch.Tensor:
                 base = token_ids.to(dtype=torch.float32).unsqueeze(-1)
@@ -339,7 +357,8 @@ class TestPrefillBuilderBoundary:
         if kwargs.get("instruct"):
             prompt_kwargs["instruct"] = None
             prompt_kwargs["instruct_token_ids"] = tokenizer.encode_ids(
-                kwargs["instruct"], add_special_tokens=False,
+                kwargs["instruct"],
+                add_special_tokens=False,
             )
         kwargs_from_ids = dict(kwargs)
         kwargs_from_ids.update(prompt_kwargs)
@@ -375,6 +394,7 @@ class TestPrefillBuilderBoundary:
 # 5. Full pipeline integration test (asyncio + engine thread, stub mode)
 # ---------------------------------------------------------------------------
 
+
 class TestEngineIntegration:
     """Test the full engine pipeline in stub (no-GPU) mode."""
 
@@ -383,7 +403,9 @@ class TestEngineIntegration:
     async def test_single_session_stub(self):
         """One session, streaming text, verify audio callback chain."""
         from engine.core.types import (
-            EngineRequest, EngineResult, RequestType, ResultType,
+            EngineResult,
+            RequestType,
+            ResultType,
         )
         from engine.frontend.interface import FrontendInterface
         from engine.frontend.spliter.tokenizer import LightQwen3TTSTokenizer
@@ -426,18 +448,22 @@ class TestEngineIntegration:
 
         req_types = [r.type for r in requests_sent]
         assert RequestType.NEW_SESSION in req_types
-        has_segment = (RequestType.START_TOKENS in req_types
-                       or RequestType.APPEND_TOKENS in req_types)
+        has_segment = (
+            RequestType.START_TOKENS in req_types
+            or RequestType.APPEND_TOKENS in req_types
+        )
         assert has_segment, f"Expected segment requests, got: {req_types}"
 
         print(f"\nRequests sent to engine: {len(requests_sent)}")
         for r in requests_sent:
             print(f"  {r.type.name} seg={r.segment_idx} tokens={r.token_ids}")
 
-        await session.result_queue.put(EngineResult(
-            type=ResultType.SESSION_DONE,
-            session_id="test-001",
-        ))
+        await session.result_queue.put(
+            EngineResult(
+                type=ResultType.SESSION_DONE,
+                session_id="test-001",
+            )
+        )
 
         await asyncio.wait_for(done_event.wait(), timeout=2.0)
         assert interface.active_count == 0
@@ -479,10 +505,12 @@ class TestEngineIntegration:
 
         assert tokenizer.last_text == "第一行，第二行。 第三行。"
         assert session.engine_tokens_done_sent is True
-        await session.result_queue.put(EngineResult(
-            type=ResultType.SESSION_DONE,
-            session_id="norm-001",
-        ))
+        await session.result_queue.put(
+            EngineResult(
+                type=ResultType.SESSION_DONE,
+                session_id="norm-001",
+            )
+        )
         await asyncio.sleep(0)
 
     @pytest.mark.asyncio
@@ -519,10 +547,12 @@ class TestEngineIntegration:
         assert session.config.ref_text_spec.text == "参考文段，第二行。"
         assert session.config.instruct_spec.token_ids == [6, 7]
         assert session.config.ref_text_spec.token_ids == [9, 10]
-        await session.result_queue.put(EngineResult(
-            type=ResultType.SESSION_DONE,
-            session_id="prompt-001",
-        ))
+        await session.result_queue.put(
+            EngineResult(
+                type=ResultType.SESSION_DONE,
+                session_id="prompt-001",
+            )
+        )
         await asyncio.sleep(0)
 
     @pytest.mark.asyncio
@@ -566,18 +596,24 @@ class TestEngineIntegration:
         await asyncio.sleep(0)
 
         event_types = [event["type"] for event in events]
-        token_text = "".join(event["text"] for event in events if event["type"] == "text_token")
+        token_text = "".join(
+            event["text"] for event in events if event["type"] == "text_token"
+        )
 
         assert token_text == "你好。"
         assert "text_boundary_commit" in event_types
-        boundary = next(event for event in events if event["type"] == "text_boundary_commit")
+        boundary = next(
+            event for event in events if event["type"] == "text_boundary_commit"
+        )
         assert boundary["text"] == "你好。"
         assert boundary["meta"]["text_complete"] == "true"
 
-        await session.result_queue.put(EngineResult(
-            type=ResultType.SESSION_DONE,
-            session_id="token-player-001",
-        ))
+        await session.result_queue.put(
+            EngineResult(
+                type=ResultType.SESSION_DONE,
+                session_id="token-player-001",
+            )
+        )
         await asyncio.sleep(0)
 
     @SKIP_NO_TOKENIZER
@@ -585,7 +621,8 @@ class TestEngineIntegration:
     async def test_multi_session_stub(self):
         """Multiple concurrent sessions."""
         from engine.core.types import (
-            EngineResult, RequestType, ResultType,
+            EngineResult,
+            ResultType,
         )
         from engine.frontend.interface import FrontendInterface
         from engine.frontend.spliter.tokenizer import LightQwen3TTSTokenizer
@@ -612,15 +649,23 @@ class TestEngineIntegration:
                 _e.set()
 
             s = await interface.create_session(
-                sid, task_type="custom_voice", on_done=on_done,
+                sid,
+                task_type="custom_voice",
+                on_done=on_done,
             )
             sessions[sid] = s
 
         assert interface.active_count == n_sessions
 
         texts = [
-            "你好。", "世界！", "今天天气好。", "明天见。",
-            "测试。", "一二三四五。", "很高兴见到你！", "再见！",
+            "你好。",
+            "世界！",
+            "今天天气好。",
+            "明天见。",
+            "测试。",
+            "一二三四五。",
+            "很高兴见到你！",
+            "再见！",
         ]
         for i, sid in enumerate(sessions):
             await interface.push_text_input(sid, texts[i])
@@ -635,10 +680,12 @@ class TestEngineIntegration:
         assert req_count >= n_sessions
 
         for sid, session in sessions.items():
-            await session.result_queue.put(EngineResult(
-                type=ResultType.SESSION_DONE,
-                session_id=sid,
-            ))
+            await session.result_queue.put(
+                EngineResult(
+                    type=ResultType.SESSION_DONE,
+                    session_id=sid,
+                )
+            )
 
         for sid, evt in done_events.items():
             await asyncio.wait_for(evt.wait(), timeout=2.0)
@@ -674,9 +721,15 @@ class TestEngineIntegration:
 
     @SKIP_NO_TOKENIZER
     @pytest.mark.asyncio
-    async def test_long_segment_streaming_queues_followup_groups_until_segment_done(self):
+    async def test_long_segment_streaming_queues_followup_groups_until_segment_done(
+        self,
+    ):
         from engine.core.types import (
-            EngineResult, GroupPolicy, InputMode, ResultType, SessionConfig,
+            EngineResult,
+            GroupPolicy,
+            InputMode,
+            ResultType,
+            SessionConfig,
         )
         from engine.frontend.interface import FrontendInterface
         from engine.frontend.spliter.tokenizer import LightQwen3TTSTokenizer
@@ -719,12 +772,14 @@ class TestEngineIntegration:
         assert ("START_TOKENS", 2) not in initial_types
         assert ("START_TOKENS", 3) not in initial_types
 
-        await session.result_queue.put(EngineResult(
-            type=ResultType.SEGMENT_END,
-            session_id="long-seg-001",
-            segment_idx=0,
-            metrics={"audio_steps": 10, "text_tokens": 9},
-        ))
+        await session.result_queue.put(
+            EngineResult(
+                type=ResultType.SEGMENT_END,
+                session_id="long-seg-001",
+                segment_idx=0,
+                metrics={"audio_steps": 10, "text_tokens": 9},
+            )
+        )
         await asyncio.sleep(0)
 
         after_seg0 = []
@@ -733,12 +788,14 @@ class TestEngineIntegration:
             after_seg0.append((req.type.name, req.segment_idx))
         assert ("START_TOKENS", 2) in after_seg0
 
-        await session.result_queue.put(EngineResult(
-            type=ResultType.SEGMENT_END,
-            session_id="long-seg-001",
-            segment_idx=1,
-            metrics={"audio_steps": 10, "text_tokens": 3},
-        ))
+        await session.result_queue.put(
+            EngineResult(
+                type=ResultType.SEGMENT_END,
+                session_id="long-seg-001",
+                segment_idx=1,
+                metrics={"audio_steps": 10, "text_tokens": 3},
+            )
+        )
         await asyncio.sleep(0)
 
         after_seg1 = []
@@ -747,16 +804,19 @@ class TestEngineIntegration:
             after_seg1.append((req.type.name, req.segment_idx))
         assert ("START_TOKENS", 3) in after_seg1
 
-        await session.result_queue.put(EngineResult(
-            type=ResultType.SESSION_DONE,
-            session_id="long-seg-001",
-        ))
+        await session.result_queue.put(
+            EngineResult(
+                type=ResultType.SESSION_DONE,
+                session_id="long-seg-001",
+            )
+        )
         await asyncio.sleep(0)
 
 
 # ---------------------------------------------------------------------------
 # 6. Performance benchmark (optional, needs real tokenizer)
 # ---------------------------------------------------------------------------
+
 
 class TestPerformance:
     @SKIP_NO_TOKENIZER
@@ -779,8 +839,10 @@ class TestPerformance:
         elapsed = time.perf_counter() - start
 
         tokens_per_sec = (len(tokens) * n_iters) / elapsed
-        print(f"\nSpliter throughput: {tokens_per_sec:.0f} tokens/sec "
-              f"({len(tokens)} tokens × {n_iters} iters in {elapsed:.3f}s)")
+        print(
+            f"\nSpliter throughput: {tokens_per_sec:.0f} tokens/sec "
+            f"({len(tokens)} tokens × {n_iters} iters in {elapsed:.3f}s)"
+        )
         assert tokens_per_sec > 10_000, "Spliter should handle >10K tokens/sec"
 
 

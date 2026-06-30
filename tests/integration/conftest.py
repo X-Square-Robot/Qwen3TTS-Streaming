@@ -1,4 +1,5 @@
 """Auto-apply 'integration' marker to all tests in this directory."""
+
 import pytest
 
 

@@ -33,8 +33,10 @@ def main() -> None:
     )
 
     fmt = result.audio_format
-    print(f"transport={result.transport}  encoding={fmt.encoding}  "
-          f"sample_rate={fmt.sample_rate}  bytes={len(result.audio_bytes)}")
+    print(
+        f"transport={result.transport}  encoding={fmt.encoding}  "
+        f"sample_rate={fmt.sample_rate}  bytes={len(result.audio_bytes)}"
+    )
 
     _save_wav(OUT, result.audio_bytes, fmt.encoding, fmt.sample_rate)
     print(f"saved {OUT}")
@@ -44,6 +46,7 @@ def _save_wav(path: str, pcm: bytes, encoding: str, sample_rate: int) -> None:
     """Write engine PCM (pcm_f32 or pcm_s16le) to a 16-bit WAV."""
     if encoding == "pcm_f32":
         import array
+
         floats = array.array("f")
         floats.frombytes(pcm)
         pcm16 = b"".join(

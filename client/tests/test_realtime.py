@@ -31,7 +31,9 @@ def _pcm_f32_silence(duration_s: float, sample_rate: int = SAMPLE_RATE) -> bytes
     return b"\x00" * (num_samples * 4)
 
 
-def _pcm_f32_tone(duration_s: float, freq: float = 440.0, sample_rate: int = SAMPLE_RATE) -> bytes:
+def _pcm_f32_tone(
+    duration_s: float, freq: float = 440.0, sample_rate: int = SAMPLE_RATE
+) -> bytes:
     """Generate a pcm_f32 sine tone for distinguishable test data."""
     import math
 
@@ -116,7 +118,9 @@ class TestPassthroughMode:
     def test_yields_audio_chunks_as_timed_audio(self):
         chunk = _make_audio_chunk(0.02)
         session = _session_with_chunks(chunk)
-        stream = RealtimeAudioStream(session, fill_silence=False, sample_rate=SAMPLE_RATE)
+        stream = RealtimeAudioStream(
+            session, fill_silence=False, sample_rate=SAMPLE_RATE
+        )
 
         frames = list(stream)
         # One audio frame + no silence fills
@@ -126,7 +130,9 @@ class TestPassthroughMode:
 
     def test_no_silence_inserted(self):
         session = _session_with_chunks(_make_audio_chunk(0.02))
-        stream = RealtimeAudioStream(session, fill_silence=False, sample_rate=SAMPLE_RATE)
+        stream = RealtimeAudioStream(
+            session, fill_silence=False, sample_rate=SAMPLE_RATE
+        )
         frames = list(stream)
         silence_frames = [f for f in frames if f.is_silence]
         assert len(silence_frames) == 0
@@ -138,14 +144,18 @@ class TestPassthroughMode:
         session._put_message(_make_audio_chunk(0.02))
         session._put_message(StreamEvent(type="done", session_id="test"))
 
-        stream = RealtimeAudioStream(session, fill_silence=False, sample_rate=SAMPLE_RATE)
+        stream = RealtimeAudioStream(
+            session, fill_silence=False, sample_rate=SAMPLE_RATE
+        )
         frames = list(stream)
         assert len(frames) == 1
         assert not frames[0].is_silence
 
     def test_empty_stream(self):
         session = _session_with_chunks()
-        stream = RealtimeAudioStream(session, fill_silence=False, sample_rate=SAMPLE_RATE)
+        stream = RealtimeAudioStream(
+            session, fill_silence=False, sample_rate=SAMPLE_RATE
+        )
         frames = list(stream)
         assert len(frames) == 0
 

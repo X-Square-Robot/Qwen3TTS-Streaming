@@ -23,7 +23,7 @@ from __future__ import annotations
 from collections import deque
 import logging
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Deque, List, Optional, Tuple
 
 from ...core.types import SegmentToken
@@ -82,9 +82,11 @@ def _match_terminal_punct(text: str) -> int:
 # Output type — actions tagged with segment index
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SegmentAction:
     """One Driver action tagged with the segment it belongs to."""
+
     segment_idx: int
     action: ActionResult
     group_idx: int = -1
@@ -102,6 +104,7 @@ class _PendingToken:
     ``boundary`` marks the last token of an offline group: the driver is
     force-flushed right after it.
     """
+
     token: SegmentToken
     group_idx: Optional[int]
     boundary: bool = False
@@ -110,6 +113,7 @@ class _PendingToken:
 # ---------------------------------------------------------------------------
 # Spliter
 # ---------------------------------------------------------------------------
+
 
 class Spliter:
     """Orchestrates text splitting and multi-segment Driver management.
@@ -169,9 +173,15 @@ class Spliter:
         self._next_segment_idx: int = 0
 
         # Coordinate metadata assigned when a segment is opened (Option ①):
-        self._seg_coords: dict[int, Tuple[int, int]] = {}   # segment_idx -> (group_idx, local_idx)
-        self._seg_group_key: dict[int, Optional[int]] = {}  # segment_idx -> offline group id (None = streaming)
-        self._group_next_local: dict[int, int] = {}         # offline group id -> next local_idx
+        self._seg_coords: dict[
+            int, Tuple[int, int]
+        ] = {}  # segment_idx -> (group_idx, local_idx)
+        self._seg_group_key: dict[
+            int, Optional[int]
+        ] = {}  # segment_idx -> offline group id (None = streaming)
+        self._group_next_local: dict[
+            int, int
+        ] = {}  # offline group id -> next local_idx
 
         # Segments that have entered flush (engine still decoding pad)
         self._flushing: set[int] = set()
@@ -221,29 +231,36 @@ class Spliter:
         return out
 
     def _record_split(
-        self, trigger: str, th: SplitThresholds, seg_tokens: List[SegmentToken],
-        last_l1_pos: int, chosen_level: int, reason: str,
+        self,
+        trigger: str,
+        th: SplitThresholds,
+        seg_tokens: List[SegmentToken],
+        last_l1_pos: int,
+        chosen_level: int,
+        reason: str,
     ) -> None:
         if not self._record_decisions:
             return
         preview = "".join(getattr(t, "text", "") or "" for t in seg_tokens)
-        self._split_decisions.append({
-            "obs": "split_decision",
-            "path": "offline_pre_split",
-            "trigger": trigger,
-            "remaining_kv": self._engine_max - self._prefill_len,
-            "prefill_len": self._prefill_len,
-            "ema_ratio": round(self._ema_ratio, 2),
-            "thresholds": {
-                "min_tokens_l1": th.min_tokens_l1,
-                "force_split_at": th.force_split_at,
-            },
-            "token_count_at_split": len(seg_tokens),
-            "last_l1_pos": last_l1_pos,
-            "chosen_level": chosen_level,
-            "reason": reason,
-            "text_preview": preview,
-        })
+        self._split_decisions.append(
+            {
+                "obs": "split_decision",
+                "path": "offline_pre_split",
+                "trigger": trigger,
+                "remaining_kv": self._engine_max - self._prefill_len,
+                "prefill_len": self._prefill_len,
+                "ema_ratio": round(self._ema_ratio, 2),
+                "thresholds": {
+                    "min_tokens_l1": th.min_tokens_l1,
+                    "force_split_at": th.force_split_at,
+                },
+                "token_count_at_split": len(seg_tokens),
+                "last_l1_pos": last_l1_pos,
+                "chosen_level": chosen_level,
+                "reason": reason,
+                "text_preview": preview,
+            }
+        )
 
     # ------------------------------------------------------------------
     # Threshold helpers
@@ -261,7 +278,8 @@ class Spliter:
         )
 
     def _create_driver(
-        self, thresholds: Optional[SplitThresholds] = None,
+        self,
+        thresholds: Optional[SplitThresholds] = None,
     ) -> Tuple[int, StreamingDriver]:
         idx = self._next_segment_idx
         self._next_segment_idx += 1
@@ -298,23 +316,27 @@ class Spliter:
         flushed = False
         for r in results:
             tt = token_text if r.type in (ActionType.PREFILL, ActionType.DECODE) else ""
-            out.append(SegmentAction(idx, r, group_idx, local_idx, group_final, token_text=tt))
+            out.append(
+                SegmentAction(idx, r, group_idx, local_idx, group_final, token_text=tt)
+            )
             if r.type in (ActionType.FLUSH_EOS, ActionType.FLUSH_NOP):
                 self._flushing.add(idx)
                 flushed = True
                 if self._record_decisions:
                     th = self._make_thresholds()
-                    self._split_decisions.append({
-                        "obs": "driver_transition",
-                        "path": "streaming_driver",
-                        "segment_idx": idx,
-                        "flush_type": r.type.name,
-                        "ema_ratio": round(self._ema_ratio, 2),
-                        "thresholds": {
-                            "min_tokens_l1": th.min_tokens_l1,
-                            "force_split_at": th.force_split_at,
-                        },
-                    })
+                    self._split_decisions.append(
+                        {
+                            "obs": "driver_transition",
+                            "path": "streaming_driver",
+                            "segment_idx": idx,
+                            "flush_type": r.type.name,
+                            "ema_ratio": round(self._ema_ratio, 2),
+                            "thresholds": {
+                                "min_tokens_l1": th.min_tokens_l1,
+                                "force_split_at": th.force_split_at,
+                            },
+                        }
+                    )
         return out, flushed
 
     # ------------------------------------------------------------------
@@ -357,7 +379,10 @@ class Spliter:
         return 3 if saw_level3_break else 0
 
     def _make_event(
-        self, token_id: int, text: str, punct_level: int,
+        self,
+        token_id: int,
+        text: str,
+        punct_level: int,
     ) -> SpliterEvent:
         if punct_level > 0:
             return SpliterEvent(
@@ -378,7 +403,8 @@ class Spliter:
     # ------------------------------------------------------------------
 
     def pre_split(
-        self, tokens: List[SegmentToken],
+        self,
+        tokens: List[SegmentToken],
     ) -> List[List[SegmentToken]]:
         """Pack a fully-known token sequence into capacity-sized segments,
         cutting at the LATEST safe boundary (hierarchical bin-packing).
@@ -404,12 +430,12 @@ class Spliter:
         source_tokens = self._coerce_tokens(tokens)
         segments: List[List[SegmentToken]] = []
         current: List[SegmentToken] = []
-        last = {1: -1, 2: -1, 3: -1}   # latest index of each punct tier in `current`
+        last = {1: -1, 2: -1, 3: -1}  # latest index of each punct tier in `current`
 
         def _flush_at(pos: int) -> None:
             nonlocal current
             segments.append(current[: pos + 1])
-            current = current[pos + 1:]
+            current = current[pos + 1 :]
             last[1] = last[2] = last[3] = -1
             for j, tok in enumerate(current):
                 if tok.punct_level in last:
@@ -429,27 +455,43 @@ class Spliter:
                     pos = last[1]
                     _flush_at(pos)
                     self._record_split(
-                        "l1", th, segments[-1], pos, 1,
+                        "l1",
+                        th,
+                        segments[-1],
+                        pos,
+                        1,
                         f"packed to capacity({capacity}); cut at latest L1 boundary pos {pos}",
                     )
                 elif last[2] >= 0:
                     pos = last[2]
                     _flush_at(pos)
                     self._record_split(
-                        "l2", th, segments[-1], pos, 2,
+                        "l2",
+                        th,
+                        segments[-1],
+                        pos,
+                        2,
                         f"packed to capacity({capacity}); no L1, cut at latest L2 boundary pos {pos}",
                     )
                 elif last[3] >= 0:
                     pos = last[3]
                     _flush_at(pos)
                     self._record_split(
-                        "l3", th, segments[-1], pos, 3,
+                        "l3",
+                        th,
+                        segments[-1],
+                        pos,
+                        3,
                         f"packed to capacity({capacity}); no L1/L2, cut at latest L3 boundary pos {pos}",
                     )
                 else:
                     segments.append(current)
                     self._record_split(
-                        "hard_cut", th, segments[-1], -1, 0,
+                        "hard_cut",
+                        th,
+                        segments[-1],
+                        -1,
+                        0,
                         f"packed to capacity({capacity}); single unit has no usable "
                         f"punctuation; hard cut",
                     )
@@ -466,7 +508,8 @@ class Spliter:
     # ------------------------------------------------------------------
 
     def set_full_text(
-        self, tokens: List[SegmentToken],
+        self,
+        tokens: List[SegmentToken],
     ) -> List[SegmentAction]:
         """Offline mode: set complete token sequence, pre-split, drive all.
 
@@ -481,7 +524,8 @@ class Spliter:
         return self._drive_events()
 
     def _enqueue_presplit_groups(
-        self, tokens: List[SegmentToken],
+        self,
+        tokens: List[SegmentToken],
     ) -> None:
         """Pre-split tokens into L1 groups and enqueue them as pending tokens.
 
@@ -499,7 +543,8 @@ class Spliter:
                 self._pending.append(_PendingToken(tok, gid, boundary=(i == last)))
 
     def push_group_tokens(
-        self, tokens: List[SegmentToken],
+        self,
+        tokens: List[SegmentToken],
     ) -> List[SegmentAction]:
         """Queue one complete long-segment unit for group-level pre-splitting.
 
@@ -558,10 +603,16 @@ class Spliter:
 
         while self._pending and self._pending[0].group_idx == cur_key:
             pt = self._pending.popleft()
-            evt = self._make_event(pt.token.token_id, pt.token.text, pt.token.punct_level)
+            evt = self._make_event(
+                pt.token.token_id, pt.token.text, pt.token.punct_level
+            )
             tok_actions, flushed = self._results_to_actions(
-                active_idx, driver.feed(evt), token_text=pt.token.text,
-                group_idx=group_idx, local_idx=local_idx, group_final=is_stream,
+                active_idx,
+                driver.feed(evt),
+                token_text=pt.token.text,
+                group_idx=group_idx,
+                local_idx=local_idx,
+                group_final=is_stream,
             )
             out.extend(tok_actions)
             if flushed:
@@ -569,8 +620,11 @@ class Spliter:
                 break
             if pt.boundary:
                 end_actions, _ = self._results_to_actions(
-                    active_idx, driver.feed(SpliterEvent(type=ET.END)),
-                    group_idx=group_idx, local_idx=local_idx, group_final=is_stream,
+                    active_idx,
+                    driver.feed(SpliterEvent(type=ET.END)),
+                    group_idx=group_idx,
+                    local_idx=local_idx,
+                    group_final=is_stream,
                 )
                 out.extend(end_actions)
                 self._finalize_segment(active_idx, out, group_exhausted=True)
@@ -583,8 +637,11 @@ class Spliter:
         # streaming/offline sessions (one group key throughout).
         if not flushed and self._pending and self._pending[0].group_idx != cur_key:
             end_actions, _ = self._results_to_actions(
-                active_idx, driver.feed(SpliterEvent(type=ET.END)),
-                group_idx=group_idx, local_idx=local_idx, group_final=is_stream,
+                active_idx,
+                driver.feed(SpliterEvent(type=ET.END)),
+                group_idx=group_idx,
+                local_idx=local_idx,
+                group_final=is_stream,
             )
             out.extend(end_actions)
             self._finalize_segment(active_idx, out, group_exhausted=True)
@@ -593,8 +650,11 @@ class Spliter:
         # End-of-input: flush the open streaming segment once the queue drains.
         if not flushed and self._input_complete and not self._pending:
             end_actions, _ = self._results_to_actions(
-                active_idx, driver.feed(SpliterEvent(type=ET.END)),
-                group_idx=group_idx, local_idx=local_idx, group_final=is_stream,
+                active_idx,
+                driver.feed(SpliterEvent(type=ET.END)),
+                group_idx=group_idx,
+                local_idx=local_idx,
+                group_final=is_stream,
             )
             out.extend(end_actions)
             self._finalize_segment(active_idx, out, group_exhausted=True)
@@ -618,8 +678,10 @@ class Spliter:
             # stays as the KV-overflow safety floor (the group is sized <= it).
             cap = thresholds.force_split_at
             thresholds = SplitThresholds(
-                min_tokens_l1=cap, min_tokens_l2=cap,
-                min_tokens_l3=cap, force_split_at=cap,
+                min_tokens_l1=cap,
+                min_tokens_l2=cap,
+                min_tokens_l3=cap,
+                force_split_at=cap,
             )
         idx, driver = self._create_driver(thresholds)
         if key is None:
@@ -635,14 +697,21 @@ class Spliter:
         self._seg_coords[idx] = (group_idx, local_idx)
         self._seg_group_key[idx] = key
         start_actions, _ = self._results_to_actions(
-            idx, driver.feed(SpliterEvent(type=ET.START)),
-            group_idx=group_idx, local_idx=local_idx, group_final=(key is None),
+            idx,
+            driver.feed(SpliterEvent(type=ET.START)),
+            group_idx=group_idx,
+            local_idx=local_idx,
+            group_final=(key is None),
         )
         out.extend(start_actions)
         return idx
 
     def _finalize_segment(
-        self, idx: int, actions: List[SegmentAction], *, group_exhausted: bool,
+        self,
+        idx: int,
+        actions: List[SegmentAction],
+        *,
+        group_exhausted: bool,
     ) -> None:
         """Stamp ``group_final`` on a just-flushed segment's actions and advance
         its group's local counter. Streaming segments are always final; an
@@ -660,7 +729,8 @@ class Spliter:
     # ------------------------------------------------------------------
 
     def feed_tokens(
-        self, tokens: List[SegmentToken],
+        self,
+        tokens: List[SegmentToken],
     ) -> List[SegmentAction]:
         """Streaming mode: queue tokens (each its own group) and drive.
 
@@ -673,7 +743,8 @@ class Spliter:
         return self._drive_events()
 
     def feed_auto(
-        self, tokens: List[SegmentToken],
+        self,
+        tokens: List[SegmentToken],
     ) -> List[SegmentAction]:
         """Auto mode: route a packet by size; Stage 1 engages only when long.
 
@@ -700,9 +771,11 @@ class Spliter:
         active = self._get_active_driver_idx()
         occupied = self._drivers[active].token_count if active is not None else 0
         if len(coerced) > capacity - occupied:
-            self._enqueue_presplit_groups(coerced)   # won't fit remaining room: Stage 1 foresight
+            self._enqueue_presplit_groups(
+                coerced
+            )  # won't fit remaining room: Stage 1 foresight
         else:
-            for tok in coerced:                       # fits: transparent stream (coalesce)
+            for tok in coerced:  # fits: transparent stream (coalesce)
                 self._pending.append(_PendingToken(tok, None, boundary=False))
         return self._drive_events()
 
@@ -737,8 +810,11 @@ class Spliter:
         return self._drive_events()
 
     def update_ratio(
-        self, actual_audio_steps: int, actual_text_tokens: int,
-        *, overflow: bool = False,
+        self,
+        actual_audio_steps: int,
+        actual_text_tokens: int,
+        *,
+        overflow: bool = False,
     ) -> None:
         """Update EMA audio:text ratio from engine feedback.
 
@@ -758,18 +834,30 @@ class Spliter:
         if overflow:
             alpha = self._ema_overflow_alpha
             self._ema_ratio = (1.0 - alpha) * self._ema_ratio + alpha * observed
-            self._ema_ratio = max(self._ema_min_ratio, min(self._ema_max_ratio, self._ema_ratio))
+            self._ema_ratio = max(
+                self._ema_min_ratio, min(self._ema_max_ratio, self._ema_ratio)
+            )
             logger.warning(
                 "EMA overflow update: observed=%.3f ema=%.3f→%.3f (steps=%d tokens=%d)",
-                observed, old_ratio, self._ema_ratio, actual_audio_steps, actual_text_tokens,
+                observed,
+                old_ratio,
+                self._ema_ratio,
+                actual_audio_steps,
+                actual_text_tokens,
             )
         else:
             alpha = self._ema_alpha
             self._ema_ratio = (1.0 - alpha) * self._ema_ratio + alpha * observed
-            self._ema_ratio = max(self._ema_min_ratio, min(self._ema_max_ratio, self._ema_ratio))
+            self._ema_ratio = max(
+                self._ema_min_ratio, min(self._ema_max_ratio, self._ema_ratio)
+            )
             logger.debug(
                 "EMA update: observed=%.3f ema=%.3f→%.3f (steps=%d tokens=%d)",
-                observed, old_ratio, self._ema_ratio, actual_audio_steps, actual_text_tokens,
+                observed,
+                old_ratio,
+                self._ema_ratio,
+                actual_audio_steps,
+                actual_text_tokens,
             )
 
         if abs(self._ema_ratio - old_ratio) > 0.01:
@@ -824,7 +912,9 @@ class Spliter:
                 normalized.append(token)
                 continue
             token_id, text = token[:2]
-            punct_level = token[2] if len(token) > 2 else self.classify_punct_level(text)
+            punct_level = (
+                token[2] if len(token) > 2 else self.classify_punct_level(text)
+            )
             normalized.append(
                 SegmentToken(
                     token_id=token_id,

@@ -1,4 +1,5 @@
 """Auto-apply 'e2e' marker to pytest tests in this directory."""
+
 import pytest
 
 

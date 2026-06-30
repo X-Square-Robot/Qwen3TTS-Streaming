@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
 
 from qwen3tts_protocol import (
     AudioFormat,
@@ -36,14 +35,24 @@ class _FakeAdapter:
 
     def open_stream(self, start_request):
         self.calls.append(("open_stream", start_request.session_id))
+
         class _Session:
             session_id = start_request.session_id
             transport = "fake"
             degraded_to_oneshot = False
-            def send_text(self, text, **kw): pass
-            def end(self, **kw): pass
-            def cancel(self, reason=""): pass
-            def iter_messages(self): return iter(())
+
+            def send_text(self, text, **kw):
+                pass
+
+            def end(self, **kw):
+                pass
+
+            def cancel(self, reason=""):
+                pass
+
+            def iter_messages(self):
+                return iter(())
+
         return _Session()
 
 
@@ -102,7 +111,9 @@ class TestAsyncTTSClient:
         async_client = AsyncTTSClient(sync_client)
 
         async def _run():
-            result = await async_client.synthesize_bytes("hello", request=SynthesisConfig(task_type="custom_voice"))
+            result = await async_client.synthesize_bytes(
+                "hello", request=SynthesisConfig(task_type="custom_voice")
+            )
             return result
 
         result = asyncio.get_event_loop().run_until_complete(_run())
@@ -111,7 +122,9 @@ class TestAsyncTTSClient:
 
     def test_properties_mirror_sync_client(self):
         fake_adapter = _FakeAdapter()
-        detected = type("D", (), {"transport": "engine-websocket", "probe_report": []})()
+        detected = type(
+            "D", (), {"transport": "engine-websocket", "probe_report": []}
+        )()
         sync_client = type(
             "TTSClient",
             (),

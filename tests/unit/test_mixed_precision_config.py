@@ -10,9 +10,7 @@ Covers:
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -20,6 +18,7 @@ import pytest
 # ---------------------------------------------------------------------------
 #  triton_manifest_io tests
 # ---------------------------------------------------------------------------
+
 
 class TestBuildManifestForExport:
     """Tests for build_manifest_for_export with mixed-precision fields."""
@@ -29,6 +28,7 @@ class TestBuildManifestForExport:
         self.tmp_path = tmp_path
         # Add scripts/python to sys.path for imports
         import sys
+
         sys_path = str(Path(__file__).resolve().parents[3] / "scripts" / "python")
         if sys_path not in sys.path:
             sys.path.insert(0, sys_path)
@@ -135,6 +135,7 @@ class TestResolveSubmodelPrecisions:
     @pytest.fixture(autouse=True)
     def _setup(self):
         import sys
+
         sys_path = str(Path(__file__).resolve().parents[3] / "scripts" / "python")
         if sys_path not in sys.path:
             sys.path.insert(0, sys_path)
@@ -176,6 +177,7 @@ class TestResolveSubmodelPrecisions:
 #  engine/config tests
 # ---------------------------------------------------------------------------
 
+
 class TestEngineProfileConfig:
     """Tests for EngineProfileConfig with mixed-precision fields."""
 
@@ -203,6 +205,7 @@ class TestEngineProfileConfig:
 #  update_triton_manifest_profile tests
 # ---------------------------------------------------------------------------
 
+
 class TestUpdateManifestProfile:
     """Tests for update_triton_manifest_profile with mixed-precision fields."""
 
@@ -210,6 +213,7 @@ class TestUpdateManifestProfile:
     def _setup(self, tmp_path):
         self.tmp_path = tmp_path
         import sys
+
         sys_path = str(Path(__file__).resolve().parents[3] / "scripts" / "python")
         if sys_path not in sys.path:
             sys.path.insert(0, sys_path)

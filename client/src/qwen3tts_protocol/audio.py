@@ -23,6 +23,7 @@ DEFAULT_SAMPLE_RATE = 24000
 # PCM conversion
 # ---------------------------------------------------------------------------
 
+
 def pcm16_from_float_audio(audio: Any) -> Any:
     """Convert float32 audio samples to int16 PCM.
 
@@ -39,6 +40,7 @@ def pcm16_from_float_audio(audio: Any) -> Any:
 # ---------------------------------------------------------------------------
 # WAV writing
 # ---------------------------------------------------------------------------
+
 
 def save_wav(
     audio: Any,
@@ -82,6 +84,7 @@ def save_wav(
 # Audio byte decoding
 # ---------------------------------------------------------------------------
 
+
 def decode_obj(value: Any) -> str:
     """Decode bytes or str to str — helper for Triton tensor values."""
     if isinstance(value, bytes):
@@ -116,6 +119,7 @@ def decode_audio_bytes(raw: bytes, audio_format: dict[str, Any] | None = None) -
 # Stream result (lightweight)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class StreamResult:
     """Lightweight result holder for a single Triton streaming inference.
@@ -137,7 +141,9 @@ class StreamResult:
 
     @property
     def duration_sec(self) -> float:
-        return self.total_samples / DEFAULT_SAMPLE_RATE if self.total_samples > 0 else 0.0
+        return (
+            self.total_samples / DEFAULT_SAMPLE_RATE if self.total_samples > 0 else 0.0
+        )
 
     @property
     def rtf(self) -> float:

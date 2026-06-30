@@ -78,7 +78,9 @@ def bootstrap_project_imports(*groups: str) -> tuple[Path, ...]:
             resolved.append(IMPORT_PATH_GROUPS[name])
         except KeyError as exc:
             known = ", ".join(sorted(IMPORT_PATH_GROUPS))
-            raise ValueError(f"Unknown import path group: {name!r}. Known groups: {known}") from exc
+            raise ValueError(
+                f"Unknown import path group: {name!r}. Known groups: {known}"
+            ) from exc
     prepend_sys_paths(*resolved)
     return tuple(resolved)
 

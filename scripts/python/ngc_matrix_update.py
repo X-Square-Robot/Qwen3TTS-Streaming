@@ -78,6 +78,7 @@ def fetch(url: str, timeout: int = 30) -> str:
 #  Parsing
 # ---------------------------------------------------------------------------
 
+
 def find_latest_release_url(index_html: str) -> str | None:
     """Return the absolute URL of the newest rel_YY-MM release-notes page."""
     links = re.findall(r'href="([^"]*rel[_-](\d{2})-(\d{2})\.html)[^"]*"', index_html)
@@ -195,20 +196,27 @@ def scrape_matrix(release_html: str) -> list[list[str]]:
         if not m:
             continue
         ngc_tag = m.group(1)
-        cuda, cuda_patch = _normalize_cuda(next((c for c in row if "cuda" in c.lower()), ""))
-        tensorrt = _normalize_version(next((c for c in row if "tensorrt" in c.lower()), ""))
+        cuda, cuda_patch = _normalize_cuda(
+            next((c for c in row if "cuda" in c.lower()), "")
+        )
+        tensorrt = _normalize_version(
+            next((c for c in row if "tensorrt" in c.lower()), "")
+        )
         if cuda == "-" or tensorrt == "-":
             continue
         min_driver = _min_driver_for_cuda(cuda, cuda_patch)
         if min_driver == "-":
             continue
-        out.append([ngc_tag, min_driver, tensorrt, cuda, _infer_python_version(ngc_tag), "-"])
+        out.append(
+            [ngc_tag, min_driver, tensorrt, cuda, _infer_python_version(ngc_tag), "-"]
+        )
     return out
 
 
 # ---------------------------------------------------------------------------
 #  Merge
 # ---------------------------------------------------------------------------
+
 
 def parse_conf(path: Path) -> tuple[list[str], "OrderedDict[str, list[str]]"]:
     """Parse a conf file into (comment_lines, {tag: fields}) preserving comments."""
@@ -237,8 +245,11 @@ def _pad(fields: list[str], n: int = 6) -> list[str]:
     return fields
 
 
-def merge_matrix(scraped: list[list[str]], comments: list[str],
-                 existing: "OrderedDict[str, list[str]]") -> list[str]:
+def merge_matrix(
+    scraped: list[list[str]],
+    comments: list[str],
+    existing: "OrderedDict[str, list[str]]",
+) -> list[str]:
     """Merge scraped rows over existing entries; return formatted output lines.
 
     Release-notes data wins for version fields; existing image size is preserved
@@ -272,13 +283,22 @@ def merge_matrix(scraped: list[list[str]], comments: list[str],
 #  Entry point
 # ---------------------------------------------------------------------------
 
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--conf", required=True, type=Path, help="Path to ngc_matrix.conf")
-    ap.add_argument("--print", action="store_true", dest="to_stdout",
-                    help="Print merged conf to stdout instead of writing in place")
-    ap.add_argument("--index-html", type=Path, help="Local index HTML (skip fetch; for tests)")
-    ap.add_argument("--release-html", type=Path, help="Local release-notes HTML (skip fetch)")
+    ap.add_argument(
+        "--print",
+        action="store_true",
+        dest="to_stdout",
+        help="Print merged conf to stdout instead of writing in place",
+    )
+    ap.add_argument(
+        "--index-html", type=Path, help="Local index HTML (skip fetch; for tests)"
+    )
+    ap.add_argument(
+        "--release-html", type=Path, help="Local release-notes HTML (skip fetch)"
+    )
     ap.add_argument("--timeout", type=int, default=30)
     args = ap.parse_args()
 
@@ -289,11 +309,14 @@ def main() -> int:
     # 1) Resolve + fetch the release-notes HTML (or use local files for tests).
     try:
         if args.release_html:
-            release_html = args.release_html.read_text(encoding="utf-8", errors="replace")
+            release_html = args.release_html.read_text(
+                encoding="utf-8", errors="replace"
+            )
         else:
             index_html = (
                 args.index_html.read_text(encoding="utf-8", errors="replace")
-                if args.index_html else fetch(RELEASE_NOTES_INDEX_URL, args.timeout)
+                if args.index_html
+                else fetch(RELEASE_NOTES_INDEX_URL, args.timeout)
             )
             release_url = find_latest_release_url(index_html)
             if not release_url:
@@ -314,7 +337,9 @@ def main() -> int:
     # 3) Merge with the existing conf.
     comments, existing = parse_conf(args.conf)
     merged_lines = merge_matrix(scraped, comments, existing)
-    new_count = sum(1 for line in merged_lines if line.strip() and not line.lstrip().startswith("#"))
+    new_count = sum(
+        1 for line in merged_lines if line.strip() and not line.lstrip().startswith("#")
+    )
 
     if args.to_stdout:
         print("\n".join(merged_lines))
@@ -327,9 +352,13 @@ def main() -> int:
     args.conf.write_text("\n".join(merged_lines) + "\n", encoding="utf-8")
 
     if new_count > old_count:
-        _log(f"Matrix updated: {old_count} -> {new_count} entries (+{new_count - old_count} new)")
+        _log(
+            f"Matrix updated: {old_count} -> {new_count} entries (+{new_count - old_count} new)"
+        )
     elif new_count == old_count:
-        _log(f"Matrix up to date ({new_count} entries; versions/sizes may be refreshed)")
+        _log(
+            f"Matrix up to date ({new_count} entries; versions/sizes may be refreshed)"
+        )
     else:
         _log(f"Matrix shrank: {old_count} -> {new_count} (check {backup})")
     _log(f"Backup saved: {backup}")

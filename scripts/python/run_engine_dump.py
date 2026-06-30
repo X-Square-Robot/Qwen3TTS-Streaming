@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -25,16 +24,47 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Run TTS engine server with dump configuration.",
     )
-    p.add_argument("--config", default="engine.yaml", help="Engine config path (default: engine.yaml)")
-    p.add_argument("--dump-tag", default="full_dump", help="Prefix for auto dump dir name (default: full_dump)")
-    p.add_argument("--dump-dir", default="", help="Explicit dump dir; overrides --dump-tag")
+    p.add_argument(
+        "--config",
+        default="engine.yaml",
+        help="Engine config path (default: engine.yaml)",
+    )
+    p.add_argument(
+        "--dump-tag",
+        default="full_dump",
+        help="Prefix for auto dump dir name (default: full_dump)",
+    )
+    p.add_argument(
+        "--dump-dir", default="", help="Explicit dump dir; overrides --dump-tag"
+    )
     p.add_argument("--session", default="", help="Comma-separated session ids to dump")
-    p.add_argument("--do-sample", default="false", help="Sampling switch (default: false)")
-    p.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature (default: 1.0)")
-    p.add_argument("--repetition-penalty", type=float, default=1.05, help="Repetition penalty (default: 1.05)")
+    p.add_argument(
+        "--do-sample", default="false", help="Sampling switch (default: false)"
+    )
+    p.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Sampling temperature (default: 1.0)",
+    )
+    p.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=1.05,
+        help="Repetition penalty (default: 1.05)",
+    )
     p.add_argument("--top-k", type=int, default=50, help="Sampling top-k (default: 50)")
-    p.add_argument("--include-wav", default="0", help="Include wav tensor in dumps (0|1, default: 0)")
-    p.add_argument("--dump-limit", type=int, default=0, help="Max dump calls; 0 means unlimited (default: 0)")
+    p.add_argument(
+        "--include-wav",
+        default="0",
+        help="Include wav tensor in dumps (0|1, default: 0)",
+    )
+    p.add_argument(
+        "--dump-limit",
+        type=int,
+        default=0,
+        help="Max dump calls; 0 means unlimited (default: 0)",
+    )
     return p.parse_args(argv)
 
 
@@ -46,7 +76,9 @@ def main(argv: list[str] | None = None) -> None:
         dump_dir = Path(args.dump_dir)
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dump_dir = _REPO_ROOT / "workspace" / "engine_dumps" / f"{args.dump_tag}_{timestamp}"
+        dump_dir = (
+            _REPO_ROOT / "workspace" / "engine_dumps" / f"{args.dump_tag}_{timestamp}"
+        )
 
     # Set environment variables for engine dump mode
     env_overrides = {
@@ -54,18 +86,30 @@ def main(argv: list[str] | None = None) -> None:
         "ENGINE_SAMPLING_TEMPERATURE": str(args.temperature),
         "ENGINE_SAMPLING_REPETITION_PENALTY": str(args.repetition_penalty),
         "ENGINE_SAMPLING_TOP_K": str(args.top_k),
-        "ENGINE_SPLITER_MAX_CONCURRENT_SEGMENTS": os.environ.get("ENGINE_SPLITER_MAX_CONCURRENT_SEGMENTS", "8"),
-        "ENGINE_SERVER_REQUEST_TIMEOUT_SEC": os.environ.get("ENGINE_SERVER_REQUEST_TIMEOUT_SEC", "1800"),
-        "ENGINE_SCHEDULER_SESSION_TIMEOUT_SEC": os.environ.get("ENGINE_SCHEDULER_SESSION_TIMEOUT_SEC", "1800"),
-        "ENGINE_SESSION_RESULT_QUEUE_MAXSIZE": os.environ.get("ENGINE_SESSION_RESULT_QUEUE_MAXSIZE", "4096"),
-        "ENGINE_GRPC_AUDIO_QUEUE_MAXSIZE": os.environ.get("ENGINE_GRPC_AUDIO_QUEUE_MAXSIZE", "4096"),
+        "ENGINE_SPLITER_MAX_CONCURRENT_SEGMENTS": os.environ.get(
+            "ENGINE_SPLITER_MAX_CONCURRENT_SEGMENTS", "8"
+        ),
+        "ENGINE_SERVER_REQUEST_TIMEOUT_SEC": os.environ.get(
+            "ENGINE_SERVER_REQUEST_TIMEOUT_SEC", "1800"
+        ),
+        "ENGINE_SCHEDULER_SESSION_TIMEOUT_SEC": os.environ.get(
+            "ENGINE_SCHEDULER_SESSION_TIMEOUT_SEC", "1800"
+        ),
+        "ENGINE_SESSION_RESULT_QUEUE_MAXSIZE": os.environ.get(
+            "ENGINE_SESSION_RESULT_QUEUE_MAXSIZE", "4096"
+        ),
+        "ENGINE_GRPC_AUDIO_QUEUE_MAXSIZE": os.environ.get(
+            "ENGINE_GRPC_AUDIO_QUEUE_MAXSIZE", "4096"
+        ),
         "ENGINE_DUMP_DIR": str(dump_dir),
         "ENGINE_DUMP_SESSIONS": args.session,
         "ENGINE_DUMP_LIMIT": str(args.dump_limit),
         "ENGINE_DUMP_TEXT": os.environ.get("ENGINE_DUMP_TEXT", "1"),
         "ENGINE_DUMP_SUMMARY": os.environ.get("ENGINE_DUMP_SUMMARY", "1"),
         "ENGINE_DUMP_INCLUDE_WAV": args.include_wav,
-        "ENGINE_DUMP_TEXT_MAX_ELEMENTS": os.environ.get("ENGINE_DUMP_TEXT_MAX_ELEMENTS", "0"),
+        "ENGINE_DUMP_TEXT_MAX_ELEMENTS": os.environ.get(
+            "ENGINE_DUMP_TEXT_MAX_ELEMENTS", "0"
+        ),
         "ENGINE_DUMP_INPUT_KEYS": os.environ.get(
             "ENGINE_DUMP_INPUT_KEYS",
             "input_embeds,position_ids,token_counts,gumbel_noise,cp_gumbel_noise,temperature,penalty,"
@@ -77,7 +121,9 @@ def main(argv: list[str] | None = None) -> None:
             "full_codec,codec_sum,updated_token_counts,talker_new_kv,c2w_new_kv,"
             "c2w_new_conv_state_*,c2w_new_transconv_overlap_*,wav",
         ),
-        "ENGINE_DUMP_EXCLUDE_KEYS": os.environ.get("ENGINE_DUMP_EXCLUDE_KEYS", "hidden,logits"),
+        "ENGINE_DUMP_EXCLUDE_KEYS": os.environ.get(
+            "ENGINE_DUMP_EXCLUDE_KEYS", "hidden,logits"
+        ),
     }
 
     for key, value in env_overrides.items():

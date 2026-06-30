@@ -47,7 +47,9 @@ OUTPUT_DIR = REPO_ROOT / "workspace" / "audio_samples" / "engine"
 
 def _require_gateway():
     if _GATEWAY_IMPORT_ERROR is not None:
-        raise RuntimeError(f"engine gateway protobuf import failed: {_GATEWAY_IMPORT_ERROR}")
+        raise RuntimeError(
+            f"engine gateway protobuf import failed: {_GATEWAY_IMPORT_ERROR}"
+        )
     return tts_pb2, tts_pb2_grpc
 
 
@@ -101,8 +103,7 @@ def _compute_intervals_ms(timestamps: list[float]) -> list[float]:
     if len(timestamps) < 2:
         return []
     return [
-        (timestamps[i] - timestamps[i - 1]) * 1000.0
-        for i in range(1, len(timestamps))
+        (timestamps[i] - timestamps[i - 1]) * 1000.0 for i in range(1, len(timestamps))
     ]
 
 
@@ -161,7 +162,10 @@ def _audio_chunk_to_f32(audio_chunk) -> np.ndarray:
     pb2, _ = _require_gateway()
     encoding = getattr(audio_chunk, "encoding", pb2.AUDIO_ENCODING_PCM_F32)
     if encoding == pb2.AUDIO_ENCODING_PCM_S16LE:
-        return np.frombuffer(audio_chunk.pcm_data, dtype=np.int16).astype(np.float32) / 32767.0
+        return (
+            np.frombuffer(audio_chunk.pcm_data, dtype=np.int16).astype(np.float32)
+            / 32767.0
+        )
     return np.frombuffer(audio_chunk.pcm_data, dtype=np.float32)
 
 
@@ -421,11 +425,13 @@ async def _synthesize_streaming(
     result.first_chunk_ms = (first_ts - t0) * 1000 if first_ts else None
     result.start_to_first_audio_ms = (
         (first_ts - send_marks["start_sent_ts"]) * 1000
-        if first_ts and send_marks["start_sent_ts"] is not None else None
+        if first_ts and send_marks["start_sent_ts"] is not None
+        else None
     )
     result.ttft_ms = (
         (first_ts - send_marks["first_text_sent_ts"]) * 1000
-        if first_ts and send_marks["first_text_sent_ts"] is not None else None
+        if first_ts and send_marks["first_text_sent_ts"] is not None
+        else None
     )
     result.audio_chunk_intervals_ms = _compute_intervals_ms(chunk_timestamps)
     result.num_chunks = len(chunks)
@@ -444,23 +450,29 @@ def _print_result(result: TTSResult, label: str = ""):
     if result.warnings:
         for warning in result.warnings:
             print(f"{prefix} WARNING: {warning}")
-    fc = f"{result.first_chunk_ms:.0f}ms" if result.first_chunk_ms is not None else "N/A"
+    fc = (
+        f"{result.first_chunk_ms:.0f}ms" if result.first_chunk_ms is not None else "N/A"
+    )
     ttft = f"{result.ttft_ms:.0f}ms" if result.ttft_ms is not None else "N/A"
     start_to_first = (
         f"{result.start_to_first_audio_ms:.0f}ms"
-        if result.start_to_first_audio_ms is not None else "N/A"
+        if result.start_to_first_audio_ms is not None
+        else "N/A"
     )
     step_mean = (
         f"{result.decode_step_mean_ms:.1f}ms"
-        if result.decode_step_mean_ms is not None else "N/A"
+        if result.decode_step_mean_ms is not None
+        else "N/A"
     )
     step_p50 = (
         f"{result.decode_step_p50_ms:.1f}ms"
-        if result.decode_step_p50_ms is not None else "N/A"
+        if result.decode_step_p50_ms is not None
+        else "N/A"
     )
     step_p95 = (
         f"{result.decode_step_p95_ms:.1f}ms"
-        if result.decode_step_p95_ms is not None else "N/A"
+        if result.decode_step_p95_ms is not None
+        else "N/A"
     )
     print(
         f"{prefix} session={result.session_id}"
@@ -478,7 +490,11 @@ def _print_result(result: TTSResult, label: str = ""):
 
 
 def _print_summary(results: list[TTSResult], label: str):
-    ok = [result for result in results if result.error is None and result.first_chunk_ms is not None]
+    ok = [
+        result
+        for result in results
+        if result.error is None and result.first_chunk_ms is not None
+    ]
     fail = [result for result in results if result.error is not None]
     print(f"\n  -- {label} Summary --")
     print(f"  Total: {len(results)}  OK: {len(ok)}  Failed: {len(fail)}")
@@ -489,11 +505,7 @@ def _print_summary(results: list[TTSResult], label: str):
     totals = [result.total_ms for result in ok]
     rtfs = [result.rtf for result in ok if result.rtf > 0]
     durations = [result.duration_sec for result in ok]
-    decode_steps = [
-        step
-        for result in ok
-        for step in result.audio_chunk_intervals_ms
-    ]
+    decode_steps = [step for result in ok for step in result.audio_chunk_intervals_ms]
     print(
         f"  First-chunk latency:  min={min(first_chunks):.0f}ms  "
         f"median={statistics.median(first_chunks):.0f}ms  "
@@ -517,7 +529,7 @@ def _print_summary(results: list[TTSResult], label: str):
         print(
             f"  Decode-step interval: min={min(decode_steps):.1f}ms  "
             f"p50={statistics.median(decode_steps):.1f}ms  "
-            f"p95={sorted(decode_steps)[min(len(decode_steps) - 1, max(0, int(round(0.95 * (len(decode_steps) - 1)))) )]:.1f}ms  "
+            f"p95={sorted(decode_steps)[min(len(decode_steps) - 1, max(0, int(round(0.95 * (len(decode_steps) - 1)))))]:.1f}ms  "
             f"mean={statistics.mean(decode_steps):.1f}ms"
         )
     if rtfs:
@@ -639,7 +651,9 @@ def run_token_streaming_text(host: str, port: int, output_dir: Path) -> TTSResul
     return result
 
 
-def run_custom_voice_instruct(host: str, port: int, output_dir: Path) -> list[TTSResult]:
+def run_custom_voice_instruct(
+    host: str, port: int, output_dir: Path
+) -> list[TTSResult]:
     pb2, _ = _require_gateway()
     print("\n" + "=" * 60)
     print("  Test 2b: CustomVoice + Instruct")
@@ -698,7 +712,9 @@ def run_custom_voice_instruct(host: str, port: int, output_dir: Path) -> list[TT
     return results
 
 
-def run_concurrent(host: str, port: int, concurrency: int, output_dir: Path) -> list[TTSResult]:
+def run_concurrent(
+    host: str, port: int, concurrency: int, output_dir: Path
+) -> list[TTSResult]:
     print("\n" + "=" * 60)
     print(f"  Test 3: Concurrent Requests (concurrency={concurrency})")
     print("=" * 60)
@@ -725,7 +741,9 @@ def run_concurrent(host: str, port: int, concurrency: int, output_dir: Path) -> 
                 _print_result(result, f"c{idx}")
             except Exception as exc:
                 print(f"  [c{idx}] EXCEPTION: {exc}")
-                results.append(TTSResult(session_id=f"concurrent-{idx}", text="", error=str(exc)))
+                results.append(
+                    TTSResult(session_id=f"concurrent-{idx}", text="", error=str(exc))
+                )
 
     wall_time = time.perf_counter() - t0
     print(f"\n  Wall time for {concurrency} concurrent: {wall_time:.2f}s")
@@ -761,7 +779,11 @@ def stress_concurrent(
     for round_idx in range(total_rounds):
         measured = round_idx >= warmup_rounds
         phase = "measure" if measured else "warmup"
-        label = f"{phase}-{round_idx - warmup_rounds + 1}" if measured else f"warmup-{round_idx + 1}"
+        label = (
+            f"{phase}-{round_idx - warmup_rounds + 1}"
+            if measured
+            else f"warmup-{round_idx + 1}"
+        )
         print(f"\n  --- Round {round_idx + 1}/{total_rounds} ({label}) ---")
 
         def _run_one(idx: int) -> TTSResult:
@@ -785,7 +807,11 @@ def stress_concurrent(
                     round_results.append(result)
                 except Exception as exc:
                     round_results.append(
-                        TTSResult(session_id=f"stress-{round_idx}-{idx}", text="", error=str(exc))
+                        TTSResult(
+                            session_id=f"stress-{round_idx}-{idx}",
+                            text="",
+                            error=str(exc),
+                        )
                     )
 
         wall_time = time.perf_counter() - t0
@@ -876,7 +902,9 @@ def run_long_text(host: str, port: int, output_dir: Path) -> list[TTSResult]:
         out_path = output_dir / "test4b_long_text_verylong.wav"
         _save_wav(r2.audio, out_path)
         print(f"  Saved: {out_path}")
-        print(f"  Audio duration: {r2.duration_sec:.2f}s (~{len(VERY_LONG_TEXT)} chars)")
+        print(
+            f"  Audio duration: {r2.duration_sec:.2f}s (~{len(VERY_LONG_TEXT)} chars)"
+        )
     results.append(r2)
 
     print("\n  --- 4c: Streaming long text ---")
@@ -925,7 +953,9 @@ def run_long_text(host: str, port: int, output_dir: Path) -> list[TTSResult]:
             out_path = output_dir / "test4d_story.wav"
             _save_wav(r4.audio, out_path)
             print(f"  Saved: {out_path}")
-            print(f"  Audio duration: {r4.duration_sec:.2f}s (~{len(story_text)} chars)")
+            print(
+                f"  Audio duration: {r4.duration_sec:.2f}s (~{len(story_text)} chars)"
+            )
         results.append(r4)
     else:
         print(f"\n  --- 4d: Story SKIPPED (not found: {story_path}) ---")
@@ -941,9 +971,13 @@ def run_badcases(host: str, port: int, output_dir: Path) -> list:
     results = []
 
     print("\n  --- 5a: Empty text (should error) ---")
-    r = _synthesize_oneshot(host, port, text="", speaker="Serena", session_id="badcase-empty", timeout=15)
+    r = _synthesize_oneshot(
+        host, port, text="", speaker="Serena", session_id="badcase-empty", timeout=15
+    )
     expected_error = r.error is not None or r.total_samples == 0
-    print(f"  Got error/empty: {expected_error} -> {'PASS' if expected_error else 'FAIL'}")
+    print(
+        f"  Got error/empty: {expected_error} -> {'PASS' if expected_error else 'FAIL'}"
+    )
     if r.error:
         print(f"  Error msg: {r.error[:120]}")
     results.append(("5a_empty_text", expected_error, r))
@@ -958,7 +992,9 @@ def run_badcases(host: str, port: int, output_dir: Path) -> list:
         timeout=15,
     )
     expected_error = r.error is not None or r.total_samples == 0
-    print(f"  Got error/empty: {expected_error} -> {'PASS' if expected_error else 'FAIL'}")
+    print(
+        f"  Got error/empty: {expected_error} -> {'PASS' if expected_error else 'FAIL'}"
+    )
     if r.error:
         print(f"  Error msg: {r.error[:120]}")
     results.append(("5b_whitespace_text", expected_error, r))

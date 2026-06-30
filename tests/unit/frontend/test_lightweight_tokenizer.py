@@ -2,6 +2,7 @@
 L1 unit tests: lightweight_tokenizer (T1.1, T4.1 tokenizer consistency).
 Run from repo root: pytest tests/unit/test_lightweight_tokenizer.py -v
 """
+
 import sys
 from pathlib import Path
 
@@ -11,7 +12,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-TOKENIZER_DIR = REPO_ROOT / "workspace" / "exported" / "tokenizer" / "Qwen3-TTS-Tokenizer-12Hz"
+TOKENIZER_DIR = (
+    REPO_ROOT / "workspace" / "exported" / "tokenizer" / "Qwen3-TTS-Tokenizer-12Hz"
+)
 
 
 @pytest.fixture(scope="module")
@@ -22,18 +25,26 @@ def tokenizer_dir():
 @pytest.fixture(scope="module")
 def lightweight_tok(tokenizer_dir):
     if not Path(tokenizer_dir).is_dir():
-        pytest.skip(f"Tokenizer dir not found: {tokenizer_dir} (run export/download first)")
+        pytest.skip(
+            f"Tokenizer dir not found: {tokenizer_dir} (run export/download first)"
+        )
     from engine.frontend.spliter.tokenizer import load_lightweight_tokenizer
+
     tok = load_lightweight_tokenizer(tokenizer_dir)
     if tok is None:
-        pytest.skip("load_lightweight_tokenizer returned None (tokenizer.json or vocab+merges missing)")
+        pytest.skip(
+            "load_lightweight_tokenizer returned None (tokenizer.json or vocab+merges missing)"
+        )
     return tok
 
 
 def test_load_lightweight_tokenizer_output_type(lightweight_tok):
     """T1.1: output is numpy [1, S] int64 when return_tensors='pt'."""
     import numpy as np
-    result = lightweight_tok("<|im_start|>assistant\n你好<|im_end|>", return_tensors="pt")
+
+    result = lightweight_tok(
+        "<|im_start|>assistant\n你好<|im_end|>", return_tensors="pt"
+    )
     ids = result["input_ids"]
     assert isinstance(ids, np.ndarray), f"Expected numpy, got {type(ids)}"
     assert ids.ndim == 2, f"Expected 2D, got {ids.ndim}D"
@@ -55,6 +66,7 @@ def test_lightweight_tokenizer_without_return_tensors(lightweight_tok):
 def test_lightweight_tokenizer_multiple_texts(lightweight_tok):
     """Multiple prompts tokenize without error."""
     import numpy as np
+
     texts = [
         "<|im_start|>assistant\n你好世界<|im_end|>",
         "<|im_start|>assistant\nHello, how are you?<|im_end|>",

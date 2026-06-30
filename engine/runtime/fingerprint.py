@@ -33,7 +33,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ class FingerprintMismatch:
     field: str
     expected: str
     actual: str
-    severity: str = "error"   # "error" | "warning"
+    severity: str = "error"  # "error" | "warning"
 
     def render(self) -> str:
         return f"[{self.severity.upper()}] {self.field}: expected={self.expected} actual={self.actual}"
@@ -157,7 +157,9 @@ class FingerprintCheckError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
-def load_artifact_manifest(model_package_dir: str | os.PathLike[str]) -> ArtifactManifest | None:
+def load_artifact_manifest(
+    model_package_dir: str | os.PathLike[str],
+) -> ArtifactManifest | None:
     """Locate and parse artifact_manifest.json near a model package.
 
     Search order (first hit wins):
@@ -208,16 +210,20 @@ def _probe_gpu_via_nvidia_smi(device_index: int) -> tuple[str, str]:
     if not shutil.which("nvidia-smi"):
         return "", ""
     try:
-        out = subprocess.check_output(
-            [
-                "nvidia-smi",
-                f"--id={device_index}",
-                "--query-gpu=compute_cap,name",
-                "--format=csv,noheader,nounits",
-            ],
-            text=True,
-            timeout=5,
-        ).strip().splitlines()
+        out = (
+            subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    f"--id={device_index}",
+                    "--query-gpu=compute_cap,name",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+                timeout=5,
+            )
+            .strip()
+            .splitlines()
+        )
     except Exception as exc:  # pragma: no cover
         logger.debug("nvidia-smi GPU probe failed: %s", exc)
         return "", ""
@@ -253,6 +259,7 @@ def _probe_driver_via_nvml() -> str:
     """Returns NVIDIA driver version via pynvml/nvidia-smi.  Empty on failure."""
     try:
         import pynvml  # type: ignore
+
         pynvml.nvmlInit()
         try:
             raw = pynvml.nvmlSystemGetDriverVersion()
@@ -268,12 +275,19 @@ def _probe_driver_via_nvml() -> str:
     if not shutil.which("nvidia-smi"):
         return ""
     try:
-        out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=driver_version",
-             "--format=csv,noheader,nounits"],
-            text=True,
-            timeout=5,
-        ).strip().splitlines()
+        out = (
+            subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=driver_version",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+                timeout=5,
+            )
+            .strip()
+            .splitlines()
+        )
         if out and re.match(r"^\d+(\.\d+){1,2}$", out[0].strip()):
             return out[0].strip()
     except Exception as exc:  # pragma: no cover
@@ -365,7 +379,9 @@ def validate_engine_fingerprint(
             )
 
     if manifest.tensorrt_version and env.tensorrt_version:
-        if _major_minor(manifest.tensorrt_version) != _major_minor(env.tensorrt_version):
+        if _major_minor(manifest.tensorrt_version) != _major_minor(
+            env.tensorrt_version
+        ):
             mismatches.append(
                 FingerprintMismatch(
                     field="tensorrt_version",
@@ -528,7 +544,9 @@ def enforce_engine_fingerprint(
 
     detail = format_report(report, header="Engine fingerprint mismatch:")
     if allow_mismatch or not strict:
-        logger.warning("%s\n(bypassed via %s=1 or strict=False)", detail, ENV_ALLOW_MISMATCH)
+        logger.warning(
+            "%s\n(bypassed via %s=1 or strict=False)", detail, ENV_ALLOW_MISMATCH
+        )
         return report
 
     raise FingerprintCheckError(

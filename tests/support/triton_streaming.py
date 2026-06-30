@@ -15,9 +15,6 @@ from __future__ import annotations
 import json
 import threading
 import time
-import wave
-from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
@@ -35,13 +32,13 @@ from qwen3tts_protocol.triton_types import (  # noqa: F401
     build_text_stream_requests,
     build_variant_request_payload,
 )
-from qwen3tts_protocol.triton_types import build_request_payload as _build_request_payload
 
 # ---- Constants kept locally (Triton-specific) ----
 REQUEST_MODEL_NAME = "tts_orchestrator"
 
 
 # ---- Synchronous stream helpers (require live tritonclient) ----
+
 
 def build_stream_request(grpcclient, req_dict: dict[str, Any]):
     """Build a Triton InferInput from a request dict."""
@@ -100,7 +97,11 @@ def infer_stream_sequence(
         event_json = result_obj.as_numpy("event_json")
         audio = result_obj.as_numpy("audio_chunk")
         is_final = result_obj.as_numpy("is_final")
-        et = decode_obj(event_type.flatten()[0]) if event_type is not None and event_type.size else ""
+        et = (
+            decode_obj(event_type.flatten()[0])
+            if event_type is not None and event_type.size
+            else ""
+        )
         payload = {}
         if event_json is not None and event_json.size:
             raw_json = decode_obj(event_json.flatten()[0])
@@ -119,7 +120,11 @@ def infer_stream_sequence(
             errors.append(payload.get("message", "unknown error"))
             done.set()
             return
-        final = bool(is_final.flatten()[0]) if is_final is not None and is_final.size else False
+        final = (
+            bool(is_final.flatten()[0])
+            if is_final is not None and is_final.size
+            else False
+        )
         if final:
             done.set()
 

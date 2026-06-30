@@ -41,18 +41,21 @@ def _quantize_no_cdist(self, hidden_states):
     after JIT trace (AssertionError: row_size_x1 is not None).  The equivalent
     squared-L2 via matmul is fully traceable.
     """
-    x = hidden_states.float()                    # [N, D]
-    e = self.embed.to(x.device).float()          # [C, D]
+    x = hidden_states.float()  # [N, D]
+    e = self.embed.to(x.device).float()  # [C, D]
     # ||x - e||^2 = ||x||^2 - 2 x·eᵀ + ||e||^2
-    dists = (x * x).sum(dim=-1, keepdim=True) \
-          - 2.0 * torch.mm(x, e.t()) \
-          + (e * e).sum(dim=-1).unsqueeze(0)
+    dists = (
+        (x * x).sum(dim=-1, keepdim=True)
+        - 2.0 * torch.mm(x, e.t())
+        + (e * e).sum(dim=-1).unsqueeze(0)
+    )
     return dists.argmin(dim=-1)
 
 
 def _patch_cdist_in_encoder(encoder: torch.nn.Module):
     """Replace quantize() on all MimiEuclideanCodebook instances inside encoder."""
     from types import MethodType
+
     for mod in encoder.modules():
         cls_name = type(mod).__name__
         if cls_name == "MimiEuclideanCodebook":
@@ -94,8 +97,12 @@ def export_speech_tokenizer_encoder(
     tokenizer_path = resolve_tokenizer_path(models_dir)
     out_dir = ensure_output_dir(output_dir, "tokenizer")
 
-    logger.info(f"Loading speech tokenizer from {tokenizer_path} (fp32 for ONNX export)")
-    tokenizer_model = load_speech_tokenizer(tokenizer_path, device=device, dtype=torch.float32)
+    logger.info(
+        f"Loading speech tokenizer from {tokenizer_path} (fp32 for ONNX export)"
+    )
+    tokenizer_model = load_speech_tokenizer(
+        tokenizer_path, device=device, dtype=torch.float32
+    )
 
     encoder = tokenizer_model.encoder.to(device).eval()
     wrapper = SpeechTokenizerEncoderWrapper(encoder).to(device).eval()
@@ -149,14 +156,18 @@ def export_speech_tokenizer_encoder(
 
 def main():
     setup_logging()
-    parser = argparse.ArgumentParser(description="Export Speech Tokenizer Encoder to ONNX")
+    parser = argparse.ArgumentParser(
+        description="Export Speech Tokenizer Encoder to ONNX"
+    )
     add_common_args(parser)
     args = parser.parse_args()
 
     device = resolve_device(args.device)
     dtype = resolve_dtype(args.dtype)
 
-    path = export_speech_tokenizer_encoder(args.models_dir, args.output_dir, device, dtype)
+    path = export_speech_tokenizer_encoder(
+        args.models_dir, args.output_dir, device, dtype
+    )
     logger.info(f"Speech Tokenizer Encoder exported: {path}")
 
 

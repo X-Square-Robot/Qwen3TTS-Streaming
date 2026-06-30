@@ -17,7 +17,7 @@ Thread safety:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class MLFQConfig:
     """Tuneable MLFQ parameters (loaded from engine.yaml → SchedulerConfig)."""
+
     q1_threshold: int = 50
     q2_threshold: int = 200
     aging_interval: int = 100
@@ -38,6 +39,7 @@ class MLFQConfig:
 @dataclass
 class MLFQMeta:
     """Per-segment MLFQ tracking state."""
+
     level: int = 0
     decode_steps: int = 0
     last_scheduled_at: int = 0
@@ -190,7 +192,8 @@ class MLFQScheduler:
             if boosted > 0:
                 logger.debug(
                     "MLFQ aging at step %d: boosted %d starved segments",
-                    self._global_step, boosted,
+                    self._global_step,
+                    boosted,
                 )
 
         return boosted

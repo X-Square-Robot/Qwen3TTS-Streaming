@@ -17,9 +17,9 @@ The signature case ``你好吗？明天天气不错，有没有什么想吃的�
 whole redesign: offline pre-split finds the global-optimal L1 cut, while the
 streaming driver, lacking foresight, snaps to the L2 comma. Both are frozen here.
 """
+
 from __future__ import annotations
 
-import pytest
 
 from engine.frontend.spliter.spliter import Spliter
 from engine.text_normalization import strip_emoji, split_pending_emoji
@@ -44,14 +44,16 @@ def _summarize(actions):
     segs: list[dict] = []
     for a in actions:
         if not segs or segs[-1]["seg"] != a.segment_idx:
-            segs.append({
-                "seg": a.segment_idx,
-                "group": a.group_idx,
-                "local": a.local_idx,
-                "final": a.group_final,
-                "text": "",
-                "acts": [],
-            })
+            segs.append(
+                {
+                    "seg": a.segment_idx,
+                    "group": a.group_idx,
+                    "local": a.local_idx,
+                    "final": a.group_final,
+                    "text": "",
+                    "acts": [],
+                }
+            )
         segs[-1]["acts"].append(a.action.type.name)
         segs[-1]["text"] += a.token_text
     return segs
@@ -93,7 +95,7 @@ def test_streaming_feed_once_snaps_to_l2_comma():
     segs = _summarize(sp.feed_tokens(_toks(SIGNATURE)))
 
     assert [(s["seg"], s["group"], s["text"]) for s in segs] == [
-        (0, 0, "你好吗？明天天气不错，"),   # WILL CHANGE @ Step 3/5 (L2 snap)
+        (0, 0, "你好吗？明天天气不错，"),  # WILL CHANGE @ Step 3/5 (L2 snap)
         (1, 1, "有没有什么想吃的？"),
     ]
 
@@ -153,16 +155,21 @@ def test_auto_long_packet_engages_stage1_global_optimal():
     """Auto mode: a packet longer than one segment is pre-split with foresight,
     yielding the SAME global-optimal L1 cut as offline set_full_text."""
     sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
-    segs = _summarize(sp.feed_auto(_toks(SIGNATURE)))   # 20 tokens > force_split_at(15)
+    segs = _summarize(sp.feed_auto(_toks(SIGNATURE)))  # 20 tokens > force_split_at(15)
 
     assert [(s["seg"], s["group"], s["text"]) for s in segs] == [
         (0, 0, "你好吗？"),
         (1, 1, "明天天气不错，"),
     ]
     # Matches the offline path exactly — Stage 1 had full foresight over the packet.
-    off = _summarize(Spliter(engine_max_decode_len=100, ema_ratio=10.0).set_full_text(_toks(SIGNATURE)))
-    assert [(s["seg"], s["group"], s["text"]) for s in segs] == \
-           [(s["seg"], s["group"], s["text"]) for s in off]
+    off = _summarize(
+        Spliter(engine_max_decode_len=100, ema_ratio=10.0).set_full_text(
+            _toks(SIGNATURE)
+        )
+    )
+    assert [(s["seg"], s["group"], s["text"]) for s in segs] == [
+        (s["seg"], s["group"], s["text"]) for s in off
+    ]
 
 
 def test_auto_token_by_token_is_transparent_streaming():
@@ -200,15 +207,19 @@ def test_auto_mixed_streaming_then_long_packet_no_group_collision():
     group ids — streaming and offline groups share one _next_group_idx
     namespace. Regression guard for the namespace-collision bug."""
     sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
-    a1 = sp.feed_auto(_toks("今天天气真的很不错"))           # 9 tok, no L1 → streams (group 0)
-    a2 = sp.feed_auto(_toks("，我们出去玩吧。好不好呀？"))   # won't fit remaining room → Stage 1
+    a1 = sp.feed_auto(_toks("今天天气真的很不错"))  # 9 tok, no L1 → streams (group 0)
+    a2 = sp.feed_auto(
+        _toks("，我们出去玩吧。好不好呀？")
+    )  # won't fit remaining room → Stage 1
 
     groups_by_seg: dict[int, int] = {}
     for sa in a1 + a2:
         groups_by_seg.setdefault(sa.segment_idx, sa.group_idx)
 
-    assert groups_by_seg[0] == 0, groups_by_seg                     # streaming residual, own group
-    assert all(g != 0 for s, g in groups_by_seg.items() if s != 0), groups_by_seg  # no collision
+    assert groups_by_seg[0] == 0, groups_by_seg  # streaming residual, own group
+    assert all(g != 0 for s, g in groups_by_seg.items() if s != 0), (
+        groups_by_seg
+    )  # no collision
 
 
 def test_emoji_whole_keycap_in_one_packet_is_stripped():
@@ -224,7 +235,7 @@ def _stage0_stream(packets):
     for p in packets:
         body, carry = split_pending_emoji(carry + p)
         out.append(strip_emoji(body))
-    out.append(strip_emoji(carry))   # end-of-input flush
+    out.append(strip_emoji(carry))  # end-of-input flush
     return "".join(out)
 
 
@@ -243,4 +254,4 @@ def test_emoji_carry_does_not_drop_normal_trailing_digits():
     """A held digit that turns out NOT to be a keycap is emitted intact — the
     carry never loses normal numeric text, only delays it by one packet."""
     assert _stage0_stream(["price5", "6dollars"]) == "price56dollars"
-    assert _stage0_stream(["count3"]) == "count3"        # flushed at end of input
+    assert _stage0_stream(["count3"]) == "count3"  # flushed at end of input

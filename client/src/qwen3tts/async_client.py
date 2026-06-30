@@ -23,10 +23,14 @@ class AsyncTTSClient:
         return await asyncio.to_thread(self._sync.get_capabilities)
 
     async def synthesize_bytes(self, text: str, *, request=None):
-        return await asyncio.to_thread(self._sync.synthesize_bytes, text, request=request)
+        return await asyncio.to_thread(
+            self._sync.synthesize_bytes, text, request=request
+        )
 
     async def synthesize_array(self, text: str, *, request=None):
-        return await asyncio.to_thread(self._sync.synthesize_array, text, request=request)
+        return await asyncio.to_thread(
+            self._sync.synthesize_array, text, request=request
+        )
 
     async def aopen_stream(self, start_request):
         sync_session = await asyncio.to_thread(self._sync.open_stream, start_request)

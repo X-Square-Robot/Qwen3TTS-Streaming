@@ -71,10 +71,13 @@ def detect_driver_version():
     """Echo NVIDIA driver version from nvidia-smi, or empty string."""
     if not shutil.which("nvidia-smi"):
         return ""
-    out = run([
-        "nvidia-smi", "--query-gpu=driver_version",
-        "--format=csv,noheader,nounits",
-    ])
+    out = run(
+        [
+            "nvidia-smi",
+            "--query-gpu=driver_version",
+            "--format=csv,noheader,nounits",
+        ]
+    )
     if not out:
         return ""
     ver = out.splitlines()[0].strip()
@@ -101,11 +104,13 @@ def probe_host_trtexec_path():
     env_override = os.environ.get("TRTEXEC_HOST")
     if env_override:
         candidates.append(env_override)
-    candidates.extend([
-        "/usr/src/tensorrt/bin/trtexec",
-        "/opt/tritonserver/bin/trtexec",
-        "/usr/local/tensorrt/bin/trtexec",
-    ])
+    candidates.extend(
+        [
+            "/usr/src/tensorrt/bin/trtexec",
+            "/opt/tritonserver/bin/trtexec",
+            "/usr/local/tensorrt/bin/trtexec",
+        ]
+    )
     for path in candidates:
         if path and os.path.isfile(path) and os.access(path, os.X_OK):
             return path
@@ -157,9 +162,11 @@ def probe_cudnn_version():
             text = p.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             continue
+
         def pick(name, default="0"):
             m = re.search(rf"#define\s+{name}\s+(\d+)", text)
             return m.group(1) if m else default
+
         maj = pick("CUDNN_MAJOR", "")
         if maj:
             return f"{maj}.{pick('CUDNN_MINOR', '0')}.{pick('CUDNN_PATCHLEVEL', '0')}"
@@ -211,11 +218,13 @@ def resolve_selected_runner(has_docker, docker_has_gpu, trtexec_path):
 
 def collect_gpus():
     rows = []
-    raw = run([
-        "nvidia-smi",
-        "--query-gpu=index,uuid,name,compute_cap,memory.total",
-        "--format=csv,noheader,nounits",
-    ])
+    raw = run(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,uuid,name,compute_cap,memory.total",
+            "--format=csv,noheader,nounits",
+        ]
+    )
     if not raw:
         return rows
     for row in csv.reader(io.StringIO(raw)):
@@ -223,14 +232,16 @@ def collect_gpus():
             continue
         index, uuid, name, cc, memory = [x.strip() for x in row[:5]]
         try:
-            rows.append({
-                "index": int(index),
-                "uuid": uuid,
-                "name": name,
-                "compute_capability": cc,
-                "sm": f"sm_{cc.replace('.', '')}",
-                "memory_total_mib": int(float(memory)),
-            })
+            rows.append(
+                {
+                    "index": int(index),
+                    "uuid": uuid,
+                    "name": name,
+                    "compute_capability": cc,
+                    "sm": f"sm_{cc.replace('.', '')}",
+                    "memory_total_mib": int(float(memory)),
+                }
+            )
         except Exception:
             continue
     return rows
@@ -253,9 +264,7 @@ def main():
         return 1
     ngc_tag = resolve_ngc_tag(driver)
     if not ngc_tag:
-        sys.stderr.write(
-            f"[ERROR] Driver {driver} too old — no compatible NGC entry\n"
-        )
+        sys.stderr.write(f"[ERROR] Driver {driver} too old — no compatible NGC entry\n")
         return 1
 
     gpus = collect_gpus()
@@ -282,7 +291,8 @@ def main():
         "profile_schema_version": 2,
         "host": socket.gethostname(),
         "captured_at_utc": dt.datetime.now(dt.timezone.utc)
-                          .replace(microsecond=0).isoformat(),
+        .replace(microsecond=0)
+        .isoformat(),
         "driver_version": driver,
         "cuda_runtime": cuda_runtime,
         "recommended_ngc_tag": ngc_tag,

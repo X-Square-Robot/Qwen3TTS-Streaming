@@ -96,34 +96,92 @@ def _iter_profile_shapes(
     talker_kv_dim1 = num_layers * 2
 
     fixed_specs = [
-        ("input_embeds", (1, 1, hidden_size), (b_opt, 1, hidden_size), (max_batch_size, max_input_len, hidden_size)),
-        ("position_ids", (1, 3, 1, 1), (b_opt, 3, 1, 1), (max_batch_size, 3, max_input_len, 1)),
-        ("attention_bias", (1, 1, 1, 1), (b_opt, 1, 1, opt_s_past + 1), (max_batch_size, 1, max_input_len, max_seq_len + max_input_len)),
-        ("token_counts", (1, VOCAB_SIZE), (b_opt, VOCAB_SIZE), (max_batch_size, VOCAB_SIZE)),
-        ("gumbel_noise", (1, LOGITS_TOPK), (b_opt, LOGITS_TOPK), (max_batch_size, LOGITS_TOPK)),
-        ("cp_gumbel_noise", (1, cp_num_stages, LOGITS_TOPK), (b_opt, cp_num_stages, LOGITS_TOPK), (max_batch_size, cp_num_stages, LOGITS_TOPK)),
+        (
+            "input_embeds",
+            (1, 1, hidden_size),
+            (b_opt, 1, hidden_size),
+            (max_batch_size, max_input_len, hidden_size),
+        ),
+        (
+            "position_ids",
+            (1, 3, 1, 1),
+            (b_opt, 3, 1, 1),
+            (max_batch_size, 3, max_input_len, 1),
+        ),
+        (
+            "attention_bias",
+            (1, 1, 1, 1),
+            (b_opt, 1, 1, opt_s_past + 1),
+            (max_batch_size, 1, max_input_len, max_seq_len + max_input_len),
+        ),
+        (
+            "token_counts",
+            (1, VOCAB_SIZE),
+            (b_opt, VOCAB_SIZE),
+            (max_batch_size, VOCAB_SIZE),
+        ),
+        (
+            "gumbel_noise",
+            (1, LOGITS_TOPK),
+            (b_opt, LOGITS_TOPK),
+            (max_batch_size, LOGITS_TOPK),
+        ),
+        (
+            "cp_gumbel_noise",
+            (1, cp_num_stages, LOGITS_TOPK),
+            (b_opt, cp_num_stages, LOGITS_TOPK),
+            (max_batch_size, cp_num_stages, LOGITS_TOPK),
+        ),
         ("temperature", (1, 1), (b_opt, 1), (max_batch_size, 1)),
         ("penalty", (1, 1), (b_opt, 1), (max_batch_size, 1)),
         ("cache_position", (1, 1), (b_opt, 1), (max_batch_size, 1)),
-        ("c2w_attention_bias", (1, 1, 1, 2), (b_opt, 1, 1, 5), (max_batch_size, 1, 1, C2W_SLIDING_WINDOW)),
-        ("talker_past_kv", (1, talker_kv_dim1, kv_heads, 0, head_dim), (b_opt, talker_kv_dim1, kv_heads, opt_s_past, head_dim), (max_batch_size, talker_kv_dim1, kv_heads, max_seq_len, head_dim)),
-        ("c2w_past_kv", (1, n_c2w_layers * 2, C2W_KV_HEADS, 1, C2W_HEAD_DIM), (b_opt, n_c2w_layers * 2, C2W_KV_HEADS, 4, C2W_HEAD_DIM), (max_batch_size, n_c2w_layers * 2, C2W_KV_HEADS, C2W_SLIDING_WINDOW - 1, C2W_HEAD_DIM)),
+        (
+            "c2w_attention_bias",
+            (1, 1, 1, 2),
+            (b_opt, 1, 1, 5),
+            (max_batch_size, 1, 1, C2W_SLIDING_WINDOW),
+        ),
+        (
+            "talker_past_kv",
+            (1, talker_kv_dim1, kv_heads, 0, head_dim),
+            (b_opt, talker_kv_dim1, kv_heads, opt_s_past, head_dim),
+            (max_batch_size, talker_kv_dim1, kv_heads, max_seq_len, head_dim),
+        ),
+        (
+            "c2w_past_kv",
+            (1, n_c2w_layers * 2, C2W_KV_HEADS, 1, C2W_HEAD_DIM),
+            (b_opt, n_c2w_layers * 2, C2W_KV_HEADS, 4, C2W_HEAD_DIM),
+            (
+                max_batch_size,
+                n_c2w_layers * 2,
+                C2W_KV_HEADS,
+                C2W_SLIDING_WINDOW - 1,
+                C2W_HEAD_DIM,
+            ),
+        ),
     ]
     for item in fixed_specs:
         yield item
 
     for name, smin, sopt, smax in c2w_conv_transconv_specs(str(max_batch_size)):
+
         def _parse(spec: str) -> Tuple[int, ...]:
             return tuple(int(x) for x in spec.split("x"))
 
         yield (f"c2w_{name}", _parse(smin), _parse(sopt), _parse(smax))
 
 
-def _set_io_dtypes(network: trt.INetworkDefinition, input_formats: list[str], output_formats: list[str]) -> None:
+def _set_io_dtypes(
+    network: trt.INetworkDefinition, input_formats: list[str], output_formats: list[str]
+) -> None:
     if network.num_inputs != len(input_formats):
-        raise ValueError(f"Input format count mismatch: network={network.num_inputs}, formats={len(input_formats)}")
+        raise ValueError(
+            f"Input format count mismatch: network={network.num_inputs}, formats={len(input_formats)}"
+        )
     if network.num_outputs != len(output_formats):
-        raise ValueError(f"Output format count mismatch: network={network.num_outputs}, formats={len(output_formats)}")
+        raise ValueError(
+            f"Output format count mismatch: network={network.num_outputs}, formats={len(output_formats)}"
+        )
 
     linear_mask = 1 << int(trt.TensorFormat.LINEAR)
     for idx, fmt in enumerate(input_formats):
@@ -152,7 +210,9 @@ def main() -> None:
     variant_dir = args.variant_dir.resolve()
     onnx_path = variant_dir / "talker_code2wav_fused.onnx"
     manifest_path = variant_dir / "triton_manifest.json"
-    engine_path = (args.engine_out or (variant_dir / "talker_code2wav_fused.fixed.engine")).resolve()
+    engine_path = (
+        args.engine_out or (variant_dir / "talker_code2wav_fused.fixed.engine")
+    ).resolve()
 
     manifest = _load_manifest(manifest_path)
     arch = manifest["architecture"]
@@ -163,7 +223,9 @@ def main() -> None:
 
     logger = trt.Logger(trt.Logger.VERBOSE if args.verbose else trt.Logger.INFO)
     builder = trt.Builder(logger)
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+    network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    )
     parser = trt.OnnxParser(network, logger)
 
     if not parser.parse_from_file(str(onnx_path)):
@@ -198,7 +260,7 @@ def main() -> None:
         raise RuntimeError("TensorRT build returned None")
 
     engine_path.write_bytes(bytes(serialized))
-    size_gib = engine_path.stat().st_size / (1024 ** 3)
+    size_gib = engine_path.stat().st_size / (1024**3)
     print(f"Wrote engine: {engine_path}")
     print(f"Size: {size_gib:.2f} GiB")
 

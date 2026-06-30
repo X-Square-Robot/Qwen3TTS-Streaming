@@ -4,6 +4,7 @@ Pytest conftest: shared path setup and variant auto-discovery.
 Path constants (REPO_ROOT, VARIANT, TOKENIZER_DIR, etc.) are defined here
 and can be imported from any test module via ``from tests.conftest import ...``.
 """
+
 import os
 import sys
 from pathlib import Path
@@ -35,9 +36,9 @@ MODELS_DIR = REPO_ROOT / "workspace" / "models"
 VARIANT_MODEL_MAP = {
     "design-1.7b": "Qwen3-TTS-12Hz-1.7B-VoiceDesign",
     "custom-1.7b": "Qwen3-TTS-12Hz-1.7B-CustomVoice",
-    "base-1.7b":   "Qwen3-TTS-12Hz-1.7B-Base",
+    "base-1.7b": "Qwen3-TTS-12Hz-1.7B-Base",
     "custom-0.6b": "Qwen3-TTS-12Hz-0.6B-CustomVoice",
-    "base-0.6b":   "Qwen3-TTS-12Hz-0.6B-Base",
+    "base-0.6b": "Qwen3-TTS-12Hz-0.6B-Base",
 }
 
 
@@ -58,7 +59,11 @@ VARIANT = os.environ.get("TEST_VARIANT", "") or _discover_variant()
 TOKENIZER_DIR = MODELS_DIR / VARIANT_MODEL_MAP.get(VARIANT, "") if VARIANT else Path("")
 WEIGHTS_DIR = EXPORTED_DIR / VARIANT / "weights" if VARIANT else Path("")
 ONNX_DIR = EXPORTED_DIR / VARIANT if VARIANT else Path("")
-ENGINE_DIR = EXPORTED_DIR / VARIANT / "engines" / "talker_code2wav_fused" if VARIANT else Path("")
+ENGINE_DIR = (
+    EXPORTED_DIR / VARIANT / "engines" / "talker_code2wav_fused"
+    if VARIANT
+    else Path("")
+)
 SHARED_TOKENIZER_DIR = EXPORTED_DIR / "tokenizer"
 
 

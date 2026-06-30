@@ -30,9 +30,7 @@ def resolve_submodel_precisions(manifest: Dict[str, Any]) -> Dict[str, str]:
         "backbone": _normalize_precision(
             manifest.get("backbone_precision", ""), engine_dtype
         ),
-        "cp": _normalize_precision(
-            manifest.get("cp_precision", ""), engine_dtype
-        ),
+        "cp": _normalize_precision(manifest.get("cp_precision", ""), engine_dtype),
         "code2wav": _normalize_precision(
             manifest.get("code2wav_precision", ""), engine_dtype
         ),
@@ -137,7 +135,13 @@ def load_manifest(
     package_version = Path(package_model_package_dir).name or "1"
 
     if not manifest.get("talker") and output_repo is not None:
-        wc = output_repo / "tts_orchestrator" / package_version / "weights" / "config.json"
+        wc = (
+            output_repo
+            / "tts_orchestrator"
+            / package_version
+            / "weights"
+            / "config.json"
+        )
         if wc.is_file():
             manifest["talker"] = weights_to_talker_section(load_weights_config(wc))
             logger.info("Filled manifest.talker from orchestrator weights/config.json")
@@ -172,7 +176,9 @@ def load_manifest(
     return manifest
 
 
-def runtime_optional_assets_for_variant(variant: str, engine_mode: str) -> Dict[str, str]:
+def runtime_optional_assets_for_variant(
+    variant: str, engine_mode: str
+) -> Dict[str, str]:
     """Return production runtime support assets for a variant."""
     if not (variant.startswith("base-") or variant.startswith("icl-")):
         return {}
@@ -224,14 +230,20 @@ def build_manifest_for_export(
         "c2w_kv_heads": code2wav_layout.get("c2w_kv_heads", 16),
         "c2w_head_dim": code2wav_layout.get("c2w_head_dim", 64),
         "c2w_sliding_window": code2wav_layout.get("c2w_sliding_window", 72),
-        "n_c2w_conv_states": len([
-            n for n in code2wav_layout.get("c2w_state_input_names", [])
-            if "conv_state" in n
-        ]),
-        "n_c2w_transconv_states": len([
-            n for n in code2wav_layout.get("c2w_state_input_names", [])
-            if "transconv" in n
-        ]),
+        "n_c2w_conv_states": len(
+            [
+                n
+                for n in code2wav_layout.get("c2w_state_input_names", [])
+                if "conv_state" in n
+            ]
+        ),
+        "n_c2w_transconv_states": len(
+            [
+                n
+                for n in code2wav_layout.get("c2w_state_input_names", [])
+                if "transconv" in n
+            ]
+        ),
         "dtype": engine_dtype,
     }
 
@@ -261,7 +273,9 @@ def build_manifest_for_export(
                 "trt": "runtime/model.plan",
                 "onnx": "runtime/model.onnx",
             },
-            "optional_assets": runtime_optional_assets_for_variant(variant, engine_mode),
+            "optional_assets": runtime_optional_assets_for_variant(
+                variant, engine_mode
+            ),
         },
         "engine_profile": {
             "profile_schema_version": 1,

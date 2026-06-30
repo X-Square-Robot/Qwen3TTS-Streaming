@@ -109,7 +109,9 @@ class ConcurrencyJobManager:
         finally:
             job.done = True
 
-    async def _run_simulated(self, job: ConcurrencyJob, concurrency: int, started: float) -> None:
+    async def _run_simulated(
+        self, job: ConcurrencyJob, concurrency: int, started: float
+    ) -> None:
         rng = random.Random(job.job_id)
         ttfts: list[float] = []
         failed = 0
@@ -140,13 +142,17 @@ class ConcurrencyJobManager:
             "concurrency": concurrency,
             "failed_streams": failed,
             "elapsed_ms": elapsed_ms,
-            "throughput_audio_sec_per_sec": round(concurrency * 4.2 / max(elapsed_ms / 1000.0, 0.001), 2),
+            "throughput_audio_sec_per_sec": round(
+                concurrency * 4.2 / max(elapsed_ms / 1000.0, 0.001), 2
+            ),
             **summarize_ttft(ttfts),
         }
         job.summary = summary
         await job.publish(summary)
 
-    async def _run_live(self, job: ConcurrencyJob, concurrency: int, started: float) -> None:
+    async def _run_live(
+        self, job: ConcurrencyJob, concurrency: int, started: float
+    ) -> None:
         semaphore = asyncio.Semaphore(min(concurrency, 128))
         ttfts: list[tuple[int, float]] = []
         failed = 0
@@ -162,7 +168,12 @@ class ConcurrencyJobManager:
             async with semaphore:
                 try:
                     result = await measure_once(
-                        TtsRequest(text=text, speaker=speaker, language=language, cache_mode=cache_mode),
+                        TtsRequest(
+                            text=text,
+                            speaker=speaker,
+                            language=language,
+                            cache_mode=cache_mode,
+                        ),
                         timeout_sec=float(job.request.get("timeout_sec") or 60.0),
                     )
                     ttft = first_available_ms(
@@ -175,7 +186,9 @@ class ConcurrencyJobManager:
                     ttfts.append((stream_idx, ttft))
                     audio = None
                     if self.audio_store and result.raw_audio:
-                        sample_rate = int(result.audio_format.get("sample_rate") or 24000)
+                        sample_rate = int(
+                            result.audio_format.get("sample_rate") or 24000
+                        )
                         audio = self.audio_store.save_pcm_f32_wav(
                             result.raw_audio,
                             sample_rate=sample_rate,

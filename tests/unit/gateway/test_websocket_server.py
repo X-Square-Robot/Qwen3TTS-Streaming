@@ -148,7 +148,9 @@ async def test_websocket_gateway_streams_audio_and_events_when_aiohttp_available
                 "loaded_model_type": "custom_voice",
             }
 
-        async def start_session(self, session_id, *, config, on_audio=None, on_done=None, on_event=None):
+        async def start_session(
+            self, session_id, *, config, on_audio=None, on_done=None, on_event=None
+        ):
             self._on_audio = on_audio
             self._on_done = on_done
             return session_id

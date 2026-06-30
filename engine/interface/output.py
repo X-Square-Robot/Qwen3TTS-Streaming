@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from ..core.types import AudioConfig, AudioEncoding
+from ..core.types import AudioEncoding
 from .protocol import PROTOCOL_VERSION, output_policy_json, timing_context_json
 from .types import AudioFrame, SessionStartRequest, StreamEvent
 
@@ -83,7 +83,9 @@ class OutputPipeline:
     def convert_audio_chunk(self, pcm_bytes: bytes) -> AudioFrame:
         audio = np.frombuffer(pcm_bytes, dtype=np.float32)
         if self._audio.sample_rate != self._native_sample_rate:
-            audio = _resample_linear(audio, self._native_sample_rate, self._audio.sample_rate)
+            audio = _resample_linear(
+                audio, self._native_sample_rate, self._audio.sample_rate
+            )
         if self._audio.encoding == AudioEncoding.PCM_S16LE:
             audio = np.clip(audio, -1.0, 1.0)
             payload = (audio * 32767.0).astype(np.int16).tobytes()
@@ -141,16 +143,22 @@ class OutputPipeline:
 
         # Raw / effective audio timestamps
         if self._first_raw_audio_epoch_ms is not None:
-            meta["server_first_raw_audio_epoch_ms"] = str(self._first_raw_audio_epoch_ms)
+            meta["server_first_raw_audio_epoch_ms"] = str(
+                self._first_raw_audio_epoch_ms
+            )
         if self._first_effective_audio_epoch_ms is not None:
-            meta["server_first_effective_audio_epoch_ms"] = str(self._first_effective_audio_epoch_ms)
+            meta["server_first_effective_audio_epoch_ms"] = str(
+                self._first_effective_audio_epoch_ms
+            )
 
         # Derived raw-to-effective latency (gating delay)
         if (
             self._first_raw_audio_monotonic is not None
             and self._first_effective_audio_monotonic is not None
         ):
-            gating_ms = (self._first_effective_audio_monotonic - self._first_raw_audio_monotonic) * 1000.0
+            gating_ms = (
+                self._first_effective_audio_monotonic - self._first_raw_audio_monotonic
+            ) * 1000.0
             meta["server_first_raw_to_first_effective_audio_ms"] = f"{gating_ms:.3f}"
 
         # Prefix trim / output gating
@@ -170,7 +178,9 @@ class OutputPipeline:
 
         # Deprecated aliases for backward compatibility
         if self._first_effective_audio_epoch_ms is not None:
-            meta["server_first_audio_epoch_ms"] = str(self._first_effective_audio_epoch_ms)
+            meta["server_first_audio_epoch_ms"] = str(
+                self._first_effective_audio_epoch_ms
+            )
 
         timing = self._start_request.timing
         if timing.request_id:
@@ -216,7 +226,9 @@ def _base_meta(start_request: SessionStartRequest) -> dict[str, str]:
     return meta
 
 
-def build_start_event(session_id: str, start_request: SessionStartRequest) -> StreamEvent:
+def build_start_event(
+    session_id: str, start_request: SessionStartRequest
+) -> StreamEvent:
     return StreamEvent(
         type="start",
         session_id=session_id,

@@ -22,16 +22,17 @@ from .observability import ObsLevel
 # Session lifecycle
 # ---------------------------------------------------------------------------
 
+
 class SessionState(Enum):
-    PENDING   = auto()
-    PREFILL   = auto()
-    DECODING  = auto()
-    SEGMENT   = auto()
-    DONE      = auto()
+    PENDING = auto()
+    PREFILL = auto()
+    DECODING = auto()
+    SEGMENT = auto()
+    DONE = auto()
 
 
 class InputMode(Enum):
-    AUTO = "auto"            # engine decides per-packet: Stage 1 engages only for long packets
+    AUTO = "auto"  # engine decides per-packet: Stage 1 engages only for long packets
     TOKEN = "token"
     CLAUSE = "clause"
     LONG_SEGMENT = "long_segment"
@@ -58,7 +59,7 @@ class AudioConfig:
 @dataclass
 class VADConfig:
     enabled: bool = False
-    strategy: str = "disabled"   # "disabled" | "energy" | "tenvad"
+    strategy: str = "disabled"  # "disabled" | "energy" | "tenvad"
     implementation: str = ""
     config: dict[str, Any] = field(default_factory=dict)
     # Direct VAD parameters (populated from protocol layer)
@@ -92,6 +93,7 @@ class TimingConfig:
 @dataclass
 class TokenizedText:
     """Canonical text payload: normalized text plus its token IDs."""
+
     text: str = ""
     token_ids: list[int] = field(default_factory=list)
 
@@ -99,6 +101,7 @@ class TokenizedText:
 @dataclass
 class SegmentToken:
     """One canonical text token used by the frontend spliter."""
+
     token_id: int
     text: str
     punct_level: int = 0
@@ -143,25 +146,28 @@ class SessionConfig:
 # Frontend → Engine thread  (via engine_inbox)
 # ---------------------------------------------------------------------------
 
+
 class RequestType(Enum):
-    NEW_SESSION      = auto()
-    START_TOKENS     = auto()  # begin a new token segment within an existing session
-    APPEND_TOKENS    = auto()
+    NEW_SESSION = auto()
+    START_TOKENS = auto()  # begin a new token segment within an existing session
+    APPEND_TOKENS = auto()
     SEGMENT_TOKENS_DONE = auto()  # per-segment: no more tokens for this segment
     SESSION_TOKENS_DONE = auto()  # session-level: upstream has finished all tokens
-    CANCEL_SESSION   = auto()
+    CANCEL_SESSION = auto()
 
 
 class RequestPriority(Enum):
     """Lower numeric value = higher urgency."""
-    FIRST_SEGMENT = 0   # new session, first segment — TTFB critical
-    CONTINUATION  = 1   # next segment while previous is flushing
-    PREFETCHED    = 2   # offline pre-split, ahead-of-time preparation
+
+    FIRST_SEGMENT = 0  # new session, first segment — TTFB critical
+    CONTINUATION = 1  # next segment while previous is flushing
+    PREFETCHED = 2  # offline pre-split, ahead-of-time preparation
 
 
 @dataclass
 class EngineRequest:
     """A single message from the asyncio world to the engine thread."""
+
     type: RequestType
     session_id: str
     segment_idx: int = 0
@@ -169,7 +175,7 @@ class EngineRequest:
     session_config: Optional[SessionConfig] = None
     # NEW_SESSION payload
     speaker_key: Optional[str] = None
-    task_type: Optional[str] = None       # "custom_voice" | "voice_design" | "voice_clone"
+    task_type: Optional[str] = None  # "custom_voice" | "voice_design" | "voice_clone"
     ref_audio: Optional[bytes] = None
     # APPEND_TOKENS / START_TOKENS payload
     token_ids: Optional[list[int]] = None
@@ -178,22 +184,23 @@ class EngineRequest:
     result_queue: Optional[asyncio.Queue] = None
 
     # -- Lifecycle timestamps (monotonic clock) --
-    enqueued_at: Optional[float] = None   # set by Dispatcher before put()
-    dequeued_at: Optional[float] = None   # set by EngineLoop after get()
+    enqueued_at: Optional[float] = None  # set by Dispatcher before put()
+    dequeued_at: Optional[float] = None  # set by EngineLoop after get()
 
 
 # ---------------------------------------------------------------------------
 # Engine thread → Frontend  (via per-session result_queue)
 # ---------------------------------------------------------------------------
 
+
 class ResultType(Enum):
-    PREFILL_DONE   = auto()
-    AUDIO_CHUNK    = auto()
-    WARNING        = auto()
-    SEGMENT_END    = auto()
-    SESSION_DONE   = auto()
-    RATIO_UPDATE   = auto()  # EMA audio:text ratio feedback
-    ERROR          = auto()
+    PREFILL_DONE = auto()
+    AUDIO_CHUNK = auto()
+    WARNING = auto()
+    SEGMENT_END = auto()
+    SESSION_DONE = auto()
+    RATIO_UPDATE = auto()  # EMA audio:text ratio feedback
+    ERROR = auto()
 
 
 @dataclass
@@ -201,8 +208,8 @@ class EngineResult:
     type: ResultType
     session_id: str
     segment_idx: int = 0
-    audio_bytes: Optional[bytes] = None   # for AUDIO_CHUNK
-    warning_msg: Optional[str] = None     # for WARNING
-    error_msg: Optional[str] = None       # for ERROR
+    audio_bytes: Optional[bytes] = None  # for AUDIO_CHUNK
+    warning_msg: Optional[str] = None  # for WARNING
+    error_msg: Optional[str] = None  # for ERROR
     metrics: dict = field(default_factory=dict)  # step_count, rtf, etc.
-    ema_ratio: float = 0.0                # for RATIO_UPDATE
+    ema_ratio: float = 0.0  # for RATIO_UPDATE

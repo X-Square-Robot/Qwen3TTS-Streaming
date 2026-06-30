@@ -7,7 +7,9 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
-REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/unit/operators/<file> -> repo root
+REPO_ROOT = (
+    Path(__file__).resolve().parents[3]
+)  # tests/unit/operators/<file> -> repo root
 EXPORT_DIR = REPO_ROOT / "scripts" / "export"
 if str(EXPORT_DIR) not in sys.path:
     sys.path.insert(0, str(EXPORT_DIR))
@@ -86,7 +88,9 @@ class _SequenceLengthProjection(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self.seq_lens.append(int(x.shape[1]))
-        offsets = torch.arange(x.shape[1], device=x.device, dtype=x.dtype).view(1, -1, 1)
+        offsets = torch.arange(x.shape[1], device=x.device, dtype=x.dtype).view(
+            1, -1, 1
+        )
         return x + offsets
 
 

@@ -1,7 +1,5 @@
 """Tests for engine.core.mlfq.MLFQScheduler."""
 
-import pytest
-
 from engine.core.mlfq import MLFQConfig, MLFQMeta, MLFQScheduler
 
 
@@ -55,7 +53,8 @@ class TestMLFQScheduler:
         s_q2.meta.level = 2
 
         ordered = sched.select_batch(
-            [s_q2, s_q1, s_q0], max_batch=3,
+            [s_q2, s_q1, s_q0],
+            max_batch=3,
             get_meta=lambda s: s.meta,
         )
         assert [s.name for s in ordered] == ["fresh", "mid", "old"]
@@ -64,15 +63,18 @@ class TestMLFQScheduler:
         sched = MLFQScheduler()
         segs = [FakeSegment(f"s{i}") for i in range(10)]
         ordered = sched.select_batch(
-            segs, max_batch=3,
+            segs,
+            max_batch=3,
             get_meta=lambda s: s.meta,
         )
         assert len(ordered) == 3
 
     def test_anti_starvation_aging(self):
         cfg = MLFQConfig(
-            q1_threshold=2, q2_threshold=5,
-            aging_interval=10, starvation_limit=5,
+            q1_threshold=2,
+            q2_threshold=5,
+            aging_interval=10,
+            starvation_limit=5,
         )
         sched = MLFQScheduler(cfg)
         meta = MLFQMeta()
@@ -88,8 +90,10 @@ class TestMLFQScheduler:
         # that are NOT selected into a batch, otherwise the starvation boost
         # can never fire. A scheduled segment must stay at 0.
         cfg = MLFQConfig(
-            q1_threshold=1000, q2_threshold=2000,
-            aging_interval=5, starvation_limit=5,
+            q1_threshold=1000,
+            q2_threshold=2000,
+            aging_interval=5,
+            starvation_limit=5,
         )
         sched = MLFQScheduler(cfg)
 
@@ -114,8 +118,10 @@ class TestMLFQScheduler:
         # Drive candidates > max_batch so select_batch truncates and the
         # lowest-priority segment is never picked until aging rescues it.
         cfg = MLFQConfig(
-            q1_threshold=1000, q2_threshold=2000,
-            aging_interval=5, starvation_limit=5,
+            q1_threshold=1000,
+            q2_threshold=2000,
+            aging_interval=5,
+            starvation_limit=5,
         )
         sched = MLFQScheduler(cfg)
         max_batch = 2
@@ -129,7 +135,9 @@ class TestMLFQScheduler:
         scheduled_at = []
         for step in range(8):
             ordered = sched.select_batch(
-                candidates, max_batch, get_meta=lambda s: s.meta,
+                candidates,
+                max_batch,
+                get_meta=lambda s: s.meta,
             )
             for seg in ordered:
                 sched.on_step_done(seg.meta)

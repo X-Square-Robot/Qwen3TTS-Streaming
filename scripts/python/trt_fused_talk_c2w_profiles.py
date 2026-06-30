@@ -58,8 +58,15 @@ CP_NUM_STAGES = 15
 
 
 def compute_fused_profiles(
-    H, KV, HD, NL, Bmax,
-    max_in="128", max_seq="512", n_c2w=8, n_cp=CP_NUM_STAGES,
+    H,
+    KV,
+    HD,
+    NL,
+    Bmax,
+    max_in="128",
+    max_seq="512",
+    n_c2w=8,
+    n_cp=CP_NUM_STAGES,
 ):
     """Return (min, opt, max) trtexec shape strings for talker_code2wav_fused.
 
@@ -80,7 +87,7 @@ def compute_fused_profiles(
 
     parts_min = [
         f"input_embeds:1x1x{H}",
-        f"position_ids:1x3x1x1",
+        "position_ids:1x3x1x1",
         "attention_bias:1x1x1x1",
         f"token_counts:1x{V}",
         f"gumbel_noise:1x{K}",

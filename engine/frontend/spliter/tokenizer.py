@@ -26,7 +26,9 @@ class LightQwen3TTSTokenizer:
                 self.logger.info(f"Loaded tokenizer from {self.tokenizer_json_path}")
                 return
             except Exception as e:
-                self.logger.error(f"Failed to load tokenizer from {self.tokenizer_json_path}: {e}")
+                self.logger.error(
+                    f"Failed to load tokenizer from {self.tokenizer_json_path}: {e}"
+                )
 
         # 没有tokenizer_config.json文件，那么需要从vocab.json和merges.txt文件中构建tokenizer
         vocab_path = self.tokenizer_dir / "vocab.json"
@@ -118,21 +120,29 @@ class LightQwen3TTSTokenizer:
         """Return the raw tokenizers.Encoding object."""
         return self.tokenizer.encode(text, add_special_tokens=add_special_tokens)
 
-    def encode_ids(self, text: str, add_special_tokens: bool = True, **kwargs: Any) -> List[int]:
+    def encode_ids(
+        self, text: str, add_special_tokens: bool = True, **kwargs: Any
+    ) -> List[int]:
         """Return token ids only."""
         return self.encode(text, add_special_tokens=add_special_tokens, **kwargs).ids
 
-    def encode_with_offsets(self, text: str, add_special_tokens: bool = True, **kwargs: Any) -> Tuple[List[int], List[Tuple[int, int]]]:
+    def encode_with_offsets(
+        self, text: str, add_special_tokens: bool = True, **kwargs: Any
+    ) -> Tuple[List[int], List[Tuple[int, int]]]:
         """Return token ids and the corresponding original text offsets."""
         enc = self.encode(text, add_special_tokens=add_special_tokens, **kwargs)
         return enc.ids, enc.offsets
 
-    def encode_with_tokens(self, text: str, add_special_tokens: bool = True, **kwargs: Any) -> Tuple[List[int], List[str]]:
+    def encode_with_tokens(
+        self, text: str, add_special_tokens: bool = True, **kwargs: Any
+    ) -> Tuple[List[int], List[str]]:
         """Return token ids and the corresponding original token."""
         enc = self.encode(text, add_special_tokens=add_special_tokens, **kwargs)
         return enc.ids, enc.tokens
 
-    def encode_with_text(self, text: str, add_special_tokens: bool = True, **kwargs: Any) -> Tuple[List[int], List[str]]:
+    def encode_with_text(
+        self, text: str, add_special_tokens: bool = True, **kwargs: Any
+    ) -> Tuple[List[int], List[str]]:
         """Return token ids and stable original-text spans derived from offsets.
 
         Byte-level tokenizers can occasionally surface overlapping offsets for
@@ -201,15 +211,21 @@ class LightQwen3TTSTokenizer:
             "pieces": pieces,
         }
 
-    def __call__(self, text: str, return_tensors: str | None = None, **kwargs: Any) -> Dict[str, Any]:
+    def __call__(
+        self, text: str, return_tensors: str | None = None, **kwargs: Any
+    ) -> Dict[str, Any]:
         """HuggingFace-compatible __call__ for drop-in use in PrefillBuilder."""
-        ids = self.encode_ids(text, add_special_tokens=kwargs.get("add_special_tokens", True))
+        ids = self.encode_ids(
+            text, add_special_tokens=kwargs.get("add_special_tokens", True)
+        )
         if return_tensors == "np":
             import numpy as np
+
             arr = np.array(ids, dtype=np.int64).reshape(1, -1)
             return {"input_ids": arr}
         elif return_tensors == "pt":
             import torch
+
             return {"input_ids": torch.tensor([ids], dtype=torch.int64)}
         return {"input_ids": ids}
 
@@ -226,7 +242,9 @@ class _LegacyLightweightTokenizerAdapter:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._tokenizer, name)
 
-    def __call__(self, text: str, return_tensors: str | None = None, **kwargs: Any) -> Dict[str, Any]:
+    def __call__(
+        self, text: str, return_tensors: str | None = None, **kwargs: Any
+    ) -> Dict[str, Any]:
         ids = self._tokenizer.encode_ids(
             text,
             add_special_tokens=kwargs.get("add_special_tokens", True),

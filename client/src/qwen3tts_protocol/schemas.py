@@ -28,9 +28,11 @@ BACKENDS = (
 # Trace event
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class TraceEvent:
     """A single event in a TTS trace timeline."""
+
     run_id: str
     backend: str
     type: str
@@ -49,9 +51,11 @@ class TraceEvent:
 # Run metrics
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class RunMetrics:
     """Quantitative metrics for a single TTS run."""
+
     first_playable_ms: float | None = None
     total_ms: float | None = None
     server_ttft_ms: float | None = None
@@ -74,9 +78,11 @@ class RunMetrics:
 # Run result
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class RunResult:
     """Complete result of a single TTS run: metrics + events + raw audio."""
+
     run_id: str
     backend: str
     label: str
@@ -107,6 +113,7 @@ class RunResult:
 # ---------------------------------------------------------------------------
 # Statistics helpers
 # ---------------------------------------------------------------------------
+
 
 def percentile(values: list[float], pct: float) -> float | None:
     """Compute the *pct*-th percentile (0..1) of *values*."""
@@ -159,7 +166,9 @@ def normalize_backend_result(raw: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(raw)
     normalized["events"] = events
     normalized.setdefault("warnings", [])
-    normalized.setdefault("audio_format", {"encoding": "pcm_f32", "sample_rate": 24000, "channels": 1})
+    normalized.setdefault(
+        "audio_format", {"encoding": "pcm_f32", "sample_rate": 24000, "channels": 1}
+    )
     normalized.setdefault("metrics", {})
     return normalized
 

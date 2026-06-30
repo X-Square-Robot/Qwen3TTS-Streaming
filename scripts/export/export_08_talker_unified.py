@@ -40,29 +40,47 @@ def _export_talker_unified_onnx(
     device: str = "cpu",
     opset_version: int = 18,
 ) -> str:
-    fused, num_layers, hidden_size, num_kv_heads, head_dim = build_talker_unified_fused_module(
-        model, device=device
+    fused, num_layers, hidden_size, num_kv_heads, head_dim = (
+        build_talker_unified_fused_module(model, device=device)
     )
     vocab_size = fused.vocab_size
     cp_num_stages = fused.cp.num_stages
 
     B, one, S_past = 1, 1, 0
-    dummy_embeds = torch.randn(B, one, hidden_size, device=device, dtype=ONNX_EXPORT_DTYPE)
+    dummy_embeds = torch.randn(
+        B, one, hidden_size, device=device, dtype=ONNX_EXPORT_DTYPE
+    )
     position_ids = torch.full((B, 3, one, 1), S_past, device=device, dtype=torch.long)
 
     token_counts = torch.zeros(B, vocab_size, device=device, dtype=ONNX_EXPORT_DTYPE)
     gumbel_noise = torch.zeros(B, LOGITS_TOPK, device=device, dtype=ONNX_EXPORT_DTYPE)
-    cp_gumbel_noise = torch.zeros(B, cp_num_stages, LOGITS_TOPK, device=device, dtype=ONNX_EXPORT_DTYPE)
+    cp_gumbel_noise = torch.zeros(
+        B, cp_num_stages, LOGITS_TOPK, device=device, dtype=ONNX_EXPORT_DTYPE
+    )
     temperature = torch.ones(B, 1, device=device, dtype=ONNX_EXPORT_DTYPE)
     penalty = torch.ones(B, 1, device=device, dtype=ONNX_EXPORT_DTYPE)
 
     past_list = []
     for _ in range(num_layers):
         past_list.append(
-            torch.zeros(B, num_kv_heads, S_past, head_dim, device=device, dtype=ONNX_EXPORT_DTYPE)
+            torch.zeros(
+                B,
+                num_kv_heads,
+                S_past,
+                head_dim,
+                device=device,
+                dtype=ONNX_EXPORT_DTYPE,
+            )
         )
         past_list.append(
-            torch.zeros(B, num_kv_heads, S_past, head_dim, device=device, dtype=ONNX_EXPORT_DTYPE)
+            torch.zeros(
+                B,
+                num_kv_heads,
+                S_past,
+                head_dim,
+                device=device,
+                dtype=ONNX_EXPORT_DTYPE,
+            )
         )
 
     with torch.no_grad():
@@ -77,10 +95,18 @@ def _export_talker_unified_onnx(
             *past_list,
         )
 
-    codec_sum, full_codec, hidden, logits, updated_token_counts = out[0], out[1], out[2], out[3], out[4]
+    codec_sum, full_codec, hidden, logits, updated_token_counts = (
+        out[0],
+        out[1],
+        out[2],
+        out[3],
+        out[4],
+    )
     ref_nan = torch.isnan(hidden).any().item() or torch.isnan(logits).any().item()
     if ref_nan:
-        logger.warning("  PyTorch reference has NaN in hidden or logits (check causal_mask / RoPE)")
+        logger.warning(
+            "  PyTorch reference has NaN in hidden or logits (check causal_mask / RoPE)"
+        )
     for i in range(num_layers):
         k, v = out[5 + 2 * i], out[6 + 2 * i]
         if torch.isnan(k).any() or torch.isnan(v).any():
@@ -92,7 +118,13 @@ def _export_talker_unified_onnx(
         f"updated_token_counts={updated_token_counts.shape}, present_kv layers={num_layers}"
     )
 
-    output_names = ["codec_sum", "full_codec", "hidden", "logits", "updated_token_counts"]
+    output_names = [
+        "codec_sum",
+        "full_codec",
+        "hidden",
+        "logits",
+        "updated_token_counts",
+    ]
     for i in range(num_layers):
         output_names.append(f"present_kv_{i}_k")
         output_names.append(f"present_kv_{i}_v")
@@ -164,7 +196,9 @@ def _export_talker_unified_onnx(
     }
     for i, t in enumerate(past_list):
         test_inputs[input_names[kv_input_offset + i]] = to_numpy(t)
-    torch_outputs = {output_names[i]: to_numpy(out[i]) for i in range(len(output_names))}
+    torch_outputs = {
+        output_names[i]: to_numpy(out[i]) for i in range(len(output_names))
+    }
     atol = 2e-3 if ONNX_EXPORT_DTYPE == torch.float32 else 1e-1
     ok = verify_onnx(onnx_path, test_inputs, torch_outputs, atol=atol, rtol=1e-2)
     if ok:

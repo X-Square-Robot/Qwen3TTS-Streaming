@@ -16,12 +16,10 @@ Usage:
 
 import argparse
 import json
-import os
 import sys
 import time
 from pathlib import Path
 
-import numpy as np
 import soundfile as sf
 import torch
 
@@ -74,7 +72,9 @@ def load_model(model_path: str, device: str = "cuda:0"):
     return model
 
 
-def inject_pad_tokens(input_ids: torch.Tensor, pad_token_id: int, n_pad: int) -> torch.Tensor:
+def inject_pad_tokens(
+    input_ids: torch.Tensor, pad_token_id: int, n_pad: int
+) -> torch.Tensor:
     """Insert *n_pad* copies of pad_token_id at the midpoint of the text
     portion of input_ids.
 
@@ -95,22 +95,23 @@ def inject_pad_tokens(input_ids: torch.Tensor, pad_token_id: int, n_pad: int) ->
     tail = ids[-5:]
 
     mid = len(text) // 2
-    pad_tensor = torch.full(
-        (n_pad,), pad_token_id, dtype=ids.dtype, device=ids.device
-    )
+    pad_tensor = torch.full((n_pad,), pad_token_id, dtype=ids.dtype, device=ids.device)
     new_text = torch.cat([text[:mid], pad_tensor, text[mid:]])
     return torch.cat([role, new_text, tail]).unsqueeze(0)
 
 
-def run_experiment(model, test_case: dict, pad_count: int, output_dir: Path,
-                   seed: int, run_idx: int):
+def run_experiment(
+    model, test_case: dict, pad_count: int, output_dir: Path, seed: int, run_idx: int
+):
     label = test_case["label"]
     text = test_case["text"]
     language = test_case["language"]
     speaker = test_case["speaker"]
 
     formatted_text = f"<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n"
-    processor_input = model.processor(text=formatted_text, return_tensors="pt", padding=True)
+    processor_input = model.processor(
+        text=formatted_text, return_tensors="pt", padding=True
+    )
     input_ids_orig = processor_input["input_ids"].to(model.device)
     if input_ids_orig.dim() == 1:
         input_ids_orig = input_ids_orig.unsqueeze(0)
@@ -168,13 +169,18 @@ def run_experiment(model, test_case: dict, pad_count: int, output_dir: Path,
 def main():
     parser = argparse.ArgumentParser(description="Pad tolerance A/B experiment")
     parser.add_argument(
-        "--model-variant", default="custom",
+        "--model-variant",
+        default="custom",
         choices=["custom", "base"],
-        help="Model variant: custom (CustomVoice) or base (Base)"
+        help="Model variant: custom (CustomVoice) or base (Base)",
     )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--runs", type=int, default=2,
-                        help="Repeat each (text, pad_count) combination N times")
+    parser.add_argument(
+        "--runs",
+        type=int,
+        default=2,
+        help="Repeat each (text, pad_count) combination N times",
+    )
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
@@ -203,7 +209,10 @@ def main():
                 print(f"{tag} ...", end=" ", flush=True)
 
                 result = run_experiment(
-                    model, tc, pad_count, output_dir,
+                    model,
+                    tc,
+                    pad_count,
+                    output_dir,
                     seed=args.seed + run_idx,
                     run_idx=run_idx,
                 )
@@ -220,10 +229,12 @@ def main():
     with open(report_path, "w") as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("SUMMARY")
-    print(f"{'='*70}")
-    print(f"{'Label':<16} {'Pad':>4} {'Run':>4} {'Duration':>10} {'GenTime':>10} {'Tokens':>8} {'IDs':>12}")
+    print(f"{'=' * 70}")
+    print(
+        f"{'Label':<16} {'Pad':>4} {'Run':>4} {'Duration':>10} {'GenTime':>10} {'Tokens':>8} {'IDs':>12}"
+    )
     print("-" * 70)
     for r in all_results:
         print(
@@ -235,7 +246,7 @@ def main():
 
     print(f"\nAudio files saved to: {output_dir}")
     print(f"Results JSON: {report_path}")
-    print(f"\nA/B Comparison:")
+    print("\nA/B Comparison:")
     print("  Listen to *_pad0_* (baseline) vs *_pad1/2/3/5_* for each label.")
     print("  Same seed per run ensures differences come only from pad injection.")
 

@@ -73,14 +73,18 @@ class TestEngineSmokeAndStreaming:
 
     def test_single_smoke(self, engine_addr):
         host, port = engine_addr
-        r = _synthesize_oneshot(host, port, text="你好，这是一个测试。", speaker="Serena")
+        r = _synthesize_oneshot(
+            host, port, text="你好，这是一个测试。", speaker="Serena"
+        )
         assert r.error is None, f"Synthesis failed: {r.error}"
         assert r.num_chunks >= 1
         assert r.total_samples >= SAMPLE_RATE * 0.1
 
     def test_english(self, engine_addr):
         host, port = engine_addr
-        r = _synthesize_oneshot(host, port, text="Hello, how are you today?", speaker="Serena")
+        r = _synthesize_oneshot(
+            host, port, text="Hello, how are you today?", speaker="Serena"
+        )
         assert r.error is None, f"Synthesis failed: {r.error}"
         assert r.total_samples >= SAMPLE_RATE * 0.1
 
@@ -166,13 +170,17 @@ class TestEngineLongText:
 
     def test_medium_long(self, engine_addr):
         host, port = engine_addr
-        r = _synthesize_oneshot(host, port, text=LONG_TEXT, speaker="Serena", timeout=180)
+        r = _synthesize_oneshot(
+            host, port, text=LONG_TEXT, speaker="Serena", timeout=180
+        )
         assert r.error is None, f"Long text failed: {r.error}"
         assert r.duration_sec >= 1.0, f"Audio too short: {r.duration_sec:.2f}s"
 
     def test_very_long(self, engine_addr):
         host, port = engine_addr
-        r = _synthesize_oneshot(host, port, text=VERY_LONG_TEXT, speaker="Serena", timeout=300)
+        r = _synthesize_oneshot(
+            host, port, text=VERY_LONG_TEXT, speaker="Serena", timeout=300
+        )
         assert r.error is None, f"Very long text failed: {r.error}"
         assert r.duration_sec >= 3.0, f"Audio too short: {r.duration_sec:.2f}s"
 
@@ -187,7 +195,9 @@ class TestEngineBadCases:
 
     def test_whitespace_text(self, engine_addr):
         host, port = engine_addr
-        r = _synthesize_oneshot(host, port, text="   \n\t  ", speaker="Serena", timeout=15)
+        r = _synthesize_oneshot(
+            host, port, text="   \n\t  ", speaker="Serena", timeout=15
+        )
         assert r.error is not None or r.total_samples == 0
 
     def test_single_char(self, engine_addr):
@@ -211,4 +221,6 @@ class TestEnginePerformance:
         assert r.error is None
         assert r.first_chunk_ms is not None
         print(f"\n  first_chunk={r.first_chunk_ms:.0f}ms  RTF={r.rtf:.2f}")
-        assert r.first_chunk_ms < 30_000, f"First chunk too slow: {r.first_chunk_ms:.0f}ms"
+        assert r.first_chunk_ms < 30_000, (
+            f"First chunk too slow: {r.first_chunk_ms:.0f}ms"
+        )

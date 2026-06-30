@@ -60,7 +60,7 @@ class TimingMetricDef:
     end_event: str
     clock_domain: str
     classification: str  # "strong" | "contextual"
-    metric_type: str     # "derived" | "raw_timestamp"
+    metric_type: str  # "derived" | "raw_timestamp"
     deprecated_alias: Optional[str] = None
     description: str = ""
 
@@ -246,7 +246,7 @@ _DERIVED_DURATION_METRICS: list[TimingMetricDef] = [
         metric_type="derived",
         deprecated_alias="first_audio_latency_ms",
         description="Time from session creation to first raw audio. "
-                    "Replaces the ambiguous 'first_audio' metric.",
+        "Replaces the ambiguous 'first_audio' metric.",
     ),
     TimingMetricDef(
         name="session_create_to_first_effective_audio_ms",
@@ -265,7 +265,7 @@ _DERIVED_DURATION_METRICS: list[TimingMetricDef] = [
         classification="strong",
         metric_type="derived",
         description="Time from first text enqueue to first raw audio. "
-                    "Captures engine queue wait + prefill + decode.",
+        "Captures engine queue wait + prefill + decode.",
     ),
     TimingMetricDef(
         name="first_text_enqueue_to_first_effective_audio_ms",
@@ -320,7 +320,7 @@ _DERIVED_DURATION_METRICS: list[TimingMetricDef] = [
         classification="strong",
         metric_type="derived",
         description="Gating latency: raw audio to effective audio. "
-                    "Non-zero when prefix trim / VAD gating is applied.",
+        "Non-zero when prefix trim / VAD gating is applied.",
     ),
     TimingMetricDef(
         name="total_latency_ms",
@@ -347,7 +347,7 @@ _CONTEXTUAL_METRICS: list[TimingMetricDef] = [
         classification="contextual",
         metric_type="derived",
         description="Client request timestamp to server first effective audio. "
-                    "Cross-domain: involves both client and server clocks.",
+        "Cross-domain: involves both client and server clocks.",
     ),
     TimingMetricDef(
         name="client_request_to_server_first_raw_audio_ms",
@@ -357,7 +357,7 @@ _CONTEXTUAL_METRICS: list[TimingMetricDef] = [
         classification="contextual",
         metric_type="derived",
         description="Client request timestamp to server first raw audio. "
-                    "Cross-domain: involves both client and server clocks.",
+        "Cross-domain: involves both client and server clocks.",
     ),
 ]
 
@@ -375,9 +375,7 @@ ALL_METRICS: list[TimingMetricDef] = (
 _METRICS_BY_NAME: dict[str, TimingMetricDef] = {m.name: m for m in ALL_METRICS}
 
 _DEPRECATED_ALIASES: dict[str, str] = {
-    m.deprecated_alias: m.name
-    for m in ALL_METRICS
-    if m.deprecated_alias is not None
+    m.deprecated_alias: m.name for m in ALL_METRICS if m.deprecated_alias is not None
 }
 
 

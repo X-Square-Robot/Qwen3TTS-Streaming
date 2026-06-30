@@ -23,7 +23,9 @@ def test_pad_packed_kv_uniform_lengths():
     kv1 = torch.full((1, 4, 2, 3, 8), 2.0, dtype=torch.float32)
 
     batched, past_seq_lens = pad_packed_kv(
-        [kv0, kv1], device=torch.device("cpu"), dtype=torch.float32,
+        [kv0, kv1],
+        device=torch.device("cpu"),
+        dtype=torch.float32,
     )
 
     assert past_seq_lens.tolist() == [3, 3]
@@ -38,7 +40,9 @@ def test_pad_packed_kv_heterogeneous_lengths():
     kv_long = torch.full((1, 4, 2, 5, 8), 2.0, dtype=torch.float32)
 
     batched, past_seq_lens = pad_packed_kv(
-        [kv_short, kv_long], device=torch.device("cpu"), dtype=torch.float32,
+        [kv_short, kv_long],
+        device=torch.device("cpu"),
+        dtype=torch.float32,
     )
 
     assert past_seq_lens.tolist() == [2, 5]
@@ -67,11 +71,11 @@ def test_split_packed_kv_heterogeneous():
     present = torch.randn(2, 4, 2, padded_past + seq, 8)
 
     # Fill identifiable data
-    present[0, :, :, :3, :] = 1.0   # row 0 real past (len=3)
+    present[0, :, :, :3, :] = 1.0  # row 0 real past (len=3)
     present[0, :, :, 3:5, :] = -1.0  # row 0 padding
-    present[0, :, :, 5:6, :] = 2.0   # row 0 new token
-    present[1, :, :, :5, :] = 3.0    # row 1 real past (len=5)
-    present[1, :, :, 5:6, :] = 4.0   # row 1 new token
+    present[0, :, :, 5:6, :] = 2.0  # row 0 new token
+    present[1, :, :, :5, :] = 3.0  # row 1 real past (len=5)
+    present[1, :, :, 5:6, :] = 4.0  # row 1 new token
 
     splits = split_packed_kv(present, [3, 5], padded_past_len=padded_past, seq=seq)
 
@@ -108,8 +112,11 @@ def test_padded_attention_bias_vectorized():
     """Verify the vectorized implementation matches expected masking."""
     past_seq_lens = torch.tensor([1, 3, 5], dtype=torch.long)
     bias = padded_attention_bias(
-        past_seq_lens, seq=1, padded_past_len=5,
-        device=torch.device("cpu"), dtype=torch.float32,
+        past_seq_lens,
+        seq=1,
+        padded_past_len=5,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
     )
     assert bias.shape == (3, 1, 1, 6)
     # Row 0: past_len=1, mask [1:5]

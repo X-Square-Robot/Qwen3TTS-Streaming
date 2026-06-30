@@ -45,22 +45,22 @@ def test_fused_io_format_counts_and_int_positions():
     # token_counts(i64), gumbel_noise(fp32), cp_gumbel_noise(fp32),
     # temperature(fp32), penalty(fp32),
     # cache_position(fp32), c2w_attention_bias
-    assert in_parts[0] == "bf16:chw"    # input_embeds
-    assert in_parts[1] == "int64:chw"   # position_ids
-    assert in_parts[2] == "bf16:chw"    # attention_bias
-    assert in_parts[3] == "int64:chw"   # token_counts
-    assert in_parts[4] == "fp32:chw"    # gumbel_noise
-    assert in_parts[5] == "fp32:chw"    # cp_gumbel_noise
-    assert in_parts[6] == "fp32:chw"    # temperature
-    assert in_parts[7] == "fp32:chw"    # penalty
-    assert in_parts[8] == "fp32:chw"    # cache_position
-    assert in_parts[9] == "bf16:chw"    # c2w_attention_bias
+    assert in_parts[0] == "bf16:chw"  # input_embeds
+    assert in_parts[1] == "int64:chw"  # position_ids
+    assert in_parts[2] == "bf16:chw"  # attention_bias
+    assert in_parts[3] == "int64:chw"  # token_counts
+    assert in_parts[4] == "fp32:chw"  # gumbel_noise
+    assert in_parts[5] == "fp32:chw"  # cp_gumbel_noise
+    assert in_parts[6] == "fp32:chw"  # temperature
+    assert in_parts[7] == "fp32:chw"  # penalty
+    assert in_parts[8] == "fp32:chw"  # cache_position
+    assert in_parts[9] == "bf16:chw"  # c2w_attention_bias
     # outputs: wav, codec_sum, full_codec(i64), hidden, logits, updated_token_counts(i64)
-    assert out_parts[0] == "bf16:chw"   # wav
-    assert out_parts[1] == "bf16:chw"   # codec_sum
+    assert out_parts[0] == "bf16:chw"  # wav
+    assert out_parts[1] == "bf16:chw"  # codec_sum
     assert out_parts[2] == "int64:chw"  # full_codec
-    assert out_parts[3] == "bf16:chw"   # hidden
-    assert out_parts[4] == "bf16:chw"   # logits
+    assert out_parts[3] == "bf16:chw"  # hidden
+    assert out_parts[4] == "bf16:chw"  # logits
     assert out_parts[5] == "int64:chw"  # updated_token_counts
 
 
@@ -68,7 +68,9 @@ def test_fused_io_fp32_float_tokens():
     m = _load_fixture()
     m["triton_io_float_dtype"] = "fp32"
     inp, out = fused_input_output_io_format_strings(m)
-    assert inp.startswith("fp32:chw,int64:chw,fp32:chw,int64:chw,fp32:chw,fp32:chw,fp32:chw,fp32:chw,fp32:chw,fp32:chw,fp32:chw,fp32:chw,")
+    assert inp.startswith(
+        "fp32:chw,int64:chw,fp32:chw,int64:chw,fp32:chw,fp32:chw,fp32:chw,fp32:chw,fp32:chw,fp32:chw,fp32:chw,fp32:chw,"
+    )
     assert "fp32:chw" in out.split(",")[0]
 
 
@@ -77,7 +79,13 @@ def test_cli_smoke():
     import subprocess
 
     r = subprocess.run(
-        [sys.executable, str(SCRIPTS_PY / "trt_fused_io_formats.py"), str(FIXTURE_MANIFEST), "--emit", "all"],
+        [
+            sys.executable,
+            str(SCRIPTS_PY / "trt_fused_io_formats.py"),
+            str(FIXTURE_MANIFEST),
+            "--emit",
+            "all",
+        ],
         capture_output=True,
         text=True,
         check=True,

@@ -5,7 +5,7 @@ without requiring the TenVad ONNX runtime.
 """
 
 import math
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -14,7 +14,6 @@ from engine.interface.vad import (
     DisabledVADProcessor,
     EnergyVADProcessor,
     TTSVADConfig,
-    TTSVADProcessor,
     VADMode,
     VADState,
     create_vad_processor,
@@ -28,6 +27,7 @@ FRAME_SAMPLES = 384  # 16ms @ 24kHz
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_silence(duration_ms: int, sr: int = SAMPLE_RATE) -> np.ndarray:
     """Generate silence (all zeros) as int16."""
@@ -65,6 +65,7 @@ def _make_noise(
 # Factory
 # ---------------------------------------------------------------------------
 
+
 class TestCreateVADProcessor:
     def test_disabled_mode(self):
         cfg = TTSVADConfig(mode=VADMode.DISABLED)
@@ -94,11 +95,13 @@ class TestVadConfigFromDict:
         assert cfg.mode == VADMode.DISABLED
 
     def test_energy_mode(self):
-        cfg = vad_config_from_dict({
-            "mode": "energy",
-            "begin_threshold": 0.4,
-            "end_count": 50,
-        })
+        cfg = vad_config_from_dict(
+            {
+                "mode": "energy",
+                "begin_threshold": 0.4,
+                "end_count": 50,
+            }
+        )
         assert cfg.mode == VADMode.ENERGY
         assert cfg.begin_threshold == 0.4
         assert cfg.end_count == 50
@@ -111,6 +114,7 @@ class TestVadConfigFromDict:
 # ---------------------------------------------------------------------------
 # Disabled VAD
 # ---------------------------------------------------------------------------
+
 
 class TestDisabledVADProcessor:
     def test_passthrough(self):
@@ -131,6 +135,7 @@ class TestDisabledVADProcessor:
 # ---------------------------------------------------------------------------
 # Energy VAD scoring
 # ---------------------------------------------------------------------------
+
 
 class TestEnergyVADScoring:
     def test_silence_scores_near_zero(self):
@@ -159,6 +164,7 @@ class TestEnergyVADScoring:
 # ---------------------------------------------------------------------------
 # VAD state machine
 # ---------------------------------------------------------------------------
+
 
 class TestVADStateMachine:
     def test_leading_silence_trimmed(self):
@@ -300,6 +306,7 @@ class TestVADStateMachine:
 # Frame alignment
 # ---------------------------------------------------------------------------
 
+
 class TestFrameAlignment:
     def test_sub_frame_chunk(self):
         """Chunks smaller than one frame should be buffered."""
@@ -360,6 +367,7 @@ class TestFrameAlignment:
 # Observability
 # ---------------------------------------------------------------------------
 
+
 class TestVADObservability:
     def test_metrics_disabled_mode(self):
         cfg = TTSVADConfig(mode=VADMode.DISABLED)
@@ -419,6 +427,7 @@ class TestVADObservability:
 # ---------------------------------------------------------------------------
 # Reset
 # ---------------------------------------------------------------------------
+
 
 class TestVADReset:
     def test_reset_clears_state(self):

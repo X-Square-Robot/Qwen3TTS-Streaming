@@ -9,8 +9,8 @@ Requires:
 
 Outputs WAV files to workspace/audio_samples/
 """
+
 import sys
-from pathlib import Path
 
 import numpy as np
 from common import REPO_ROOT, bootstrap_project_imports
@@ -66,7 +66,9 @@ def stream_tts(client, text: str, speaker: str, timeout: float = 60.0):
     )
     stream = infer_stream(client, grpcclient, req_dict, timeout=timeout)
     chunks = [stream.audio] if stream.audio is not None and stream.audio.size else []
-    first_sec = (stream.first_chunk_ms / 1000.0) if stream.first_chunk_ms is not None else None
+    first_sec = (
+        (stream.first_chunk_ms / 1000.0) if stream.first_chunk_ms is not None else None
+    )
     total = stream.total_ms / 1000.0
     return chunks, first_sec, total, stream.error
 
@@ -93,7 +95,7 @@ def main():
         text = sample["text"]
         speaker = sample["speaker"]
 
-        print(f"  [{name}] \"{text[:40]}...\"")
+        print(f'  [{name}] "{text[:40]}..."')
         chunks, first_sec, total_sec, err = stream_tts(client, text, speaker)
 
         if err:
@@ -101,7 +103,7 @@ def main():
             continue
 
         if not chunks:
-            print(f"    WARNING: no audio chunks received")
+            print("    WARNING: no audio chunks received")
             continue
 
         audio = np.concatenate(chunks)
@@ -109,11 +111,13 @@ def main():
         wav_path = OUTPUT_DIR / f"{name}.wav"
         save_wav(audio, wav_path, sample_rate=SAMPLE_RATE)
 
-        print(f"    → {wav_path.name}  "
-              f"duration={duration:.2f}s  "
-              f"first_chunk={first_sec*1000:.0f}ms  "
-              f"total={total_sec*1000:.0f}ms  "
-              f"chunks={len(chunks)}")
+        print(
+            f"    → {wav_path.name}  "
+            f"duration={duration:.2f}s  "
+            f"first_chunk={first_sec * 1000:.0f}ms  "
+            f"total={total_sec * 1000:.0f}ms  "
+            f"chunks={len(chunks)}"
+        )
 
     print(f"\nDone. Files in: {OUTPUT_DIR}/")
 

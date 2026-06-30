@@ -2,6 +2,7 @@
 Unit tests for LightQwen3TTSTokenizer.
 Run: pytest tests/unit/test_tokenizer_core.py -v
 """
+
 import pytest
 
 from tests.conftest import TOKENIZER_DIR, REPO_ROOT
@@ -16,6 +17,7 @@ def tok():
 
 
 # ── construction ────────────────────────────────────────────────
+
 
 class TestConstruction:
     def test_invalid_dir_raises(self):
@@ -35,6 +37,7 @@ class TestConstruction:
 
 # ── encode_ids ──────────────────────────────────────────────────
 
+
 class TestEncodeIds:
     def test_returns_list_of_int(self, tok):
         ids = tok.encode_ids("hello")
@@ -49,6 +52,7 @@ class TestEncodeIds:
 
 
 # ── encode_with_offsets ─────────────────────────────────────────
+
 
 class TestEncodeWithOffsets:
     def test_offsets_cover_full_text(self, tok):
@@ -69,11 +73,12 @@ class TestEncodeWithOffsets:
         _, offsets = tok.encode_with_offsets(text)
         for i in range(1, len(offsets)):
             assert offsets[i][0] == offsets[i - 1][1], (
-                f"Gap/overlap between token {i-1} and {i}: {offsets[i-1]} vs {offsets[i]}"
+                f"Gap/overlap between token {i - 1} and {i}: {offsets[i - 1]} vs {offsets[i]}"
             )
 
 
 # ── encode_with_tokens (BPE internal) ──────────────────────────
+
 
 class TestEncodeWithTokens:
     def test_token_count_matches_ids(self, tok):
@@ -82,6 +87,7 @@ class TestEncodeWithTokens:
 
 
 # ── encode_with_text (original spans) ──────────────────────────
+
 
 class TestEncodeWithText:
     def test_spans_concatenate_to_original(self, tok):
@@ -96,18 +102,21 @@ class TestEncodeWithText:
         for s in spans:
             assert "\u0120" not in s, f"BPE artifact Ġ found in span: {s!r}"
 
-    @pytest.mark.parametrize("text", [
-        "你好世界",
-        "中英混合 test 123",
-        "你好，这是 token player + audio 并行流式测试。",
-        "Hello, how are you?",
-        "  leading spaces",
-        "trailing spaces  ",
-        "multiple   spaces",
-        "line\nbreak",
-        "tab\there",
-        "特殊符号：！@#￥%",
-    ])
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "你好世界",
+            "中英混合 test 123",
+            "你好，这是 token player + audio 并行流式测试。",
+            "Hello, how are you?",
+            "  leading spaces",
+            "trailing spaces  ",
+            "multiple   spaces",
+            "line\nbreak",
+            "tab\there",
+            "特殊符号：！@#￥%",
+        ],
+    )
     def test_spans_roundtrip_various(self, tok, text):
         _, spans = tok.encode_with_text(text)
         assert "".join(spans) == text
@@ -115,15 +124,19 @@ class TestEncodeWithText:
 
 # ── decode roundtrip ────────────────────────────────────────────
 
+
 class TestDecodeRoundtrip:
-    @pytest.mark.parametrize("text", [
-        "Hello, world!",
-        "你好世界",
-        "中英混合 test 123",
-        "  leading spaces",
-        "trailing spaces  ",
-        "line\nbreak",
-    ])
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Hello, world!",
+            "你好世界",
+            "中英混合 test 123",
+            "  leading spaces",
+            "trailing spaces  ",
+            "line\nbreak",
+        ],
+    )
     def test_encode_decode_roundtrip(self, tok, text):
         ids = tok.encode_ids(text)
         decoded = tok.decode(ids)
@@ -134,6 +147,7 @@ class TestDecodeRoundtrip:
 
 
 # ── special tokens ──────────────────────────────────────────────
+
 
 class TestSpecialTokens:
     SPECIAL_TOKENS = ["<|im_start|>", "<|im_end|>", "<|endoftext|>"]
@@ -161,6 +175,7 @@ class TestSpecialTokens:
 
 # ── HF consistency (optional) ──────────────────────────────────
 
+
 class TestHFConsistency:
     @pytest.fixture(scope="class")
     def hf_tok(self):
@@ -168,16 +183,25 @@ class TestHFConsistency:
             from transformers import AutoTokenizer
         except ImportError:
             pytest.skip("transformers not installed")
-        hf_dir = REPO_ROOT / "workspace" / "exported" / "tokenizer" / "Qwen3-TTS-Tokenizer-12Hz"
+        hf_dir = (
+            REPO_ROOT
+            / "workspace"
+            / "exported"
+            / "tokenizer"
+            / "Qwen3-TTS-Tokenizer-12Hz"
+        )
         if not hf_dir.is_dir():
             pytest.skip(f"HF tokenizer dir not found: {hf_dir}")
         return AutoTokenizer.from_pretrained(str(hf_dir), trust_remote_code=True)
 
-    @pytest.mark.parametrize("text", [
-        "<|im_start|>assistant\n你好世界<|im_end|>",
-        "<|im_start|>assistant\nHello, how are you?<|im_end|>",
-        "中英混合 test 123",
-    ])
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "<|im_start|>assistant\n你好世界<|im_end|>",
+            "<|im_start|>assistant\nHello, how are you?<|im_end|>",
+            "中英混合 test 123",
+        ],
+    )
     def test_ids_match_hf(self, tok, hf_tok, text):
         light_ids = tok.encode_ids(text)
         hf_ids = hf_tok(text)["input_ids"]

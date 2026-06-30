@@ -56,7 +56,13 @@ from engine.config import (
     load_model_manifest,
     resolve_model_package_paths,
 )
-from engine.core.types import AudioConfig, AudioEncoding, GroupPolicy, InputMode, SessionConfig
+from engine.core.types import (
+    AudioConfig,
+    AudioEncoding,
+    GroupPolicy,
+    InputMode,
+    SessionConfig,
+)
 from engine.runtime.fingerprint import (
     FingerprintCheckError,
     enforce_engine_fingerprint,
@@ -142,7 +148,9 @@ def _decode_ref_audio(raw: Any) -> bytes | None:
     try:
         return base64.b64decode(raw, validate=True)
     except Exception as exc:
-        raise ValueError("Request field 'ref_audio' must be valid base64 audio data") from exc
+        raise ValueError(
+            "Request field 'ref_audio' must be valid base64 audio data"
+        ) from exc
 
 
 def _parse_input_mode(raw: Any, *, default_mode: InputMode) -> InputMode:
@@ -238,7 +246,9 @@ class TritonPythonModel:
         params = self.model_config.get("parameters", {})
 
         self.variant = _param_string(params, "model_variant", "unknown")
-        self.device_id = int(_param_string(params, "device_id", os.environ.get("CUDA_DEVICE", "0")))
+        self.device_id = int(
+            _param_string(params, "device_id", os.environ.get("CUDA_DEVICE", "0"))
+        )
 
         self._model_package_dir = Path(
             _param_string(params, "model_package_dir", str(_MODEL_VERSION_DIR))
@@ -276,10 +286,18 @@ class TritonPythonModel:
             or _param_string(params, "engine_max_decode_len", "512")
         )
         cfg.scheduler.session_timeout_sec = float(
-            _param_string(params, "request_timeout_sec", os.environ.get("REQUEST_TIMEOUT_SEC", "300"))
+            _param_string(
+                params,
+                "request_timeout_sec",
+                os.environ.get("REQUEST_TIMEOUT_SEC", "300"),
+            )
         )
         cfg.prefix_cache.enabled = _parse_bool(
-            _param_string(params, "enable_prefix_kv_cache", os.environ.get("ENABLE_PREFIX_KV_CACHE", "1")),
+            _param_string(
+                params,
+                "enable_prefix_kv_cache",
+                os.environ.get("ENABLE_PREFIX_KV_CACHE", "1"),
+            ),
             True,
         )
         cfg.prefix_cache.max_entries = int(
@@ -301,7 +319,9 @@ class TritonPythonModel:
             _param_string(
                 params,
                 "temperature",
-                _env_string("ENGINE_SAMPLING_TEMPERATURE", "TEMPERATURE", default="0.9"),
+                _env_string(
+                    "ENGINE_SAMPLING_TEMPERATURE", "TEMPERATURE", default="0.9"
+                ),
             )
         )
         cfg.sampling.repetition_penalty = float(
@@ -316,7 +336,9 @@ class TritonPythonModel:
             )
         )
         cfg.spliter.ema_ratio_initial = float(
-            _param_string(params, "ratio_initial", os.environ.get("RATIO_INITIAL", "5.5"))
+            _param_string(
+                params, "ratio_initial", os.environ.get("RATIO_INITIAL", "5.5")
+            )
         )
         cfg.spliter.ema_alpha = float(
             _param_string(params, "ratio_alpha", os.environ.get("RATIO_ALPHA", "0.1"))
@@ -338,21 +360,27 @@ class TritonPythonModel:
             _param_string(
                 params,
                 "l1_split_cap_ratio",
-                os.environ.get("L1_SPLIT_CAP_RATIO", str(cfg.spliter.l1_split_cap_ratio)),
+                os.environ.get(
+                    "L1_SPLIT_CAP_RATIO", str(cfg.spliter.l1_split_cap_ratio)
+                ),
             )
         )
         cfg.spliter.l2_split_cap_ratio = float(
             _param_string(
                 params,
                 "l2_split_cap_ratio",
-                os.environ.get("L2_SPLIT_CAP_RATIO", str(cfg.spliter.l2_split_cap_ratio)),
+                os.environ.get(
+                    "L2_SPLIT_CAP_RATIO", str(cfg.spliter.l2_split_cap_ratio)
+                ),
             )
         )
         cfg.spliter.l3_split_cap_ratio = float(
             _param_string(
                 params,
                 "l3_split_cap_ratio",
-                os.environ.get("L3_SPLIT_CAP_RATIO", str(cfg.spliter.l3_split_cap_ratio)),
+                os.environ.get(
+                    "L3_SPLIT_CAP_RATIO", str(cfg.spliter.l3_split_cap_ratio)
+                ),
             )
         )
         cfg.prefill.default_speaker = _param_string(
@@ -366,10 +394,13 @@ class TritonPythonModel:
             os.environ.get("FALLBACK_SPEAKER", cfg.prefill.fallback_speaker),
         )
 
-        model_arch = load_model_manifest(str(self._engine_dir), cfg, tokenizer_dir=str(self._tokenizer_dir))
-        self._loaded_model_type = (
-            (model_arch.tts_model_type or "").strip()
-            or (model_arch.supported_task_types[0] if model_arch.supported_task_types else "unknown")
+        model_arch = load_model_manifest(
+            str(self._engine_dir), cfg, tokenizer_dir=str(self._tokenizer_dir)
+        )
+        self._loaded_model_type = (model_arch.tts_model_type or "").strip() or (
+            model_arch.supported_task_types[0]
+            if model_arch.supported_task_types
+            else "unknown"
         )
 
         self._loop = asyncio.new_event_loop()
@@ -419,7 +450,9 @@ class TritonPythonModel:
             response_sender = request.get_response_sender()
             try:
                 req = self._parse_request_json(request)
-                action = str(req.get("action", "synthesize") or "synthesize").strip().lower()
+                action = (
+                    str(req.get("action", "synthesize") or "synthesize").strip().lower()
+                )
 
                 if action == "capabilities":
                     self._handle_capabilities(response_sender)
@@ -430,7 +463,9 @@ class TritonPythonModel:
                 elif action == "cancel":
                     self._handle_cancel(req, response_sender)
                 elif action in ("init", "start", "synthesize"):
-                    self._handle_start(req, response_sender, streaming=(action in ("init", "start")))
+                    self._handle_start(
+                        req, response_sender, streaming=(action in ("init", "start"))
+                    )
                 else:
                     raise ValueError(f"Unsupported action: {action}")
             except Exception as exc:
@@ -460,7 +495,10 @@ class TritonPythonModel:
     def _shutdown_loop(self) -> None:
         if getattr(self, "_loop", None) is not None and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
-        if getattr(self, "_loop_thread", None) is not None and self._loop_thread.is_alive():
+        if (
+            getattr(self, "_loop_thread", None) is not None
+            and self._loop_thread.is_alive()
+        ):
             self._loop_thread.join(timeout=5)
 
     def _parse_request_json(self, request) -> dict[str, Any]:
@@ -478,7 +516,9 @@ class TritonPythonModel:
         return req
 
     def _handle_capabilities(self, response_sender) -> None:
-        caps_json = json.dumps(_build_legacy_capabilities(self._engine), ensure_ascii=False)
+        caps_json = json.dumps(
+            _build_legacy_capabilities(self._engine), ensure_ascii=False
+        )
         response = pb_utils.InferenceResponse(
             output_tensors=[
                 pb_utils.Tensor("audio_chunk", np.array([b""], dtype=object)),
@@ -550,7 +590,10 @@ class TritonPythonModel:
             output_tensors=[
                 pb_utils.Tensor("audio_chunk", np.array([audio_bytes], dtype=object)),
                 pb_utils.Tensor("event_type", np.array([event_type], dtype=object)),
-                pb_utils.Tensor("event_json", np.array([json.dumps(event, ensure_ascii=False)], dtype=object)),
+                pb_utils.Tensor(
+                    "event_json",
+                    np.array([json.dumps(event, ensure_ascii=False)], dtype=object),
+                ),
                 pb_utils.Tensor("is_final", np.array([is_final], dtype=bool)),
             ]
         )
@@ -558,7 +601,9 @@ class TritonPythonModel:
         if is_final:
             self._safe_send_final(response_sender)
 
-    def _handle_start(self, req: dict[str, Any], response_sender, *, streaming: bool) -> None:
+    def _handle_start(
+        self, req: dict[str, Any], response_sender, *, streaming: bool
+    ) -> None:
         request_received = time.perf_counter()
         first_audio_sent = False
         session_id = str(req.get("session_id") or uuid.uuid4().hex)
@@ -611,7 +656,9 @@ class TritonPythonModel:
                         str(k): str(v)
                         for k, v in (metrics or {}).items()
                         if k != "error"
-                    } if isinstance(metrics, dict) else {},
+                    }
+                    if isinstance(metrics, dict)
+                    else {},
                     is_final=True,
                 )
                 return
@@ -619,9 +666,9 @@ class TritonPythonModel:
                 response_sender,
                 event_type="end",
                 session_id=_sid,
-                meta={
-                    str(k): str(v) for k, v in (metrics or {}).items()
-                } if isinstance(metrics, dict) else {},
+                meta={str(k): str(v) for k, v in (metrics or {}).items()}
+                if isinstance(metrics, dict)
+                else {},
                 is_final=True,
             )
 
@@ -661,7 +708,9 @@ class TritonPythonModel:
                 pass
             raise
 
-    def _session_config_from_request(self, req: dict[str, Any], *, streaming: bool) -> SessionConfig:
+    def _session_config_from_request(
+        self, req: dict[str, Any], *, streaming: bool
+    ) -> SessionConfig:
         default_mode = InputMode.LONG_SEGMENT if streaming else InputMode.FULL_TEXT
         task_type = _normalize_request_task_type(
             str(req.get("task_type") or ""),
@@ -672,12 +721,20 @@ class TritonPythonModel:
         config = SessionConfig(
             task_type=task_type,
             language=str(req.get("language") or "auto"),
-            speaker=(str(req.get("speaker")).strip() or None) if req.get("speaker") is not None else None,
-            instruct=(str(req.get("instruct")).strip() or None) if req.get("instruct") is not None else None,
+            speaker=(str(req.get("speaker")).strip() or None)
+            if req.get("speaker") is not None
+            else None,
+            instruct=(str(req.get("instruct")).strip() or None)
+            if req.get("instruct") is not None
+            else None,
             ref_audio=_decode_ref_audio(req.get("ref_audio")),
-            ref_text=(str(req.get("ref_text")).strip() or None) if req.get("ref_text") is not None else None,
+            ref_text=(str(req.get("ref_text")).strip() or None)
+            if req.get("ref_text") is not None
+            else None,
             x_vector_only=_parse_bool(req.get("x_vector_only"), False),
-            input_mode=_parse_input_mode(req.get("input_mode"), default_mode=default_mode),
+            input_mode=_parse_input_mode(
+                req.get("input_mode"), default_mode=default_mode
+            ),
             group_policy=_parse_group_policy(req.get("group_policy")),
             audio=audio,
         )

@@ -34,7 +34,9 @@ def _positive_int(value: str) -> int:
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
 
 
 def update_manifest(args: argparse.Namespace) -> None:
@@ -45,9 +47,17 @@ def update_manifest(args: argparse.Namespace) -> None:
     triton_io_dtype = _normalize_dtype(args.triton_io_float_dtype or engine_dtype)
 
     # Resolve per-submodel precision: explicit args override, else fall back to engine_dtype
-    backbone_prec = _normalize_dtype(args.backbone_precision) if args.backbone_precision else engine_dtype
+    backbone_prec = (
+        _normalize_dtype(args.backbone_precision)
+        if args.backbone_precision
+        else engine_dtype
+    )
     cp_prec = _normalize_dtype(args.cp_precision) if args.cp_precision else engine_dtype
-    code2wav_prec = _normalize_dtype(args.code2wav_precision) if args.code2wav_precision else engine_dtype
+    code2wav_prec = (
+        _normalize_dtype(args.code2wav_precision)
+        if args.code2wav_precision
+        else engine_dtype
+    )
 
     if args.engine_mode:
         data["engine_mode"] = args.engine_mode
@@ -87,7 +97,9 @@ def update_manifest(args: argparse.Namespace) -> None:
         }
     )
     if not args.skip_built_at:
-        profile["built_at_utc"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        profile["built_at_utc"] = (
+            datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        )
     else:
         profile.pop("built_at_utc", None)
 
@@ -96,13 +108,27 @@ def update_manifest(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", required=True, help="Path to triton_manifest.json")
+    parser.add_argument(
+        "--manifest", required=True, help="Path to triton_manifest.json"
+    )
     parser.add_argument("--engine-mode", default="trt", choices=("onnx", "trt"))
     parser.add_argument("--engine-dtype", required=True, help="bf16|fp16|fp32|fp8")
-    parser.add_argument("--triton-io-float-dtype", default="", help="Default: same as --engine-dtype")
-    parser.add_argument("--backbone-precision", default="", help="Backbone compute precision; default: engine-dtype")
-    parser.add_argument("--cp-precision", default="", help="CP compute precision; default: engine-dtype")
-    parser.add_argument("--code2wav-precision", default="", help="Code2Wav compute precision; default: engine-dtype")
+    parser.add_argument(
+        "--triton-io-float-dtype", default="", help="Default: same as --engine-dtype"
+    )
+    parser.add_argument(
+        "--backbone-precision",
+        default="",
+        help="Backbone compute precision; default: engine-dtype",
+    )
+    parser.add_argument(
+        "--cp-precision", default="", help="CP compute precision; default: engine-dtype"
+    )
+    parser.add_argument(
+        "--code2wav-precision",
+        default="",
+        help="Code2Wav compute precision; default: engine-dtype",
+    )
     parser.add_argument("--max-batch-size", type=_positive_int, required=True)
     parser.add_argument("--max-input-len", type=_positive_int, required=True)
     parser.add_argument("--max-seq-len", type=_positive_int, required=True)
@@ -110,7 +136,9 @@ def main() -> None:
     parser.add_argument("--builder-image", default="")
     parser.add_argument("--target-driver", default="")
     parser.add_argument("--ngc-tag", default="")
-    parser.add_argument("--target-profile", default="", help="target_profile.json for gpu_sm metadata")
+    parser.add_argument(
+        "--target-profile", default="", help="target_profile.json for gpu_sm metadata"
+    )
     parser.add_argument("--gpu-sm", default="")
     parser.add_argument("--tensorrt-version", default="")
     parser.add_argument("--skip-built-at", action="store_true")

@@ -9,7 +9,9 @@ import numpy as np
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-AUDIO_DIR = Path(os.environ.get("QWEN_DEMO_AUDIO_DIR", str(REPO_ROOT / "workspace" / "demo_audio")))
+AUDIO_DIR = Path(
+    os.environ.get("QWEN_DEMO_AUDIO_DIR", str(REPO_ROOT / "workspace" / "demo_audio"))
+)
 
 
 class AudioStore:
@@ -17,8 +19,12 @@ class AudioStore:
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def save_pcm_f32_wav(self, pcm_f32: bytes, *, sample_rate: int = 24000, name_hint: str = "audio") -> dict:
-        digest = hashlib.sha1(pcm_f32[:65536] + name_hint.encode("utf-8")).hexdigest()[:16]
+    def save_pcm_f32_wav(
+        self, pcm_f32: bytes, *, sample_rate: int = 24000, name_hint: str = "audio"
+    ) -> dict:
+        digest = hashlib.sha1(pcm_f32[:65536] + name_hint.encode("utf-8")).hexdigest()[
+            :16
+        ]
         filename = f"{safe_name(name_hint)}-{digest}.wav"
         path = self.root / filename
         if not path.exists():
@@ -40,7 +46,9 @@ class AudioStore:
 
 
 def safe_name(value: str) -> str:
-    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in value.lower())
+    cleaned = "".join(
+        ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in value.lower()
+    )
     return cleaned.strip("-")[:64] or "audio"
 
 

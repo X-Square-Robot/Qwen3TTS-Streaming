@@ -241,7 +241,9 @@ class EngineDebugDumper:
 
         if include_patterns and not self._matches_any(include_patterns, full, leaf):
             return False
-        if self._exclude_patterns and self._matches_any(self._exclude_patterns, full, leaf):
+        if self._exclude_patterns and self._matches_any(
+            self._exclude_patterns, full, leaf
+        ):
             return False
         return True
 
@@ -270,7 +272,9 @@ class EngineDebugDumper:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
             self._append_tsv(sess_dir / "timeline.tsv", [row])
 
-    def _build_call_summary(self, path: Path, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_call_summary(
+        self, path: Path, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
         meta = payload.get("metadata", {})
         inputs = payload.get("inputs", {})
         outputs = payload.get("outputs", {})
@@ -317,27 +321,61 @@ class EngineDebugDumper:
             "batch_row": row_idx,
             "slot_id": self._meta_at(meta, "slot_ids", row_idx, default=-1),
             "session_id": self._meta_at(meta, "slot_session_ids", row_idx, default=""),
-            "segment_idx": self._meta_at(meta, "slot_segment_indices", row_idx, default=-1),
-            "prefill_source": self._meta_at(meta, "slot_prefill_sources", row_idx, default=""),
-            "past_len_before": self._meta_at(meta, "slot_past_len_before", row_idx, default=0),
-            "original_talker_past_len": self._meta_at(meta, "original_talker_past_lens", row_idx, default=0),
-            "frame_idx_before": self._meta_at(meta, "slot_frame_idx_before", row_idx, default=0),
-            "text_idx_before": self._meta_at(meta, "slot_text_idx_before", row_idx, default=0),
-            "trailing_len": self._meta_at(meta, "slot_trailing_len", row_idx, default=0),
-            "c2w_len_before": self._meta_at(meta, "slot_c2w_len_before", row_idx, default=0),
-            "slot_has_next_embed_before": self._meta_at(meta, "slot_has_next_embed", row_idx, default=False),
-            "slot_has_last_codec_sum_before": self._meta_at(meta, "slot_has_last_codec_sum", row_idx, default=False),
+            "segment_idx": self._meta_at(
+                meta, "slot_segment_indices", row_idx, default=-1
+            ),
+            "prefill_source": self._meta_at(
+                meta, "slot_prefill_sources", row_idx, default=""
+            ),
+            "past_len_before": self._meta_at(
+                meta, "slot_past_len_before", row_idx, default=0
+            ),
+            "original_talker_past_len": self._meta_at(
+                meta, "original_talker_past_lens", row_idx, default=0
+            ),
+            "frame_idx_before": self._meta_at(
+                meta, "slot_frame_idx_before", row_idx, default=0
+            ),
+            "text_idx_before": self._meta_at(
+                meta, "slot_text_idx_before", row_idx, default=0
+            ),
+            "trailing_len": self._meta_at(
+                meta, "slot_trailing_len", row_idx, default=0
+            ),
+            "c2w_len_before": self._meta_at(
+                meta, "slot_c2w_len_before", row_idx, default=0
+            ),
+            "slot_has_next_embed_before": self._meta_at(
+                meta, "slot_has_next_embed", row_idx, default=False
+            ),
+            "slot_has_last_codec_sum_before": self._meta_at(
+                meta, "slot_has_last_codec_sum", row_idx, default=False
+            ),
         }
-        row["c2w_window_remaining_before"] = max(0, c2w_window - int(row["c2w_len_before"]))
+        row["c2w_window_remaining_before"] = max(
+            0, c2w_window - int(row["c2w_len_before"])
+        )
         row["c2w_window_full_before"] = int(row["c2w_len_before"]) >= c2w_window
 
-        row["position_start"] = self._tensor_scalar(inputs.get("position_ids"), row_idx, (0, 0, 0))
-        row["cache_position"] = self._tensor_scalar(inputs.get("cache_position"), row_idx, (0,))
-        row["full_codec_0"] = self._tensor_scalar(outputs.get("full_codec"), row_idx, (0,))
-        row["full_codec_head"] = self._tensor_head(outputs.get("full_codec"), row_idx, take=4)
+        row["position_start"] = self._tensor_scalar(
+            inputs.get("position_ids"), row_idx, (0, 0, 0)
+        )
+        row["cache_position"] = self._tensor_scalar(
+            inputs.get("cache_position"), row_idx, (0,)
+        )
+        row["full_codec_0"] = self._tensor_scalar(
+            outputs.get("full_codec"), row_idx, (0,)
+        )
+        row["full_codec_head"] = self._tensor_head(
+            outputs.get("full_codec"), row_idx, take=4
+        )
         row["wav_numel"] = self._tensor_numel(outputs.get("wav"), row_idx)
-        row["talker_delta_len"] = self._tensor_dim(outputs.get("talker_new_kv"), row_idx, dim=3)
-        row["c2w_delta_len"] = self._tensor_dim(outputs.get("c2w_new_kv"), row_idx, dim=3)
+        row["talker_delta_len"] = self._tensor_dim(
+            outputs.get("talker_new_kv"), row_idx, dim=3
+        )
+        row["c2w_delta_len"] = self._tensor_dim(
+            outputs.get("c2w_new_kv"), row_idx, dim=3
+        )
         codec_eos_id = int(config.get("codec_eos_id", -1) or -1)
         row["eos"] = bool(
             codec_eos_id >= 0
@@ -444,9 +482,7 @@ class EngineDebugDumper:
             if write_header:
                 f.write("\t".join(header) + "\n")
             for row in rows:
-                f.write(
-                    "\t".join(str(row.get(col, "")) for col in header) + "\n"
-                )
+                f.write("\t".join(str(row.get(col, "")) for col in header) + "\n")
 
     def _write_text_dump(self, base_path: Path, payload: Dict[str, Any]) -> None:
         base_path.mkdir(parents=True, exist_ok=True)
@@ -513,10 +549,12 @@ class EngineDebugDumper:
         elif cols == 0:
             body = "\n" * shown_rows
         else:
-            body = "\n".join(
-                " ".join(str(value) for value in row)
-                for row in shown.tolist()
-            ) + "\n"
+            body = (
+                "\n".join(
+                    " ".join(str(value) for value in row) for row in shown.tolist()
+                )
+                + "\n"
+            )
         path.write_text(body, encoding="utf-8")
 
         info_path = path.with_name(f"{path.stem}__layout.txt")

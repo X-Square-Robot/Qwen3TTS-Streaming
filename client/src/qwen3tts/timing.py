@@ -97,7 +97,9 @@ class ServerTimingReport:
         """Parse server timing from the done event's meta dict."""
         return cls(
             # Epoch timestamps
-            server_request_received_epoch_ms=_safe_int(meta.get("server_request_received_epoch_ms")),
+            server_request_received_epoch_ms=_safe_int(
+                meta.get("server_request_received_epoch_ms")
+            ),
             # Prefer the real session-created timestamp (server emits it under
             # *_monotonic); the *_epoch_ms key carries the request-received time
             # as a coarse approximation. Fall back to it for older servers.
@@ -105,57 +107,99 @@ class ServerTimingReport:
                 meta.get("server_session_created_monotonic")
                 or meta.get("server_session_created_epoch_ms")
             ),
-            server_first_text_received_epoch_ms=_safe_int(meta.get("server_first_text_received_epoch_ms")),
-            server_first_text_enqueued_epoch_ms=_safe_int(meta.get("server_first_text_enqueued_epoch_ms")),
-            server_first_text_dequeued_epoch_ms=_safe_int(meta.get("server_first_text_dequeued_epoch_ms")),
-            server_prefill_started_epoch_ms=_safe_int(meta.get("server_prefill_started_epoch_ms")),
-            server_prefill_completed_epoch_ms=_safe_int(meta.get("server_prefill_completed_epoch_ms")),
-            server_first_raw_audio_epoch_ms=_safe_int(meta.get("server_first_raw_audio_epoch_ms")),
-            server_first_effective_audio_epoch_ms=_safe_int(meta.get("server_first_effective_audio_epoch_ms")),
+            server_first_text_received_epoch_ms=_safe_int(
+                meta.get("server_first_text_received_epoch_ms")
+            ),
+            server_first_text_enqueued_epoch_ms=_safe_int(
+                meta.get("server_first_text_enqueued_epoch_ms")
+            ),
+            server_first_text_dequeued_epoch_ms=_safe_int(
+                meta.get("server_first_text_dequeued_epoch_ms")
+            ),
+            server_prefill_started_epoch_ms=_safe_int(
+                meta.get("server_prefill_started_epoch_ms")
+            ),
+            server_prefill_completed_epoch_ms=_safe_int(
+                meta.get("server_prefill_completed_epoch_ms")
+            ),
+            server_first_raw_audio_epoch_ms=_safe_int(
+                meta.get("server_first_raw_audio_epoch_ms")
+            ),
+            server_first_effective_audio_epoch_ms=_safe_int(
+                meta.get("server_first_effective_audio_epoch_ms")
+            ),
             server_done_epoch_ms=_safe_int(meta.get("server_done_epoch_ms")),
             # Client timestamps
             client_request_ts_ms=_safe_int(meta.get("client_request_ts_ms")),
             client_text_ts_ms=_safe_int(meta.get("client_text_ts_ms")),
             client_end_ts_ms=_safe_int(meta.get("client_end_ts_ms")),
             # Server-derived durations
-            server_session_create_to_first_raw_audio_ms=_safe_float(meta.get("server_session_create_to_first_raw_audio_ms")),
-            server_session_create_to_first_effective_audio_ms=_safe_float(meta.get("server_session_create_to_first_effective_audio_ms")),
-            server_first_text_enqueue_to_first_raw_audio_ms=_safe_float(meta.get("server_first_text_enqueue_to_first_raw_audio_ms")),
-            server_first_text_enqueue_to_first_effective_audio_ms=_safe_float(meta.get("server_first_text_enqueue_to_first_effective_audio_ms")),
-            server_first_text_dequeue_to_first_raw_audio_ms=_safe_float(meta.get("server_first_text_dequeue_to_first_raw_audio_ms")),
-            server_first_text_dequeue_to_first_effective_audio_ms=_safe_float(meta.get("server_first_text_dequeue_to_first_effective_audio_ms")),
-            server_engine_queue_wait_ms=_safe_float(meta.get("server_engine_queue_wait_ms")),
+            server_session_create_to_first_raw_audio_ms=_safe_float(
+                meta.get("server_session_create_to_first_raw_audio_ms")
+            ),
+            server_session_create_to_first_effective_audio_ms=_safe_float(
+                meta.get("server_session_create_to_first_effective_audio_ms")
+            ),
+            server_first_text_enqueue_to_first_raw_audio_ms=_safe_float(
+                meta.get("server_first_text_enqueue_to_first_raw_audio_ms")
+            ),
+            server_first_text_enqueue_to_first_effective_audio_ms=_safe_float(
+                meta.get("server_first_text_enqueue_to_first_effective_audio_ms")
+            ),
+            server_first_text_dequeue_to_first_raw_audio_ms=_safe_float(
+                meta.get("server_first_text_dequeue_to_first_raw_audio_ms")
+            ),
+            server_first_text_dequeue_to_first_effective_audio_ms=_safe_float(
+                meta.get("server_first_text_dequeue_to_first_effective_audio_ms")
+            ),
+            server_engine_queue_wait_ms=_safe_float(
+                meta.get("server_engine_queue_wait_ms")
+            ),
             server_engine_prefill_ms=_safe_float(meta.get("server_engine_prefill_ms")),
-            server_first_raw_to_first_effective_audio_ms=_safe_float(meta.get("server_first_raw_to_first_effective_audio_ms")),
+            server_first_raw_to_first_effective_audio_ms=_safe_float(
+                meta.get("server_first_raw_to_first_effective_audio_ms")
+            ),
             server_total_latency_ms=_safe_float(meta.get("server_total_latency_ms")),
             # Policy / result
             server_prefix_trim_applied=meta.get("server_prefix_trim_applied") == "true",
             server_prefix_trimmed_ms=_safe_float(meta.get("server_prefix_trimmed_ms")),
             server_vad_policy=meta.get("server_vad_policy", ""),
             server_cache_hit=meta.get("server_cache_hit") == "true",
-            server_cache_tokens_reused=_safe_int(meta.get("server_cache_tokens_reused")) or 0,
+            server_cache_tokens_reused=_safe_int(meta.get("server_cache_tokens_reused"))
+            or 0,
             # Segment stats
             server_total_segments=_safe_int(meta.get("server_total_segments")),
             server_total_audio_ms=_safe_float(meta.get("server_total_audio_ms")),
             # Text observability
             server_text_input_mode=meta.get("server_text_input_mode", ""),
             server_raw_first_text_preview=meta.get("server_raw_first_text_preview", ""),
-            server_normalized_first_text_preview=meta.get("server_normalized_first_text_preview", ""),
+            server_normalized_first_text_preview=meta.get(
+                "server_normalized_first_text_preview", ""
+            ),
             server_text_coalesced=meta.get("server_text_coalesced") == "true",
-            server_text_progress_protected=meta.get("server_text_progress_protected") == "true",
+            server_text_progress_protected=meta.get("server_text_progress_protected")
+            == "true",
         )
 
     @property
     def client_request_to_server_first_audio_ms(self) -> Optional[float]:
         """Contextual: client request to server first effective audio."""
-        if self.client_request_ts_ms is not None and self.server_first_effective_audio_epoch_ms is not None:
-            return self.server_first_effective_audio_epoch_ms - self.client_request_ts_ms
+        if (
+            self.client_request_ts_ms is not None
+            and self.server_first_effective_audio_epoch_ms is not None
+        ):
+            return (
+                self.server_first_effective_audio_epoch_ms - self.client_request_ts_ms
+            )
         return None
 
     @property
     def client_request_to_server_first_raw_audio_ms(self) -> Optional[float]:
         """Contextual: client request to server first raw audio."""
-        if self.client_request_ts_ms is not None and self.server_first_raw_audio_epoch_ms is not None:
+        if (
+            self.client_request_ts_ms is not None
+            and self.server_first_raw_audio_epoch_ms is not None
+        ):
             return self.server_first_raw_audio_epoch_ms - self.client_request_ts_ms
         return None
 
@@ -191,13 +235,30 @@ class ServerTimingReport:
             components.append(("Engine queue wait", self.server_engine_queue_wait_ms))
         if self.server_engine_prefill_ms is not None:
             components.append(("Prefill", self.server_engine_prefill_ms))
-        if self.server_first_text_dequeue_to_first_raw_audio_ms is not None and self.server_engine_prefill_ms is not None:
-            decode_ms = self.server_first_text_dequeue_to_first_raw_audio_ms - self.server_engine_prefill_ms
+        if (
+            self.server_first_text_dequeue_to_first_raw_audio_ms is not None
+            and self.server_engine_prefill_ms is not None
+        ):
+            decode_ms = (
+                self.server_first_text_dequeue_to_first_raw_audio_ms
+                - self.server_engine_prefill_ms
+            )
             if decode_ms > 0:
                 components.append(("Decode (first raw audio)", decode_ms))
-        if self.server_first_raw_to_first_effective_audio_ms is not None and self.server_first_raw_to_first_effective_audio_ms > 0.01:
-            components.append(("Output gating (raw→effective)", self.server_first_raw_to_first_effective_audio_ms))
-        if self.server_prefix_trimmed_ms is not None and self.server_prefix_trimmed_ms > 0:
+        if (
+            self.server_first_raw_to_first_effective_audio_ms is not None
+            and self.server_first_raw_to_first_effective_audio_ms > 0.01
+        ):
+            components.append(
+                (
+                    "Output gating (raw→effective)",
+                    self.server_first_raw_to_first_effective_audio_ms,
+                )
+            )
+        if (
+            self.server_prefix_trimmed_ms is not None
+            and self.server_prefix_trimmed_ms > 0
+        ):
             components.append(("Prefix trim", self.server_prefix_trimmed_ms))
 
         for name, ms in components:
@@ -212,6 +273,8 @@ class ServerTimingReport:
         if self.server_total_latency_ms is not None:
             lines.append(f"  Total: {self.server_total_latency_ms:.1f}ms")
         if self.server_cache_hit:
-            lines.append(f"  Cache hit: yes ({self.server_cache_tokens_reused} tokens reused)")
+            lines.append(
+                f"  Cache hit: yes ({self.server_cache_tokens_reused} tokens reused)"
+            )
 
         return "\n".join(lines)

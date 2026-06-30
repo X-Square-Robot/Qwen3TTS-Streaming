@@ -126,9 +126,17 @@ class TTSEngine:
         self._weights_dir = weights_dir or self._cfg.paths.weights_dir
         self._engine_dir = engine_dir or self._cfg.paths.engine_dir
         self._device_id = device_id
-        self._max_batch = max_batch_size if max_batch_size != 48 else self._cfg.scheduler.max_batch_size
-        self._max_sessions = max_sessions if max_sessions != 128 else self._cfg.server.max_sessions
-        self._max_seq_len = max_seq_len if max_seq_len != 512 else self._cfg.scheduler.max_seq_len
+        self._max_batch = (
+            max_batch_size
+            if max_batch_size != 48
+            else self._cfg.scheduler.max_batch_size
+        )
+        self._max_sessions = (
+            max_sessions if max_sessions != 128 else self._cfg.server.max_sessions
+        )
+        self._max_seq_len = (
+            max_seq_len if max_seq_len != 512 else self._cfg.scheduler.max_seq_len
+        )
         self._validate_runtime_profile_bounds()
         self._cfg.scheduler.max_batch_size = self._max_batch
         self._cfg.scheduler.max_seq_len = self._max_seq_len
@@ -270,7 +278,9 @@ class TTSEngine:
             logger.warning(
                 "manifest max_input_len=%d disagrees with loaded TRT plan "
                 "max_input_len=%d (variant=%s); prefill is enforced at the plan value.",
-                _prof_max_in, _plan_max_in, self._model_arch.variant or "unknown",
+                _prof_max_in,
+                _plan_max_in,
+                self._model_arch.variant or "unknown",
             )
 
         sc = self._cfg.spliter
@@ -380,9 +390,13 @@ class TTSEngine:
         self._engine_loop.start()
 
         self._relay_task = asyncio.create_task(self._relay_inbox())
-        logger.info("TTS Engine started (max_batch=%d, max_sessions=%d, mlfq=%s, prefix_cache=%s)",
-                     self._max_batch, self._max_sessions,
-                     "enabled", "enabled" if pc.enabled else "disabled")
+        logger.info(
+            "TTS Engine started (max_batch=%d, max_sessions=%d, mlfq=%s, prefix_cache=%s)",
+            self._max_batch,
+            self._max_sessions,
+            "enabled",
+            "enabled" if pc.enabled else "disabled",
+        )
 
     async def stop(self) -> None:
         if self._relay_task:
@@ -477,7 +491,9 @@ class TTSEngine:
         stats["variant"] = self._model_arch.variant
         stats["loaded_model_type"] = self._loaded_model_type()
         if self._model_arch.supported_task_types:
-            stats["declared_supported_task_types"] = list(self._model_arch.supported_task_types)
+            stats["declared_supported_task_types"] = list(
+                self._model_arch.supported_task_types
+            )
         profile = self._model_arch.engine_profile
         if profile.max_batch_size or profile.max_seq_len:
             stats["engine_profile"] = {
@@ -495,40 +511,49 @@ class TTSEngine:
         """Return static standalone capability metadata for clients."""
         ref_caps = self._reference_capabilities()
 
-        return normalize_capabilities({
-            "variant": self._model_arch.variant,
-            "loaded_model_type": self._loaded_model_type(),
-            "declared_supported_task_types": list(self._model_arch.supported_task_types or ()),
-            "supported_input_modes": ["token", "clause", "long_segment", "full_text"],
-            "supported_group_policies": ["none", "auto"],
-            "supported_audio_formats": [
-                {"encoding": "pcm_f32", "sample_rate": 24000, "channels": 1},
-                {"encoding": "pcm_f32", "sample_rate": 16000, "channels": 1},
-                {"encoding": "pcm_s16le", "sample_rate": 24000, "channels": 1},
-                {"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 1},
-            ],
-            **ref_caps,
-            "engine_profile": {
-                "max_batch_size": self._model_arch.engine_profile.max_batch_size,
-                "max_input_len": self._model_arch.engine_profile.max_input_len,
-                "max_seq_len": self._model_arch.engine_profile.max_seq_len,
-                "engine_dtype": self._model_arch.engine_profile.engine_dtype,
-                "triton_io_float_dtype": self._model_arch.engine_profile.triton_io_float_dtype,
-            },
-        })
+        return normalize_capabilities(
+            {
+                "variant": self._model_arch.variant,
+                "loaded_model_type": self._loaded_model_type(),
+                "declared_supported_task_types": list(
+                    self._model_arch.supported_task_types or ()
+                ),
+                "supported_input_modes": [
+                    "token",
+                    "clause",
+                    "long_segment",
+                    "full_text",
+                ],
+                "supported_group_policies": ["none", "auto"],
+                "supported_audio_formats": [
+                    {"encoding": "pcm_f32", "sample_rate": 24000, "channels": 1},
+                    {"encoding": "pcm_f32", "sample_rate": 16000, "channels": 1},
+                    {"encoding": "pcm_s16le", "sample_rate": 24000, "channels": 1},
+                    {"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 1},
+                ],
+                **ref_caps,
+                "engine_profile": {
+                    "max_batch_size": self._model_arch.engine_profile.max_batch_size,
+                    "max_input_len": self._model_arch.engine_profile.max_input_len,
+                    "max_seq_len": self._model_arch.engine_profile.max_seq_len,
+                    "engine_dtype": self._model_arch.engine_profile.engine_dtype,
+                    "triton_io_float_dtype": self._model_arch.engine_profile.triton_io_float_dtype,
+                },
+            }
+        )
 
     def _reference_capabilities(self) -> dict:
-        support = self._ref_audio_processor.support if self._ref_audio_processor is not None else None
+        support = (
+            self._ref_audio_processor.support
+            if self._ref_audio_processor is not None
+            else None
+        )
         loaded_model_type = self._loaded_model_type()
         speaker_encoder_available = bool(
             support is not None and support.speaker_encoder_available
         )
-        ref_codec_available = bool(
-            support is not None and support.ref_codec_available
-        )
-        icl_available = bool(
-            support is not None and support.icl_available
-        )
+        ref_codec_available = bool(support is not None and support.ref_codec_available)
+        icl_available = bool(support is not None and support.icl_available)
         if loaded_model_type in ("base", "icl"):
             ref_audio_available = icl_available
         else:
@@ -599,23 +624,35 @@ class TTSEngine:
         if task_type == "voice_clone":
             if not config.ref_audio:
                 raise ValueError("ref_audio is required for task_type 'voice_clone'")
-            support = self._ref_audio_processor.support if self._ref_audio_processor is not None else None
+            support = (
+                self._ref_audio_processor.support
+                if self._ref_audio_processor is not None
+                else None
+            )
             if support is None or not support.speaker_encoder_available:
                 reason = (
                     support.reason
                     if support is not None
                     else "reference-audio processor unavailable"
                 )
-                raise ValueError(f"voice_clone is not available in standalone mode: {reason}")
+                raise ValueError(
+                    f"voice_clone is not available in standalone mode: {reason}"
+                )
             if not config.x_vector_only and not support.ref_codec_available:
                 reason = support.ref_codec_reason or support.reason
-                raise ValueError(f"voice_clone ICL is not available in standalone mode: {reason}")
+                raise ValueError(
+                    f"voice_clone ICL is not available in standalone mode: {reason}"
+                )
 
     def _loaded_model_type(self) -> str:
         model_type = (self._model_arch.tts_model_type or "").strip()
         if model_type and model_type != "unknown":
             return model_type
-        supported = tuple(t.strip() for t in self._model_arch.supported_task_types or () if t and t.strip())
+        supported = tuple(
+            t.strip()
+            for t in self._model_arch.supported_task_types or ()
+            if t and t.strip()
+        )
         if len(supported) == 1:
             return supported[0]
         return "unknown"
@@ -650,13 +687,17 @@ class TTSEngine:
                     continue
                 data = path.read_bytes()
             except OSError as exc:
-                logger.warning("Could not read default Base ref_audio %s: %s", path, exc)
+                logger.warning(
+                    "Could not read default Base ref_audio %s: %s", path, exc
+                )
                 continue
             if not data:
                 logger.warning("Default Base ref_audio %s is empty", path)
                 continue
             self._default_base_ref_audio = data
-            logger.info("Loaded default Base ref_audio from %s (%d bytes)", path, len(data))
+            logger.info(
+                "Loaded default Base ref_audio from %s (%d bytes)", path, len(data)
+            )
             return data
 
         raise ValueError(
@@ -694,8 +735,15 @@ class TTSEngine:
         if not ref_text and ref_text_path:
             ref_text = self._read_reference_text_path(ref_text_path)
         if not ref_text:
-            raise ValueError(f"ref_text_required: reference {ref_id!r} has empty ref_text")
-        return self._read_reference_audio_path(audio_path), ref_text, raw_key or normalized, language
+            raise ValueError(
+                f"ref_text_required: reference {ref_id!r} has empty ref_text"
+            )
+        return (
+            self._read_reference_audio_path(audio_path),
+            ref_text,
+            raw_key or normalized,
+            language,
+        )
 
     def _reference_path_candidates(self, raw_path: str) -> list[Path]:
         path = Path(raw_path).expanduser()
@@ -752,7 +800,9 @@ class TTSEngine:
         if refs.entries:
             ref_id = (refs.default or "default").strip() or "default"
             try:
-                audio, text, resolved_id, language = self._resolve_reference_entry(ref_id)
+                audio, text, resolved_id, language = self._resolve_reference_entry(
+                    ref_id
+                )
             except ValueError as exc:
                 raise ValueError(f"default_reference_missing: {exc}") from exc
             return audio, text, resolved_id, "default", language
@@ -788,16 +838,25 @@ class TTSEngine:
             targets.append((source, ref_id, audio))
             seen_ids.add(ref_id.strip().lower())
         except Exception as exc:
-            logger.warning("Could not resolve default Base/ICL reference for cache priming: %s", exc)
+            logger.warning(
+                "Could not resolve default Base/ICL reference for cache priming: %s",
+                exc,
+            )
 
         for raw_id in (self._cfg.references.entries or {}).keys():
             ref_id = str(raw_id).strip()
             if not ref_id or ref_id.lower() in seen_ids:
                 continue
             try:
-                audio, _text, resolved_id, _language = self._resolve_reference_entry(ref_id)
+                audio, _text, resolved_id, _language = self._resolve_reference_entry(
+                    ref_id
+                )
             except Exception as exc:
-                logger.warning("Could not resolve Base/ICL reference %s for cache priming: %s", ref_id, exc)
+                logger.warning(
+                    "Could not resolve Base/ICL reference %s for cache priming: %s",
+                    ref_id,
+                    exc,
+                )
                 continue
             targets.append(("registry", resolved_id, audio))
             seen_ids.add(resolved_id.strip().lower())
@@ -858,22 +917,30 @@ class TTSEngine:
             config=config,
         )
 
-    def _resolve_voice_clone_reference(self, model_type: str, config: SessionConfig) -> None:
+    def _resolve_voice_clone_reference(
+        self, model_type: str, config: SessionConfig
+    ) -> None:
         normalized = (model_type or "").strip()
         has_audio = bool(config.ref_audio)
         has_text = bool((config.ref_text or "").strip())
         alias = (config.speaker or "").strip()
 
         if has_audio and has_text:
-            self._mark_reference_metadata(config, source="explicit", ref_id=alias or None)
+            self._mark_reference_metadata(
+                config, source="explicit", ref_id=alias or None
+            )
             config.speaker = None
             config.x_vector_only = False
             return
 
         if has_audio and not has_text:
             if normalized == "icl":
-                raise ValueError("ref_text_required: ref_text is required for loaded model_type 'icl'")
-            self._mark_reference_metadata(config, source="explicit", ref_id=alias or None)
+                raise ValueError(
+                    "ref_text_required: ref_text is required for loaded model_type 'icl'"
+                )
+            self._mark_reference_metadata(
+                config, source="explicit", ref_id=alias or None
+            )
             config.speaker = None
             config.x_vector_only = True
             return
@@ -901,14 +968,18 @@ class TTSEngine:
         config.speaker = None
         config.x_vector_only = False
 
-    def _validate_model_specific_fields(self, model_type: str, config: SessionConfig) -> None:
+    def _validate_model_specific_fields(
+        self, model_type: str, config: SessionConfig
+    ) -> None:
         normalized = (model_type or "").strip()
         if normalized == "base":
             self._resolve_voice_clone_reference(normalized, config)
             if not config.ref_audio:
                 raise ValueError("ref_audio is required for loaded model_type 'base'")
             if config.instruct:
-                raise ValueError("instruct is not supported for loaded model_type 'base'")
+                raise ValueError(
+                    "instruct is not supported for loaded model_type 'base'"
+                )
             return
 
         if normalized in ("icl",):
@@ -916,32 +987,52 @@ class TTSEngine:
             if not config.ref_audio:
                 raise ValueError("ref_audio is required for loaded model_type 'icl'")
             if not (config.ref_text or "").strip():
-                raise ValueError("ref_text_required: ref_text is required for loaded model_type 'icl'")
+                raise ValueError(
+                    "ref_text_required: ref_text is required for loaded model_type 'icl'"
+                )
             if config.instruct:
-                raise ValueError("instruct is not supported for loaded model_type 'icl'")
+                raise ValueError(
+                    "instruct is not supported for loaded model_type 'icl'"
+                )
             config.x_vector_only = False
             return
 
         if normalized in ("voice_design", "instruct"):
             if not (config.instruct or "").strip():
-                raise ValueError("instruct is required for loaded model_type 'voice_design'")
+                raise ValueError(
+                    "instruct is required for loaded model_type 'voice_design'"
+                )
             if config.speaker:
-                raise ValueError("speaker is not supported for loaded model_type 'voice_design'")
+                raise ValueError(
+                    "speaker is not supported for loaded model_type 'voice_design'"
+                )
             if config.ref_audio:
-                raise ValueError("ref_audio is not supported for loaded model_type 'voice_design'")
+                raise ValueError(
+                    "ref_audio is not supported for loaded model_type 'voice_design'"
+                )
             if config.ref_text:
-                raise ValueError("ref_text is not supported for loaded model_type 'voice_design'")
+                raise ValueError(
+                    "ref_text is not supported for loaded model_type 'voice_design'"
+                )
             if config.x_vector_only:
-                raise ValueError("x_vector_only is not supported for loaded model_type 'voice_design'")
+                raise ValueError(
+                    "x_vector_only is not supported for loaded model_type 'voice_design'"
+                )
             return
 
         if normalized == "custom_voice":
             if config.ref_audio:
-                raise ValueError("ref_audio is not supported for loaded model_type 'custom_voice'")
+                raise ValueError(
+                    "ref_audio is not supported for loaded model_type 'custom_voice'"
+                )
             if config.ref_text:
-                raise ValueError("ref_text is not supported for loaded model_type 'custom_voice'")
+                raise ValueError(
+                    "ref_text is not supported for loaded model_type 'custom_voice'"
+                )
             if config.x_vector_only:
-                raise ValueError("x_vector_only is not supported for loaded model_type 'custom_voice'")
+                raise ValueError(
+                    "x_vector_only is not supported for loaded model_type 'custom_voice'"
+                )
             return
 
         if normalized == "voice_clone":
@@ -963,7 +1054,8 @@ class TTSEngine:
             config.ref_audio,
             require_ref_codec=not bool(config.x_vector_only),
             cache_tag=(
-                "voice_clone_icl" if not bool(config.x_vector_only)
+                "voice_clone_icl"
+                if not bool(config.x_vector_only)
                 else "voice_clone_xvec"
             ),
         )
@@ -1003,7 +1095,9 @@ class TTSEngine:
                 "speaker": config.speaker,
                 "language": config.language,
                 "input_mode": config.input_mode.value if config.input_mode else "",
-                "group_policy": config.group_policy.value if config.group_policy else "",
+                "group_policy": config.group_policy.value
+                if config.group_policy
+                else "",
                 "has_ref_audio": bool(config.ref_audio),
                 "has_ref_text": bool((config.ref_text or "").strip()),
                 "has_instruct": bool((config.instruct or "").strip()),
@@ -1055,6 +1149,7 @@ class TTSEngine:
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -1062,28 +1157,41 @@ def main():
     )
 
     parser = argparse.ArgumentParser(description="TTS Engine Server")
-    parser.add_argument("--config", default="engine.yaml",
-                        help="Path to engine.yaml config file (default: engine.yaml)")
-    parser.add_argument("--model-package-dir", default="",
-                        help="Path to shared model package (tts_orchestrator/<version>)")
+    parser.add_argument(
+        "--config",
+        default="engine.yaml",
+        help="Path to engine.yaml config file (default: engine.yaml)",
+    )
+    parser.add_argument(
+        "--model-package-dir",
+        default="",
+        help="Path to shared model package (tts_orchestrator/<version>)",
+    )
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--max-batch", type=int, default=0,
-                        help="Override scheduler.max_batch_size")
-    parser.add_argument("--max-seq-len", type=int, default=0,
-                        help="Override scheduler.max_seq_len")
-    parser.add_argument("--max-sessions", type=int, default=0,
-                        help="Override server.max_sessions")
-    parser.add_argument("--port", type=int, default=0,
-                        help="Override server.port")
-    parser.add_argument("--ws-port", type=int, default=-1,
-                        help="Override server.websocket_port (-1 keeps config)")
-    parser.add_argument("--ws-path", default="",
-                        help="Override server.websocket_path")
+    parser.add_argument(
+        "--max-batch", type=int, default=0, help="Override scheduler.max_batch_size"
+    )
+    parser.add_argument(
+        "--max-seq-len", type=int, default=0, help="Override scheduler.max_seq_len"
+    )
+    parser.add_argument(
+        "--max-sessions", type=int, default=0, help="Override server.max_sessions"
+    )
+    parser.add_argument("--port", type=int, default=0, help="Override server.port")
+    parser.add_argument(
+        "--ws-port",
+        type=int,
+        default=-1,
+        help="Override server.websocket_port (-1 keeps config)",
+    )
+    parser.add_argument("--ws-path", default="", help="Override server.websocket_path")
     args = parser.parse_args()
 
     cli_overrides: dict = {}
     if args.model_package_dir:
-        cli_overrides.setdefault("paths", {})["model_package_dir"] = args.model_package_dir
+        cli_overrides.setdefault("paths", {})["model_package_dir"] = (
+            args.model_package_dir
+        )
     if args.max_batch > 0:
         cli_overrides.setdefault("scheduler", {})["max_batch_size"] = args.max_batch
     if args.max_seq_len > 0:
@@ -1125,7 +1233,9 @@ def main():
             "true" if cfg.observability.dump_include_wav else "false",
         )
         if cfg.observability.dump_sessions:
-            os.environ.setdefault("ENGINE_DUMP_SESSIONS", cfg.observability.dump_sessions)
+            os.environ.setdefault(
+                "ENGINE_DUMP_SESSIONS", cfg.observability.dump_sessions
+            )
 
     if cfg.paths.model_package_dir:
         apply_model_package_paths(
@@ -1176,6 +1286,7 @@ def main():
 
         try:
             from .gateway.grpc_server import serve as grpc_serve
+
             grpc_task = asyncio.create_task(
                 grpc_serve(engine, port, stop_event=stop_event),
             )
@@ -1186,6 +1297,7 @@ def main():
         if websocket_port > 0:
             try:
                 from .gateway.websocket_server import serve as websocket_serve
+
                 websocket_task = asyncio.create_task(
                     websocket_serve(
                         engine,

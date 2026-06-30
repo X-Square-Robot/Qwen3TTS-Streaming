@@ -66,9 +66,12 @@ class CodePredictorSingleStage(nn.Module):
         self.projection = code_predictor.small_to_mtp_projection
         self.hidden_size = code_predictor.config.hidden_size
 
-    def forward(self, sequence: torch.Tensor,
-                lm_head_weight: torch.Tensor,
-                lm_head_bias: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        sequence: torch.Tensor,
+        lm_head_weight: torch.Tensor,
+        lm_head_bias: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Args:
             sequence:       [B, S, hidden_size] (S grows from 2 to num_code_groups)
@@ -84,7 +87,7 @@ class CodePredictorSingleStage(nn.Module):
         position_embeddings = self.rotary_emb(sequence, position_ids)
 
         causal_mask = torch.triu(
-            torch.full((S, S), float('-inf'), device=device, dtype=sequence.dtype),
+            torch.full((S, S), float("-inf"), device=device, dtype=sequence.dtype),
             diagonal=1,
         )
         causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)
@@ -126,7 +129,9 @@ def export_code_predictor_unrolled(
     code_predictor = talker.code_predictor.to(device).eval()
     talker_codec_embedding = talker.model.codec_embedding.to(device).eval()
 
-    wrapper = CodePredictorUnrolled(code_predictor, talker_codec_embedding).to(device).eval()
+    wrapper = (
+        CodePredictorUnrolled(code_predictor, talker_codec_embedding).to(device).eval()
+    )
 
     hidden_size = talker.config.hidden_size
     B = 1
@@ -154,6 +159,7 @@ def export_code_predictor_unrolled(
     )
 
     import onnx
+
     onnx_model = onnx.load(onnx_path)
     n_inits = len(onnx_model.graph.initializer)
     n_nodes = len(onnx_model.graph.node)
@@ -173,7 +179,9 @@ def export_code_predictor_unrolled(
     if ok:
         logger.info("Unrolled Code Predictor ONNX verification PASSED")
     else:
-        logger.warning("Unrolled Code Predictor ONNX verification FAILED (expected for argmax-based model)")
+        logger.warning(
+            "Unrolled Code Predictor ONNX verification FAILED (expected for argmax-based model)"
+        )
 
     del model
     if device != "cpu":
@@ -204,7 +212,9 @@ def export_code_predictor_single_stage(
     vocab_size = code_predictor.config.vocab_size
     B, S = 1, 5
     dummy_seq = torch.randn(B, S, hidden_size, device=device, dtype=torch.float32)
-    dummy_weight = torch.randn(vocab_size, hidden_size, device=device, dtype=torch.float32)
+    dummy_weight = torch.randn(
+        vocab_size, hidden_size, device=device, dtype=torch.float32
+    )
     dummy_bias = torch.zeros(vocab_size, device=device, dtype=torch.float32)
 
     with torch.no_grad():
@@ -247,11 +257,19 @@ def export_code_predictor_single_stage(
 def main():
     setup_logging()
     parser = argparse.ArgumentParser(description="Export Code Predictor to ONNX")
-    parser.add_argument("--variant", type=str, default=None,
-                        help="Model variant. Default: export all variants")
-    parser.add_argument("--mode", type=str, default="both",
-                        choices=["unrolled", "single_stage", "both"],
-                        help="Export mode: unrolled (primary), single_stage (fallback), or both")
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default=None,
+        help="Model variant. Default: export all variants",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="both",
+        choices=["unrolled", "single_stage", "both"],
+        help="Export mode: unrolled (primary), single_stage (fallback), or both",
+    )
     add_common_args(parser)
     args = parser.parse_args()
 
@@ -267,7 +285,8 @@ def main():
         try:
             if args.mode in ("unrolled", "both"):
                 path = export_code_predictor_unrolled(
-                    variant, args.models_dir, args.output_dir, device, dtype)
+                    variant, args.models_dir, args.output_dir, device, dtype
+                )
                 logger.info(f"[{variant}] Unrolled Code Predictor exported: {path}")
         except FileNotFoundError as e:
             logger.warning(f"[{variant}] Skipped unrolled: {e}")
@@ -277,7 +296,8 @@ def main():
         try:
             if args.mode in ("single_stage", "both"):
                 path = export_code_predictor_single_stage(
-                    variant, args.models_dir, args.output_dir, device, dtype)
+                    variant, args.models_dir, args.output_dir, device, dtype
+                )
                 logger.info(f"[{variant}] Single-stage Code Predictor exported: {path}")
         except FileNotFoundError as e:
             logger.warning(f"[{variant}] Skipped single-stage: {e}")

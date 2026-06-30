@@ -15,7 +15,12 @@ import pytest
 pytest.importorskip("tritonclient")
 import numpy as np
 
-from qwen3tts_protocol import AudioChunk, SessionStartRequest, StreamEvent, SynthesisConfig
+from qwen3tts_protocol import (
+    AudioChunk,
+    SessionStartRequest,
+    StreamEvent,
+    SynthesisConfig,
+)
 import qwen3tts._adapters.triton_grpc as tg
 
 
@@ -40,18 +45,32 @@ class _FakeClient:
 def test_is_final_without_end_event_does_not_hang(monkeypatch):
     fake_grpcclient = types.SimpleNamespace(
         InferenceServerClient=lambda url: _FakeClient(url),
-        InferInput=lambda *a, **k: types.SimpleNamespace(set_data_from_numpy=lambda *a, **k: None),
+        InferInput=lambda *a, **k: types.SimpleNamespace(
+            set_data_from_numpy=lambda *a, **k: None
+        ),
         InferRequestedOutput=lambda name: name,
     )
     monkeypatch.setattr(tg, "_require_triton", lambda: (np, fake_grpcclient))
     # Canned extraction: an audio chunk flagged final, with NO end/error event.
-    canned = {"event_type": "audio", "event_json": None, "audio_chunk": "x", "is_final": True}
-    monkeypatch.setattr(tg, "_scalar_from_result", lambda result, name: canned.get(name))
-    monkeypatch.setattr(tg, "_decode_audio_bytes_field", lambda value, payload: b"\x00\x00\x00\x00")
+    canned = {
+        "event_type": "audio",
+        "event_json": None,
+        "audio_chunk": "x",
+        "is_final": True,
+    }
+    monkeypatch.setattr(
+        tg, "_scalar_from_result", lambda result, name: canned.get(name)
+    )
+    monkeypatch.setattr(
+        tg, "_decode_audio_bytes_field", lambda value, payload: b"\x00\x00\x00\x00"
+    )
 
     adapter = tg.TritonGrpcAdapter("localhost:8001", model_name="m", timeout=2.0)
     session = tg.TritonGrpcStreamSession(
-        adapter, SessionStartRequest(session_id="s", config=SynthesisConfig(task_type="custom_voice"))
+        adapter,
+        SessionStartRequest(
+            session_id="s", config=SynthesisConfig(task_type="custom_voice")
+        ),
     )
     session.end()  # close the send side so the worker reaches its terminal logic
 

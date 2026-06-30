@@ -33,9 +33,10 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class PrefixCacheEntry:
     """Immutable cached prefix KV + metadata."""
+
     key: str
-    talker_kv: torch.Tensor       # [1, L*2, H, S_prefix, D]
-    prefix_len: int               # number of tokens in the cached prefix
+    talker_kv: torch.Tensor  # [1, L*2, H, S_prefix, D]
+    prefix_len: int  # number of tokens in the cached prefix
     created_at: float
     hit_count: int = 0
 
@@ -94,7 +95,9 @@ class PrefixKVCache:
         object.__setattr__(entry, "hit_count", entry.hit_count + 1)
         logger.debug(
             "Prefix cache HIT: key=%s prefix_len=%d (hits=%d)",
-            key, entry.prefix_len, entry.hit_count,
+            key,
+            entry.prefix_len,
+            entry.hit_count,
         )
         return entry
 
@@ -119,7 +122,9 @@ class PrefixKVCache:
             return
         if prefix_len > self._max_prefix_len:
             logger.debug(
-                "Prefix too long (%d > %d), skipping cache", prefix_len, self._max_prefix_len,
+                "Prefix too long (%d > %d), skipping cache",
+                prefix_len,
+                self._max_prefix_len,
             )
             return
 
@@ -131,7 +136,8 @@ class PrefixKVCache:
             evicted_key, evicted = self._cache.popitem(last=False)
             logger.debug(
                 "Prefix cache evict: key=%s (hits=%d, age=%.1fs)",
-                evicted_key, evicted.hit_count,
+                evicted_key,
+                evicted.hit_count,
                 time.monotonic() - evicted.created_at,
             )
 
@@ -144,7 +150,10 @@ class PrefixKVCache:
         self._cache[key] = entry
         logger.info(
             "Prefix cache PUT: key=%s prefix_len=%d (size=%d/%d)",
-            key, prefix_len, len(self._cache), self._max_entries,
+            key,
+            prefix_len,
+            len(self._cache),
+            self._max_entries,
         )
 
     def invalidate(self, key: str) -> bool:

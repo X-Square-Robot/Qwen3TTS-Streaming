@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, List, Optional
+from typing import Callable, List
 
 from .core import FSM, Rule, ALWAYS
 from .state import SpliterState as St
@@ -16,6 +16,7 @@ _TRANSIENT = frozenset({St.PREFILL, St.PAD_TEXT_EOS, St.PAD_TEXT_NOP})
 # ---------------------------------------------------------------------------
 # Action results — returned to the caller via feed()
 # ---------------------------------------------------------------------------
+
 
 class ActionType(Enum):
     PREFILL = "prefill"
@@ -34,6 +35,7 @@ class ActionResult:
 # Threshold computation — mirrors decode_fsm.py logic
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SplitThresholds:
     """Min text-token counts before split at punct tier + forced upper bound.
@@ -42,6 +44,7 @@ class SplitThresholds:
     L1 (。！？), L2 (，；：), L3 (weaker breaks).  ``force_split_at`` caps segment
     length regardless of punctuation.
     """
+
     min_tokens_l1: int
     min_tokens_l2: int
     min_tokens_l3: int
@@ -87,7 +90,7 @@ def compute_thresholds(
 # ---------------------------------------------------------------------------
 # FSM design (mermaid reference)
 # ---------------------------------------------------------------------------
-'''
+"""
 Three-tier punctuation threshold state machine
 ================================================
 
@@ -125,12 +128,13 @@ stateDiagram-v2
     PAD_TEXT_NOP --> HALT : [is_final] / flush_nop()
     PAD_TEXT_NOP --> IDLE : [else] / flush_nop()
 ```
-'''
+"""
 
 
 # ---------------------------------------------------------------------------
 # StreamingDriver
 # ---------------------------------------------------------------------------
+
 
 class StreamingDriver:
     """Token-driven FSM for streaming text segmentation with 3-tier thresholds.
@@ -175,18 +179,22 @@ class StreamingDriver:
         return lambda e: e.type in s
 
     def _normal_overflow(self, e: SpliterEvent) -> bool:
-        return e.type == ET.NORMAL_TOKEN and self._token_count >= self.thresholds.force_split_at
+        return (
+            e.type == ET.NORMAL_TOKEN
+            and self._token_count >= self.thresholds.force_split_at
+        )
 
     def _normal_no_overflow(self, e: SpliterEvent) -> bool:
-        return e.type == ET.NORMAL_TOKEN and self._token_count < self.thresholds.force_split_at
+        return (
+            e.type == ET.NORMAL_TOKEN
+            and self._token_count < self.thresholds.force_split_at
+        )
 
     def _punct_should_split(self, e: SpliterEvent) -> bool:
-        return (e.type == ET.PUNCTUATION_TOKEN
-                and self._meets_split_threshold(e))
+        return e.type == ET.PUNCTUATION_TOKEN and self._meets_split_threshold(e)
 
     def _punct_no_split(self, e: SpliterEvent) -> bool:
-        return (e.type == ET.PUNCTUATION_TOKEN
-                and not self._meets_split_threshold(e))
+        return e.type == ET.PUNCTUATION_TOKEN and not self._meets_split_threshold(e)
 
     def _check_final(self, _e: SpliterEvent) -> bool:
         return self._is_final
@@ -226,37 +234,109 @@ class StreamingDriver:
     def _build_fsm(self) -> FSM:
         table = {
             St.IDLE: [
-                Rule(St.HALT,    guard=self._evt(ET.END),       action=self._nop,           name="idle→halt"),
-                Rule(St.IDLE,    guard=self._evt(ET.START),     action=self._reset_context,  name="idle:start"),
-                Rule(St.PREFILL, guard=self._evt(ET.START_TOKEN, ET.NORMAL_TOKEN, ET.PUNCTUATION_TOKEN),
-                                                                action=self._prefill,        name="idle→prefill"),
-                Rule(St.IDLE,    guard=self._evt(ET.END_TOKEN), action=self._nop,           name="idle:end_tok_ignore"),
-                Rule(St.IDLE,    guard=self._evt(ET.UNKNOWN),   action=self._nop,           name="idle:unknown"),
+                Rule(
+                    St.HALT, guard=self._evt(ET.END), action=self._nop, name="idle→halt"
+                ),
+                Rule(
+                    St.IDLE,
+                    guard=self._evt(ET.START),
+                    action=self._reset_context,
+                    name="idle:start",
+                ),
+                Rule(
+                    St.PREFILL,
+                    guard=self._evt(
+                        ET.START_TOKEN, ET.NORMAL_TOKEN, ET.PUNCTUATION_TOKEN
+                    ),
+                    action=self._prefill,
+                    name="idle→prefill",
+                ),
+                Rule(
+                    St.IDLE,
+                    guard=self._evt(ET.END_TOKEN),
+                    action=self._nop,
+                    name="idle:end_tok_ignore",
+                ),
+                Rule(
+                    St.IDLE,
+                    guard=self._evt(ET.UNKNOWN),
+                    action=self._nop,
+                    name="idle:unknown",
+                ),
             ],
-
             St.PREFILL: [
-                Rule(St.TEXT_INPUTING, guard=ALWAYS, action=self._nop, name="prefill→input"),
+                Rule(
+                    St.TEXT_INPUTING,
+                    guard=ALWAYS,
+                    action=self._nop,
+                    name="prefill→input",
+                ),
             ],
-
             St.TEXT_INPUTING: [
-                Rule(St.PAD_TEXT_EOS,  guard=self._evt(ET.END),       action=self._set_final,  name="input→pad_eos(final)"),
-                Rule(St.PAD_TEXT_NOP,  guard=self._evt(ET.END_TOKEN), action=self._decode,     name="input→pad_nop"),
-                Rule(St.PAD_TEXT_EOS,  guard=self._normal_overflow,   action=self._decode,     name="input→pad_eos(overflow)"),
-                Rule(St.TEXT_INPUTING, guard=self._normal_no_overflow, action=self._decode,    name="input:normal"),
-                Rule(St.PAD_TEXT_EOS,  guard=self._punct_should_split, action=self._decode,   name="input→pad_eos(punct)"),
-                Rule(St.TEXT_INPUTING, guard=self._punct_no_split,    action=self._decode,     name="input:punct_acc"),
-                Rule(St.TEXT_INPUTING, guard=self._evt(ET.START_TOKEN, ET.START, ET.UNKNOWN),
-                                                                      action=self._nop,       name="input:ignore"),
+                Rule(
+                    St.PAD_TEXT_EOS,
+                    guard=self._evt(ET.END),
+                    action=self._set_final,
+                    name="input→pad_eos(final)",
+                ),
+                Rule(
+                    St.PAD_TEXT_NOP,
+                    guard=self._evt(ET.END_TOKEN),
+                    action=self._decode,
+                    name="input→pad_nop",
+                ),
+                Rule(
+                    St.PAD_TEXT_EOS,
+                    guard=self._normal_overflow,
+                    action=self._decode,
+                    name="input→pad_eos(overflow)",
+                ),
+                Rule(
+                    St.TEXT_INPUTING,
+                    guard=self._normal_no_overflow,
+                    action=self._decode,
+                    name="input:normal",
+                ),
+                Rule(
+                    St.PAD_TEXT_EOS,
+                    guard=self._punct_should_split,
+                    action=self._decode,
+                    name="input→pad_eos(punct)",
+                ),
+                Rule(
+                    St.TEXT_INPUTING,
+                    guard=self._punct_no_split,
+                    action=self._decode,
+                    name="input:punct_acc",
+                ),
+                Rule(
+                    St.TEXT_INPUTING,
+                    guard=self._evt(ET.START_TOKEN, ET.START, ET.UNKNOWN),
+                    action=self._nop,
+                    name="input:ignore",
+                ),
             ],
-
             St.PAD_TEXT_EOS: [
-                Rule(St.HALT, guard=self._check_final, action=self._flush_eos, name="pad_eos→halt"),
-                Rule(St.IDLE, guard=ALWAYS,            action=self._flush_eos, name="pad_eos→idle"),
+                Rule(
+                    St.HALT,
+                    guard=self._check_final,
+                    action=self._flush_eos,
+                    name="pad_eos→halt",
+                ),
+                Rule(
+                    St.IDLE, guard=ALWAYS, action=self._flush_eos, name="pad_eos→idle"
+                ),
             ],
-
             St.PAD_TEXT_NOP: [
-                Rule(St.HALT, guard=self._check_final, action=self._flush_nop, name="pad_nop→halt"),
-                Rule(St.IDLE, guard=ALWAYS,            action=self._flush_nop, name="pad_nop→idle"),
+                Rule(
+                    St.HALT,
+                    guard=self._check_final,
+                    action=self._flush_nop,
+                    name="pad_nop→halt",
+                ),
+                Rule(
+                    St.IDLE, guard=ALWAYS, action=self._flush_nop, name="pad_nop→idle"
+                ),
             ],
         }
 
@@ -300,5 +380,10 @@ class StreamingDriver:
         self._token_count = 0
 
 
-__all__ = ("StreamingDriver", "ActionType", "ActionResult",
-           "SplitThresholds", "compute_thresholds")
+__all__ = (
+    "StreamingDriver",
+    "ActionType",
+    "ActionResult",
+    "SplitThresholds",
+    "compute_thresholds",
+)

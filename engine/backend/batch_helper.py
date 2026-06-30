@@ -7,7 +7,7 @@ Packed format: single [B, L*2, H, S, D] tensor per cache type instead of
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+from typing import Sequence
 
 import torch
 import torch.nn.functional as F
@@ -16,6 +16,7 @@ import torch.nn.functional as F
 # ---------------------------------------------------------------------------
 # Attention bias construction
 # ---------------------------------------------------------------------------
+
 
 def _apply_causal_mask(bias: torch.Tensor, past_len: int, seq: int) -> torch.Tensor:
     """Lower-triangular causal mask over the new-token region.
@@ -28,7 +29,7 @@ def _apply_causal_mask(bias: torch.Tensor, past_len: int, seq: int) -> torch.Ten
         torch.full((seq, seq), float("-inf"), device=bias.device, dtype=bias.dtype),
         diagonal=1,
     )
-    bias[:, :, :, past_len:past_len + seq] += causal.unsqueeze(0).unsqueeze(0)
+    bias[:, :, :, past_len : past_len + seq] += causal.unsqueeze(0).unsqueeze(0)
     return bias
 
 
@@ -67,7 +68,9 @@ def padded_attention_bias(
 
 
 def uniform_past_seq_lens(
-    batch: int, past_len: int, device: torch.device,
+    batch: int,
+    past_len: int,
+    device: torch.device,
 ) -> torch.Tensor:
     return torch.full((batch,), past_len, device=device, dtype=torch.long)
 
@@ -75,6 +78,7 @@ def uniform_past_seq_lens(
 # ---------------------------------------------------------------------------
 # Packed KV cache padding and splitting
 # ---------------------------------------------------------------------------
+
 
 def pad_packed_kv(
     session_kv: Sequence[torch.Tensor],
@@ -92,18 +96,21 @@ def pad_packed_kv(
         [B, L*2, H, padded_past_len, D].
     """
     if not session_kv:
-        return torch.empty(0, device=device, dtype=dtype), \
-               torch.empty((0,), device=device, dtype=torch.long)
+        return torch.empty(0, device=device, dtype=dtype), torch.empty(
+            (0,), device=device, dtype=torch.long
+        )
 
     past_seq_lens = torch.tensor(
         [int(kv.shape[3]) for kv in session_kv],
-        device=device, dtype=torch.long,
+        device=device,
+        dtype=torch.long,
     )
     padded_past_len = int(past_seq_lens.max().item())
 
     if len(set(int(kv.shape[3]) for kv in session_kv)) == 1:
         batched = torch.cat(
-            [kv.to(device=device, dtype=dtype) for kv in session_kv], dim=0,
+            [kv.to(device=device, dtype=dtype) for kv in session_kv],
+            dim=0,
         ).contiguous()
         return batched, past_seq_lens
 
@@ -140,18 +147,16 @@ def split_packed_kv(
     uniform = len(set(original_past_lens)) <= 1
 
     if uniform:
-        return [present_kv[i:i + 1] for i in range(present_kv.shape[0])]
+        return [present_kv[i : i + 1] for i in range(present_kv.shape[0])]
 
     results = []
     for i, orig_pl in enumerate(original_past_lens):
         if orig_pl >= padded_past_len:
-            results.append(
-                present_kv[i:i + 1, :, :, :orig_pl + seq, :].contiguous()
-            )
+            results.append(present_kv[i : i + 1, :, :, : orig_pl + seq, :].contiguous())
         else:
-            real_past = present_kv[i:i + 1, :, :, :orig_pl, :]
-            new_part = present_kv[i:i + 1, :, :, padded_past_len:padded_past_len + seq, :]
-            results.append(
-                torch.cat([real_past, new_part], dim=3).contiguous()
-            )
+            real_past = present_kv[i : i + 1, :, :, :orig_pl, :]
+            new_part = present_kv[
+                i : i + 1, :, :, padded_past_len : padded_past_len + seq, :
+            ]
+            results.append(torch.cat([real_past, new_part], dim=3).contiguous())
     return results

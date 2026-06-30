@@ -9,11 +9,11 @@ harnesses that need to simulate real-time playback rhythm.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from queue import Empty, Queue
 from typing import Iterator
 
-from qwen3tts_protocol import AudioChunk, StreamEvent
+from qwen3tts_protocol import AudioChunk
 
 from ._session import BaseStreamSession
 
@@ -156,7 +156,7 @@ class RealtimeAudioStream:
         feeder_thread.start()
 
         wall_start: float | None = None  # anchored at the first audio frame
-        play_clock = 0.0                 # cumulative emitted duration (playhead)
+        play_clock = 0.0  # cumulative emitted duration (playhead)
 
         try:
             while True:

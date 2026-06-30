@@ -98,7 +98,10 @@ def test_host_port_prefers_engine_grpc(monkeypatch):
         assert endpoint == "host.test:50051"
 
     monkeypatch.setattr("qwen3tts.detect._probe_engine_grpc", fake_engine_grpc)
-    monkeypatch.setattr("qwen3tts.detect._probe_triton_grpc", lambda *args, **kwargs: pytest.fail("should not probe triton grpc"))
+    monkeypatch.setattr(
+        "qwen3tts.detect._probe_triton_grpc",
+        lambda *args, **kwargs: pytest.fail("should not probe triton grpc"),
+    )
     detected = detect_transport(
         "host.test:50051",
         transport="auto",

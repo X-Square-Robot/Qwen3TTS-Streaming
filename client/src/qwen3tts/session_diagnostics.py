@@ -37,7 +37,8 @@ class SessionDiagnostics:
 
     @classmethod
     def from_done_meta(
-        cls, done_meta: dict[str, str],
+        cls,
+        done_meta: dict[str, str],
         segment_metas: Optional[list[dict[str, str]]] = None,
     ) -> "SessionDiagnostics":
         return cls(
@@ -123,7 +124,7 @@ class SessionDiagnostics:
 
         text = self.done_meta.get("server_final_synthesized_text")
         if text:
-            lines.append(f"Synthesized: \"{text}\"")
+            lines.append(f'Synthesized: "{text}"')
         batch = self._batch_summary()
         if batch:
             lines.append(

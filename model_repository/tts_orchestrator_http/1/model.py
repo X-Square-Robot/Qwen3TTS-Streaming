@@ -103,13 +103,21 @@ class TritonPythonModel:
                 responses.append(self._execute_one(request))
             except Exception as exc:
                 logger.error("Offline aggregation request failed: %s", exc)
-                meta = json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False)
+                meta = json.dumps(
+                    {"type": "error", "message": str(exc)}, ensure_ascii=False
+                )
                 responses.append(
                     pb_utils.InferenceResponse(
                         output_tensors=[
-                            pb_utils.Tensor("audio_chunk", np.array([""], dtype=object)),
-                            pb_utils.Tensor("event_type", np.array(["error"], dtype=object)),
-                            pb_utils.Tensor("event_json", np.array([meta], dtype=object)),
+                            pb_utils.Tensor(
+                                "audio_chunk", np.array([""], dtype=object)
+                            ),
+                            pb_utils.Tensor(
+                                "event_type", np.array(["error"], dtype=object)
+                            ),
+                            pb_utils.Tensor(
+                                "event_json", np.array([meta], dtype=object)
+                            ),
                             pb_utils.Tensor("is_final", np.array([True], dtype=bool)),
                         ],
                         error=pb_utils.TritonError(str(exc)),
@@ -129,7 +137,12 @@ class TritonPythonModel:
 
         bls_request = pb_utils.InferenceRequest(
             model_name=self._target_model,
-            requested_output_names=["audio_chunk", "event_type", "event_json", "is_final"],
+            requested_output_names=[
+                "audio_chunk",
+                "event_type",
+                "event_json",
+                "is_final",
+            ],
             inputs=[pb_utils.Tensor("request", np.array([req_json], dtype=object))],
             timeout=self._timeout_us,
         )
@@ -175,7 +188,9 @@ class TritonPythonModel:
                 break
 
         if final_event_type == "error":
-            raise RuntimeError(str(final_event.get("message") or "tts_orchestrator error"))
+            raise RuntimeError(
+                str(final_event.get("message") or "tts_orchestrator error")
+            )
 
         final_meta = dict(final_event) if isinstance(final_event, dict) else {}
         if audio_format and "audio_format" not in final_meta:
@@ -191,12 +206,17 @@ class TritonPythonModel:
             output_tensors=[
                 pb_utils.Tensor(
                     "audio_chunk",
-                    np.array([base64.b64encode(b"".join(audio_parts)).decode("ascii")], dtype=object),
+                    np.array(
+                        [base64.b64encode(b"".join(audio_parts)).decode("ascii")],
+                        dtype=object,
+                    ),
                 ),
                 pb_utils.Tensor("event_type", np.array(["end"], dtype=object)),
                 pb_utils.Tensor(
                     "event_json",
-                    np.array([json.dumps(final_meta, ensure_ascii=False)], dtype=object),
+                    np.array(
+                        [json.dumps(final_meta, ensure_ascii=False)], dtype=object
+                    ),
                 ),
                 pb_utils.Tensor("is_final", np.array([True], dtype=bool)),
             ]

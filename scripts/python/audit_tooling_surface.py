@@ -86,9 +86,15 @@ def build_report(
     min_duplicate_count: int,
     include_common_names: bool,
 ) -> dict[str, object]:
-    python_files = _iter_files(REPO_ROOT / "scripts", [".py"]) + _iter_files(REPO_ROOT / "tests", [".py"])
-    shell_files = _iter_files(REPO_ROOT / "scripts", [".sh"]) + _iter_files(REPO_ROOT / "tests", [".sh"])
-    markdown_files = _iter_files(REPO_ROOT / "scripts", [".md"]) + _iter_files(REPO_ROOT / "tests", [".md"])
+    python_files = _iter_files(REPO_ROOT / "scripts", [".py"]) + _iter_files(
+        REPO_ROOT / "tests", [".py"]
+    )
+    shell_files = _iter_files(REPO_ROOT / "scripts", [".sh"]) + _iter_files(
+        REPO_ROOT / "tests", [".sh"]
+    )
+    markdown_files = _iter_files(REPO_ROOT / "scripts", [".md"]) + _iter_files(
+        REPO_ROOT / "tests", [".md"]
+    )
     engine_python_files = _iter_files(REPO_ROOT / "engine", [".py"])
     pycache_dirs = sorted(
         _relative(path)
@@ -120,7 +126,11 @@ def build_report(
                 unmanaged_sys_path_bootstraps.append(rel)
         if rel.startswith("tools/validation/") and "from tests.e2e.test_" in source:
             tools_importing_pytest_modules.append(rel)
-        if rel.startswith("tests/") and not rel.startswith("tests/e2e/") and "from tests.e2e.test_" in source:
+        if (
+            rel.startswith("tests/")
+            and not rel.startswith("tests/e2e/")
+            and "from tests.e2e.test_" in source
+        ):
             non_e2e_imports_of_e2e_tests.append(rel)
 
         try:
@@ -251,7 +261,9 @@ def _render_text(report: dict[str, object]) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    parser.add_argument(
+        "--json", action="store_true", help="Emit JSON instead of text."
+    )
     parser.add_argument(
         "--top-duplicates",
         type=int,

@@ -26,7 +26,6 @@ from _bootstrap import bootstrap_tool_imports
 
 bootstrap_tool_imports()
 from tests.support.triton_streaming import (
-    StreamResult,
     build_request_payload,
     infer_stream,
     save_wav,
@@ -44,7 +43,9 @@ def _build_request(text: str, task_type: str, language: str) -> str:
     return json.dumps(payload)
 
 
-def test_http_non_streaming(url: str, text: str, output_path: str, task_type: str, language: str):
+def test_http_non_streaming(
+    url: str, text: str, output_path: str, task_type: str, language: str
+):
     """Test via HTTP (non-streaming, will get first response only)."""
     import requests
 
@@ -109,8 +110,10 @@ def test_grpc_streaming(
     except ImportError:
         print("tritonclient not available, installing ...")
         import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install",
-                               "tritonclient[grpc]", "-q"])
+
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "tritonclient[grpc]", "-q"]
+        )
         import tritonclient.grpc as grpcclient
 
     client = grpcclient.InferenceServerClient(url=f"{host}:{port}")
@@ -119,7 +122,7 @@ def test_grpc_streaming(
         print("ERROR: Triton server not ready")
         return False
 
-    print(f"Server ready. Sending TTS request ...")
+    print("Server ready. Sending TTS request ...")
     print(f"  Text: {text}")
     print(f"  Task type: {task_type or '<auto>'}")
 
@@ -131,13 +134,17 @@ def test_grpc_streaming(
         return False
 
     if stream.audio is None or stream.audio.size == 0:
-        print(f"\n  No audio chunks received ({stream.total_ms/1000.0:.2f}s)")
+        print(f"\n  No audio chunks received ({stream.total_ms / 1000.0:.2f}s)")
         return False
 
     all_audio = stream.audio
-    sample_rate = int(stream.metadata.get("audio_format", {}).get("sample_rate", 24000) or 24000)
-    print(f"\n  Total audio: {len(all_audio)} samples ({len(all_audio)/sample_rate:.2f}s at {sample_rate}Hz)")
-    print(f"  Latency: {stream.total_ms/1000.0:.2f}s")
+    sample_rate = int(
+        stream.metadata.get("audio_format", {}).get("sample_rate", 24000) or 24000
+    )
+    print(
+        f"\n  Total audio: {len(all_audio)} samples ({len(all_audio) / sample_rate:.2f}s at {sample_rate}Hz)"
+    )
+    print(f"  Latency: {stream.total_ms / 1000.0:.2f}s")
     print(f"  Audio range: [{all_audio.min():.4f}, {all_audio.max():.4f}]")
 
     if np.all(all_audio == 0):
@@ -150,19 +157,26 @@ def test_grpc_streaming(
 
 def main():
     parser = argparse.ArgumentParser(description="Test TTS Orchestrator on Triton")
-    parser.add_argument("--text", default="今天天气真好，我们一起出去玩吧。",
-                        help="Text to synthesize")
-    parser.add_argument("--output", default="workspace/test_tts_output.wav",
-                        help="Output WAV file path")
+    parser.add_argument(
+        "--text", default="今天天气真好，我们一起出去玩吧。", help="Text to synthesize"
+    )
+    parser.add_argument(
+        "--output", default="workspace/test_tts_output.wav", help="Output WAV file path"
+    )
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--grpc-port", type=int, default=8001)
     parser.add_argument("--http-port", type=int, default=8000)
-    parser.add_argument("--task-type", default="",
-                        help="Optional task type. Leave empty to let the server bind to the loaded model type.")
-    parser.add_argument("--language", default="auto",
-                        help="Language field sent in the request payload")
-    parser.add_argument("--mode", choices=["grpc", "http"], default="grpc",
-                        help="Client mode")
+    parser.add_argument(
+        "--task-type",
+        default="",
+        help="Optional task type. Leave empty to let the server bind to the loaded model type.",
+    )
+    parser.add_argument(
+        "--language", default="auto", help="Language field sent in the request payload"
+    )
+    parser.add_argument(
+        "--mode", choices=["grpc", "http"], default="grpc", help="Client mode"
+    )
     args = parser.parse_args()
 
     print("=" * 60)

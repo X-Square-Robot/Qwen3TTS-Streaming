@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import math
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Optional
 
@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
 
 class VADMode(Enum):
     DISABLED = "disabled"
@@ -48,17 +49,17 @@ class TTSVADConfig:
 
     mode: VADMode = VADMode.DISABLED
     chunk_ms: int = 16
-    begin_threshold: float = 0.6   # 0~1, mapped internally
-    begin_count: int = 5           # consecutive frames above begin_threshold
-    end_threshold: float = 0.35    # 0~1, mapped internally
-    end_count: int = 31            # consecutive frames below end_threshold (~500ms)
-    start_margin_ms: int = 20      # lookback on begin trigger
+    begin_threshold: float = 0.6  # 0~1, mapped internally
+    begin_count: int = 5  # consecutive frames above begin_threshold
+    end_threshold: float = 0.35  # 0~1, mapped internally
+    end_count: int = 31  # consecutive frames below end_threshold (~500ms)
+    start_margin_ms: int = 20  # lookback on begin trigger
 
     # Energy-mode internals
     preemphasis: float = 0.97
 
     # TenVAD-mode internals
-    tenvad_hop_size: int = 256     # 256 samples @ 16kHz = 16ms
+    tenvad_hop_size: int = 256  # 256 samples @ 16kHz = 16ms
     tenvad_threshold: float = 0.5  # inner model threshold
 
     @property
@@ -70,6 +71,7 @@ class TTSVADConfig:
 # VAD state machine
 # ---------------------------------------------------------------------------
 
+
 class VADState(Enum):
     SILENCE = auto()
     SPEECH = auto()
@@ -78,6 +80,7 @@ class VADState(Enum):
 # ---------------------------------------------------------------------------
 # Observability
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class VADMetrics:
@@ -107,6 +110,7 @@ class VADMetrics:
 # ---------------------------------------------------------------------------
 # Base class
 # ---------------------------------------------------------------------------
+
 
 class TTSVADProcessor(ABC):
     """Per-session streaming VAD processor.
@@ -217,14 +221,18 @@ class TTSVADProcessor(ABC):
     def flush(self) -> np.ndarray:
         """Audio stream ending: emit all pending audio and reset."""
         if not self._config.enabled:
-            result = self._input_buffer.copy() if self._input_buffer.size > 0 else np.empty((0,), dtype=np.int16)
+            result = (
+                self._input_buffer.copy()
+                if self._input_buffer.size > 0
+                else np.empty((0,), dtype=np.int16)
+            )
             self._input_buffer = np.empty((0,), dtype=np.int16)
             return result
 
         # Process remaining partial frame (pad with zeros)
         if self._input_buffer.size > 0:
             padded = np.zeros(self._frame_samples, dtype=np.int16)
-            padded[:self._input_buffer.size] = self._input_buffer
+            padded[: self._input_buffer.size] = self._input_buffer
             self._metrics.original_audio_samples += self._input_buffer.size
             self._process_frame(padded)
             self._input_buffer = np.empty((0,), dtype=np.int16)
@@ -309,11 +317,14 @@ class TTSVADProcessor(ABC):
                 self._begin_counter = 0
                 self._metrics.begin_trigger_count += 1
                 if self._record_transitions:
-                    self._transitions.append({
-                        "event": "begin", "score": round(float(score), 4),
-                        "threshold": cfg.begin_threshold,
-                        "trigger_count": self._metrics.begin_trigger_count,
-                    })
+                    self._transitions.append(
+                        {
+                            "event": "begin",
+                            "score": round(float(score), 4),
+                            "threshold": cfg.begin_threshold,
+                            "trigger_count": self._metrics.begin_trigger_count,
+                        }
+                    )
 
                 # Emit the lookback margin (silence before the onset) ...
                 if self._margin_buffer.size > 0:
@@ -345,11 +356,14 @@ class TTSVADProcessor(ABC):
                 self._end_counter = 0
                 self._metrics.end_trigger_count += 1
                 if self._record_transitions:
-                    self._transitions.append({
-                        "event": "end", "score": round(float(score), 4),
-                        "threshold": cfg.end_threshold,
-                        "trigger_count": self._metrics.end_trigger_count,
-                    })
+                    self._transitions.append(
+                        {
+                            "event": "end",
+                            "score": round(float(score), 4),
+                            "threshold": cfg.end_threshold,
+                            "trigger_count": self._metrics.end_trigger_count,
+                        }
+                    )
                 # The end_count frames that triggered end are discarded
                 # (they were below end_threshold = noise/silence)
                 self._metrics.tail_trimmed_samples += frame_int16.size
@@ -382,6 +396,7 @@ class TTSVADProcessor(ABC):
 # Disabled (pass-through)
 # ---------------------------------------------------------------------------
 
+
 class DisabledVADProcessor(TTSVADProcessor):
     """No-op VAD: passes all audio through unchanged."""
 
@@ -392,6 +407,7 @@ class DisabledVADProcessor(TTSVADProcessor):
 # ---------------------------------------------------------------------------
 # Energy VAD
 # ---------------------------------------------------------------------------
+
 
 class EnergyVADProcessor(TTSVADProcessor):
     """Log-energy VAD with preemphasis + Hamming window + dB-scale threshold.
@@ -456,6 +472,7 @@ _tenvad_import_error: Optional[Exception] = None
 
 try:
     from ten_vad import TenVad
+
     _TenVadClass = TenVad
 except ImportError as e:
     _tenvad_import_error = e
@@ -513,10 +530,10 @@ class TenVADProcessor(TTSVADProcessor):
         if downsampled.size < self._tenvad_frame_samples:
             # Not enough samples after downsampling — pad with zeros
             padded = np.zeros(self._tenvad_frame_samples, dtype=np.int16)
-            padded[:downsampled.size] = downsampled
+            padded[: downsampled.size] = downsampled
             downsampled = padded
         elif downsampled.size > self._tenvad_frame_samples:
-            downsampled = downsampled[:self._tenvad_frame_samples]
+            downsampled = downsampled[: self._tenvad_frame_samples]
 
         try:
             probability, flags = self._vad.process(downsampled)
@@ -539,8 +556,12 @@ class TenVADProcessor(TTSVADProcessor):
         if dst_len <= 0:
             return np.empty((0,), dtype=np.int16)
 
-        src_x = np.linspace(0.0, src_len / self._sample_rate, num=src_len, endpoint=False)
-        dst_x = np.linspace(0.0, src_len / self._sample_rate, num=dst_len, endpoint=False)
+        src_x = np.linspace(
+            0.0, src_len / self._sample_rate, num=src_len, endpoint=False
+        )
+        dst_x = np.linspace(
+            0.0, src_len / self._sample_rate, num=dst_len, endpoint=False
+        )
         result = np.interp(dst_x, src_x, src)
         return np.clip(result, -32768, 32767).astype(np.int16)
 
@@ -558,6 +579,7 @@ class TenVADProcessor(TTSVADProcessor):
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
+
 
 def create_vad_processor(
     config: TTSVADConfig,
@@ -579,7 +601,11 @@ def create_vad_processor(
 def vad_config_from_dict(d: dict) -> TTSVADConfig:
     """Build TTSVADConfig from a dict (e.g. from VADConfig.config or protocol)."""
     mode_str = str(d.get("mode", "disabled") or "disabled").strip().lower()
-    mode = VADMode(mode_str) if mode_str in {m.value for m in VADMode} else VADMode.DISABLED
+    mode = (
+        VADMode(mode_str)
+        if mode_str in {m.value for m in VADMode}
+        else VADMode.DISABLED
+    )
 
     # Use `if k in d else default` rather than `d.get(k) or default` so an
     # explicit 0 / 0.0 (e.g. start_margin_ms=0 to disable lookback) is honored

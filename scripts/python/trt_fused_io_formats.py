@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -141,36 +140,38 @@ def fused_input_output_io_format_strings(manifest: Dict[str, Any]) -> Tuple[str,
     c2w_in = list(c2w.get("c2w_state_input_names") or [])
     c2w_out = list(c2w.get("c2w_state_output_names") or [])
 
-    raw_io = manifest.get("triton_io_float_dtype") or manifest.get("onnx_io_dtype") or "fp32"
+    raw_io = (
+        manifest.get("triton_io_float_dtype") or manifest.get("onnx_io_dtype") or "fp32"
+    )
     ft = _normalize_float_io_token(str(raw_io))
     fp_spec = f"{ft}:chw"
     i64 = "int64:chw"
 
     in_parts: List[str] = [
-        fp_spec,        # input_embeds
-        i64,            # position_ids
-        fp_spec,        # attention_bias
-        i64,            # token_counts
-        "fp32:chw",     # gumbel_noise
-        "fp32:chw",     # cp_gumbel_noise
-        "fp32:chw",     # temperature
-        "fp32:chw",     # penalty
-        "fp32:chw",     # cache_position
-        fp_spec,        # c2w_attention_bias
-        fp_spec,        # talker_past_kv (packed)
-        fp_spec,        # c2w_past_kv (packed)
+        fp_spec,  # input_embeds
+        i64,  # position_ids
+        fp_spec,  # attention_bias
+        i64,  # token_counts
+        "fp32:chw",  # gumbel_noise
+        "fp32:chw",  # cp_gumbel_noise
+        "fp32:chw",  # temperature
+        "fp32:chw",  # penalty
+        "fp32:chw",  # cache_position
+        fp_spec,  # c2w_attention_bias
+        fp_spec,  # talker_past_kv (packed)
+        fp_spec,  # c2w_past_kv (packed)
     ]
     in_parts.extend([fp_spec] * len(c2w_in))
 
     out_parts: List[str] = [
-        fp_spec,        # wav
-        fp_spec,        # codec_sum
-        i64,            # full_codec
-        fp_spec,        # hidden
-        fp_spec,        # logits
-        i64,            # updated_token_counts
-        fp_spec,        # talker_new_kv (packed delta)
-        fp_spec,        # c2w_new_kv (packed delta)
+        fp_spec,  # wav
+        fp_spec,  # codec_sum
+        i64,  # full_codec
+        fp_spec,  # hidden
+        fp_spec,  # logits
+        i64,  # updated_token_counts
+        fp_spec,  # talker_new_kv (packed delta)
+        fp_spec,  # c2w_new_kv (packed delta)
     ]
     out_parts.extend([fp_spec] * len(c2w_out))
 

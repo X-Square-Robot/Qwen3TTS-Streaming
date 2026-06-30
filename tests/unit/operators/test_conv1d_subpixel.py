@@ -7,6 +7,7 @@ Unit test: ConvTranspose1d replacement equivalence.
 
 Run: pytest tests/unit/test_conv1d_subpixel.py -v
 """
+
 import sys
 from pathlib import Path
 
@@ -14,15 +15,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/unit/operators/<file> -> repo root
+REPO_ROOT = (
+    Path(__file__).resolve().parents[3]
+)  # tests/unit/operators/<file> -> repo root
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "export"))
 from utils import Conv1dInsertZeros
 
 
-def _conv_transpose_via_insert_zeros(x: torch.Tensor, tc: nn.ConvTranspose1d) -> torch.Tensor:
+def _conv_transpose_via_insert_zeros(
+    x: torch.Tensor, tc: nn.ConvTranspose1d
+) -> torch.Tensor:
     """Reference: ConvTranspose1d via insert-zeros then Conv1d. Same weight, no reshape."""
     B, C, L = x.shape
-    K = tc.kernel_size[0] if isinstance(tc.kernel_size, (tuple, list)) else tc.kernel_size
+    K = (
+        tc.kernel_size[0]
+        if isinstance(tc.kernel_size, (tuple, list))
+        else tc.kernel_size
+    )
     S = tc.stride[0] if isinstance(tc.stride, (tuple, list)) else tc.stride
     # Insert S-1 zeros: x[i] -> positions i*S. Length = (L-1)*S + 1
     L_up = (L - 1) * S + 1
@@ -50,14 +59,18 @@ def test_conv_transpose_equals_insert_zeros():
         with torch.no_grad():
             y_tc = tc(x)
             y_iz = _conv_transpose_via_insert_zeros(x, tc)
-        assert y_tc.shape == y_iz.shape, f"K={K} S={S}: shape {y_tc.shape} vs {y_iz.shape}"
+        assert y_tc.shape == y_iz.shape, (
+            f"K={K} S={S}: shape {y_tc.shape} vs {y_iz.shape}"
+        )
         mad = (y_tc.float() - y_iz.float()).abs().max().item()
         assert mad < 1e-5, (
             f"K={K} S={S}: insert-zeros must equal ConvTranspose (baseline), mad={mad:.6e}"
         )
 
 
-def _compare(tc: nn.ConvTranspose1d, sub: Conv1dInsertZeros, x: torch.Tensor, tol: float = 1e-5):
+def _compare(
+    tc: nn.ConvTranspose1d, sub: Conv1dInsertZeros, x: torch.Tensor, tol: float = 1e-5
+):
     """Run both on x, return (match, max_abs_diff, cosine_sim)."""
     with torch.no_grad():
         y_tc = tc(x)
@@ -106,7 +119,9 @@ def test_conv1d_subpixel_multiple_configs():
         sub = Conv1dInsertZeros(tc)
         x = torch.randn(1, in_ch, 8)
         match, mad, cos = _compare(tc, sub, x)
-        assert match, f"in={in_ch} out={out_ch} K={K} S={S}: mad={mad:.6f}, cos={cos:.6f}"
+        assert match, (
+            f"in={in_ch} out={out_ch} K={K} S={S}: mad={mad:.6f}, cos={cos:.6f}"
+        )
 
 
 def test_conv1d_subpixel_from_real_decoder():
@@ -114,6 +129,7 @@ def test_conv1d_subpixel_from_real_decoder():
     tok_path = REPO_ROOT / "workspace" / "models" / "Qwen3-TTS-Tokenizer-12Hz"
     if not tok_path.exists():
         import pytest
+
         pytest.skip("Tokenizer not found (run download first)")
 
     sys.path.insert(0, str(REPO_ROOT / "third_party" / "Qwen3-TTS"))
@@ -125,6 +141,7 @@ def test_conv1d_subpixel_from_real_decoder():
     from qwen_tts.core.tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 import (
         Qwen3TTSTokenizerV2CausalTransConvNet,
     )
+
     for mod in decoder.modules():
         if isinstance(mod, Qwen3TTSTokenizerV2CausalTransConvNet):
             tc = mod.conv
@@ -139,4 +156,5 @@ def test_conv1d_subpixel_from_real_decoder():
                 assert match, f"Real decoder layer: mad={mad:.6f}, cos={cos:.6f}"
                 return
     import pytest
+
     pytest.skip("No ConvTranspose found in decoder")

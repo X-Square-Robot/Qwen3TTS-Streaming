@@ -71,9 +71,17 @@ SAMPLE_RATE = 24000
 #   "whitespace" — one case per whitespace-separated token (whole file)
 # ``repeat`` is the default number of repetitions when --repeat is not given.
 DATASET_CONFIG: dict[str, dict] = {
-    "short":     {"split": "line",       "repeat": 20, "note": "intermittent hallucination probe"},
-    "long":      {"split": "line",       "repeat": 1,  "note": "long-form audio quality"},
-    "difficult": {"split": "whitespace", "repeat": 1,  "note": "number/date normalization"},
+    "short": {
+        "split": "line",
+        "repeat": 20,
+        "note": "intermittent hallucination probe",
+    },
+    "long": {"split": "line", "repeat": 1, "note": "long-form audio quality"},
+    "difficult": {
+        "split": "whitespace",
+        "repeat": 1,
+        "note": "number/date normalization",
+    },
 }
 
 
@@ -111,7 +119,9 @@ def _chunk_to_array(chunk: AudioChunk) -> np.ndarray:
     """Decode a streamed PCM chunk into float32 samples."""
     encoding = (chunk.audio.encoding or "pcm_f32").lower()
     if encoding == "pcm_s16le":
-        return np.frombuffer(chunk.pcm_bytes, dtype=np.int16).astype(np.float32) / 32767.0
+        return (
+            np.frombuffer(chunk.pcm_bytes, dtype=np.int16).astype(np.float32) / 32767.0
+        )
     return np.frombuffer(chunk.pcm_bytes, dtype=np.float32)
 
 
@@ -173,9 +183,14 @@ def synthesize_once(
     total_ms = (time.perf_counter() - t0) * 1000.0
     if not parts:
         return {
-            "status": "error" if error else "no_audio", "samples": None,
-            "sample_rate": sample_rate, "duration_s": 0.0, "ttft_ms": None,
-            "total_ms": round(total_ms), "chunks": 0, "error": error,
+            "status": "error" if error else "no_audio",
+            "samples": None,
+            "sample_rate": sample_rate,
+            "duration_s": 0.0,
+            "ttft_ms": None,
+            "total_ms": round(total_ms),
+            "chunks": 0,
+            "error": error,
         }
 
     samples = np.concatenate(parts)
@@ -196,28 +211,60 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run the badcase collection through the client SDK and save audio.",
     )
-    parser.add_argument("--datasets", default="short,long,difficult",
-                        help="Comma list of datasets under resources/dataset/badcase (default: all)")
-    parser.add_argument("-n", "--repeat", type=int, default=0,
-                        help="Repetitions per case (0 = per-dataset default)")
-    parser.add_argument("--speaker", default="serena", help="Speaker name (default: serena)")
-    parser.add_argument("--host", default="localhost", help="Engine host (default: localhost)")
-    parser.add_argument("--port", type=int, default=50071, help="Engine port (default: 50071)")
-    parser.add_argument("--transport", default="engine-grpc",
-                        help="Client transport (engine-grpc | engine-websocket | auto)")
-    parser.add_argument("--input-mode", default="token", help="Input mode (default: token)")
-    parser.add_argument("--group-policy", default="auto", help="Group policy (default: auto)")
-    parser.add_argument("--timeout", type=float, default=300.0,
-                        help="Per-request timeout in seconds (default: 300)")
-    parser.add_argument("--max-cases", type=int, default=0,
-                        help="Limit number of cases per dataset (0 = no limit)")
+    parser.add_argument(
+        "--datasets",
+        default="short,long,difficult",
+        help="Comma list of datasets under resources/dataset/badcase (default: all)",
+    )
+    parser.add_argument(
+        "-n",
+        "--repeat",
+        type=int,
+        default=0,
+        help="Repetitions per case (0 = per-dataset default)",
+    )
+    parser.add_argument(
+        "--speaker", default="serena", help="Speaker name (default: serena)"
+    )
+    parser.add_argument(
+        "--host", default="localhost", help="Engine host (default: localhost)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=50071, help="Engine port (default: 50071)"
+    )
+    parser.add_argument(
+        "--transport",
+        default="engine-grpc",
+        help="Client transport (engine-grpc | engine-websocket | auto)",
+    )
+    parser.add_argument(
+        "--input-mode", default="token", help="Input mode (default: token)"
+    )
+    parser.add_argument(
+        "--group-policy", default="auto", help="Group policy (default: auto)"
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=300.0,
+        help="Per-request timeout in seconds (default: 300)",
+    )
+    parser.add_argument(
+        "--max-cases",
+        type=int,
+        default=0,
+        help="Limit number of cases per dataset (0 = no limit)",
+    )
     parser.add_argument("--outdir", default="", help="Override output run directory")
     args = parser.parse_args()
 
     datasets = [d.strip() for d in args.datasets.split(",") if d.strip()]
     for d in datasets:
         if d not in DATASET_CONFIG:
-            print(f"ERROR: unknown dataset {d!r}; known: {', '.join(DATASET_CONFIG)}", file=sys.stderr)
+            print(
+                f"ERROR: unknown dataset {d!r}; known: {', '.join(DATASET_CONFIG)}",
+                file=sys.stderr,
+            )
             return 2
         if not (BADCASE_DIR / f"{d}.txt").is_file():
             print(f"ERROR: missing {BADCASE_DIR / (d + '.txt')}", file=sys.stderr)
@@ -238,10 +285,15 @@ def main() -> int:
     print("=" * 72)
 
     try:
-        client = TTSClient.connect(endpoint, transport=args.transport, timeout=args.timeout)
+        client = TTSClient.connect(
+            endpoint, transport=args.transport, timeout=args.timeout
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR: cannot connect to engine at {endpoint}: {exc}", file=sys.stderr)
-        print("  Make sure the engine is running and the port is correct.", file=sys.stderr)
+        print(
+            "  Make sure the engine is running and the port is correct.",
+            file=sys.stderr,
+        )
         return 1
     print(f"  connected:   transport={client.resolved_transport}\n")
 
@@ -273,7 +325,9 @@ def main() -> int:
             for c in cases:
                 f.write(f"[case {c['case_no']:03d}] {c['text']}\n")
 
-        print(f"\n### dataset={dataset}  ({conf['note']})  cases={len(cases)}  repeat={repeat}")
+        print(
+            f"\n### dataset={dataset}  ({conf['note']})  cases={len(cases)}  repeat={repeat}"
+        )
         results: list[dict] = []
         durations_by_case: dict[int, list[float]] = {}
 
@@ -282,26 +336,42 @@ def main() -> int:
             preview = text[:48] + ("…" if len(text) > 48 else "")
             for r in range(1, repeat + 1):
                 fname = f"case{case_no:03d}_run{r:03d}.wav"
-                sid = f"badcase-{dataset}-{case_no:03d}-{r:03d}-{int(time.time()*1000)}"
+                sid = (
+                    f"badcase-{dataset}-{case_no:03d}-{r:03d}-{int(time.time() * 1000)}"
+                )
                 res = synthesize_once(
-                    client, text,
-                    speaker=args.speaker, input_mode=args.input_mode,
-                    group_policy=args.group_policy, session_id=sid,
+                    client,
+                    text,
+                    speaker=args.speaker,
+                    input_mode=args.input_mode,
+                    group_policy=args.group_policy,
+                    session_id=sid,
                 )
                 rec = {
-                    "file": f"{dataset}/{fname}", "case": case_no, "run": r,
-                    "status": res["status"], "duration_s": res["duration_s"],
-                    "ttft_ms": res["ttft_ms"], "total_ms": res["total_ms"],
-                    "chunks": res["chunks"], "text_len": len(text),
+                    "file": f"{dataset}/{fname}",
+                    "case": case_no,
+                    "run": r,
+                    "status": res["status"],
+                    "duration_s": res["duration_s"],
+                    "ttft_ms": res["ttft_ms"],
+                    "total_ms": res["total_ms"],
+                    "chunks": res["chunks"],
+                    "text_len": len(text),
                 }
                 if res["status"] == "ok":
-                    (ds_dir / fname).write_bytes(make_wav(res["samples"], sr=res["sample_rate"]))
+                    (ds_dir / fname).write_bytes(
+                        make_wav(res["samples"], sr=res["sample_rate"])
+                    )
                     durations_by_case.setdefault(case_no, []).append(res["duration_s"])
-                    print(f"  [{dataset} c{case_no:03d} r{r:03d}] OK  dur={res['duration_s']:6.2f}s "
-                          f"ttft={res['ttft_ms']}ms chunks={res['chunks']}  \"{preview}\"")
+                    print(
+                        f"  [{dataset} c{case_no:03d} r{r:03d}] OK  dur={res['duration_s']:6.2f}s "
+                        f'ttft={res["ttft_ms"]}ms chunks={res["chunks"]}  "{preview}"'
+                    )
                 else:
                     rec["error"] = res["error"]
-                    print(f"  [{dataset} c{case_no:03d} r{r:03d}] {res['status'].upper()}: {res['error']}")
+                    print(
+                        f"  [{dataset} c{case_no:03d} r{r:03d}] {res['status'].upper()}: {res['error']}"
+                    )
                 results.append(rec)
                 grand_total += 1
                 grand_ok += 1 if res["status"] == "ok" else 0
@@ -320,18 +390,25 @@ def main() -> int:
                 "suspected_hallucination_runs": outliers,
             }
             if outliers:
-                print(f"  ⚠ case {case_no:03d}: median={med:.2f}s but runs {outliers} "
-                      f"(>1.5x median) — possible hallucination")
+                print(
+                    f"  ⚠ case {case_no:03d}: median={med:.2f}s but runs {outliers} "
+                    f"(>1.5x median) — possible hallucination"
+                )
 
         summary["datasets"][dataset] = {
-            "note": conf["note"], "split": conf["split"], "repeat": repeat,
-            "cases": len(cases), "case_stats": case_stats, "results": results,
+            "note": conf["note"],
+            "split": conf["split"],
+            "repeat": repeat,
+            "cases": len(cases),
+            "case_stats": case_stats,
+            "results": results,
         }
 
     summary["grand_total"] = grand_total
     summary["grand_ok"] = grand_ok
     (run_dir / "_summary.json").write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     print("\n" + "=" * 72)
     print(f"Done: {grand_ok}/{grand_total} OK")

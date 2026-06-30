@@ -27,7 +27,9 @@ class RawWebSocketConnection:
         while len(self.buffer) < n:
             chunk = self.sock.recv(max(4096, n - len(self.buffer)))
             if not chunk:
-                raise RawWebSocketError("websocket closed before enough data was received")
+                raise RawWebSocketError(
+                    "websocket closed before enough data was received"
+                )
             self.buffer.extend(chunk)
         data = bytes(self.buffer[:n])
         del self.buffer[:n]
@@ -99,16 +101,24 @@ def ws_connect(
 
     accept = headers_map.get("sec-websocket-accept", "")
     expected = base64.b64encode(
-        hashlib.sha1((ws_key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+        hashlib.sha1(
+            (ws_key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+        ).digest()
     ).decode("ascii")
     if accept != expected:
-        raise RawWebSocketError("websocket handshake failed: invalid Sec-WebSocket-Accept")
+        raise RawWebSocketError(
+            "websocket handshake failed: invalid Sec-WebSocket-Accept"
+        )
 
     return RawWebSocketConnection(sock=sock, buffer=bytearray(leftover))
 
 
 def ws_send_json(conn: RawWebSocketConnection, payload: dict[str, Any]) -> None:
-    ws_send_frame(conn, opcode=0x1, payload=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    ws_send_frame(
+        conn,
+        opcode=0x1,
+        payload=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+    )
 
 
 def ws_send_frame(conn: RawWebSocketConnection, *, opcode: int, payload: bytes) -> None:

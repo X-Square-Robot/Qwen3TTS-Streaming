@@ -40,7 +40,9 @@ class BaseStreamSession:
 
     def _check_send_open(self) -> None:
         if self._send_closed:
-            raise StreamClosedError(f"stream session {self.session_id} is already closed for sending")
+            raise StreamClosedError(
+                f"stream session {self.session_id} is already closed for sending"
+            )
 
     def _mark_send_closed(self) -> None:
         self._send_closed = True

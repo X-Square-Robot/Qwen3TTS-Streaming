@@ -1,18 +1,15 @@
 from __future__ import annotations
 
 import json
-import pytest
 
 from qwen3tts_protocol import (
     BytesResult,
     Capabilities,
-    OutputPolicy,
     SessionStartRequest,
     SynthesisConfig,
 )
 from qwen3tts._adapters.engine_websocket import (
     EngineWebSocketAdapter,
-    EngineWebSocketStreamSession,
 )
 from qwen3tts.constants import TRANSPORT_ENGINE_WEBSOCKET
 
@@ -40,17 +37,20 @@ class FakeRawWebSocketConnection:
 def _make_ws_connect(fake_conn):
     def ws_connect(url, *, timeout, headers=None):
         return fake_conn
+
     return ws_connect
 
 
 def _make_ws_send_json(tracker: list[dict]):
     def ws_send_json(conn, payload):
         tracker.append(payload)
+
     return ws_send_json
 
 
 def _make_ws_recv_frame(responses):
     idx = [0]
+
     def ws_recv_frame(conn):
         if idx[0] >= len(responses):
             raise ConnectionError("no more frames")
@@ -59,12 +59,14 @@ def _make_ws_recv_frame(responses):
         if isinstance(item, bytes):
             return 0x2, item
         return 0x1, json.dumps(item).encode("utf-8")
+
     return ws_recv_frame
 
 
 def _make_ws_close(tracker: list[bool]):
     def ws_close(conn):
         tracker[0] = True
+
     return ws_close
 
 
@@ -141,7 +143,9 @@ class TestEngineWebSocketAdapter:
         )
 
         adapter = EngineWebSocketAdapter("ws://localhost:50052/v1/ws", timeout=5.0)
-        start = SessionStartRequest(session_id="s1", config=SynthesisConfig(task_type="custom_voice"))
+        start = SessionStartRequest(
+            session_id="s1", config=SynthesisConfig(task_type="custom_voice")
+        )
         result = adapter.synthesize_bytes("hello", request=start)
 
         assert isinstance(result, BytesResult)
@@ -164,9 +168,11 @@ class TestEngineWebSocketAdapter:
         )
         monkeypatch.setattr(
             "qwen3tts._adapters.engine_websocket.ws_recv_frame",
-            _make_ws_recv_frame([
-                {"type": "event", "event": {"type": "done", "session_id": "s3"}},
-            ]),
+            _make_ws_recv_frame(
+                [
+                    {"type": "event", "event": {"type": "done", "session_id": "s3"}},
+                ]
+            ),
         )
         monkeypatch.setattr(
             "qwen3tts._adapters.engine_websocket.ws_close",
@@ -178,7 +184,9 @@ class TestEngineWebSocketAdapter:
         )
 
         adapter = EngineWebSocketAdapter("ws://localhost:50052/v1/ws", timeout=5.0)
-        start = SessionStartRequest(session_id="s3", config=SynthesisConfig(task_type="custom_voice"))
+        start = SessionStartRequest(
+            session_id="s3", config=SynthesisConfig(task_type="custom_voice")
+        )
         session = adapter.open_stream(start)
 
         assert session.session_id == "s3"

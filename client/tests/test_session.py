@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import queue
-import threading
 
 import pytest
 
 from qwen3tts_protocol import AudioChunk, AudioFormat, StreamEvent
-from qwen3tts._session import BaseStreamSession, AsyncStreamSession, _QUEUE_SENTINEL
+from qwen3tts._session import BaseStreamSession, AsyncStreamSession
 from qwen3tts.exceptions import StreamClosedError
 
 
@@ -15,9 +13,7 @@ class TestBaseStreamSession:
     def test_put_and_iter_messages(self):
         session = BaseStreamSession(session_id="s1", transport="test")
         session._put_message(StreamEvent(type="start", session_id="s1"))
-        session._put_message(
-            AudioChunk(pcm_bytes=b"\x00\x01", audio=AudioFormat())
-        )
+        session._put_message(AudioChunk(pcm_bytes=b"\x00\x01", audio=AudioFormat()))
         session._put_message(StreamEvent(type="done", session_id="s1"))
 
         messages = list(session.iter_messages())

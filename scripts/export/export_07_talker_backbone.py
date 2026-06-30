@@ -40,21 +40,37 @@ def _export_talker_backbone_onnx(
     device: str = "cpu",
     opset_version: int = 18,
 ) -> str:
-    backbone, num_layers, hidden_size, num_kv_heads, head_dim = build_talker_backbone_module(
-        model, device=device
+    backbone, num_layers, hidden_size, num_kv_heads, head_dim = (
+        build_talker_backbone_module(model, device=device)
     )
 
     B, one, S_past = 1, 1, 0
-    dummy_embeds = torch.randn(B, one, hidden_size, device=device, dtype=ONNX_EXPORT_DTYPE)
+    dummy_embeds = torch.randn(
+        B, one, hidden_size, device=device, dtype=ONNX_EXPORT_DTYPE
+    )
     position_ids = torch.full((B, 3, one, 1), S_past, device=device, dtype=torch.long)
 
     past_list = []
     for _ in range(num_layers):
         past_list.append(
-            torch.zeros(B, num_kv_heads, S_past, head_dim, device=device, dtype=ONNX_EXPORT_DTYPE)
+            torch.zeros(
+                B,
+                num_kv_heads,
+                S_past,
+                head_dim,
+                device=device,
+                dtype=ONNX_EXPORT_DTYPE,
+            )
         )
         past_list.append(
-            torch.zeros(B, num_kv_heads, S_past, head_dim, device=device, dtype=ONNX_EXPORT_DTYPE)
+            torch.zeros(
+                B,
+                num_kv_heads,
+                S_past,
+                head_dim,
+                device=device,
+                dtype=ONNX_EXPORT_DTYPE,
+            )
         )
 
     with torch.no_grad():
@@ -106,7 +122,9 @@ def _export_talker_backbone_onnx(
     }
     for i, t in enumerate(past_list):
         test_inputs[input_names[2 + i]] = to_numpy(t)
-    torch_outputs = {output_names[i]: to_numpy(out[i]) for i in range(len(output_names))}
+    torch_outputs = {
+        output_names[i]: to_numpy(out[i]) for i in range(len(output_names))
+    }
     atol = 2e-3 if ONNX_EXPORT_DTYPE == torch.float32 else 1e-1
     ok = verify_onnx(onnx_path, test_inputs, torch_outputs, atol=atol, rtol=1e-2)
     if ok:
@@ -136,7 +154,9 @@ def export_talker_backbone(
 
 def main():
     setup_logging()
-    parser = argparse.ArgumentParser(description="Export Talker backbone (no CP/sum) ONNX")
+    parser = argparse.ArgumentParser(
+        description="Export Talker backbone (no CP/sum) ONNX"
+    )
     parser.add_argument("--variant", type=str, default=None)
     add_common_args(parser)
     args = parser.parse_args()
@@ -147,7 +167,9 @@ def main():
             logger.error(f"Unknown variant: {variant}")
             continue
         try:
-            results = export_talker_backbone(variant, args.models_dir, args.output_dir, device)
+            results = export_talker_backbone(
+                variant, args.models_dir, args.output_dir, device
+            )
             for key, path in results.items():
                 logger.info(f"[{variant}] Talker backbone {key}: {path}")
         except FileNotFoundError as e:

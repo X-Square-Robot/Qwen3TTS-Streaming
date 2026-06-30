@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 import json
-import time
 
-import pytest
 
 from qwen3tts_protocol import (
-    AudioChunk,
     BytesResult,
-    Capabilities,
     OutputPolicy,
     SessionStartRequest,
     StreamEvent,
@@ -36,7 +32,10 @@ class TestTritonHttpAdapter:
             timeout=5.0,
         )
         url = adapter._infer_url()
-        assert url == "http://localhost:8000/v2/models/tts_orchestrator_http/versions/1/infer"
+        assert (
+            url
+            == "http://localhost:8000/v2/models/tts_orchestrator_http/versions/1/infer"
+        )
 
     def test_infer_payload_structure(self):
         adapter = TritonHttpAdapter(
@@ -84,7 +83,9 @@ class TestTritonHttpAdapter:
             model_name="tts_orchestrator_http",
             timeout=5.0,
         )
-        start = SessionStartRequest(session_id="s1", config=SynthesisConfig(task_type="custom_voice"))
+        start = SessionStartRequest(
+            session_id="s1", config=SynthesisConfig(task_type="custom_voice")
+        )
         result = adapter.synthesize_bytes("hello", request=start)
 
         assert isinstance(result, BytesResult)
@@ -119,7 +120,9 @@ class TestTritonHttpBufferedSession:
             model_name="tts_orchestrator_http",
             timeout=5.0,
         )
-        start = SessionStartRequest(session_id="s1", config=SynthesisConfig(task_type="custom_voice"))
+        start = SessionStartRequest(
+            session_id="s1", config=SynthesisConfig(task_type="custom_voice")
+        )
         session = adapter.open_stream(start)
 
         assert isinstance(session, TritonHttpBufferedSession)
@@ -131,7 +134,9 @@ class TestTritonHttpBufferedSession:
             model_name="tts_orchestrator_http",
             timeout=5.0,
         )
-        start = SessionStartRequest(session_id="s1", config=SynthesisConfig(task_type="custom_voice"))
+        start = SessionStartRequest(
+            session_id="s1", config=SynthesisConfig(task_type="custom_voice")
+        )
         session = adapter.open_stream(start)
 
         session.send_text("hello, ")
@@ -169,7 +174,9 @@ class TestTritonHttpBufferedSession:
             model_name="tts_orchestrator_http",
             timeout=5.0,
         )
-        start = SessionStartRequest(session_id="s1", config=SynthesisConfig(task_type="custom_voice"))
+        start = SessionStartRequest(
+            session_id="s1", config=SynthesisConfig(task_type="custom_voice")
+        )
         session = adapter.open_stream(start)
 
         session.send_text("hello")
@@ -179,12 +186,16 @@ class TestTritonHttpBufferedSession:
         for msg in session.iter_messages():
             messages.append(msg)
 
-        types = [m.type if isinstance(m, StreamEvent) else "audio_chunk" for m in messages]
+        types = [
+            m.type if isinstance(m, StreamEvent) else "audio_chunk" for m in messages
+        ]
         assert "start" in types
         assert "done" in types
 
         # Start event should carry degraded_to_oneshot meta
-        start_ev = [m for m in messages if isinstance(m, StreamEvent) and m.type == "start"][0]
+        start_ev = [
+            m for m in messages if isinstance(m, StreamEvent) and m.type == "start"
+        ][0]
         assert start_ev.meta.get("degraded_to_oneshot") == "true"
 
     def test_cancel_just_puts_done(self):
@@ -193,7 +204,9 @@ class TestTritonHttpBufferedSession:
             model_name="tts_orchestrator_http",
             timeout=5.0,
         )
-        start = SessionStartRequest(session_id="s1", config=SynthesisConfig(task_type="custom_voice"))
+        start = SessionStartRequest(
+            session_id="s1", config=SynthesisConfig(task_type="custom_voice")
+        )
         session = adapter.open_stream(start)
 
         session.cancel(reason="user abort")

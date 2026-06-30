@@ -10,7 +10,13 @@ from demo_api import llm_pk
 from demo_api.audio_assets import attach_audio_to_result, scheduled_start_ms
 from demo_api.audio_store import AudioStore
 from demo_api.jobs import ConcurrencyJobManager
-from demo_api.schemas import RunMetrics, RunResult, normalize_backend_result, percentile, summarize_ttft
+from demo_api.schemas import (
+    RunMetrics,
+    RunResult,
+    normalize_backend_result,
+    percentile,
+    summarize_ttft,
+)
 from demo_api.triton_client import TtsRequest, build_action_payload
 
 
@@ -38,7 +44,11 @@ def test_normalize_triton_streaming_result_round_trips():
     assert result["backend"] == "triton_streaming"
     assert result["metrics"]["client_ttfb_ms"] == 18
     assert result["metrics"]["simulated_llm_complete_ms"] == 870
-    assert result["audio_format"] == {"encoding": "pcm_f32", "sample_rate": 24000, "channels": 1}
+    assert result["audio_format"] == {
+        "encoding": "pcm_f32",
+        "sample_rate": 24000,
+        "channels": 1,
+    }
 
 
 def test_normalize_unknown_backend_raises():
@@ -152,7 +162,11 @@ def test_llm_pk_streaming_init_uses_token_mode(monkeypatch):
             self._values = {
                 "event_type": np.array([event_type], dtype=object),
                 "event_json": np.array(
-                    [json.dumps(payload or {}, ensure_ascii=False) if payload is not None else ""],
+                    [
+                        json.dumps(payload or {}, ensure_ascii=False)
+                        if payload is not None
+                        else ""
+                    ],
                     dtype=object,
                 ),
                 "audio_chunk": np.array([audio], dtype=object),
@@ -321,6 +335,6 @@ def test_jobs_evicted_when_over_cap(monkeypatch):
         ]
         assert len(manager._jobs) <= 3
         assert manager.get(ids[-1]) is not None  # newest retained
-        assert manager.get(ids[0]) is None       # oldest evicted
+        assert manager.get(ids[0]) is None  # oldest evicted
 
     asyncio.run(run())

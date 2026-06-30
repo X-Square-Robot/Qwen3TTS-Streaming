@@ -57,7 +57,9 @@ class TokenTextChunks:
             "chunks": list(self.chunks),
             "token_ids": list(self.token_ids),
             "chunk_token_ids": [list(token_ids) for token_ids in self.chunk_token_ids],
-            "chunk_token_counts": [len(token_ids) for token_ids in self.chunk_token_ids],
+            "chunk_token_counts": [
+                len(token_ids) for token_ids in self.chunk_token_ids
+            ],
         }
 
 
@@ -104,13 +106,20 @@ def candidate_tokenizer_dirs(*, repo_root: Path = REPO_ROOT) -> list[Path]:
 
     candidates.extend(
         [
-            repo_root / "workspace" / "model_repository" / "tts_orchestrator" / "1" / "tokenizer",
+            repo_root
+            / "workspace"
+            / "model_repository"
+            / "tts_orchestrator"
+            / "1"
+            / "tokenizer",
             repo_root / "model_repository" / "tts_orchestrator" / "1" / "tokenizer",
         ]
     )
     workspace_models = repo_root / "workspace" / "models"
     if workspace_models.is_dir():
-        candidates.extend(sorted(path for path in workspace_models.iterdir() if path.is_dir()))
+        candidates.extend(
+            sorted(path for path in workspace_models.iterdir() if path.is_dir())
+        )
 
     seen: set[str] = set()
     unique: list[Path] = []
@@ -171,9 +180,7 @@ def validate_token_text_chunks(
                 f"chunks={len(chunk_list)} chunk_token_ids={len(chunk_token_id_list)}"
             )
         flattened = [
-            token_id
-            for token_group in chunk_token_id_list
-            for token_id in token_group
+            token_id for token_group in chunk_token_id_list for token_id in token_group
         ]
         if flattened != token_id_list:
             raise ValueError(
@@ -188,7 +195,9 @@ def validate_token_text_chunks(
         )
     empty_indices = [idx for idx, chunk in enumerate(chunk_list) if chunk == ""]
     if empty_indices:
-        raise ValueError(f"tokenized text produced empty text chunks at indices {empty_indices}")
+        raise ValueError(
+            f"tokenized text produced empty text chunks at indices {empty_indices}"
+        )
     reconstructed = "".join(chunk_list)
     if reconstructed != text:
         raise ValueError(
@@ -232,7 +241,9 @@ def _build_reencodable_text_chunks(
         )
 
     @lru_cache(maxsize=None)
-    def solve(char_pos: int, token_pos: int) -> tuple[tuple[str, tuple[int, ...]], ...] | None:
+    def solve(
+        char_pos: int, token_pos: int
+    ) -> tuple[tuple[str, tuple[int, ...]], ...] | None:
         if char_pos == text_len and token_pos == token_count:
             return ()
         if char_pos >= text_len or token_pos >= token_count:
@@ -298,7 +309,9 @@ def build_token_text_chunks(
     )
 
     mismatches: list[str] = []
-    for idx, (expected_ids, chunk) in enumerate(zip(tokenized.chunk_token_ids, tokenized.chunks)):
+    for idx, (expected_ids, chunk) in enumerate(
+        zip(tokenized.chunk_token_ids, tokenized.chunks)
+    ):
         actual_ids = list(tokenizer.encode_ids(chunk, add_special_tokens=False))
         if actual_ids != expected_ids:
             mismatches.append(

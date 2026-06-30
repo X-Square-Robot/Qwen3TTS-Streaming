@@ -1,7 +1,13 @@
 from .core import FSM, Rule, ALWAYS
 from .event import SpliterEvent, SpliterEventType
 from .state import SpliterState
-from .driver import StreamingDriver, ActionType, ActionResult, SplitThresholds, compute_thresholds
+from .driver import (
+    StreamingDriver,
+    ActionType,
+    ActionResult,
+    SplitThresholds,
+    compute_thresholds,
+)
 from .spliter import Spliter, SegmentAction
 from .reorder import AudioReorder
 

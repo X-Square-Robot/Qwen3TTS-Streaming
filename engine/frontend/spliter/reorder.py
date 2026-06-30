@@ -53,7 +53,9 @@ class AudioReorder:
             return self._try_drain()
         return []
 
-    def mark_done(self, group_idx: int, local_idx: int, *, group_final: bool = False) -> List[bytes]:
+    def mark_done(
+        self, group_idx: int, local_idx: int, *, group_final: bool = False
+    ) -> List[bytes]:
         """Mark a segment as fully complete; drain any contiguous completions."""
         key = (group_idx, local_idx)
         self._done.add(key)

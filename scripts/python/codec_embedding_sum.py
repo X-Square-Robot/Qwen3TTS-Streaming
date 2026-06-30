@@ -77,7 +77,11 @@ class CodecEmbeddingSum(nn.Module):
         G = min(G, self.num_groups)
         codec_ids = codec_ids[:, :G]
         stacked = self.stacked_weight[:G]
-        group_idx = torch.arange(G, device=codec_ids.device, dtype=torch.long).unsqueeze(0).expand(B, -1)
+        group_idx = (
+            torch.arange(G, device=codec_ids.device, dtype=torch.long)
+            .unsqueeze(0)
+            .expand(B, -1)
+        )
         looked_up = stacked[group_idx, codec_ids, :]
         return looked_up.sum(dim=1)
 
@@ -89,7 +93,9 @@ class CodecEmbeddingSum(nn.Module):
         device: torch.device = None,
     ) -> torch.Tensor:
         """Build [16, V_max, H] stacked tensor (vocab-aligned, CP zero-padded)."""
-        return _stack_weights_impl(talker_weight, cp_weights, dtype=dtype, device=device)
+        return _stack_weights_impl(
+            talker_weight, cp_weights, dtype=dtype, device=device
+        )
 
     @classmethod
     def from_exported_weights(
@@ -100,12 +106,16 @@ class CodecEmbeddingSum(nn.Module):
     ) -> "CodecEmbeddingSum":
         """Load from codec_embeddings.pt and build stacked 3D tensor."""
         weights_dir = Path(weights_dir)
-        data = torch.load(weights_dir / "codec_embeddings.pt", map_location=device, weights_only=True)
+        data = torch.load(
+            weights_dir / "codec_embeddings.pt", map_location=device, weights_only=True
+        )
         talker_sd = data["talker_codec_embedding"]
         cp_sds = data["code_predictor_codec_embeddings"]
         talker_weight = talker_sd["weight"]
         cp_weights = [sd["weight"] for sd in cp_sds]
-        stacked = cls.stack_weights(talker_weight, cp_weights, dtype=dtype, device=device)
+        stacked = cls.stack_weights(
+            talker_weight, cp_weights, dtype=dtype, device=device
+        )
         return cls(stacked)
 
     @classmethod
@@ -116,7 +126,9 @@ class CodecEmbeddingSum(nn.Module):
         cp_weights = [emb.weight for emb in talker.code_predictor.model.codec_embedding]
         if dtype is None:
             dtype = talker_weight.dtype
-        stacked = cls.stack_weights(talker_weight, cp_weights, dtype=dtype, device=talker_weight.device)
+        stacked = cls.stack_weights(
+            talker_weight, cp_weights, dtype=dtype, device=talker_weight.device
+        )
         return cls(stacked)
 
 
@@ -180,12 +192,16 @@ def benchmark(
     if naive_talker_embedding is not None and naive_cp_embeddings is not None:
         with torch.no_grad():
             for _ in range(num_warmup):
-                _ = codec_sum_naive(naive_talker_embedding, naive_cp_embeddings, codec_ids)
+                _ = codec_sum_naive(
+                    naive_talker_embedding, naive_cp_embeddings, codec_ids
+                )
             if getattr(device, "type", None) == "cuda":
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
             for _ in range(num_repeat):
-                _ = codec_sum_naive(naive_talker_embedding, naive_cp_embeddings, codec_ids)
+                _ = codec_sum_naive(
+                    naive_talker_embedding, naive_cp_embeddings, codec_ids
+                )
             if getattr(device, "type", None) == "cuda":
                 torch.cuda.synchronize()
             naive_ms = (time.perf_counter() - t0) / num_repeat * 1000

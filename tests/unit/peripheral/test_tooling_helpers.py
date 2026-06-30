@@ -70,7 +70,11 @@ def test_bootstrap_project_imports_rejects_unknown_group():
 
 def test_save_wav_creates_parent_and_clips_audio(tmp_path: Path):
     output = tmp_path / "nested" / "audio.wav"
-    save_wav(np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=np.float32), output, sample_rate=24000)
+    save_wav(
+        np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=np.float32),
+        output,
+        sample_rate=24000,
+    )
 
     assert output.is_file()
     with wave.open(str(output), "rb") as wf:

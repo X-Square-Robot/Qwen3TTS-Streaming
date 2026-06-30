@@ -1,11 +1,8 @@
 """Tests for engine.backend.prefix_cache.PrefixKVCache."""
 
-import time
-
 import torch
-import pytest
 
-from engine.backend.prefix_cache import PrefixKVCache, PrefixCacheEntry
+from engine.backend.prefix_cache import PrefixKVCache
 
 
 def _make_kv(prefix_len: int = 10, layers: int = 56, heads: int = 8, dim: int = 64):

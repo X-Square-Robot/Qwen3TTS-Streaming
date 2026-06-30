@@ -7,7 +7,7 @@ import requests
 
 from qwen3tts_protocol import DetectedTransport
 
-from ._internal.raw_websocket import RawWebSocketError, ws_close, ws_connect, ws_recv_frame, ws_send_json
+from ._internal.raw_websocket import ws_close, ws_connect, ws_recv_frame, ws_send_json
 from .constants import (
     DEFAULT_ENGINE_CAPABILITIES_PATH,
     DEFAULT_ENGINE_GRPC_PORT,
@@ -47,13 +47,26 @@ def detect_transport(
             transport=transport,
             model_name=model_name or _default_model_for_transport(transport),
             model_version=model_version,
-            probe_report=[{"transport": transport, "endpoint": resolved_endpoint, "ok": True, "reason": "explicit"}],
+            probe_report=[
+                {
+                    "transport": transport,
+                    "endpoint": resolved_endpoint,
+                    "ok": True,
+                    "reason": "explicit",
+                }
+            ],
         )
 
     report: list[dict] = []
     parsed = urlparse(endpoint if "://" in endpoint else "")
     if parsed.scheme in {"ws", "wss"}:
-        return _detect_websocket_url(endpoint, timeout=timeout, headers=headers, report=report, model_version=model_version)
+        return _detect_websocket_url(
+            endpoint,
+            timeout=timeout,
+            headers=headers,
+            report=report,
+            model_version=model_version,
+        )
     if parsed.scheme in {"http", "https"}:
         return _detect_http_url(
             endpoint,
@@ -72,13 +85,26 @@ def detect_transport(
     )
 
 
-def _detect_websocket_url(url: str, *, timeout: float, headers, report: list[dict], model_version: str) -> DetectedTransport:
+def _detect_websocket_url(
+    url: str, *, timeout: float, headers, report: list[dict], model_version: str
+) -> DetectedTransport:
     try:
         _probe_engine_websocket(url, timeout=timeout, headers=headers)
     except Exception as exc:
-        report.append({"transport": TRANSPORT_ENGINE_WEBSOCKET, "endpoint": url, "ok": False, "reason": str(exc)})
-        raise TransportProbeError(f"websocket endpoint probe failed: {exc}", probe_report=report) from exc
-    report.append({"transport": TRANSPORT_ENGINE_WEBSOCKET, "endpoint": url, "ok": True})
+        report.append(
+            {
+                "transport": TRANSPORT_ENGINE_WEBSOCKET,
+                "endpoint": url,
+                "ok": False,
+                "reason": str(exc),
+            }
+        )
+        raise TransportProbeError(
+            f"websocket endpoint probe failed: {exc}", probe_report=report
+        ) from exc
+    report.append(
+        {"transport": TRANSPORT_ENGINE_WEBSOCKET, "endpoint": url, "ok": True}
+    )
     return DetectedTransport(
         requested_endpoint=url,
         resolved_endpoint=url,
@@ -104,7 +130,13 @@ def _detect_http_url(
         if response.status_code == 200:
             payload = response.json()
             if isinstance(payload, dict) and "loaded_model_type" in payload:
-                report.append({"transport": "engine-http-capabilities", "endpoint": capabilities_url, "ok": True})
+                report.append(
+                    {
+                        "transport": "engine-http-capabilities",
+                        "endpoint": capabilities_url,
+                        "ok": True,
+                    }
+                )
                 return DetectedTransport(
                     requested_endpoint=base_url,
                     resolved_endpoint=f"{base_url.rstrip('/')}{DEFAULT_ENGINE_WS_PATH}",
@@ -113,16 +145,43 @@ def _detect_http_url(
                     model_version=model_version,
                     probe_report=report,
                 )
-        report.append({"transport": "engine-http-capabilities", "endpoint": capabilities_url, "ok": False, "reason": f"http {response.status_code}"})
+        report.append(
+            {
+                "transport": "engine-http-capabilities",
+                "endpoint": capabilities_url,
+                "ok": False,
+                "reason": f"http {response.status_code}",
+            }
+        )
     except Exception as exc:
-        report.append({"transport": "engine-http-capabilities", "endpoint": capabilities_url, "ok": False, "reason": str(exc)})
+        report.append(
+            {
+                "transport": "engine-http-capabilities",
+                "endpoint": capabilities_url,
+                "ok": False,
+                "reason": str(exc),
+            }
+        )
 
     triton_model = model_name or DEFAULT_TRITON_HTTP_MODEL
-    for path in ("/v2/health/live", "/v2/health/ready", f"/v2/models/{triton_model}/ready"):
+    for path in (
+        "/v2/health/live",
+        "/v2/health/ready",
+        f"/v2/models/{triton_model}/ready",
+    ):
         try:
-            response = requests.get(f"{base_url.rstrip('/')}{path}", timeout=timeout, headers=headers)
+            response = requests.get(
+                f"{base_url.rstrip('/')}{path}", timeout=timeout, headers=headers
+            )
             ok = response.status_code == 200
-            report.append({"transport": TRANSPORT_TRITON_HTTP, "endpoint": f"{base_url.rstrip('/')}{path}", "ok": ok, "reason": "" if ok else f"http {response.status_code}"})
+            report.append(
+                {
+                    "transport": TRANSPORT_TRITON_HTTP,
+                    "endpoint": f"{base_url.rstrip('/')}{path}",
+                    "ok": ok,
+                    "reason": "" if ok else f"http {response.status_code}",
+                }
+            )
             if not ok:
                 raise RuntimeError(f"http {response.status_code}")
         except Exception as exc:
@@ -177,7 +236,13 @@ def _detect_bare_endpoint(
         if port == DEFAULT_ENGINE_GRPC_PORT:
             try:
                 _probe_engine_grpc(candidate, timeout=timeout)
-                report.append({"transport": TRANSPORT_ENGINE_GRPC, "endpoint": candidate, "ok": True})
+                report.append(
+                    {
+                        "transport": TRANSPORT_ENGINE_GRPC,
+                        "endpoint": candidate,
+                        "ok": True,
+                    }
+                )
                 return DetectedTransport(
                     requested_endpoint=endpoint,
                     resolved_endpoint=candidate,
@@ -187,12 +252,25 @@ def _detect_bare_endpoint(
                     probe_report=report,
                 )
             except Exception as exc:
-                report.append({"transport": TRANSPORT_ENGINE_GRPC, "endpoint": candidate, "ok": False, "reason": str(exc)})
+                report.append(
+                    {
+                        "transport": TRANSPORT_ENGINE_GRPC,
+                        "endpoint": candidate,
+                        "ok": False,
+                        "reason": str(exc),
+                    }
+                )
         if port == DEFAULT_TRITON_GRPC_PORT:
             try:
                 triton_model = model_name or DEFAULT_TRITON_GRPC_MODEL
                 _probe_triton_grpc(candidate, timeout=timeout, model_name=triton_model)
-                report.append({"transport": TRANSPORT_TRITON_GRPC, "endpoint": candidate, "ok": True})
+                report.append(
+                    {
+                        "transport": TRANSPORT_TRITON_GRPC,
+                        "endpoint": candidate,
+                        "ok": True,
+                    }
+                )
                 return DetectedTransport(
                     requested_endpoint=endpoint,
                     resolved_endpoint=candidate,
@@ -202,12 +280,25 @@ def _detect_bare_endpoint(
                     probe_report=report,
                 )
             except Exception as exc:
-                report.append({"transport": TRANSPORT_TRITON_GRPC, "endpoint": candidate, "ok": False, "reason": str(exc)})
+                report.append(
+                    {
+                        "transport": TRANSPORT_TRITON_GRPC,
+                        "endpoint": candidate,
+                        "ok": False,
+                        "reason": str(exc),
+                    }
+                )
         if port == DEFAULT_ENGINE_WS_PORT:
             ws_url = f"ws://{host}:{port}{DEFAULT_ENGINE_WS_PATH}"
             try:
                 _probe_engine_websocket(ws_url, timeout=timeout, headers=None)
-                report.append({"transport": TRANSPORT_ENGINE_WEBSOCKET, "endpoint": ws_url, "ok": True})
+                report.append(
+                    {
+                        "transport": TRANSPORT_ENGINE_WEBSOCKET,
+                        "endpoint": ws_url,
+                        "ok": True,
+                    }
+                )
                 return DetectedTransport(
                     requested_endpoint=endpoint,
                     resolved_endpoint=ws_url,
@@ -217,7 +308,14 @@ def _detect_bare_endpoint(
                     probe_report=report,
                 )
             except Exception as exc:
-                report.append({"transport": TRANSPORT_ENGINE_WEBSOCKET, "endpoint": ws_url, "ok": False, "reason": str(exc)})
+                report.append(
+                    {
+                        "transport": TRANSPORT_ENGINE_WEBSOCKET,
+                        "endpoint": ws_url,
+                        "ok": False,
+                        "reason": str(exc),
+                    }
+                )
         http_fallback = f"http://{host}:{port}"
         try:
             return _detect_http_url(
@@ -230,7 +328,9 @@ def _detect_bare_endpoint(
             )
         except TransportProbeError:
             pass
-    raise TransportProbeError("auto-detect could not resolve a supported transport", probe_report=report)
+    raise TransportProbeError(
+        "auto-detect could not resolve a supported transport", probe_report=report
+    )
 
 
 def _probe_engine_websocket(url: str, *, timeout: float, headers) -> None:
@@ -239,7 +339,9 @@ def _probe_engine_websocket(url: str, *, timeout: float, headers) -> None:
         ws_send_json(conn, {"type": "get_capabilities"})
         deadline = __import__("time").perf_counter() + timeout
         while __import__("time").perf_counter() < deadline:
-            conn.sock.settimeout(max(0.05, min(0.2, deadline - __import__("time").perf_counter())))
+            conn.sock.settimeout(
+                max(0.05, min(0.2, deadline - __import__("time").perf_counter()))
+            )
             opcode, payload = ws_recv_frame(conn)
             if opcode == 0x9:
                 continue
@@ -257,7 +359,9 @@ def _probe_engine_grpc(endpoint: str, *, timeout: float) -> None:
     try:
         import grpc
     except ImportError as exc:
-        raise DependencyMissingError("auto-detect for engine-grpc requires the 'grpc' extra") from exc
+        raise DependencyMissingError(
+            "auto-detect for engine-grpc requires the 'grpc' extra"
+        ) from exc
     from ._proto import tts_pb2, tts_pb2_grpc
 
     channel = grpc.insecure_channel(endpoint)
@@ -273,7 +377,9 @@ def _probe_triton_grpc(endpoint: str, *, timeout: float, model_name: str) -> Non
     try:
         import tritonclient.grpc as grpcclient
     except ImportError as exc:
-        raise DependencyMissingError("auto-detect for triton-grpc requires the 'triton' extra") from exc
+        raise DependencyMissingError(
+            "auto-detect for triton-grpc requires the 'triton' extra"
+        ) from exc
     client = grpcclient.InferenceServerClient(url=endpoint)
     if not client.is_server_live():
         raise RuntimeError("server_live=false")
@@ -297,7 +403,11 @@ def _resolve_explicit_endpoint(endpoint: str, transport: str) -> str:
     if "://" in endpoint:
         parsed = urlparse(endpoint)
         host = parsed.hostname or endpoint
-        port = parsed.port or (DEFAULT_ENGINE_GRPC_PORT if transport == TRANSPORT_ENGINE_GRPC else DEFAULT_TRITON_GRPC_PORT)
+        port = parsed.port or (
+            DEFAULT_ENGINE_GRPC_PORT
+            if transport == TRANSPORT_ENGINE_GRPC
+            else DEFAULT_TRITON_GRPC_PORT
+        )
         return f"{host}:{port}"
     return endpoint
 

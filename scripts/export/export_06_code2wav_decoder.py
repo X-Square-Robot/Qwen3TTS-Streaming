@@ -54,11 +54,17 @@ def export_code2wav_decoder(
     tokenizer_path = resolve_tokenizer_path(models_dir)
     out_dir = ensure_output_dir(output_dir, "tokenizer")
 
-    logger.info(f"Loading speech tokenizer from {tokenizer_path} (fp32 for ONNX export)")
-    tokenizer_model = load_speech_tokenizer(tokenizer_path, device=device, dtype=torch.float32)
+    logger.info(
+        f"Loading speech tokenizer from {tokenizer_path} (fp32 for ONNX export)"
+    )
+    tokenizer_model = load_speech_tokenizer(
+        tokenizer_path, device=device, dtype=torch.float32
+    )
 
     decoder = tokenizer_model.decoder.to(device).eval()
-    patch_decoder_transconv_for_trt(decoder)  # ConvTranspose -> Conv1d+Reshape for TRT BF16
+    patch_decoder_transconv_for_trt(
+        decoder
+    )  # ConvTranspose -> Conv1d+Reshape for TRT BF16
     wrapper = Code2WavStreamingWrapper(decoder).to(device).eval()
 
     B = 1
@@ -66,7 +72,9 @@ def export_code2wav_decoder(
     # Use past_kv_len > 0 for export so KV inputs survive ONNX trace & simplification.
     # Zero-length tensors would be constant-folded away, removing KV inputs entirely.
     EXPORT_PAST_LEN = CHUNK_T
-    dummy_codes = torch.randint(0, 2048, (B, 16, CHUNK_T), device=device, dtype=torch.long)
+    dummy_codes = torch.randint(
+        0, 2048, (B, 16, CHUNK_T), device=device, dtype=torch.long
+    )
     cache_position = torch.arange(
         EXPORT_PAST_LEN,
         EXPORT_PAST_LEN + CHUNK_T,
@@ -82,13 +90,17 @@ def export_code2wav_decoder(
         past_kv_len=EXPORT_PAST_LEN,
         conv_state_batch_size=state_batch,
     )
-    state_tensors = [torch.randn(s, device=device, dtype=torch.float32) for _, s in state_shapes]
+    state_tensors = [
+        torch.randn(s, device=device, dtype=torch.float32) for _, s in state_shapes
+    ]
 
     with torch.no_grad():
         out = wrapper(dummy_codes, cache_position, c2w_attention_bias, *state_tensors)
 
     wav_ref = out[0]
-    logger.info(f"Streaming decoder output wav shape: {wav_ref.shape} (expected [1, 7680])")
+    logger.info(
+        f"Streaming decoder output wav shape: {wav_ref.shape} (expected [1, 7680])"
+    )
 
     n_c2w = num_code2wav_hidden_layers(decoder)
     input_names = ["codes", "cache_position", "c2w_attention_bias"]
@@ -159,7 +171,9 @@ def export_code2wav_decoder(
     }
     for i, t in enumerate(cpu_states):
         test_inputs[input_names[3 + i]] = to_numpy(t)
-    torch_outputs = {output_names[i]: to_numpy(cpu_out[i]) for i in range(len(output_names))}
+    torch_outputs = {
+        output_names[i]: to_numpy(cpu_out[i]) for i in range(len(output_names))
+    }
     ok = verify_onnx(onnx_path, test_inputs, torch_outputs, atol=1e-3)
     if ok:
         logger.info("Code2Wav Streaming ONNX verification PASSED")

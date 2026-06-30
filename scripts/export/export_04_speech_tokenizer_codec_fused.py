@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -64,7 +63,9 @@ class RefCodecSumFromAudioCodes(nn.Module):
 
 
 class SpeechTokenizerCodecFusedONNX(nn.Module):
-    def __init__(self, speech_wrapper: SpeechTokenizerEncoderWrapper, stacked_3d: torch.Tensor):
+    def __init__(
+        self, speech_wrapper: SpeechTokenizerEncoderWrapper, stacked_3d: torch.Tensor
+    ):
         super().__init__()
         self.speech = speech_wrapper
         self.ref_sum = RefCodecSumFromAudioCodes(stacked_3d)
@@ -74,7 +75,9 @@ class SpeechTokenizerCodecFusedONNX(nn.Module):
         return self.ref_sum(codes.long()), codes.long()
 
 
-def _load_stacked_3d_for_variant(variant: str, models_dir: str, output_dir: str, device: str) -> torch.Tensor:
+def _load_stacked_3d_for_variant(
+    variant: str, models_dir: str, output_dir: str, device: str
+) -> torch.Tensor:
     """Load codec_embeddings_3d.pt produced by export_01 for this variant."""
     weights_dir = ensure_output_dir(output_dir, variant) / "weights"
     path = weights_dir / "codec_embeddings_3d.pt"
@@ -101,7 +104,9 @@ def export_speech_tokenizer_codec_fused(
 
     tokenizer_path = resolve_tokenizer_path(models_dir)
     logger.info(f"Loading speech tokenizer from {tokenizer_path}")
-    tokenizer_model = load_speech_tokenizer(tokenizer_path, device=device, dtype=torch.float32)
+    tokenizer_model = load_speech_tokenizer(
+        tokenizer_path, device=device, dtype=torch.float32
+    )
     encoder = tokenizer_model.encoder.to(device).eval()
     speech_wrapper = SpeechTokenizerEncoderWrapper(encoder).to(device).eval()
 
@@ -153,7 +158,9 @@ def export_speech_tokenizer_codec_fused(
     if ok:
         logger.info("Speech Tokenizer + Codec fused ONNX verification PASSED")
     else:
-        logger.warning("Speech Tokenizer + Codec fused ONNX verification had differences")
+        logger.warning(
+            "Speech Tokenizer + Codec fused ONNX verification had differences"
+        )
 
     del tokenizer_model
     if device != "cpu":
@@ -166,7 +173,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Export Speech Tokenizer + ICL temporal ref codec embeddings fused ONNX"
     )
-    parser.add_argument("--variant", type=str, required=True, help="Model variant (base-* for ICL)")
+    parser.add_argument(
+        "--variant", type=str, required=True, help="Model variant (base-* for ICL)"
+    )
     add_common_args(parser)
     args = parser.parse_args()
 

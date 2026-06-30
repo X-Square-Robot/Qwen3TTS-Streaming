@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +23,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 #  Prefix classification table
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class PrefixRule:
@@ -58,6 +58,7 @@ DEFAULT_PREFIX_RULES: tuple[PrefixRule, ...] = (
 # ---------------------------------------------------------------------------
 #  Classification
 # ---------------------------------------------------------------------------
+
 
 def classify_layer_name(
     name: str,
@@ -95,6 +96,7 @@ def classify_layer_name(
 #  Audit result
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class AuditReport:
     """Result of an ONNX prefix audit."""
@@ -117,6 +119,7 @@ class LayerAuditError(Exception):
 # ---------------------------------------------------------------------------
 #  ONNX audit
 # ---------------------------------------------------------------------------
+
 
 def audit_onnx_prefixes(
     onnx_path: Path,
@@ -141,8 +144,7 @@ def audit_onnx_prefixes(
         import onnx
     except ImportError:
         raise ImportError(
-            "onnx package required for prefix audit. "
-            "Install: pip install onnx"
+            "onnx package required for prefix audit. Install: pip install onnx"
         )
 
     if not onnx_path.is_file():
@@ -151,9 +153,7 @@ def audit_onnx_prefixes(
     model = onnx.load(str(onnx_path))
     graph = model.graph
 
-    categories: dict[str, list[str]] = {
-        rule.category: [] for rule in rules
-    }
+    categories: dict[str, list[str]] = {rule.category: [] for rule in rules}
     categories["unclassified"] = []
 
     # Classify all nodes in the graph
@@ -179,7 +179,9 @@ def audit_onnx_prefixes(
         if cat == "unclassified" and count > 0:
             logger.warning(
                 "  %s: %d nodes (%.1f%%) — check prefix table",
-                cat, count, ratio * 100,
+                cat,
+                count,
+                ratio * 100,
             )
             # Show up to 5 unclassified names as examples
             for name in names[:5]:
@@ -200,6 +202,7 @@ def audit_onnx_prefixes(
 # ---------------------------------------------------------------------------
 #  CLI
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     """Run ONNX prefix audit from command line."""
@@ -243,6 +246,7 @@ def main() -> None:
 
     if args.json:
         import json
+
         output = {
             "total_nodes": report.total_nodes,
             "categories": {k: len(v) for k, v in report.categories.items()},

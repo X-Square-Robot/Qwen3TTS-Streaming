@@ -49,7 +49,9 @@ def export_speaker_encoder(
     model = load_tts_model(model_path, device=device, dtype=torch.float32)
 
     if model.speaker_encoder is None:
-        logger.warning(f"Variant '{variant}' has no speaker encoder (not a base model). Skipping.")
+        logger.warning(
+            f"Variant '{variant}' has no speaker encoder (not a base model). Skipping."
+        )
         return None
 
     speaker_encoder = model.speaker_encoder.to(device).eval()
@@ -79,7 +81,9 @@ def export_speaker_encoder(
     if ok:
         logger.info("Speaker Encoder ONNX verification PASSED")
     else:
-        logger.warning("Speaker Encoder ONNX verification FAILED (outputs differ beyond tolerance)")
+        logger.warning(
+            "Speaker Encoder ONNX verification FAILED (outputs differ beyond tolerance)"
+        )
 
     del model
     if device != "cpu":
@@ -90,8 +94,12 @@ def export_speaker_encoder(
 def main():
     setup_logging()
     parser = argparse.ArgumentParser(description="Export Speaker Encoder to ONNX")
-    parser.add_argument("--variant", type=str, default=None,
-                        help="Model variant (e.g. base-1.7b). Default: export all base variants")
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default=None,
+        help="Model variant (e.g. base-1.7b). Default: export all base variants",
+    )
     add_common_args(parser)
     args = parser.parse_args()
 
@@ -106,7 +114,9 @@ def main():
             logger.error(f"Unknown variant: {variant}")
             continue
         try:
-            path = export_speaker_encoder(variant, args.models_dir, args.output_dir, device, dtype)
+            path = export_speaker_encoder(
+                variant, args.models_dir, args.output_dir, device, dtype
+            )
             if path:
                 logger.info(f"[{variant}] Speaker Encoder exported: {path}")
         except FileNotFoundError as e:

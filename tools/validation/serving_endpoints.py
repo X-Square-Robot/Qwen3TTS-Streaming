@@ -81,8 +81,11 @@ else:
 
 def _require_engine_gateway():
     if _ENGINE_GATEWAY_IMPORT_ERROR is not None:
-        raise RuntimeError(f"engine gateway protobuf import failed: {_ENGINE_GATEWAY_IMPORT_ERROR}")
+        raise RuntimeError(
+            f"engine gateway protobuf import failed: {_ENGINE_GATEWAY_IMPORT_ERROR}"
+        )
     return tts_pb2, tts_pb2_grpc
+
 
 TRITON_EXPECTED_INPUTS = {"request"}
 TRITON_EXPECTED_OUTPUTS = {"audio_chunk", "event_type", "event_json", "is_final"}
@@ -200,23 +203,29 @@ class SynthesisResult:
     def to_summary(self) -> str:
         if self.error:
             return f"ERROR: {self.error}"
-        fc = f"{self.first_chunk_ms:.0f}ms" if self.first_chunk_ms is not None else "N/A"
+        fc = (
+            f"{self.first_chunk_ms:.0f}ms" if self.first_chunk_ms is not None else "N/A"
+        )
         ttft = f"{self.ttft_ms:.0f}ms" if self.ttft_ms is not None else "N/A"
         start_to_first = (
             f"{self.start_to_first_audio_ms:.0f}ms"
-            if self.start_to_first_audio_ms is not None else "N/A"
+            if self.start_to_first_audio_ms is not None
+            else "N/A"
         )
         step_mean = (
             f"{self.decode_step_mean_ms:.1f}ms"
-            if self.decode_step_mean_ms is not None else "N/A"
+            if self.decode_step_mean_ms is not None
+            else "N/A"
         )
         step_p50 = (
             f"{self.decode_step_p50_ms:.1f}ms"
-            if self.decode_step_p50_ms is not None else "N/A"
+            if self.decode_step_p50_ms is not None
+            else "N/A"
         )
         step_p95 = (
             f"{self.decode_step_p95_ms:.1f}ms"
-            if self.decode_step_p95_ms is not None else "N/A"
+            if self.decode_step_p95_ms is not None
+            else "N/A"
         )
         return (
             f"first_chunk={fc} ttft={ttft} start_to_first_audio={start_to_first} "
@@ -276,7 +285,9 @@ class CaseResult:
 def _compute_intervals_ms(timestamps: list[float]) -> list[float]:
     if len(timestamps) < 2:
         return []
-    return [(timestamps[i] - timestamps[i - 1]) * 1000.0 for i in range(1, len(timestamps))]
+    return [
+        (timestamps[i] - timestamps[i - 1]) * 1000.0 for i in range(1, len(timestamps))
+    ]
 
 
 def _percentile(values: list[float], pct: float) -> float:
@@ -330,7 +341,9 @@ def _summarize_ttft_distribution(
             successful.append(sample)
         else:
             failed.append(sample)
-    ttfts = [float(sample.ttft_ms) for sample in successful if sample.ttft_ms is not None]
+    ttfts = [
+        float(sample.ttft_ms) for sample in successful if sample.ttft_ms is not None
+    ]
     if not ttfts:
         return {
             "summary": {
@@ -347,7 +360,9 @@ def _summarize_ttft_distribution(
     stdev_ms = statistics.stdev(ttfts) if len(ttfts) > 1 else 0.0
     variance_ms2 = statistics.variance(ttfts) if len(ttfts) > 1 else 0.0
     population_variance_ms2 = statistics.pvariance(ttfts) if len(ttfts) > 1 else 0.0
-    max_abs_delta = max(abs(value - mean_ms) for value in ttfts) if len(ttfts) > 1 else 0.0
+    max_abs_delta = (
+        max(abs(value - mean_ms) for value in ttfts) if len(ttfts) > 1 else 0.0
+    )
     summary = {
         "requested": requested,
         "warmup": warmup,
@@ -495,11 +510,15 @@ def _capture_event_meta(result: SynthesisResult, event_type: str, meta: Any) -> 
         result.details["prefill_done"] = meta_dict
 
 
-def _make_engine_request_spec(args: argparse.Namespace, loaded_model_type: str = "") -> RequestSpec:
+def _make_engine_request_spec(
+    args: argparse.Namespace, loaded_model_type: str = ""
+) -> RequestSpec:
     task_type = (args.task_type or loaded_model_type or "custom_voice").strip()
     speaker = args.speaker.strip() if args.speaker else ""
     instruct = args.instruct.strip() if args.instruct else ""
-    ref_audio_bytes = _load_ref_audio(args.ref_audio_path) if args.ref_audio_path else None
+    ref_audio_bytes = (
+        _load_ref_audio(args.ref_audio_path) if args.ref_audio_path else None
+    )
     ref_text = args.ref_text.strip() if args.ref_text else None
 
     if task_type == "custom_voice" and not speaker:
@@ -509,7 +528,9 @@ def _make_engine_request_spec(args: argparse.Namespace, loaded_model_type: str =
     if task_type in {"base", "icl"} and not speaker and ref_audio_bytes is None:
         speaker = args.reference_alias.strip() if args.reference_alias else ""
     if task_type in {"base", "icl"} and ref_audio_bytes is not None and not ref_text:
-        raise ValueError("task_type 'icl' requires --ref-text for a full synthesis test")
+        raise ValueError(
+            "task_type 'icl' requires --ref-text for a full synthesis test"
+        )
 
     return RequestSpec(
         task_type=task_type,
@@ -536,7 +557,10 @@ def _custom_voice_instruct_supported(capabilities: dict[str, Any]) -> bool:
 
 
 def _reference_tests_supported(capabilities: dict[str, Any]) -> bool:
-    return str(capabilities.get("loaded_model_type", "") or "").strip() in {"base", "icl"}
+    return str(capabilities.get("loaded_model_type", "") or "").strip() in {
+        "base",
+        "icl",
+    }
 
 
 def _engine_loaded_model_type(caps: dict[str, Any]) -> str:
@@ -566,7 +590,9 @@ def _engine_default_reference_available(caps: dict[str, Any]) -> bool:
     return "ref_audio_available" not in caps
 
 
-def _engine_has_reference_source(args: argparse.Namespace, caps: dict[str, Any]) -> bool:
+def _engine_has_reference_source(
+    args: argparse.Namespace, caps: dict[str, Any]
+) -> bool:
     return (
         not _engine_needs_reference(caps)
         or _engine_reference_args_supplied(args)
@@ -620,8 +646,15 @@ def _case_from_synth(
     save_path: Path | None = None,
     min_audio_sec: float = 0.1,
 ) -> CaseResult:
-    ok = synthesis.error is None and synthesis.total_samples >= int(synthesis.sample_rate * min_audio_sec)
-    if ok and save_path is not None and synthesis.audio is not None and synthesis.audio.size > 0:
+    ok = synthesis.error is None and synthesis.total_samples >= int(
+        synthesis.sample_rate * min_audio_sec
+    )
+    if (
+        ok
+        and save_path is not None
+        and synthesis.audio is not None
+        and synthesis.audio.size > 0
+    ):
         save_wav(synthesis.audio, save_path, sample_rate=synthesis.sample_rate)
     summary = synthesis.to_summary()
     return CaseResult(
@@ -753,15 +786,27 @@ class EngineGrpcTransport:
             return {
                 "variant": resp.variant,
                 "loaded_model_type": resp.loaded_model_type,
-                "declared_supported_task_types": list(resp.declared_supported_task_types),
+                "declared_supported_task_types": list(
+                    resp.declared_supported_task_types
+                ),
                 "supported_audio_formats": [
-                    {"encoding": fmt.encoding, "sample_rate": fmt.sample_rate, "channels": fmt.channels}
+                    {
+                        "encoding": fmt.encoding,
+                        "sample_rate": fmt.sample_rate,
+                        "channels": fmt.channels,
+                    }
                     for fmt in resp.supported_audio_formats
                 ],
-                "ref_audio_available": bool(getattr(resp, "ref_audio_available", False)),
+                "ref_audio_available": bool(
+                    getattr(resp, "ref_audio_available", False)
+                ),
                 "ref_audio_reason": str(getattr(resp, "ref_audio_reason", "") or ""),
-                "speaker_encoder_available": bool(getattr(resp, "speaker_encoder_available", False)),
-                "ref_codec_available": bool(getattr(resp, "ref_codec_available", False)),
+                "speaker_encoder_available": bool(
+                    getattr(resp, "speaker_encoder_available", False)
+                ),
+                "ref_codec_available": bool(
+                    getattr(resp, "ref_codec_available", False)
+                ),
                 "icl_available": bool(getattr(resp, "icl_available", False)),
                 "ref_audio_max_duration_sec": float(
                     getattr(resp, "ref_audio_max_duration_sec", 0.0) or 0.0
@@ -813,7 +858,9 @@ class EngineGrpcTransport:
         import grpc
 
         sid = session_id or uuid.uuid4().hex[:12]
-        result = SynthesisResult(self.name, sid, text, sample_rate=spec.sample_rate, encoding=spec.encoding)
+        result = SynthesisResult(
+            self.name, sid, text, sample_rate=spec.sample_rate, encoding=spec.encoding
+        )
         channel = None
         mode = self.ttft_connection_mode if self._ttft_active else "ready"
         stub = self._ttft_stub if self._ttft_active else None
@@ -833,7 +880,9 @@ class EngineGrpcTransport:
             request = pb2.SynthesizeOnceRequest(
                 session_id=sid,
                 text=text,
-                config=self._make_session_config(spec, input_mode=pb2.INPUT_MODE_FULL_TEXT),
+                config=self._make_session_config(
+                    spec, input_mode=pb2.INPUT_MODE_FULL_TEXT
+                ),
             )
             started = time.perf_counter()
             for resp in stub.SynthesizeOnce(request, timeout=timeout):
@@ -843,7 +892,9 @@ class EngineGrpcTransport:
                     if first_ts is None:
                         first_ts = now
                     timestamps.append(now)
-                    chunks.append(_decode_audio_bytes(resp.audio.pcm_data, spec.encoding))
+                    chunks.append(
+                        _decode_audio_bytes(resp.audio.pcm_data, spec.encoding)
+                    )
                     result.sample_rate = int(resp.audio.sample_rate or spec.sample_rate)
                 elif which == "event":
                     result.events.append(resp.event.type)
@@ -872,7 +923,9 @@ class EngineGrpcTransport:
 
         if "started" in locals():
             result.total_ms = (finished - started) * 1000.0
-            result.first_chunk_ms = (first_ts - started) * 1000.0 if first_ts is not None else None
+            result.first_chunk_ms = (
+                (first_ts - started) * 1000.0 if first_ts is not None else None
+            )
         else:
             result.total_ms = 0.0
             result.first_chunk_ms = None
@@ -956,7 +1009,9 @@ class EngineGrpcTransport:
                     if first_ts is None:
                         first_ts = now
                     timestamps.append(now)
-                    chunks.append(_decode_audio_bytes(resp.audio.pcm_data, spec.encoding))
+                    chunks.append(
+                        _decode_audio_bytes(resp.audio.pcm_data, spec.encoding)
+                    )
                     result.sample_rate = int(resp.audio.sample_rate or spec.sample_rate)
                 elif which == "event":
                     result.events.append(resp.event.type)
@@ -974,14 +1029,18 @@ class EngineGrpcTransport:
             channel.close()
 
         result.total_ms = (time.perf_counter() - started) * 1000.0
-        result.first_chunk_ms = (first_ts - started) * 1000.0 if first_ts is not None else None
+        result.first_chunk_ms = (
+            (first_ts - started) * 1000.0 if first_ts is not None else None
+        )
         result.start_to_first_audio_ms = (
             (first_ts - marks["start_sent"]) * 1000.0
-            if first_ts is not None and marks["start_sent"] is not None else None
+            if first_ts is not None and marks["start_sent"] is not None
+            else None
         )
         result.ttft_ms = (
             (first_ts - marks["first_text_sent"]) * 1000.0
-            if first_ts is not None and marks["first_text_sent"] is not None else None
+            if first_ts is not None and marks["first_text_sent"] is not None
+            else None
         )
         result.audio_chunk_intervals_ms = _compute_intervals_ms(timestamps)
         result.num_chunks = len(chunks)
@@ -1005,7 +1064,9 @@ class EngineGrpcTransport:
             yield pb2.SynthesizeRequest(
                 start=pb2.StartRequest(
                     session_id=sid,
-                    config=self._make_session_config(spec, input_mode=pb2.INPUT_MODE_LONG_SEGMENT),
+                    config=self._make_session_config(
+                        spec, input_mode=pb2.INPUT_MODE_LONG_SEGMENT
+                    ),
                 )
             )
             yield pb2.SynthesizeRequest(text=pb2.TextChunk(text="这段文字将被取消。"))
@@ -1016,7 +1077,9 @@ class EngineGrpcTransport:
             for resp in stub.SynthesizeStream(request_gen(), timeout=timeout):
                 which = resp.WhichOneof("response")
                 if which == "audio":
-                    chunks.append(_decode_audio_bytes(resp.audio.pcm_data, spec.encoding))
+                    chunks.append(
+                        _decode_audio_bytes(resp.audio.pcm_data, spec.encoding)
+                    )
                 elif which == "event":
                     result.events.append(resp.event.type)
                     _capture_event_meta(result, resp.event.type, resp.event.meta)
@@ -1050,7 +1113,9 @@ class EngineWebSocketTransport:
             ws_send_json(conn, {"type": "get_capabilities"})
             deadline = time.perf_counter() + timeout
             while time.perf_counter() < deadline:
-                conn.sock.settimeout(max(0.05, min(0.2, deadline - time.perf_counter())))
+                conn.sock.settimeout(
+                    max(0.05, min(0.2, deadline - time.perf_counter()))
+                )
                 opcode, payload = ws_recv_frame(conn)
                 if opcode == 0x1:
                     message = json.loads(payload.decode("utf-8"))
@@ -1139,7 +1204,9 @@ class EngineWebSocketTransport:
             return False
 
         if opcode == 0x2:
-            if payload[:1] in {b"{", b"["} or not _audio_payload_size_is_valid(payload, state["encoding"]):
+            if payload[:1] in {b"{", b"["} or not _audio_payload_size_is_valid(
+                payload, state["encoding"]
+            ):
                 try:
                     message = json.loads(payload.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
@@ -1190,7 +1257,9 @@ class EngineWebSocketTransport:
     ) -> bool:
         while time.perf_counter() < deadline:
             remaining = deadline - time.perf_counter()
-            conn.sock.settimeout(max(0.02, min(0.1 if stop_on_idle else 0.5, remaining)))
+            conn.sock.settimeout(
+                max(0.02, min(0.1 if stop_on_idle else 0.5, remaining))
+            )
             try:
                 opcode, payload = ws_recv_frame(conn)
             except socket.timeout:
@@ -1214,7 +1283,9 @@ class EngineWebSocketTransport:
             if terminal:
                 return True
         if not stop_on_idle:
-            result.error = result.error or "websocket timed out waiting for terminal event"
+            result.error = (
+                result.error or "websocket timed out waiting for terminal event"
+            )
         return bool(result.error)
 
     def synthesize_oneshot(
@@ -1226,7 +1297,9 @@ class EngineWebSocketTransport:
         session_id: str | None = None,
     ) -> SynthesisResult:
         sid = session_id or uuid.uuid4().hex[:12]
-        result = SynthesisResult(self.name, sid, text, sample_rate=spec.sample_rate, encoding=spec.encoding)
+        result = SynthesisResult(
+            self.name, sid, text, sample_rate=spec.sample_rate, encoding=spec.encoding
+        )
         conn = ws_connect(self.url, timeout=timeout)
         chunks: list[np.ndarray] = []
         timestamps: list[float] = []
@@ -1259,7 +1332,9 @@ class EngineWebSocketTransport:
 
         result.total_ms = (time.perf_counter() - started) * 1000.0
         first_ts = state["first_ts"]
-        result.first_chunk_ms = (first_ts - started) * 1000.0 if first_ts is not None else None
+        result.first_chunk_ms = (
+            (first_ts - started) * 1000.0 if first_ts is not None else None
+        )
         result.start_to_first_audio_ms = result.first_chunk_ms
         result.ttft_ms = result.first_chunk_ms
         result.audio_chunk_intervals_ms = _compute_intervals_ms(timestamps)
@@ -1318,7 +1393,11 @@ class EngineWebSocketTransport:
             )
             deadline = started + timeout
             self._read_until_timeout(
-                conn, result, chunks, timestamps, state,
+                conn,
+                result,
+                chunks,
+                timestamps,
+                state,
                 deadline=min(deadline, time.perf_counter() + 0.1),
                 stop_on_idle=True,
             )
@@ -1360,14 +1439,18 @@ class EngineWebSocketTransport:
 
         result.total_ms = (time.perf_counter() - started) * 1000.0
         first_ts = state["first_ts"]
-        result.first_chunk_ms = (first_ts - started) * 1000.0 if first_ts is not None else None
+        result.first_chunk_ms = (
+            (first_ts - started) * 1000.0 if first_ts is not None else None
+        )
         result.start_to_first_audio_ms = (
             (first_ts - marks["start_sent"]) * 1000.0
-            if first_ts is not None and marks["start_sent"] is not None else None
+            if first_ts is not None and marks["start_sent"] is not None
+            else None
         )
         result.ttft_ms = (
             (first_ts - marks["first_text_sent"]) * 1000.0
-            if first_ts is not None and marks["first_text_sent"] is not None else None
+            if first_ts is not None and marks["first_text_sent"] is not None
+            else None
         )
         result.audio_chunk_intervals_ms = _compute_intervals_ms(timestamps)
         result.num_chunks = len(chunks)
@@ -1438,7 +1521,9 @@ class TritonGrpcTransport:
             "model_ready": bool(client.is_model_ready(self.model_name)),
         }
 
-    def synthesize(self, spec: RequestSpec, text: str, timeout: float) -> SynthesisResult:
+    def synthesize(
+        self, spec: RequestSpec, text: str, timeout: float
+    ) -> SynthesisResult:
         import threading
         import tritonclient.grpc as grpcclient
 
@@ -1479,7 +1564,11 @@ class TritonGrpcTransport:
             event_json = infer_result.as_numpy("event_json")
             audio = infer_result.as_numpy("audio_chunk")
             is_final = infer_result.as_numpy("is_final")
-            et = _decode_obj(event_type.flatten()[0]) if event_type is not None and event_type.size else ""
+            et = (
+                _decode_obj(event_type.flatten()[0])
+                if event_type is not None and event_type.size
+                else ""
+            )
             payload = {}
             if event_json is not None and event_json.size:
                 raw_json = _decode_obj(event_json.flatten()[0])
@@ -1490,7 +1579,9 @@ class TritonGrpcTransport:
             if et == "start":
                 audio_fmt = payload.get("audio_format", {}) or {}
                 synth.encoding = str(audio_fmt.get("encoding") or synth.encoding)
-                synth.sample_rate = int(audio_fmt.get("sample_rate") or synth.sample_rate)
+                synth.sample_rate = int(
+                    audio_fmt.get("sample_rate") or synth.sample_rate
+                )
             elif et == "audio" and audio is not None and audio.size:
                 raw = audio.flatten()[0]
                 now = time.perf_counter()
@@ -1520,7 +1611,9 @@ class TritonGrpcTransport:
             client.stop_stream()
 
         synth.total_ms = (time.perf_counter() - started) * 1000.0
-        synth.first_chunk_ms = (first_ts - started) * 1000.0 if first_ts is not None else None
+        synth.first_chunk_ms = (
+            (first_ts - started) * 1000.0 if first_ts is not None else None
+        )
         synth.ttft_ms = synth.first_chunk_ms
         synth.start_to_first_audio_ms = synth.first_chunk_ms
         synth.audio_chunk_intervals_ms = _compute_intervals_ms(timestamps)
@@ -1541,7 +1634,9 @@ class TritonHttpTransport:
     def health(self, timeout: float) -> dict[str, Any]:
         live = requests.get(f"{self.base_url}/v2/health/live", timeout=timeout)
         ready = requests.get(f"{self.base_url}/v2/health/ready", timeout=timeout)
-        model = requests.get(f"{self.base_url}/v2/models/{self.model_name}/ready", timeout=timeout)
+        model = requests.get(
+            f"{self.base_url}/v2/models/{self.model_name}/ready", timeout=timeout
+        )
         return {
             "server_live": live.status_code == 200,
             "server_ready": ready.status_code == 200,
@@ -1570,7 +1665,9 @@ class TritonHttpTransport:
         text: str,
         timeout: float,
     ) -> SynthesisResult:
-        req_json = json.dumps(_build_triton_request(spec, text=text), ensure_ascii=False)
+        req_json = json.dumps(
+            _build_triton_request(spec, text=text), ensure_ascii=False
+        )
         payload = {
             "inputs": [
                 {
@@ -1635,7 +1732,9 @@ class TritonHttpTransport:
                 encoding = str(meta.get("audio_chunk_encoding") or "").strip().lower()
                 audio_fmt = meta.get("audio_format", {}) or {}
                 synth.encoding = str(audio_fmt.get("encoding") or synth.encoding)
-                synth.sample_rate = int(audio_fmt.get("sample_rate") or synth.sample_rate)
+                synth.sample_rate = int(
+                    audio_fmt.get("sample_rate") or synth.sample_rate
+                )
                 raw_bytes = b""
                 if audio_chunk:
                     if encoding == "base64":
@@ -1759,8 +1858,7 @@ def _run_ttft_distribution_case(
         distribution["summary"]["measurement"] = measurement
     summary = distribution["summary"]
     ok = (
-        summary.get("count", 0) == args.ttft_samples
-        and summary.get("failures", 0) == 0
+        summary.get("count", 0) == args.ttft_samples and summary.get("failures", 0) == 0
     )
     if not args.json:
         _print_ttft_distribution(transport.name, distribution)
@@ -1844,8 +1942,12 @@ def _make_concurrent_round_sample(
 ) -> SynthesisResult:
     successful = _successful_ttft_lanes(results)
     failed_count = len(results) - len(successful)
-    lane_ttfts = [float(result.ttft_ms) for result in successful if result.ttft_ms is not None]
-    lane_totals = [float(result.total_ms) for result in successful if result.total_ms > 0]
+    lane_ttfts = [
+        float(result.ttft_ms) for result in successful if result.ttft_ms is not None
+    ]
+    lane_totals = [
+        float(result.total_ms) for result in successful if result.total_ms > 0
+    ]
     total_audio_sec = sum(result.duration_sec for result in successful)
     throughput = total_audio_sec / (wall_ms / 1000.0) if wall_ms > 0 else 0.0
 
@@ -1938,13 +2040,19 @@ def _run_concurrent_case(
         warmup=args.concurrency_warmup,
         bar_width=args.ttft_bar_width,
     )
-    distribution["summary"]["measurement"] = f"concurrent x{level} lane-p50 TTFT per round"
+    distribution["summary"]["measurement"] = (
+        f"concurrent x{level} lane-p50 TTFT per round"
+    )
     if not args.json and (args.concurrency_warmup > 0 or args.concurrency_samples > 1):
         _print_ttft_distribution(target, distribution)
 
     successful_lanes = _successful_ttft_lanes(measured_lanes)
     lane_failures = len(measured_lanes) - len(successful_lanes)
-    lane_ttfts = [float(result.ttft_ms) for result in successful_lanes if result.ttft_ms is not None]
+    lane_ttfts = [
+        float(result.ttft_ms)
+        for result in successful_lanes
+        if result.ttft_ms is not None
+    ]
     lane_summary = _summarize_values(lane_ttfts)
     distribution["summary"]["lane_failures"] = lane_failures
     summary = distribution["summary"]
@@ -2063,7 +2171,9 @@ def _run_engine_reference_suite(
         )
 
     explicit_spec: RequestSpec | None = None
-    explicit_ref_audio = _load_ref_audio(args.ref_audio_path) if args.ref_audio_path else None
+    explicit_ref_audio = (
+        _load_ref_audio(args.ref_audio_path) if args.ref_audio_path else None
+    )
     explicit_ref_text = args.ref_text.strip() if args.ref_text else ""
     if explicit_ref_audio is not None and explicit_ref_text:
         explicit_spec = _reference_spec(
@@ -2098,7 +2208,11 @@ def _run_engine_reference_suite(
             )
         )
 
-    if args.reference_negative_tests and loaded_model_type == "icl" and explicit_ref_audio is not None:
+    if (
+        args.reference_negative_tests
+        and loaded_model_type == "icl"
+        and explicit_ref_audio is not None
+    ):
         partial = transport.synthesize_oneshot(
             _reference_spec(
                 args,
@@ -2117,7 +2231,9 @@ def _run_engine_reference_suite(
                 "reference-partial-ref-error",
                 ok=ok,
                 summary=partial.to_summary(),
-                error="" if ok else (partial.error or "expected ref_text_required error"),
+                error=""
+                if ok
+                else (partial.error or "expected ref_text_required error"),
                 details={"error": partial.error or ""},
             )
         )
@@ -2135,8 +2251,10 @@ def _run_engine_reference_suite(
     if not args.skip_reference_cache:
         cache_spec = alias_spec or explicit_spec or default_spec
         cache_source = (
-            "registry" if alias_spec is not None
-            else "explicit" if explicit_spec is not None
+            "registry"
+            if alias_spec is not None
+            else "explicit"
+            if explicit_spec is not None
             else "default"
         )
         prime = transport.synthesize_oneshot(
@@ -2250,13 +2368,17 @@ def _run_engine_suite(
             )
         )
     except Exception as exc:
-        results.append(_make_case(target, "capabilities", ok=False, error=_error_text(exc)))
+        results.append(
+            _make_case(target, "capabilities", ok=False, error=_error_text(exc))
+        )
         return results
 
     try:
         spec = _make_engine_request_spec(args, caps.get("loaded_model_type", ""))
     except Exception as exc:
-        results.append(_make_case(target, "request-spec", ok=False, error=_error_text(exc)))
+        results.append(
+            _make_case(target, "request-spec", ok=False, error=_error_text(exc))
+        )
         return results
 
     if args.reference_tests:
@@ -2270,7 +2392,12 @@ def _run_engine_suite(
         )
 
     if not args.skip_single:
-        synth = transport.synthesize_oneshot(spec, "你好，这是单路测试。", timeout=args.timeout, session_id=f"{target}-single")
+        synth = transport.synthesize_oneshot(
+            spec,
+            "你好，这是单路测试。",
+            timeout=args.timeout,
+            session_id=f"{target}-single",
+        )
         results.append(
             _case_from_synth(
                 target,
@@ -2286,7 +2413,12 @@ def _run_engine_suite(
     if not args.skip_streaming:
         synth = transport.synthesize_streaming(
             spec,
-            ["你好，这是流式文本输入测试。", "我们正在验证", "文本追加功能", "是否工作正常。"],
+            [
+                "你好，这是流式文本输入测试。",
+                "我们正在验证",
+                "文本追加功能",
+                "是否工作正常。",
+            ],
             timeout=args.timeout,
             session_id=f"{target}-stream",
             chunk_delay_ms=args.chunk_delay_ms,
@@ -2312,7 +2444,9 @@ def _run_engine_suite(
 
     if not args.skip_custom_instruct:
         if _custom_voice_instruct_supported(caps):
-            instruct_spec = RequestSpec(**{**spec.__dict__, "instruct": CUSTOM_VOICE_INSTRUCT_ZH})
+            instruct_spec = RequestSpec(
+                **{**spec.__dict__, "instruct": CUSTOM_VOICE_INSTRUCT_ZH}
+            )
             synth = transport.synthesize_oneshot(
                 instruct_spec,
                 "你好，这是带指令的预置音色测试。",
@@ -2398,7 +2532,9 @@ def _run_engine_suite(
         if story_text:
             story_spec = spec
             if _custom_voice_instruct_supported(caps):
-                story_spec = RequestSpec(**{**spec.__dict__, "instruct": CUSTOM_VOICE_INSTRUCT_ZH})
+                story_spec = RequestSpec(
+                    **{**spec.__dict__, "instruct": CUSTOM_VOICE_INSTRUCT_ZH}
+                )
             story = transport.synthesize_oneshot(
                 story_spec,
                 story_text,
@@ -2437,10 +2573,13 @@ def _run_engine_suite(
                 summary=empty.to_summary(),
                 error=empty.error or "",
                 details={"samples": empty.total_samples},
-                )
+            )
         )
         whitespace = transport.synthesize_oneshot(
-            spec, "   \n\t  ", timeout=min(args.timeout, 15.0), session_id=f"{target}-bad-space"
+            spec,
+            "   \n\t  ",
+            timeout=min(args.timeout, 15.0),
+            session_id=f"{target}-bad-space",
         )
         results.append(
             _make_case(
@@ -2454,7 +2593,10 @@ def _run_engine_suite(
         )
         invalid_spec = RequestSpec(**{**spec.__dict__, "task_type": "nonexistent_task"})
         invalid = transport.synthesize_oneshot(
-            invalid_spec, "测试", timeout=min(args.timeout, 15.0), session_id=f"{target}-bad-task"
+            invalid_spec,
+            "测试",
+            timeout=min(args.timeout, 15.0),
+            session_id=f"{target}-bad-task",
         )
         results.append(
             _make_case(
@@ -2466,7 +2608,10 @@ def _run_engine_suite(
             )
         )
         single_char = transport.synthesize_oneshot(
-            spec, "好", timeout=min(args.timeout, 30.0), session_id=f"{target}-single-char"
+            spec,
+            "好",
+            timeout=min(args.timeout, 30.0),
+            session_id=f"{target}-single-char",
         )
         results.append(
             _case_from_synth(
@@ -2505,7 +2650,9 @@ def _run_engine_suite(
     return results
 
 
-def _run_triton_grpc_suite(transport: TritonGrpcTransport, args: argparse.Namespace, output_dir: Path) -> list[CaseResult]:
+def _run_triton_grpc_suite(
+    transport: TritonGrpcTransport, args: argparse.Namespace, output_dir: Path
+) -> list[CaseResult]:
     results: list[CaseResult] = []
     try:
         health = transport.health()
@@ -2519,11 +2666,15 @@ def _run_triton_grpc_suite(transport: TritonGrpcTransport, args: argparse.Namesp
             )
         )
     except Exception as exc:
-        results.append(_make_case(transport.name, "health", ok=False, error=_error_text(exc)))
+        results.append(
+            _make_case(transport.name, "health", ok=False, error=_error_text(exc))
+        )
         return results
 
     spec = _make_engine_request_spec(args)
-    synth = transport.synthesize(spec, "今天天气真好，我们一起出去玩吧。", timeout=args.timeout)
+    synth = transport.synthesize(
+        spec, "今天天气真好，我们一起出去玩吧。", timeout=args.timeout
+    )
     case = _case_from_synth(
         transport.name,
         "grpc-synthesize",
@@ -2590,7 +2741,9 @@ def _run_triton_http_suite(
             )
         )
     except Exception as exc:
-        results.append(_make_case(transport.name, "health", ok=False, error=_error_text(exc)))
+        results.append(
+            _make_case(transport.name, "health", ok=False, error=_error_text(exc))
+        )
         return results
 
     describe: dict[str, Any] | None = None
@@ -2601,7 +2754,9 @@ def _run_triton_http_suite(
         meta_inputs = {item.get("name") for item in metadata.get("inputs", [])}
         meta_outputs = {item.get("name") for item in metadata.get("outputs", [])}
         backend = str(config.get("backend") or metadata.get("backend") or "")
-        decoupled = bool((config.get("model_transaction_policy", {}) or {}).get("decoupled"))
+        decoupled = bool(
+            (config.get("model_transaction_policy", {}) or {}).get("decoupled")
+        )
         ok = (
             str(metadata.get("name") or "") == transport.model_name
             and TRITON_EXPECTED_INPUTS.issubset(meta_inputs)
@@ -2622,7 +2777,9 @@ def _run_triton_http_suite(
             )
         )
     except Exception as exc:
-        results.append(_make_case(transport.name, "model-config", ok=False, error=_error_text(exc)))
+        results.append(
+            _make_case(transport.name, "model-config", ok=False, error=_error_text(exc))
+        )
         return results
 
     spec = _make_engine_request_spec(args)
@@ -2702,11 +2859,16 @@ def _print_final_summary(all_cases: list[CaseResult]) -> None:
         synths = [
             case.synthesis
             for case in cases
-            if case.synthesis is not None and case.ok and not case.skipped and case.synthesis.error is None
+            if case.synthesis is not None
+            and case.ok
+            and not case.skipped
+            and case.synthesis.error is None
         ]
         if not synths:
             continue
-        first_chunks = [s.first_chunk_ms for s in synths if s.first_chunk_ms is not None]
+        first_chunks = [
+            s.first_chunk_ms for s in synths if s.first_chunk_ms is not None
+        ]
         ttfts = [s.ttft_ms for s in synths if s.ttft_ms is not None]
         totals = [s.total_ms for s in synths if s.total_ms > 0]
         rtfs = [s.rtf for s in synths if s.rtf > 0]
@@ -2753,7 +2915,9 @@ def _print_final_summary(all_cases: list[CaseResult]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Unified full E2E test tool for engine and Triton endpoints.")
+    parser = argparse.ArgumentParser(
+        description="Unified full E2E test tool for engine and Triton endpoints."
+    )
     parser.add_argument(
         "--targets",
         default=",".join(DEFAULT_SERVING_TARGETS),
@@ -2795,7 +2959,9 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="With --reference-tests, also verify ICL partial reference requests fail clearly",
     )
-    parser.add_argument("--audio-encoding", choices=["pcm_f32", "pcm_s16le"], default="pcm_f32")
+    parser.add_argument(
+        "--audio-encoding", choices=["pcm_f32", "pcm_s16le"], default="pcm_f32"
+    )
     parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE)
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--long-timeout", type=float, default=300.0)
@@ -2834,7 +3000,10 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Concurrent warmup rounds per --concurrency level, excluded from measured statistics",
     )
-    parser.add_argument("--output-dir", default=str(REPO_ROOT / "workspace" / "audio_samples" / "serving_e2e"))
+    parser.add_argument(
+        "--output-dir",
+        default=str(REPO_ROOT / "workspace" / "audio_samples" / "serving_e2e"),
+    )
     parser.add_argument(
         "--ttft-samples",
         type=int,
@@ -2933,10 +3102,18 @@ def main() -> int:
                 )
             )
         else:
-            all_cases.append(_make_case(target, "target-parse", ok=False, error=f"unknown target: {target}"))
+            all_cases.append(
+                _make_case(
+                    target, "target-parse", ok=False, error=f"unknown target: {target}"
+                )
+            )
 
     if args.json:
-        print(json.dumps([case.to_json() for case in all_cases], ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                [case.to_json() for case in all_cases], ensure_ascii=False, indent=2
+            )
+        )
     else:
         _print_cases(all_cases)
         _print_final_summary(all_cases)

@@ -2,7 +2,9 @@ import importlib.util
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/unit/engine_core/<file> -> repo root
+REPO_ROOT = (
+    Path(__file__).resolve().parents[3]
+)  # tests/unit/engine_core/<file> -> repo root
 HELPER_PATH = REPO_ROOT / "tools" / "validation" / "suggest_engine_profile.py"
 
 

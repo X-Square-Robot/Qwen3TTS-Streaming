@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
-import os
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -57,7 +56,11 @@ class TinyRepro(nn.Module):
         self.proj = nn.Conv1d(hidden_dim, 1, kernel_size=1)
 
     def _attn_once(
-        self, x: torch.Tensor, past_k: torch.Tensor, past_v: torch.Tensor, bias: torch.Tensor
+        self,
+        x: torch.Tensor,
+        past_k: torch.Tensor,
+        past_v: torch.Tensor,
+        bias: torch.Tensor,
     ) -> torch.Tensor:
         qkv = self.qkv(x)
         q, k, v = torch.chunk(qkv, 3, dim=-1)  # [B,T,H]
@@ -165,7 +168,14 @@ def export_trial(
             model,
             inputs,
             str(onnx_path),
-            input_names=["codes", "past_k", "past_v", "attn_bias", "conv_state", "overlap"],
+            input_names=[
+                "codes",
+                "past_k",
+                "past_v",
+                "attn_bias",
+                "conv_state",
+                "overlap",
+            ],
             output_names=["wav"],
             dynamic_axes=dyn,
             opset_version=18,
@@ -179,7 +189,9 @@ def export_trial(
     return onnx_path, sim_path, node_count
 
 
-def trtexec_cmd(image: str, sim_onnx: Path, engine: Path, hidden_dim: int, heads: int, head_dim: int) -> list[str]:
+def trtexec_cmd(
+    image: str, sim_onnx: Path, engine: Path, hidden_dim: int, heads: int, head_dim: int
+) -> list[str]:
     return [
         "docker",
         "run",
@@ -206,10 +218,26 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Search for <=N-node PyTorch-exported ONNX that triggers TensorRT Myelin tensor.cpp:852."
     )
-    parser.add_argument("--out-root", default="/tmp/myelin_pytorch_search", help="Output directory")
-    parser.add_argument("--max-nodes", type=int, default=50, help="Only run TRT for simplified ONNX <= this node count")
-    parser.add_argument("--max-trials", type=int, default=64, help="Maximum number of trial configs to run")
-    parser.add_argument("--image", default="nvcr.io/nvidia/tritonserver:26.02-py3", help="Docker image with trtexec")
+    parser.add_argument(
+        "--out-root", default="/tmp/myelin_pytorch_search", help="Output directory"
+    )
+    parser.add_argument(
+        "--max-nodes",
+        type=int,
+        default=50,
+        help="Only run TRT for simplified ONNX <= this node count",
+    )
+    parser.add_argument(
+        "--max-trials",
+        type=int,
+        default=64,
+        help="Maximum number of trial configs to run",
+    )
+    parser.add_argument(
+        "--image",
+        default="nvcr.io/nvidia/tritonserver:26.02-py3",
+        help="Docker image with trtexec",
+    )
     args = parser.parse_args()
 
     out_root = Path(args.out_root).resolve()
@@ -320,11 +348,14 @@ def main() -> int:
 
     summary_path = out_root / "summary.json"
     summary_path.write_text(
-        json.dumps([asdict(r) for r in results], indent=2, ensure_ascii=False), encoding="utf-8"
+        json.dumps([asdict(r) for r in results], indent=2, ensure_ascii=False),
+        encoding="utf-8",
     )
 
     hit = [r for r in results if r.status == "myelin_fail_852"]
-    print(f"[summary] trials={len(results)} hit_myelin_852={len(hit)} summary={summary_path}")
+    print(
+        f"[summary] trials={len(results)} hit_myelin_852={len(hit)} summary={summary_path}"
+    )
     if hit:
         h = hit[0]
         print("[hit]")

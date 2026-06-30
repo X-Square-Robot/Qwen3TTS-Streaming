@@ -110,7 +110,10 @@ def decode_audio_chunk(payload: dict[str, Any], pcm_bytes: bytes) -> AudioChunk:
             channels=int(audio.get("channels", 1)),
         ),
         chunk_index=int((payload.get("meta") or {}).get("chunk_index", 0) or 0),
-        first_chunk=str((payload.get("meta") or {}).get("first_audio_chunk", "")).lower() == "true",
+        first_chunk=str(
+            (payload.get("meta") or {}).get("first_audio_chunk", "")
+        ).lower()
+        == "true",
         final_chunk=bool(payload.get("final_chunk", False)),
         meta={str(k): str(v) for k, v in dict(payload.get("meta") or {}).items()},
     )

@@ -3,7 +3,6 @@
 import asyncio
 import queue
 import time
-import threading
 from types import SimpleNamespace
 
 import torch
@@ -22,15 +21,20 @@ from engine.core.types import (
     EngineResult,
     RequestType,
     ResultType,
-    RequestPriority,
 )
 
 
 @pytest.fixture
 def model_config():
     return ModelConfig(
-        num_layers=2, kv_heads=2, head_dim=4, max_seq_len=16,
-        n_c2w_layers=2, c2w_kv_heads=2, c2w_head_dim=4, c2w_sliding_window=8,
+        num_layers=2,
+        kv_heads=2,
+        head_dim=4,
+        max_seq_len=16,
+        n_c2w_layers=2,
+        c2w_kv_heads=2,
+        c2w_head_dim=4,
+        c2w_sliding_window=8,
     )
 
 
@@ -58,8 +62,10 @@ class TestEngineLoopHealth:
 
         class StubExecutor:
             kv_pool = KVCachePool(
-                max_slots=4, config=model_config,
-                device=torch.device("cpu"), preallocate=False,
+                max_slots=4,
+                config=model_config,
+                device=torch.device("cpu"),
+                preallocate=False,
             )
             _device = torch.device("cpu")
             _config = model_config
@@ -89,8 +95,10 @@ class TestSessionTimeout:
 
         class StubExecutor:
             kv_pool = KVCachePool(
-                max_slots=4, config=model_config,
-                device=torch.device("cpu"), preallocate=False,
+                max_slots=4,
+                config=model_config,
+                device=torch.device("cpu"),
+                preallocate=False,
             )
             _device = torch.device("cpu")
             _config = model_config
@@ -125,8 +133,10 @@ class TestSessionTimeout:
 
         class StubExecutor:
             kv_pool = KVCachePool(
-                max_slots=4, config=model_config,
-                device=torch.device("cpu"), preallocate=False,
+                max_slots=4,
+                config=model_config,
+                device=torch.device("cpu"),
+                preallocate=False,
             )
             _device = torch.device("cpu")
             _config = model_config
@@ -162,8 +172,10 @@ class TestSessionCancel:
 
         class StubExecutor:
             kv_pool = KVCachePool(
-                max_slots=4, config=model_config,
-                device=torch.device("cpu"), preallocate=False,
+                max_slots=4,
+                config=model_config,
+                device=torch.device("cpu"),
+                preallocate=False,
             )
             _device = torch.device("cpu")
             _config = model_config
@@ -203,8 +215,10 @@ class TestSessionCancel:
 
         class StubExecutor:
             kv_pool = KVCachePool(
-                max_slots=4, config=model_config,
-                device=torch.device("cpu"), preallocate=False,
+                max_slots=4,
+                config=model_config,
+                device=torch.device("cpu"),
+                preallocate=False,
             )
             _device = torch.device("cpu")
             _config = model_config
@@ -241,8 +255,10 @@ class TestSessionCancel:
 
         class StubExecutor:
             kv_pool = KVCachePool(
-                max_slots=4, config=model_config,
-                device=torch.device("cpu"), preallocate=False,
+                max_slots=4,
+                config=model_config,
+                device=torch.device("cpu"),
+                preallocate=False,
             )
             _device = torch.device("cpu")
             _config = model_config
@@ -289,14 +305,18 @@ class TestSessionCancel:
         assert slot.slot_id not in engine_loop._seg_by_slot
         assert StubExecutor.kv_pool.free_count == 4
 
-    def test_failed_prefill_cleanup_releases_slot_and_removes_session(self, model_config):
+    def test_failed_prefill_cleanup_releases_slot_and_removes_session(
+        self, model_config
+    ):
         inbox = queue.Queue()
         loop = _ImmediateLoop()
 
         class StubExecutor:
             kv_pool = KVCachePool(
-                max_slots=4, config=model_config,
-                device=torch.device("cpu"), preallocate=False,
+                max_slots=4,
+                config=model_config,
+                device=torch.device("cpu"),
+                preallocate=False,
             )
             _device = torch.device("cpu")
             _config = model_config
@@ -337,8 +357,10 @@ class TestProcessStepOutput:
         loop = asyncio.new_event_loop()
 
         pool = KVCachePool(
-            max_slots=4, config=model_config,
-            device=torch.device("cpu"), preallocate=False,
+            max_slots=4,
+            config=model_config,
+            device=torch.device("cpu"),
+            preallocate=False,
         )
 
         class StubExecutor:
@@ -389,12 +411,14 @@ class TestProcessStepOutput:
 class TestConfigNewFields:
     def test_server_config_has_warmup_and_health(self):
         from engine.config import ServerConfig
+
         sc = ServerConfig()
         assert sc.warmup_rounds == 3
         assert sc.health_port == 8080
 
     def test_scheduler_config_has_timeout_and_pad_silence_thresholds(self):
         from engine.config import SchedulerConfig
+
         sc = SchedulerConfig()
         assert sc.session_timeout_sec == 300.0
         assert sc.pad_silence_peak_threshold == 5e-4
@@ -408,8 +432,10 @@ class TestPadSilenceDetection:
 
         class StubExecutor:
             kv_pool = KVCachePool(
-                max_slots=4, config=model_config,
-                device=torch.device("cpu"), preallocate=False,
+                max_slots=4,
+                config=model_config,
+                device=torch.device("cpu"),
+                preallocate=False,
             )
             _device = torch.device("cpu")
             _config = model_config
@@ -607,7 +633,9 @@ class TestPrefillBoundary:
             prefill[:, 2:, :].to(torch.float32),
         )
 
-    def test_prefix_cache_hit_restores_prefix_and_lets_decode0_consume_text(self, model_config):
+    def test_prefix_cache_hit_restores_prefix_and_lets_decode0_consume_text(
+        self, model_config
+    ):
         loop = _ImmediateLoop()
         executor = _StubExecutorForPrefill(model_config)
         hidden = model_config.hidden_size

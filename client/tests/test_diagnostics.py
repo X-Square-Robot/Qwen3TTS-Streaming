@@ -69,7 +69,8 @@ class TestSessionDiagnostics:
         from qwen3tts.diagnostics import SessionDiagnostics
 
         d = SessionDiagnostics.from_done_meta(
-            self._DONE_META, [{"eos_reason": "codec_eos"}, {"eos_reason": "kv_overflow"}]
+            self._DONE_META,
+            [{"eos_reason": "codec_eos"}, {"eos_reason": "kv_overflow"}],
         )
         s = d.summary()
         assert s["ttft"]["create_to_first_raw_ms"] == 230.0

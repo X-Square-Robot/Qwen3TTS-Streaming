@@ -63,7 +63,7 @@ import logging
 import queue
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 import numpy as np
 import torch
@@ -79,7 +79,7 @@ from ..core.types import (
 from ..core.lifecycle import LifecycleLogger
 from ..core import observability as obs
 from .executor import Executor, StepOutput
-from .kv_cache_pool import KVCachePool, SlotKVState
+from .kv_cache_pool import SlotKVState
 from .prefix_cache import PrefixKVCache
 from .prefill import PrefillBuilder, PrefillPlan, TaskType, parse_task_type
 
@@ -90,12 +90,21 @@ logger = logging.getLogger(__name__)
 # Per-segment tracking (engine-thread side)
 # ---------------------------------------------------------------------------
 
+
 class EngineSegment:
     """Engine thread's view of one segment: owns a KV slot + decode state."""
+
     __slots__ = (
-        "session_id", "segment_idx", "slot", "state", "priority",
-        "input_complete", "prefill_plan",
-        "trailing_idx", "text_tokens_consumed", "decode_start_frame",
+        "session_id",
+        "segment_idx",
+        "slot",
+        "state",
+        "priority",
+        "input_complete",
+        "prefill_plan",
+        "trailing_idx",
+        "text_tokens_consumed",
+        "decode_start_frame",
         "mlfq_meta",
         "pending_token_ids",
         "eos_trailing_added",
@@ -109,7 +118,9 @@ class EngineSegment:
     )
 
     def __init__(
-        self, session_id: str, segment_idx: int,
+        self,
+        session_id: str,
+        segment_idx: int,
         priority: RequestPriority = RequestPriority.FIRST_SEGMENT,
     ):
         self.session_id = session_id
@@ -138,9 +149,14 @@ class EngineSegment:
 
 class EngineSessionGroup:
     """Groups all segments belonging to one session."""
+
     __slots__ = (
-        "session_id", "request", "result_queue",
-        "segments", "input_complete_all", "created_at",
+        "session_id",
+        "request",
+        "result_queue",
+        "segments",
+        "input_complete_all",
+        "created_at",
         "overflow_token_ids",
         "first_text_dequeued_at",
     )
@@ -158,7 +174,8 @@ class EngineSessionGroup:
     @property
     def active_slot_count(self) -> int:
         return sum(
-            1 for seg in self.segments.values()
+            1
+            for seg in self.segments.values()
             if seg.state in ("pending_prefill", "active") and seg.slot is not None
         )
 
@@ -167,6 +184,7 @@ class EngineSessionGroup:
 # Segment key
 # ---------------------------------------------------------------------------
 
+
 def _seg_key(session_id: str, segment_idx: int) -> str:
     return f"{session_id}:{segment_idx}"
 
@@ -174,6 +192,7 @@ def _seg_key(session_id: str, segment_idx: int) -> str:
 # ---------------------------------------------------------------------------
 # Engine loop
 # ---------------------------------------------------------------------------
+
 
 class EngineLoop:
     """GPU-owning engine thread with pipelined decode and priority scheduling."""
@@ -258,7 +277,9 @@ class EngineLoop:
     def start(self) -> None:
         self._running = True
         self._thread = threading.Thread(
-            target=self._run, name="engine-loop", daemon=True,
+            target=self._run,
+            name="engine-loop",
+            daemon=True,
         )
         self._thread.start()
         logger.info("Engine loop started (max_batch=%d)", self._max_batch)
@@ -389,8 +410,10 @@ class EngineLoop:
                         segment_idx=req.segment_idx,
                         request_id=(
                             req.session_config.timing.request_id
-                            if req.session_config else None
-                        ) or None,
+                            if req.session_config
+                            else None
+                        )
+                        or None,
                         monotonic_ts=now,
                         wait_ms=round(wait_ms),
                         queue_depth_at_dequeue=self._inbox.qsize(),
@@ -406,7 +429,9 @@ class EngineLoop:
             if not replacing_existing and len(self._groups) >= self._max_queue_size:
                 logger.warning(
                     "Backpressure: rejecting session %s (active=%d >= limit=%d)",
-                    req.session_id, len(self._groups), self._max_queue_size,
+                    req.session_id,
+                    len(self._groups),
+                    self._max_queue_size,
                 )
                 if req.result_queue is not None:
                     self._async_loop.call_soon_threadsafe(
@@ -434,7 +459,8 @@ class EngineLoop:
                 phase="session.registered",
                 request_id=(
                     req.session_config.timing.request_id if req.session_config else None
-                ) or None,
+                )
+                or None,
                 free_slots=kv_pool.free_count if kv_pool else None,
                 active_sessions=len(self._groups),
             )
@@ -445,7 +471,9 @@ class EngineLoop:
                 logger.warning("START_TOKENS for unknown session: %s", req.session_id)
                 return
             seg = EngineSegment(
-                req.session_id, req.segment_idx, req.priority,
+                req.session_id,
+                req.segment_idx,
+                req.priority,
             )
             seg.dequeued_at = req.dequeued_at
             if group.overflow_token_ids:
@@ -454,7 +482,8 @@ class EngineLoop:
                 logger.info(
                     "Prepended %d overflow tokens to %s seg=%d",
                     len(group.overflow_token_ids),
-                    req.session_id, req.segment_idx,
+                    req.session_id,
+                    req.segment_idx,
                 )
                 group.overflow_token_ids.clear()
             if req.token_ids:
@@ -472,8 +501,12 @@ class EngineLoop:
             group.segments[req.segment_idx] = seg
             if req.result_queue is not None:
                 group.result_queue = req.result_queue
-            logger.debug("New segment: %s seg=%d prio=%s",
-                         req.session_id, req.segment_idx, req.priority.name)
+            logger.debug(
+                "New segment: %s seg=%d prio=%s",
+                req.session_id,
+                req.segment_idx,
+                req.priority.name,
+            )
 
         elif req.type == RequestType.APPEND_TOKENS:
             group = self._groups.get(req.session_id)
@@ -486,7 +519,8 @@ class EngineLoop:
                 group.overflow_token_ids.extend(req.token_ids)
                 logger.debug(
                     "Overflow %d tokens for %s seg=%d (seg_state=%s, overflow_total=%d)",
-                    len(req.token_ids), req.session_id,
+                    len(req.token_ids),
+                    req.session_id,
                     req.segment_idx,
                     seg.state if seg else "MISSING",
                     len(group.overflow_token_ids),
@@ -504,8 +538,10 @@ class EngineLoop:
             else:
                 logger.debug(
                     "APPEND_TOKENS %d tokens for %s seg=%d state=%s (pre-prefill accumulate)",
-                    len(req.token_ids), req.session_id,
-                    req.segment_idx, seg.state,
+                    len(req.token_ids),
+                    req.session_id,
+                    req.segment_idx,
+                    seg.state,
                 )
 
         elif req.type == RequestType.SEGMENT_TOKENS_DONE:
@@ -517,8 +553,7 @@ class EngineLoop:
                 seg.input_complete = True
                 if (
                     req.append_eos
-                    and
-                    seg.state == "active"
+                    and seg.state == "active"
                     and seg.slot is not None
                     and not seg.eos_trailing_added
                     and self._prefill_builder is not None
@@ -540,11 +575,14 @@ class EngineLoop:
         elif req.type == RequestType.CANCEL_SESSION:
             group = self._groups.get(req.session_id)
             if group is not None:
-                self._send_result(group, EngineResult(
-                    type=ResultType.SESSION_DONE,
-                    session_id=req.session_id,
-                    metrics={"cancelled": True},
-                ))
+                self._send_result(
+                    group,
+                    EngineResult(
+                        type=ResultType.SESSION_DONE,
+                        session_id=req.session_id,
+                        metrics={"cancelled": True},
+                    ),
+                )
             self._remove_session(req.session_id)
 
     # ------------------------------------------------------------------
@@ -613,7 +651,9 @@ class EngineLoop:
             try:
                 task_type = parse_task_type(
                     task_type_str,
-                    x_vector_only=(req_cfg.x_vector_only if req_cfg is not None else False),
+                    x_vector_only=(
+                        req_cfg.x_vector_only if req_cfg is not None else False
+                    ),
                 )
             except ValueError as exc:
                 logger.error("Invalid task_type for %s: %s", best.session_id, exc)
@@ -621,12 +661,15 @@ class EngineLoop:
                 self._seg_by_slot.pop(slot.slot_id, None)
                 kv_pool.release(slot.slot_id)
                 best.slot = None
-                self._send_result(best_group, EngineResult(
-                    type=ResultType.ERROR,
-                    session_id=best.session_id,
-                    segment_idx=best.segment_idx,
-                    error_msg=str(exc),
-                ))
+                self._send_result(
+                    best_group,
+                    EngineResult(
+                        type=ResultType.ERROR,
+                        session_id=best.session_id,
+                        segment_idx=best.segment_idx,
+                        error_msg=str(exc),
+                    ),
+                )
                 self._remove_session(best.session_id)
                 return False
             prefill_metrics = self._prefill_metrics(task_type, req_cfg)
@@ -641,7 +684,9 @@ class EngineLoop:
                 cache_key = self._prefill_builder.compute_cache_key(
                     task_type,
                     req_cfg.language if req_cfg is not None else "auto",
-                    req_cfg.speaker if req_cfg is not None else best_group.request.speaker_key,
+                    req_cfg.speaker
+                    if req_cfg is not None
+                    else best_group.request.speaker_key,
                     req_cfg.instruct if req_cfg is not None else None,
                     (
                         list(req_cfg.instruct_spec.token_ids)
@@ -649,32 +694,36 @@ class EngineLoop:
                         else None
                     ),
                     spk_embedding=(
-                        req_cfg.spk_embedding
-                        if req_cfg is not None
-                        else None
+                        req_cfg.spk_embedding if req_cfg is not None else None
                     ),
                 )
                 cached = self._prefix_cache.get(cache_key)
 
-            if task_type != TaskType.VOICE_CLONE_ICL and cached is not None and best.pending_token_ids:
+            if (
+                task_type != TaskType.VOICE_CLONE_ICL
+                and cached is not None
+                and best.pending_token_ids
+            ):
                 # ── Cache HIT: restore prefix KV and let decode consume first text token ──
                 best.cache_hit = True
                 best.cache_tokens_reused = cached.prefix_len
-                req_embeds, trailing = (
-                    self._prefill_builder.build_suffix_from_ids(
-                        best.pending_token_ids,
-                        include_eos=best.input_complete,
-                    )
+                req_embeds, trailing = self._prefill_builder.build_suffix_from_ids(
+                    best.pending_token_ids,
+                    include_eos=best.input_complete,
                 )
                 self._apply_prefix_cache_hit(
-                    slot, cached, req_embeds, trailing,
+                    slot,
+                    cached,
+                    req_embeds,
+                    trailing,
                 )
                 best.eos_trailing_added = best.input_complete
                 prefill_audio, prefill_eos = None, False
                 logger.info(
                     "Prefix cache hit: copied %d KV tokens for %s "
                     "(slot=%d, decode will consume first text token in batch)",
-                    cached.prefix_len, best.session_id,
+                    cached.prefix_len,
+                    best.session_id,
                     slot.slot_id,
                 )
             else:
@@ -683,7 +732,9 @@ class EngineLoop:
                     task_type=task_type,
                     token_ids=best.pending_token_ids,
                     language=req_cfg.language if req_cfg is not None else "auto",
-                    speaker=req_cfg.speaker if req_cfg is not None else best_group.request.speaker_key,
+                    speaker=req_cfg.speaker
+                    if req_cfg is not None
+                    else best_group.request.speaker_key,
                     instruct=req_cfg.instruct if req_cfg is not None else None,
                     instruct_token_ids=(
                         list(req_cfg.instruct_spec.token_ids)
@@ -691,9 +742,7 @@ class EngineLoop:
                         else None
                     ),
                     spk_embedding=(
-                        req_cfg.spk_embedding
-                        if req_cfg is not None
-                        else None
+                        req_cfg.spk_embedding if req_cfg is not None else None
                     ),
                     ref_text=req_cfg.ref_text if req_cfg is not None else None,
                     ref_text_token_ids=(
@@ -702,19 +751,13 @@ class EngineLoop:
                         else None
                     ),
                     ref_codec_sum_vec=(
-                        req_cfg.ref_codec_sum_vec
-                        if req_cfg is not None
-                        else None
+                        req_cfg.ref_codec_sum_vec if req_cfg is not None else None
                     ),
                     ref_audio_sha256=(
-                        req_cfg.ref_audio_sha256
-                        if req_cfg is not None
-                        else None
+                        req_cfg.ref_audio_sha256 if req_cfg is not None else None
                     ),
                     ref_feature_cache_key=(
-                        req_cfg.ref_feature_cache_key
-                        if req_cfg is not None
-                        else None
+                        req_cfg.ref_feature_cache_key if req_cfg is not None else None
                     ),
                     include_eos=best.input_complete,
                 )
@@ -723,20 +766,26 @@ class EngineLoop:
 
                 if req_cfg is not None and req_cfg.ref_warnings:
                     for warning_msg in req_cfg.ref_warnings:
-                        self._send_result(best_group, EngineResult(
-                            type=ResultType.WARNING,
-                            session_id=best.session_id,
-                            segment_idx=best.segment_idx,
-                            warning_msg=str(warning_msg),
-                        ))
+                        self._send_result(
+                            best_group,
+                            EngineResult(
+                                type=ResultType.WARNING,
+                                session_id=best.session_id,
+                                segment_idx=best.segment_idx,
+                                warning_msg=str(warning_msg),
+                            ),
+                        )
                 if plan.warnings:
                     for warning_msg in plan.warnings:
-                        self._send_result(best_group, EngineResult(
-                            type=ResultType.WARNING,
-                            session_id=best.session_id,
-                            segment_idx=best.segment_idx,
-                            warning_msg=str(warning_msg),
-                        ))
+                        self._send_result(
+                            best_group,
+                            EngineResult(
+                                type=ResultType.WARNING,
+                                session_id=best.session_id,
+                                segment_idx=best.segment_idx,
+                                warning_msg=str(warning_msg),
+                            ),
+                        )
 
                 # ICL keeps the reference codec path as one complete prefill.
                 # Splitting it into a cached reference prefix and request suffix
@@ -750,14 +799,16 @@ class EngineLoop:
                 )
                 if split_prefix_prefill:
                     self._executor.prefill_prefix_only(
-                        slot, plan.cacheable_prefix_embeds,
+                        slot,
+                        plan.cacheable_prefix_embeds,
                     )
                     prefill_audio, prefill_eos = None, False
                 else:
                     if task_type == TaskType.VOICE_CLONE_ICL:
                         self._apply_ref_c2w_warm_state(best_group, best, req_cfg)
                     prefill_audio, prefill_eos = self._executor.prefill(
-                        slot, plan.prefill_embeds,
+                        slot,
+                        plan.prefill_embeds,
                     )
                 if task_type != TaskType.VOICE_CLONE_ICL:
                     # Populate cache — read from pool when preallocated.
@@ -770,7 +821,9 @@ class EngineLoop:
                         prefix_kv = self._read_prefix_kv(slot, prefix_len)
                         if prefix_kv is not None:
                             self._prefix_cache.put(
-                                effective_key, prefix_kv, prefix_len,
+                                effective_key,
+                                prefix_kv,
+                                prefix_len,
                             )
 
                     if split_prefix_prefill:
@@ -790,13 +843,16 @@ class EngineLoop:
         else:
             prefill_metrics = {}
             best.prefill_started_at = time.monotonic()
-            prefill_audio, prefill_eos = self._executor.prefill(slot, torch.zeros(
-                1,
-                1,
-                self._hidden_size,
-                device=self._embed_device,
-                dtype=self._embed_dtype,
-            ))
+            prefill_audio, prefill_eos = self._executor.prefill(
+                slot,
+                torch.zeros(
+                    1,
+                    1,
+                    self._hidden_size,
+                    device=self._embed_device,
+                    dtype=self._embed_dtype,
+                ),
+            )
 
         best.state = "active"
         best.decode_start_frame = slot.frame_idx
@@ -811,13 +867,20 @@ class EngineLoop:
             prefill_duration_ms = 0.0
 
         # Determine cache hit status
-        cache_hit = slot.prefill_source == "prefix_cache_hit" if hasattr(slot, 'prefill_source') else False
+        cache_hit = (
+            slot.prefill_source == "prefix_cache_hit"
+            if hasattr(slot, "prefill_source")
+            else False
+        )
         best.cache_hit = cache_hit
 
         # Write to ServerTimingAccumulator if available
         acc = self._get_group_timing_accumulator(best_group)
         if acc is not None:
-            if acc.prefill_started_monotonic is None and best.prefill_started_at is not None:
+            if (
+                acc.prefill_started_monotonic is None
+                and best.prefill_started_at is not None
+            ):
                 acc.prefill_started_monotonic = best.prefill_started_at
             acc.prefill_completed_monotonic = prefill_end
             acc.cache_hit = cache_hit
@@ -830,8 +893,10 @@ class EngineLoop:
             segment_idx=best.segment_idx,
             request_id=(
                 best_group.request.session_config.timing.request_id
-                if best_group.request.session_config else None
-            ) or None,
+                if best_group.request.session_config
+                else None
+            )
+            or None,
             monotonic_ts=prefill_end,
             prefill_duration_ms=round(prefill_duration_ms, 3),
             cache_hit=cache_hit,
@@ -884,33 +949,43 @@ class EngineLoop:
                 best.session_id,
                 best.segment_idx,
                 " ".join(
-                    f"{key}={value}"
-                    for key, value in sorted(prefill_metrics.items())
+                    f"{key}={value}" for key, value in sorted(prefill_metrics.items())
                 ),
             )
-        self._send_result(best_group, EngineResult(
-            type=ResultType.PREFILL_DONE,
-            session_id=best.session_id,
-            segment_idx=best.segment_idx,
-            metrics=prefill_metrics,
-        ))
-
-        if prefill_audio and len(prefill_audio) > 0:
-            self._send_result(best_group, EngineResult(
-                type=ResultType.AUDIO_CHUNK,
+        self._send_result(
+            best_group,
+            EngineResult(
+                type=ResultType.PREFILL_DONE,
                 session_id=best.session_id,
                 segment_idx=best.segment_idx,
-                audio_bytes=prefill_audio,
-            ))
+                metrics=prefill_metrics,
+            ),
+        )
+
+        if prefill_audio and len(prefill_audio) > 0:
+            self._send_result(
+                best_group,
+                EngineResult(
+                    type=ResultType.AUDIO_CHUNK,
+                    session_id=best.session_id,
+                    segment_idx=best.segment_idx,
+                    audio_bytes=prefill_audio,
+                ),
+            )
         if prefill_eos:
             self._handle_segment_eos(best_group, best)
             return True
         logger.debug(
             "Prefill done: %s seg=%d prio=%s (slot=%d, past_len=%d, "
             "trailing=%d, input_complete=%s, tokens=%d)",
-            best.session_id, best.segment_idx, best.priority.name,
-            slot.slot_id, slot.past_len,
-            len(slot.trailing), best.input_complete, len(best.pending_token_ids),
+            best.session_id,
+            best.segment_idx,
+            best.priority.name,
+            slot.slot_id,
+            slot.past_len,
+            len(slot.trailing),
+            best.input_complete,
+            len(best.pending_token_ids),
         )
         return True
 
@@ -946,9 +1021,9 @@ class EngineLoop:
         prefix_len = cached.prefix_len
 
         if kv_pool._preallocate and kv_pool._talker_kv_pool is not None:
-            kv_pool._talker_kv_pool[
-                slot.slot_id, :, :, :prefix_len, :
-            ] = cached.talker_kv[0, :, :, :prefix_len, :]
+            kv_pool._talker_kv_pool[slot.slot_id, :, :, :prefix_len, :] = (
+                cached.talker_kv[0, :, :, :prefix_len, :]
+            )
         else:
             slot.talker_kv = cached.talker_kv.clone()
         slot.past_len = prefix_len
@@ -970,8 +1045,7 @@ class EngineLoop:
         )
         if warmed:
             logger.info(
-                "Applied Code2Wav ref warm state for %s "
-                "(slot=%d, frame_idx=%d)",
+                "Applied Code2Wav ref warm state for %s (slot=%d, frame_idx=%d)",
                 seg.session_id,
                 seg.slot.slot_id,
                 int(req_cfg.ref_c2w_frame_idx),
@@ -985,9 +1059,7 @@ class EngineLoop:
         slot.trailing = trailing
         if slot.next_embed is not None and slot.trailing:
             first_trail = slot.trailing[0].to(slot.next_embed.dtype)
-            slot.next_embed = (
-                slot.next_embed + first_trail
-            ).to(torch.float32)
+            slot.next_embed = (slot.next_embed + first_trail).to(torch.float32)
             slot.text_idx = 1
 
     def _prefill_metrics(self, task_type: TaskType, req_cfg) -> dict:
@@ -1065,14 +1137,19 @@ class EngineLoop:
         )
 
     def _read_prefix_kv(
-        self, slot: SlotKVState, prefix_len: int,
+        self,
+        slot: SlotKVState,
+        prefix_len: int,
     ) -> Optional[torch.Tensor]:
         """Read prefix KV from pool or slot for cache population."""
         kv_pool = self._executor.kv_pool
         if kv_pool._preallocate and kv_pool._talker_kv_pool is not None:
             return kv_pool._talker_kv_pool[
                 slot.slot_id : slot.slot_id + 1,
-                :, :, :prefix_len, :,
+                :,
+                :,
+                :prefix_len,
+                :,
             ].clone()
         if slot.talker_kv is not None:
             return slot.talker_kv[:, :, :, :prefix_len, :].clone()
@@ -1108,15 +1185,20 @@ class EngineLoop:
                 candidates.append(seg)
 
         for group, seg in evict_pairs:
-            logger.warning("Segment hit max_seq_len (%d): %s seg=%d, forcing EOS (overflow)",
-                           max_seq, seg.session_id, seg.segment_idx)
+            logger.warning(
+                "Segment hit max_seq_len (%d): %s seg=%d, forcing EOS (overflow)",
+                max_seq,
+                seg.session_id,
+                seg.segment_idx,
+            )
             self._handle_segment_eos(group, seg, overflow=True)
 
         if not candidates:
             return []
 
         ordered = self._mlfq.select_batch(
-            candidates, self._max_batch,
+            candidates,
+            self._max_batch,
             get_meta=lambda seg: seg.mlfq_meta,
         )
         return [seg.slot for seg in ordered]
@@ -1163,16 +1245,20 @@ class EngineLoop:
 
             seg.state = "evicted"
             seg.slot = None
-            self._send_result(group, EngineResult(
-                type=ResultType.ERROR,
-                session_id=seg.session_id,
-                segment_idx=seg.segment_idx,
-                error_msg=f"Slot evicted: idle > {self._max_idle_sec}s",
-            ))
+            self._send_result(
+                group,
+                EngineResult(
+                    type=ResultType.ERROR,
+                    session_id=seg.session_id,
+                    segment_idx=seg.segment_idx,
+                    error_msg=f"Slot evicted: idle > {self._max_idle_sec}s",
+                ),
+            )
             self._total_evictions += 1
             logger.warning(
                 "Evicted segment %s:%d due to idle timeout",
-                seg.session_id, seg.segment_idx,
+                seg.session_id,
+                seg.segment_idx,
             )
             self._remove_session(seg.session_id)
 
@@ -1201,7 +1287,9 @@ class EngineLoop:
             for s in output.slots:
                 m = self._seg_by_slot.get(s.slot_id)
                 if m is not None:
-                    members.append({"session_id": m.session_id, "segment_id": m.segment_idx})
+                    members.append(
+                        {"session_id": m.session_id, "segment_id": m.segment_idx}
+                    )
             LifecycleLogger.emit(
                 session_id="-",
                 phase="batch_compose",
@@ -1225,8 +1313,10 @@ class EngineLoop:
                     segment_idx=seg.segment_idx,
                     request_id=(
                         group.request.session_config.timing.request_id
-                        if group and group.request.session_config else None
-                    ) or None,
+                        if group and group.request.session_config
+                        else None
+                    )
+                    or None,
                 )
             if batch_size > seg.max_decode_batch:
                 seg.max_decode_batch = batch_size
@@ -1235,23 +1325,27 @@ class EngineLoop:
                 continue
 
             if output.batch_c2w_kv is not None:
-                kv = output.batch_c2w_kv[i:i+1]
+                kv = output.batch_c2w_kv[i : i + 1]
                 c2w_max_past = self._executor._config.c2w_sliding_window - 1
                 if slot.c2w_kv is None:
                     slot.c2w_kv = kv.clone()
                 else:
                     slot.c2w_kv = torch.cat([slot.c2w_kv, kv], dim=3)
                     if slot.c2w_kv.shape[3] > c2w_max_past:
-                        slot.c2w_kv = slot.c2w_kv[:, :, :, -c2w_max_past:, :].contiguous()
+                        slot.c2w_kv = slot.c2w_kv[
+                            :, :, :, -c2w_max_past:, :
+                        ].contiguous()
                     else:
                         slot.c2w_kv = slot.c2w_kv.contiguous()
             if not use_pool:
                 if output.batch_talker_kv is not None:
-                    kv = output.batch_talker_kv[i:i+1]
+                    kv = output.batch_talker_kv[i : i + 1]
                     if slot.talker_kv is None:
                         slot.talker_kv = kv.clone()
                     else:
-                        slot.talker_kv = torch.cat([slot.talker_kv, kv], dim=3).contiguous()
+                        slot.talker_kv = torch.cat(
+                            [slot.talker_kv, kv], dim=3
+                        ).contiguous()
 
             if output.used_pingpong and slot.pingpong_ready:
                 # batch=1 zero-copy: TRT wrote directly to write bufs
@@ -1266,16 +1360,16 @@ class EngineLoop:
                 # Fallback: clone (first step or non-pingpong slot)
                 if output.split_c2w_conv[i]:
                     slot.c2w_conv_states = [
-                        t.clone() for t in output.split_c2w_conv[i]
-                        if t is not None
+                        t.clone() for t in output.split_c2w_conv[i] if t is not None
                     ]
                 if output.split_c2w_transconv[i]:
                     slot.c2w_transconv_states = [
-                        t.clone() for t in output.split_c2w_transconv[i]
+                        t.clone()
+                        for t in output.split_c2w_transconv[i]
                         if t is not None
                     ]
             if output.updated_tc is not None:
-                slot.token_counts = output.updated_tc[i:i+1].clone()
+                slot.token_counts = output.updated_tc[i : i + 1].clone()
             slot.past_len += 1
             slot.frame_idx += 1
             slot.touch()
@@ -1290,12 +1384,14 @@ class EngineLoop:
                     slot.pad_start_frame = -1
                     slot.pad_consecutive_silence = 0
                     slot.last_codec_sum = None
-                    slot.next_embed = (output.codec_sum[i:i+1] + text_add).to(torch.float32)
+                    slot.next_embed = (output.codec_sum[i : i + 1] + text_add).to(
+                        torch.float32
+                    )
                 elif not seg.input_complete:
                     # True streaming pause: preserve the latest codec_sum and
                     # wait for more text instead of injecting pad tokens, which
                     # creates artificial silences and prosody discontinuities.
-                    slot.last_codec_sum = output.codec_sum[i:i+1].clone()
+                    slot.last_codec_sum = output.codec_sum[i : i + 1].clone()
                     slot.next_embed = None
                     slot.pad_start_frame = -1
                     slot.pad_consecutive_silence = 0
@@ -1312,7 +1408,9 @@ class EngineLoop:
                     slot.last_codec_sum = None
                     if slot.pad_start_frame < 0:
                         slot.pad_start_frame = slot.frame_idx
-                    slot.next_embed = (output.codec_sum[i:i+1] + text_add).to(torch.float32)
+                    slot.next_embed = (output.codec_sum[i : i + 1] + text_add).to(
+                        torch.float32
+                    )
             else:
                 slot.next_embed = None
 
@@ -1321,7 +1419,11 @@ class EngineLoop:
             #   1) Dynamic silence abort — stricter as KV budget shrinks
             #   2) KV overflow (past_len >= max_seq_len) — handled by
             #      _get_active_slots_mlfq before the next decode step
-            pad_steps = (slot.frame_idx - slot.pad_start_frame) if in_pad and slot.pad_start_frame >= 0 else 0
+            pad_steps = (
+                (slot.frame_idx - slot.pad_start_frame)
+                if in_pad and slot.pad_start_frame >= 0
+                else 0
+            )
 
             if output.eos_flags[i]:
                 self._handle_segment_eos(group, seg)
@@ -1344,9 +1446,12 @@ class EngineLoop:
                             logger.info(
                                 "Silence abort: %s seg=%d silence=%d limit=%d "
                                 "pad=%d remaining_kv=%d",
-                                seg.session_id, seg.segment_idx,
+                                seg.session_id,
+                                seg.segment_idx,
                                 slot.pad_consecutive_silence,
-                                silence_limit, pad_steps, remaining_kv,
+                                silence_limit,
+                                pad_steps,
+                                remaining_kv,
                             )
                             # L2 pad_phase: why this segment got silence-aborted.
                             session_level = self._session_obs_level(group)
@@ -1364,7 +1469,9 @@ class EngineLoop:
                                     remaining_kv=remaining_kv,
                                 )
                             self._handle_segment_eos(
-                                group, seg, eos_reason="silence_abort",
+                                group,
+                                seg,
+                                eos_reason="silence_abort",
                             )
                             continue
 
@@ -1376,7 +1483,10 @@ class EngineLoop:
                         now_mono = time.monotonic()
                         # Write to ServerTimingAccumulator if available
                         group_acc = self._get_group_timing_accumulator(group)
-                        if group_acc is not None and group_acc.first_raw_audio_monotonic is None:
+                        if (
+                            group_acc is not None
+                            and group_acc.first_raw_audio_monotonic is None
+                        ):
                             group_acc.first_raw_audio_monotonic = now_mono
                         LifecycleLogger.emit(
                             session_id=seg.session_id,
@@ -1384,21 +1494,28 @@ class EngineLoop:
                             segment_idx=seg.segment_idx,
                             request_id=(
                                 group.request.session_config.timing.request_id
-                                if group.request.session_config else None
-                            ) or None,
+                                if group.request.session_config
+                                else None
+                            )
+                            or None,
                             monotonic_ts=now_mono,
                         )
                         audio_metrics["first_raw_audio_at"] = str(now_mono)
                         if seg.dequeued_at is not None:
-                            audio_metrics["first_text_dequeued_at"] = str(seg.dequeued_at)
+                            audio_metrics["first_text_dequeued_at"] = str(
+                                seg.dequeued_at
+                            )
 
-                    self._send_result(group, EngineResult(
-                        type=ResultType.AUDIO_CHUNK,
-                        session_id=seg.session_id,
-                        segment_idx=seg.segment_idx,
-                        audio_bytes=audio,
-                        metrics=audio_metrics,
-                    ))
+                    self._send_result(
+                        group,
+                        EngineResult(
+                            type=ResultType.AUDIO_CHUNK,
+                            session_id=seg.session_id,
+                            segment_idx=seg.segment_idx,
+                            audio_bytes=audio,
+                            metrics=audio_metrics,
+                        ),
+                    )
 
     @staticmethod
     def _dynamic_silence_limit(remaining_kv: int) -> int:
@@ -1437,8 +1554,12 @@ class EngineLoop:
         )
 
     def _handle_segment_eos(
-        self, group: EngineSessionGroup, seg: EngineSegment,
-        *, overflow: bool = False, eos_reason: Optional[str] = None,
+        self,
+        group: EngineSessionGroup,
+        seg: EngineSegment,
+        *,
+        overflow: bool = False,
+        eos_reason: Optional[str] = None,
     ) -> None:
         """Handle EOS for one segment.
 
@@ -1461,7 +1582,11 @@ class EngineLoop:
                 "frame_idx": getattr(sl, "frame_idx", None),
                 "text_idx": getattr(sl, "text_idx", None),
                 "trailing_len": len(getattr(sl, "trailing", []) or []),
-                "c2w_kv_len": (int(sl.c2w_kv.shape[3]) if getattr(sl, "c2w_kv", None) is not None else 0),
+                "c2w_kv_len": (
+                    int(sl.c2w_kv.shape[3])
+                    if getattr(sl, "c2w_kv", None) is not None
+                    else 0
+                ),
             }
         text_tokens = seg.text_tokens_consumed
         audio_text_ratio = round(audio_steps / text_tokens, 2) if text_tokens else 0.0
@@ -1481,12 +1606,15 @@ class EngineLoop:
         seg.state = "done"
         self._release_segment_slot(seg)
 
-        self._send_result(group, EngineResult(
-            type=ResultType.SEGMENT_END,
-            session_id=seg.session_id,
-            segment_idx=seg.segment_idx,
-            metrics=metrics,
-        ))
+        self._send_result(
+            group,
+            EngineResult(
+                type=ResultType.SEGMENT_END,
+                session_id=seg.session_id,
+                segment_idx=seg.segment_idx,
+                metrics=metrics,
+            ),
+        )
         LifecycleLogger.emit(
             session_id=seg.session_id,
             phase="engine.segment.eos",
@@ -1502,8 +1630,13 @@ class EngineLoop:
         logger.info(
             "Segment EOS: %s seg=%d reason=%s audio_steps=%d text_tokens=%d "
             "ratio=%.2f batch=%d",
-            seg.session_id, seg.segment_idx, eos_reason,
-            audio_steps, text_tokens, audio_text_ratio, seg.max_decode_batch,
+            seg.session_id,
+            seg.segment_idx,
+            eos_reason,
+            audio_steps,
+            text_tokens,
+            audio_text_ratio,
+            seg.max_decode_batch,
         )
 
         # L2 segment_synthesis: sampling params + anomaly heuristics that flag
@@ -1523,9 +1656,10 @@ class EngineLoop:
                 anomaly.append("ratio_outlier")
             reason = (
                 "ran to KV cap without codec EOS — likely hallucination tail"
-                if "hit_kv_cap" in anomaly else
-                "pad-phase silence abort" if "silence_aborted" in anomaly else
-                "normal codec EOS"
+                if "hit_kv_cap" in anomaly
+                else "pad-phase silence abort"
+                if "silence_aborted" in anomaly
+                else "normal codec EOS"
             )
             LifecycleLogger.emit(
                 session_id=seg.session_id,
@@ -1572,7 +1706,8 @@ class EngineLoop:
         if group.overflow_token_ids:
             logger.warning(
                 "Session %s has %d overflow tokens pending — waiting for new segment",
-                group.session_id, len(group.overflow_token_ids),
+                group.session_id,
+                len(group.overflow_token_ids),
             )
             return
 
@@ -1581,7 +1716,8 @@ class EngineLoop:
             seg_states = {idx: s.state for idx, s in group.segments.items()}
             logger.debug(
                 "Session %s _check_session_done: not all done, seg_states=%s",
-                group.session_id, seg_states,
+                group.session_id,
+                seg_states,
             )
             return
 
@@ -1589,10 +1725,13 @@ class EngineLoop:
             "Session %s _check_session_done: ALL DONE, sending SESSION_DONE",
             group.session_id,
         )
-        self._send_result(group, EngineResult(
-            type=ResultType.SESSION_DONE,
-            session_id=group.session_id,
-        ))
+        self._send_result(
+            group,
+            EngineResult(
+                type=ResultType.SESSION_DONE,
+                session_id=group.session_id,
+            ),
+        )
         self._remove_session(group.session_id)
 
     # ------------------------------------------------------------------
@@ -1623,12 +1762,15 @@ class EngineLoop:
             for seg in group.segments.values():
                 if seg.state == "pending_prefill" and seg.slot is not None:
                     failed_sessions.append(group.session_id)
-                    self._send_result(group, EngineResult(
-                        type=ResultType.ERROR,
-                        session_id=seg.session_id,
-                        segment_idx=seg.segment_idx,
-                        error_msg="Prefill failed unexpectedly",
-                    ))
+                    self._send_result(
+                        group,
+                        EngineResult(
+                            type=ResultType.ERROR,
+                            session_id=seg.session_id,
+                            segment_idx=seg.segment_idx,
+                            error_msg="Prefill failed unexpectedly",
+                        ),
+                    )
                     logger.warning(
                         "Cleaning failed prefill session %s seg=%d slot=%d",
                         seg.session_id,
@@ -1644,7 +1786,9 @@ class EngineLoop:
     # ------------------------------------------------------------------
 
     def _send_result(
-        self, group: EngineSessionGroup, result: EngineResult,
+        self,
+        group: EngineSessionGroup,
+        result: EngineResult,
     ) -> None:
         if group.result_queue is None:
             return
@@ -1667,7 +1811,9 @@ class EngineLoop:
     # ------------------------------------------------------------------
 
     def _append_trailing_tokens(
-        self, slot: SlotKVState, token_ids: list[int],
+        self,
+        slot: SlotKVState,
+        token_ids: list[int],
     ) -> None:
         """Embed new token IDs and append to slot's trailing list.
 
@@ -1676,7 +1822,9 @@ class EngineLoop:
         """
         w = self._prefill_builder.w
         ids_tensor = torch.tensor(
-            [token_ids], device=w.device, dtype=torch.int64,
+            [token_ids],
+            device=w.device,
+            dtype=torch.int64,
         )
         with torch.no_grad():
             embed = w.text_embed(ids_tensor)
@@ -1685,7 +1833,9 @@ class EngineLoop:
             slot.trailing.append(embed[:, i : i + 1, :].clone())
         logger.debug(
             "Appended %d trailing tokens (total=%d, text_idx=%d)",
-            len(token_ids), len(slot.trailing), slot.text_idx,
+            len(token_ids),
+            len(slot.trailing),
+            slot.text_idx,
         )
 
     def _append_eos_trailing(self, seg: EngineSegment) -> None:
@@ -1695,7 +1845,8 @@ class EngineLoop:
         seg.eos_trailing_added = True
         logger.debug(
             "Appended EOS trailing for seg=%d (total=%d)",
-            seg.segment_idx, len(seg.slot.trailing),
+            seg.segment_idx,
+            len(seg.slot.trailing),
         )
 
     def _coerce_embed_tensor(
@@ -1730,11 +1881,14 @@ class EngineLoop:
             if group is None:
                 continue
             self._total_timeouts += 1
-            self._send_result(group, EngineResult(
-                type=ResultType.ERROR,
-                session_id=sid,
-                error_msg=f"Session timeout ({self._session_timeout_sec}s exceeded)",
-            ))
+            self._send_result(
+                group,
+                EngineResult(
+                    type=ResultType.ERROR,
+                    session_id=sid,
+                    error_msg=f"Session timeout ({self._session_timeout_sec}s exceeded)",
+                ),
+            )
             self._remove_session(sid)
             logger.warning("Session %s timed out", sid)
 

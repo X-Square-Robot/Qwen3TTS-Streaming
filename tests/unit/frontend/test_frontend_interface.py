@@ -101,6 +101,7 @@ def test_token_mode_preserves_whitespace_only_chunks():
 def test_cross_packet_keycap_emoji_does_not_leak_base_digit():
     """A keycap '1️⃣' split across two transport packets must not feed the bare
     base digit '1' to the backend (Stage-0 cross-packet carry)."""
+
     async def run():
         inbox = asyncio.Queue(maxsize=64)
         interface = FrontendInterface(
@@ -119,14 +120,16 @@ def test_cross_packet_keycap_emoji_does_not_leak_base_digit():
             ),
         )
 
-        await interface.push_text_input("kc", "hello1")     # keycap base, sequence incomplete
-        await interface.push_text_input("kc", "️⃣world")    # VS-16 + combining keycap
+        await interface.push_text_input(
+            "kc", "hello1"
+        )  # keycap base, sequence incomplete
+        await interface.push_text_input("kc", "️⃣world")  # VS-16 + combining keycap
         await interface.mark_input_complete("kc")
 
         requests = await _drain_requests(inbox)
         token_ids = [tid for r in requests for tid in (r.token_ids or [])]
         text = "".join(chr(t) for t in token_ids)
-        assert ord("1") not in token_ids, text   # the '1' must not reach the backend
+        assert ord("1") not in token_ids, text  # the '1' must not reach the backend
         assert "hello" in text and "world" in text, text
 
     asyncio.run(run())
@@ -162,11 +165,12 @@ def test_token_mode_serial_segments_defers_session_done_until_buffer_drains():
 
         initial = await _drain_requests(inbox)
         assert any(
-            request.type == RequestType.SEGMENT_TOKENS_DONE
-            and request.segment_idx == 0
+            request.type == RequestType.SEGMENT_TOKENS_DONE and request.segment_idx == 0
             for request in initial
         )
-        assert not any(request.type == RequestType.SESSION_TOKENS_DONE for request in initial)
+        assert not any(
+            request.type == RequestType.SESSION_TOKENS_DONE for request in initial
+        )
 
         await session.result_queue.put(
             EngineResult(
@@ -232,14 +236,14 @@ def test_token_mode_final_punct_flush_sends_session_done_without_empty_segment()
 
         initial = await _drain_requests(inbox)
         assert any(
-            request.type == RequestType.SEGMENT_TOKENS_DONE
-            and request.segment_idx == 0
+            request.type == RequestType.SEGMENT_TOKENS_DONE and request.segment_idx == 0
             for request in initial
         )
-        assert any(request.type == RequestType.SESSION_TOKENS_DONE for request in initial)
+        assert any(
+            request.type == RequestType.SESSION_TOKENS_DONE for request in initial
+        )
         assert not any(
-            request.type == RequestType.START_TOKENS
-            and request.segment_idx == 1
+            request.type == RequestType.START_TOKENS and request.segment_idx == 1
             for request in initial
         )
 
@@ -342,11 +346,14 @@ def test_tokenizer_observability_logs_raw_and_normalized_text(caplog):
         interface._tokenize_segment_text("湿度19%，气温为23℃。")
 
     observability_logs = [
-        record.message for record in caplog.records
+        record.message
+        for record in caplog.records
         if "Tokenizer observability:" in record.message
     ]
     assert observability_logs, "expected tokenizer observability logs"
-    payload = json.loads(observability_logs[-1].split("Tokenizer observability: ", 1)[1])
+    payload = json.loads(
+        observability_logs[-1].split("Tokenizer observability: ", 1)[1]
+    )
     assert payload["field"] == "segment_text"
     assert payload["normalized_text"] == "湿度19%，气温为23℃。"
     assert payload["tokenizer"]["ids"]

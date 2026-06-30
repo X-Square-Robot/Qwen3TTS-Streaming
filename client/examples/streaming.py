@@ -49,7 +49,10 @@ def main() -> None:
                 sample_rate = int(message.audio.sample_rate)
                 encoding = message.audio.encoding or encoding
         elif isinstance(message, StreamEvent):
-            print(f"event: {message.type}" + (f" — {message.message}" if message.message else ""))
+            print(
+                f"event: {message.type}"
+                + (f" — {message.message}" if message.message else "")
+            )
             if message.type == "error":
                 return
 
@@ -61,6 +64,7 @@ def main() -> None:
 def _save_wav(path: str, pcm: bytes, encoding: str, sample_rate: int) -> None:
     if encoding == "pcm_f32":
         import array
+
         floats = array.array("f")
         floats.frombytes(pcm)
         pcm = b"".join(

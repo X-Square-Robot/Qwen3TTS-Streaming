@@ -65,29 +65,40 @@ def test_stream_request_keeps_empty_task_type_when_client_omits_it():
 
 
 def test_make_capabilities_response_maps_contract_fields():
-    response = _make_capabilities_response({
-        "variant": "custom-1.7b",
-        "loaded_model_type": "custom_voice",
-        "declared_supported_task_types": ["custom_voice"],
-        "supported_input_modes": ["token", "full_text"],
-        "supported_group_policies": ["none", "auto"],
-        "supported_audio_formats": [
-            {"encoding": "pcm_f32", "sample_rate": 24000, "channels": 1},
-            {"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 1},
-        ],
-        "ref_audio_available": False,
-        "ref_audio_reason": "voice_clone unavailable",
-        "speaker_encoder_available": True,
-        "ref_codec_available": True,
-        "icl_available": True,
-        "ref_audio_max_duration_sec": 8.0,
-        "ref_c2w_warm_state_available": False,
-        "ref_codec_reason": "",
-        "protocol_version": "tts-session-v2alpha1",
-        "supported_output_policy_features": ["request_context", "timing_context", "vad_policy"],
-        "supported_vad_strategies": ["disabled", "prefix_trim", "tail_guard", "hybrid"],
-        "supported_timing_fields": ["client_request_ts_ms", "server_ttft_ms"],
-    })
+    response = _make_capabilities_response(
+        {
+            "variant": "custom-1.7b",
+            "loaded_model_type": "custom_voice",
+            "declared_supported_task_types": ["custom_voice"],
+            "supported_input_modes": ["token", "full_text"],
+            "supported_group_policies": ["none", "auto"],
+            "supported_audio_formats": [
+                {"encoding": "pcm_f32", "sample_rate": 24000, "channels": 1},
+                {"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 1},
+            ],
+            "ref_audio_available": False,
+            "ref_audio_reason": "voice_clone unavailable",
+            "speaker_encoder_available": True,
+            "ref_codec_available": True,
+            "icl_available": True,
+            "ref_audio_max_duration_sec": 8.0,
+            "ref_c2w_warm_state_available": False,
+            "ref_codec_reason": "",
+            "protocol_version": "tts-session-v2alpha1",
+            "supported_output_policy_features": [
+                "request_context",
+                "timing_context",
+                "vad_policy",
+            ],
+            "supported_vad_strategies": [
+                "disabled",
+                "prefix_trim",
+                "tail_guard",
+                "hybrid",
+            ],
+            "supported_timing_fields": ["client_request_ts_ms", "server_ttft_ms"],
+        }
+    )
 
     assert response.variant == "custom-1.7b"
     assert response.loaded_model_type == "custom_voice"
@@ -100,7 +111,9 @@ def test_make_capabilities_response_maps_contract_fields():
         tts_pb2.GROUP_POLICY_NONE,
         tts_pb2.GROUP_POLICY_AUTO,
     ]
-    assert response.supported_audio_formats[1].encoding == tts_pb2.AUDIO_ENCODING_PCM_S16LE
+    assert (
+        response.supported_audio_formats[1].encoding == tts_pb2.AUDIO_ENCODING_PCM_S16LE
+    )
     assert response.supported_audio_formats[1].sample_rate == 16000
     assert response.ref_audio_available is False
     assert response.speaker_encoder_available is True
@@ -125,7 +138,12 @@ def test_get_capabilities_returns_engine_contract():
                 "variant": "custom-1.7b",
                 "loaded_model_type": "custom_voice",
                 "declared_supported_task_types": ["custom_voice"],
-                "supported_input_modes": ["token", "clause", "long_segment", "full_text"],
+                "supported_input_modes": [
+                    "token",
+                    "clause",
+                    "long_segment",
+                    "full_text",
+                ],
                 "supported_group_policies": ["none", "auto"],
                 "supported_audio_formats": [
                     {"encoding": "pcm_f32", "sample_rate": 24000, "channels": 1},
@@ -161,7 +179,9 @@ def test_streaming_audio_is_not_blocked_by_next_text_chunk():
         def describe_capabilities(self):
             return {}
 
-        async def start_session(self, session_id, *, config, on_audio=None, on_done=None, on_event=None):
+        async def start_session(
+            self, session_id, *, config, on_audio=None, on_done=None, on_event=None
+        ):
             self._on_audio = on_audio
             self._on_done = on_done
             self._on_event = on_event
@@ -171,12 +191,14 @@ def test_streaming_audio_is_not_blocked_by_next_text_chunk():
             async def _emit():
                 await asyncio.sleep(0.01)
                 await self._on_audio(session_id, b"\x00\x00\x00\x00")
+
             asyncio.create_task(_emit())
 
         async def mark_input_complete(self, session_id):
             async def _finish():
                 await asyncio.sleep(0.01)
                 await self._on_done(session_id, {})
+
             asyncio.create_task(_finish())
 
         async def cancel(self, session_id):
@@ -222,7 +244,9 @@ def test_streaming_text_protocol_events_are_forwarded():
         def describe_capabilities(self):
             return {}
 
-        async def start_session(self, session_id, *, config, on_audio=None, on_done=None, on_event=None):
+        async def start_session(
+            self, session_id, *, config, on_audio=None, on_done=None, on_event=None
+        ):
             self._on_audio = on_audio
             self._on_done = on_done
             self._on_event = on_event
@@ -283,7 +307,8 @@ def test_streaming_text_protocol_events_are_forwarded():
     assert event_types[:3] == ["start", "text_token", "text_boundary_commit"]
     assert "done" in event_types
     boundary = next(
-        response.event for response in responses
+        response.event
+        for response in responses
         if response.WhichOneof("response") == "event"
         and response.event.type == "text_boundary_commit"
     )
@@ -351,7 +376,9 @@ def test_start_request_from_stream_request_round_trips_output_policy_and_timing(
     assert start.timing.extra["client_clock"] == "synced"
     assert start.config.output_policy.vad.strategy == "prefix_trim"
     assert start.config.timing.turn_id == "turn-1"
-    assert start.config.timing.extra["client_protocol_version"] == "tts-session-v2alpha1"
+    assert (
+        start.config.timing.extra["client_protocol_version"] == "tts-session-v2alpha1"
+    )
 
 
 def test_stream_request_recovers_vad_tuning_params_from_config_map():
@@ -403,12 +430,16 @@ def test_start_request_from_oneshot_request_defaults_vad_to_disabled():
 
 def test_validate_audio_config_rejects_non_mono():
     with pytest.raises(ValueError, match="mono only"):
-        _validate_audio_config(AudioConfig(channels=2, sample_rate=24000, encoding=AudioEncoding.PCM_F32))
+        _validate_audio_config(
+            AudioConfig(channels=2, sample_rate=24000, encoding=AudioEncoding.PCM_F32)
+        )
 
 
 def test_validate_audio_config_rejects_unsupported_sample_rate():
     with pytest.raises(ValueError, match="expected 16000 or 24000"):
-        _validate_audio_config(AudioConfig(channels=1, sample_rate=22050, encoding=AudioEncoding.PCM_F32))
+        _validate_audio_config(
+            AudioConfig(channels=1, sample_rate=22050, encoding=AudioEncoding.PCM_F32)
+        )
 
 
 def test_streaming_audio_response_includes_timing_meta():
@@ -421,7 +452,9 @@ def test_streaming_audio_response_includes_timing_meta():
         def describe_capabilities(self):
             return {}
 
-        async def start_session(self, session_id, *, config, on_audio=None, on_done=None, on_event=None):
+        async def start_session(
+            self, session_id, *, config, on_audio=None, on_done=None, on_event=None
+        ):
             self._on_audio = on_audio
             self._on_done = on_done
             self._on_event = on_event
@@ -467,11 +500,11 @@ def test_streaming_audio_response_includes_timing_meta():
 
     responses = asyncio.run(_run())
     audio_response = next(
-        response for response in responses
-        if response.WhichOneof("response") == "audio"
+        response for response in responses if response.WhichOneof("response") == "audio"
     )
     done_response = next(
-        response for response in responses
+        response
+        for response in responses
         if response.WhichOneof("response") == "event" and response.event.type == "done"
     )
 
