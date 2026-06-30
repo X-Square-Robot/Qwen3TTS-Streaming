@@ -82,6 +82,9 @@ def test_offline_set_full_text_finds_global_optimal_l1_cut():
 def test_streaming_feed_once_snaps_to_l2_comma():
     """Streaming path fragments at the L2 comma — the local-optimum problem.
 
+    Since Step 2, the streaming path emits explicit coordinates (group_idx ==
+    segment_idx, each segment its own group) instead of the -1 sentinel.
+
     # WILL CHANGE @ Step 3/5: auto + bin-packing + watermark should let the
     # streaming/auto path approach the offline cut instead of snapping to L2.
     """
@@ -89,8 +92,8 @@ def test_streaming_feed_once_snaps_to_l2_comma():
     segs = _summarize(sp.feed_tokens(_toks(SIGNATURE)))
 
     assert [(s["seg"], s["group"], s["text"]) for s in segs] == [
-        (0, -1, "你好吗？明天天气不错，"),   # WILL CHANGE @ Step 2 (group -1) and Step 3/5 (L2 snap)
-        (1, -1, "有没有什么想吃的？"),
+        (0, 0, "你好吗？明天天气不错，"),   # WILL CHANGE @ Step 3/5 (L2 snap)
+        (1, 1, "有没有什么想吃的？"),
     ]
 
 

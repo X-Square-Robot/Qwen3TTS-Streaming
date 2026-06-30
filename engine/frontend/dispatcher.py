@@ -70,10 +70,12 @@ class Dispatcher:
             seg_idx = sa.segment_idx
             action = sa.action
             priority = self._segment_priority(session, sa)
+            # Spliter always emits explicit coordinates (a streaming segment is
+            # its own group with group_idx == segment_idx); no -1 sentinel.
             order_meta = SegmentOrderMeta(
-                group_idx=sa.group_idx if sa.group_idx >= 0 else seg_idx,
-                local_idx=sa.local_idx if sa.group_idx >= 0 else 0,
-                group_final=sa.group_final if sa.group_idx >= 0 else True,
+                group_idx=sa.group_idx,
+                local_idx=sa.local_idx,
+                group_final=sa.group_final,
             )
 
             if action.type == ActionType.PREFILL:
@@ -148,12 +150,8 @@ class Dispatcher:
         if spliter is None:
             return True
 
-        pending_groups = getattr(spliter, "_presplit_groups", None)
-        if pending_groups:
-            return False
-
-        token_buffer = getattr(spliter, "_token_buffer", None)
-        if token_buffer:
+        pending = getattr(spliter, "_pending", None)
+        if pending:
             return False
 
         drivers = getattr(spliter, "_drivers", {}) or {}

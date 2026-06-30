@@ -94,12 +94,17 @@ class SegmentAction:
 
 
 @dataclass
-class PendingGroup:
-    """One offline pre-split group with a resumable read cursor."""
-    group_idx: int
-    tokens: List[SegmentToken]
-    cursor: int = 0
-    next_local_idx: int = 0
+class _PendingToken:
+    """One queued token awaiting a driver slot in the unified pipeline.
+
+    ``group_idx`` is the offline pre-split group id, or ``None`` for a streaming
+    token (each streaming segment is its own top-level group — see Option ①).
+    ``boundary`` marks the last token of an offline group: the driver is
+    force-flushed right after it.
+    """
+    token: SegmentToken
+    group_idx: Optional[int]
+    boundary: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -151,19 +156,22 @@ class Spliter:
         self._l2_split_cap_ratio = l2_split_cap_ratio
         self._l3_split_cap_ratio = l3_split_cap_ratio
 
-        # Offline pre-split groups. Each group may still yield multiple
-        # backend segments because the Driver remains the final decider.
-        self._presplit_groups: Deque[PendingGroup] = deque()
+        # Unified pending-token queue. Replaces the old streaming token buffer
+        # and offline pre-split group deque: streaming and offline now feed one
+        # queue of `_PendingToken` and one driving core (`_drive_events`).
+        self._pending: Deque[_PendingToken] = deque()
         self._presplit_thresholds: Optional[SplitThresholds] = None
         self._next_group_idx: int = 0
-
-        # Streaming token buffer (streaming mode)
-        self._token_buffer: List[SegmentToken] = []
         self._input_complete: bool = False
 
         # Per-segment drivers; key = segment_idx
         self._drivers: dict[int, StreamingDriver] = {}
         self._next_segment_idx: int = 0
+
+        # Coordinate metadata assigned when a segment is opened (Option ①):
+        self._seg_coords: dict[int, Tuple[int, int]] = {}   # segment_idx -> (group_idx, local_idx)
+        self._seg_group_key: dict[int, Optional[int]] = {}  # segment_idx -> offline group id (None = streaming)
+        self._group_next_local: dict[int, int] = {}         # offline group id -> next local_idx
 
         # Segments that have entered flush (engine still decoding pad)
         self._flushing: set[int] = set()
@@ -217,7 +225,7 @@ class Spliter:
         results: List[ActionResult],
         *,
         token_text: str = "",
-        group_idx: int = -1,
+        group_idx: Optional[int] = None,
         local_idx: int = 0,
         group_final: bool = True,
     ) -> Tuple[List[SegmentAction], bool]:
@@ -228,7 +236,14 @@ class Spliter:
         ``(actions, flushed)`` — callers own the post-flush control flow
         (start-next / break / buffer bookkeeping). Relies on the Driver FSM
         emitting FLUSH as the terminal action of a ``feed()`` call.
+
+        ``group_idx`` defaults to ``idx``: a streaming segment is its own
+        top-level group (local_idx=0, group_final=True), so the streaming and
+        offline paths share one explicit ``(group_idx, local_idx)`` coordinate
+        system and no ``-1`` sentinel reaches the dispatcher.
         """
+        if group_idx is None:
+            group_idx = idx
         out: List[SegmentAction] = []
         flushed = False
         for r in results:
@@ -368,25 +383,32 @@ class Spliter:
         """Offline mode: set complete token sequence, pre-split, drive all.
 
         Returns SegmentActions for up to max_concurrent segments.
-        Remaining work is queued by group and driven as previous segments flush.
+        Remaining work is queued and driven as previous segments flush.
         """
-        self._presplit_groups.clear()
+        self._pending.clear()
         self._next_group_idx = 0
         self._enqueue_presplit_groups(tokens)
         self._input_complete = True
 
-        return self._drive_presplit_batch()
+        return self._drive_events()
 
     def _enqueue_presplit_groups(
         self, tokens: List[SegmentToken],
     ) -> None:
-        """Pre-split a complete long segment and append its groups."""
+        """Pre-split tokens into L1 groups and enqueue them as pending tokens.
+
+        Each group gets a monotonic ``group_idx``; the group's last token is
+        marked ``boundary`` so the driving core force-flushes at the group end.
+        """
         self._presplit_thresholds = self._make_thresholds()
         for seg_tokens in self.pre_split(tokens):
-            self._presplit_groups.append(
-                PendingGroup(self._next_group_idx, seg_tokens),
-            )
+            if not seg_tokens:
+                continue
+            gid = self._next_group_idx
             self._next_group_idx += 1
+            last = len(seg_tokens) - 1
+            for i, tok in enumerate(seg_tokens):
+                self._pending.append(_PendingToken(tok, gid, boundary=(i == last)))
 
     def push_group_tokens(
         self, tokens: List[SegmentToken],
@@ -401,72 +423,133 @@ class Spliter:
         if not tokens:
             return []
         self._enqueue_presplit_groups(tokens)
-        return self._drive_presplit_batch()
+        return self._drive_events()
 
-    def _drive_presplit_batch(self) -> List[SegmentAction]:
-        """Drive as many queued offline groups as concurrency allows."""
+    # ------------------------------------------------------------------
+    # Unified driving core
+    # ------------------------------------------------------------------
+
+    def _drive_events(self) -> List[SegmentAction]:
+        """Drive the pending queue through the active-driver chain.
+
+        Streaming and offline share this core: one active driver accumulates
+        tokens across calls; offline ``boundary`` tokens force a flush;
+        concurrency gates how many segments are in flight. Loops until no
+        further progress is possible (queue drained / backpressure / an open
+        streaming segment waiting for more text).
+        """
         actions: List[SegmentAction] = []
-        while self._presplit_groups and self.active_segment_count < self._max_concurrent:
-            group = self._presplit_groups.popleft()
-            group_actions, has_remaining = self._drive_group(group)
-            actions.extend(group_actions)
-            if has_remaining:
-                self._presplit_groups.append(group)
+        while True:
+            seg_actions = self._drive_one_segment()
+            if not seg_actions:
+                break
+            actions.extend(seg_actions)
         return actions
 
-    def _drive_group(
-        self,
-        group: PendingGroup,
-    ) -> tuple[List[SegmentAction], bool]:
-        """Drive one offline group until it flushes or runs out of tokens.
+    def _drive_one_segment(self) -> List[SegmentAction]:
+        """Advance a single segment by one driving step.
 
-        Returns ``(actions, has_remaining_tokens)``. A pre-split group may
-        still yield multiple backend segments because the Driver keeps the
-        final authority to flush inside the group.
+        Opens a new segment if there is none active and a slot is free, feeds
+        pending tokens of the active segment's group until it flushes / a
+        boundary forces a flush / the queue drains / end-of-input flushes it.
+        Returns the actions produced, or ``[]`` when no progress is possible.
         """
-        # Recompute thresholds with the latest EMA before starting each new
-        # offline segment so long pre-split queues can benefit from ratio
-        # learning accumulated by earlier groups.
-        thresholds = self._make_thresholds()
-        self._presplit_thresholds = thresholds
-        idx, driver = self._create_driver(thresholds)
-        actions: List[SegmentAction] = []
+        out: List[SegmentAction] = []
+
+        active_idx = self._get_active_driver_idx()
+        if active_idx is None:
+            if not self._pending or self.active_segment_count >= self._max_concurrent:
+                return out  # nothing to do, or backpressure
+            active_idx = self._open_segment(out)
+
+        driver = self._drivers[active_idx]
+        group_idx, local_idx = self._seg_coords[active_idx]
+        cur_key = self._seg_group_key[active_idx]
+        is_stream = cur_key is None
         flushed = False
-        local_idx = group.next_local_idx
-        group.next_local_idx += 1
 
-        start_evt = SpliterEvent(type=ET.START)
-        start_actions, _ = self._results_to_actions(
-            idx, driver.feed(start_evt),
-            group_idx=group.group_idx, local_idx=local_idx, group_final=False,
-        )
-        actions.extend(start_actions)
-
-        while group.cursor < len(group.tokens):
-            token = group.tokens[group.cursor]
-            group.cursor += 1
-            evt = self._make_event(token.token_id, token.text, token.punct_level)
+        while self._pending and self._pending[0].group_idx == cur_key:
+            pt = self._pending.popleft()
+            evt = self._make_event(pt.token.token_id, pt.token.text, pt.token.punct_level)
             tok_actions, flushed = self._results_to_actions(
-                idx, driver.feed(evt), token_text=token.text,
-                group_idx=group.group_idx, local_idx=local_idx, group_final=False,
+                active_idx, driver.feed(evt), token_text=pt.token.text,
+                group_idx=group_idx, local_idx=local_idx, group_final=is_stream,
             )
-            actions.extend(tok_actions)
+            out.extend(tok_actions)
             if flushed:
+                self._finalize_segment(active_idx, out, group_exhausted=pt.boundary)
+                break
+            if pt.boundary:
+                end_actions, _ = self._results_to_actions(
+                    active_idx, driver.feed(SpliterEvent(type=ET.END)),
+                    group_idx=group_idx, local_idx=local_idx, group_final=is_stream,
+                )
+                out.extend(end_actions)
+                self._finalize_segment(active_idx, out, group_exhausted=True)
+                flushed = True
                 break
 
-        if not flushed:
-            end_evt = SpliterEvent(type=ET.END)
+        # Auto handoff (Step 3): if the next pending token belongs to a different
+        # group than the open segment, close the open segment at a clean
+        # boundary so the new group starts fresh. Does not trigger in pure
+        # streaming/offline sessions (one group key throughout).
+        if not flushed and self._pending and self._pending[0].group_idx != cur_key:
             end_actions, _ = self._results_to_actions(
-                idx, driver.feed(end_evt),
-                group_idx=group.group_idx, local_idx=local_idx, group_final=False,
+                active_idx, driver.feed(SpliterEvent(type=ET.END)),
+                group_idx=group_idx, local_idx=local_idx, group_final=is_stream,
             )
-            actions.extend(end_actions)
+            out.extend(end_actions)
+            self._finalize_segment(active_idx, out, group_exhausted=True)
+            flushed = True
 
-        group_final = group.cursor >= len(group.tokens)
+        # End-of-input: flush the open streaming segment once the queue drains.
+        if not flushed and self._input_complete and not self._pending:
+            end_actions, _ = self._results_to_actions(
+                active_idx, driver.feed(SpliterEvent(type=ET.END)),
+                group_idx=group_idx, local_idx=local_idx, group_final=is_stream,
+            )
+            out.extend(end_actions)
+            self._finalize_segment(active_idx, out, group_exhausted=True)
+
+        return out
+
+    def _open_segment(self, out: List[SegmentAction]) -> int:
+        """Create a driver for the next pending token's group, assign its
+        ``(group_idx, local_idx)`` coordinate (Option ①), emit START, and
+        return the new segment index."""
+        key = self._pending[0].group_idx
+        # Recompute thresholds with the latest EMA before each new segment so
+        # long offline queues benefit from ratio learning by earlier segments.
+        thresholds = self._make_thresholds()
+        if key is not None:
+            self._presplit_thresholds = thresholds
+        idx, driver = self._create_driver(thresholds)
+        if key is None:
+            group_idx, local_idx = idx, 0            # streaming: each segment its own group
+        else:
+            group_idx, local_idx = key, self._group_next_local.get(key, 0)
+        self._seg_coords[idx] = (group_idx, local_idx)
+        self._seg_group_key[idx] = key
+        start_actions, _ = self._results_to_actions(
+            idx, driver.feed(SpliterEvent(type=ET.START)),
+            group_idx=group_idx, local_idx=local_idx, group_final=(key is None),
+        )
+        out.extend(start_actions)
+        return idx
+
+    def _finalize_segment(
+        self, idx: int, actions: List[SegmentAction], *, group_exhausted: bool,
+    ) -> None:
+        """Stamp ``group_final`` on a just-flushed segment's actions and advance
+        its group's local counter. Streaming segments are always final; an
+        offline segment is final only when its group is exhausted."""
+        key = self._seg_group_key[idx]
+        group_final = key is None or group_exhausted
         for sa in actions:
-            sa.group_final = group_final
-
-        return actions, group.cursor < len(group.tokens)
+            if sa.segment_idx == idx:
+                sa.group_final = group_final
+        if key is not None and not group_exhausted:
+            self._group_next_local[key] = self._seg_coords[idx][1] + 1
 
     # ------------------------------------------------------------------
     # Public API: streaming
@@ -475,58 +558,20 @@ class Spliter:
     def feed_tokens(
         self, tokens: List[SegmentToken],
     ) -> List[SegmentAction]:
-        """Streaming mode: feed tokenized text, return actions.
+        """Streaming mode: queue tokens (each its own group) and drive.
 
-        Tokens are classified and fed to the current active Driver.
-        If the Driver produces a FLUSH, a new Driver is created for the
-        next segment (if concurrency allows).
+        Tokens accumulate into the active Driver across calls; when it flushes,
+        the next segment opens if concurrency allows, otherwise tokens wait in
+        the shared pending queue. The driver decides flush points (no boundary).
         """
-        classified = self._coerce_tokens(tokens)
-
-        actions: List[SegmentAction] = []
-
-        for token_idx, token in enumerate(classified):
-            active_idx = self._get_active_driver_idx()
-            if active_idx is None:
-                if self.active_segment_count < self._max_concurrent:
-                    boot = self._try_start_next()
-                    actions.extend(boot)
-                    active_idx = self._get_active_driver_idx()
-                if active_idx is None:
-                    self._token_buffer.append(token)
-                    continue
-
-            driver = self._drivers[active_idx]
-            evt = self._make_event(token.token_id, token.text, token.punct_level)
-            tok_actions, flushed = self._results_to_actions(
-                active_idx, driver.feed(evt), token_text=token.text,
-            )
-            actions.extend(tok_actions)
-            if flushed:
-                # Only pre-create the follow-up segment if we already know
-                # there is more text to feed. Creating an empty placeholder
-                # driver at the end of a chunk can block SESSION_TOKENS_DONE
-                # and leave the transport waiting forever for a terminal
-                # event.
-                has_more_classified = token_idx < len(classified) - 1
-                if has_more_classified or self._token_buffer:
-                    actions.extend(self._try_start_next())
-
-        return actions
+        for tok in self._coerce_tokens(tokens):
+            self._pending.append(_PendingToken(tok, None, boundary=False))
+        return self._drive_events()
 
     def input_done(self) -> List[SegmentAction]:
-        """Signal that no more tokens will arrive (streaming mode)."""
+        """Signal that no more tokens will arrive; flush the open segment."""
         self._input_complete = True
-        actions: List[SegmentAction] = []
-
-        active_idx = self._get_active_driver_idx()
-        if active_idx is not None:
-            driver = self._drivers[active_idx]
-            end_evt = SpliterEvent(type=ET.END)
-            end_actions, _ = self._results_to_actions(active_idx, driver.feed(end_evt))
-            actions.extend(end_actions)
-
-        return actions
+        return self._drive_events()
 
     def _get_active_driver_idx(self) -> Optional[int]:
         """Find the most recent non-flushing, non-done driver."""
@@ -535,34 +580,6 @@ class Spliter:
                 return idx
         return None
 
-    def _try_start_next(self) -> List[SegmentAction]:
-        """After a FLUSH, start a new segment if concurrency allows."""
-        if self.active_segment_count >= self._max_concurrent:
-            return []
-
-        actions: List[SegmentAction] = []
-        idx, driver = self._create_driver()
-
-        start_actions, _ = self._results_to_actions(idx, driver.feed(SpliterEvent(type=ET.START)))
-        actions.extend(start_actions)
-
-        # Drain any buffered tokens into the new driver
-        remaining: List[SegmentToken] = []
-        for i, token in enumerate(self._token_buffer):
-            evt = self._make_event(token.token_id, token.text, token.punct_level)
-            tok_actions, flushed = self._results_to_actions(idx, driver.feed(evt), token_text=token.text)
-            actions.extend(tok_actions)
-            if flushed:
-                remaining = self._token_buffer[i + 1:]
-                break
-        self._token_buffer = remaining
-
-        if self._input_complete and not self._token_buffer:
-            end_actions, _ = self._results_to_actions(idx, driver.feed(SpliterEvent(type=ET.END)))
-            actions.extend(end_actions)
-
-        return actions
-
     # ------------------------------------------------------------------
     # Engine feedback
     # ------------------------------------------------------------------
@@ -570,19 +587,16 @@ class Spliter:
     def on_segment_done(self, segment_idx: int) -> List[SegmentAction]:
         """Called when the engine reports SEGMENT_END for a segment.
 
-        Frees the segment's driver and may start the next queued segment
-        (offline pre-split) or drain the token buffer (streaming).
+        Frees the segment's driver/slot and drives any pending work that the
+        freed concurrency slot now allows (offline groups or streaming).
         """
         self._done.add(segment_idx)
         self._flushing.discard(segment_idx)
         self._drivers.pop(segment_idx, None)
+        self._seg_coords.pop(segment_idx, None)
+        self._seg_group_key.pop(segment_idx, None)
 
-        if self._presplit_thresholds is not None:
-            return self._drive_presplit_batch()
-
-        if self._token_buffer:
-            return self._try_start_next()
-        return []
+        return self._drive_events()
 
     def update_ratio(
         self, actual_audio_steps: int, actual_text_tokens: int,
@@ -652,13 +666,15 @@ class Spliter:
     # ------------------------------------------------------------------
 
     def reset(self) -> None:
-        self._presplit_groups.clear()
+        self._pending.clear()
         self._presplit_thresholds = None
         self._next_group_idx = 0
-        self._token_buffer.clear()
         self._input_complete = False
         self._drivers.clear()
         self._next_segment_idx = 0
+        self._seg_coords.clear()
+        self._seg_group_key.clear()
+        self._group_next_local.clear()
         self._flushing.clear()
         self._done.clear()
 
