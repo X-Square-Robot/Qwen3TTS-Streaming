@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
-  {name = "Qwen3-TTS Triton Contributors"}
+  {name = "Qwen3TTS-Streaming Contributors"}
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",

@@ -1,6 +1,6 @@
 # demo_api
 
-Qwen3-TTS Triton 的 WebUI 演示 API 服务。
+Qwen3TTS-Streaming 的 WebUI 演示 API 服务。
 
 ## 功能概述
 

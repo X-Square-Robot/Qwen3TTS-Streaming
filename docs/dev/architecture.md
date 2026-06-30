@@ -1,4 +1,4 @@
-# Qwen3-TTS Triton 流式推理服务架构设计
+# Qwen3TTS-Streaming 流式推理服务架构设计
 
 > **技术路线**: Triton Inference Server + TensorRT + ONNX Runtime
 >

@@ -102,7 +102,7 @@ generate_dockerfile() {
 
     cat > "$dockerfile" << 'DOCKERFILE'
 # ===========================================================================
-#  Dockerfile.triton — Self-contained Qwen3-TTS Triton deployment image
+#  Dockerfile.triton — Self-contained Qwen3TTS-Streaming deployment image
 #
 #  Base: NVIDIA Triton full py3 image (onnxruntime + tensorrt + python).
 #  Build: bash scripts/bash/build_triton.sh build --tag qwen3tts-streaming:latest

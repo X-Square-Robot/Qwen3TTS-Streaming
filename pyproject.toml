@@ -1,4 +1,4 @@
-# Qwen3-TTS Triton — dependency grouping and tool configuration.
+# Qwen3TTS-Streaming — dependency grouping and tool configuration.
 # This file is NOT a installable Python package definition — engine/, demo_api/,
 # and client/ are separate sub-projects with their own packaging.
 # It exists solely to:
@@ -10,7 +10,7 @@
 [project]
 name = "qwen3tts-streaming"
 version = "0.1.0"
-description = "Qwen3-TTS Triton inference system"
+description = "Qwen3TTS-Streaming inference system"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 

@@ -339,7 +339,7 @@ def _tts_request_from_body(body: dict[str, Any]) -> TtsRequest:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Qwen3-TTS Triton WebUI demo API")
+    parser = argparse.ArgumentParser(description="Qwen3TTS-Streaming WebUI demo API")
     parser.add_argument("--host", default=os.environ.get("QWEN_DEMO_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("QWEN_DEMO_PORT", "7860")))
     args = parser.parse_args()
