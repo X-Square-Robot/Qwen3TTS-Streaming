@@ -1,0 +1,39 @@
+Qwen3TTS-Streaming
+Copyright (c) 2026 XSquareRobot
+
+This product includes software developed by XSquareRobot, released under the
+MIT License (see LICENSE).
+
+------------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------------
+
+1. Qwen3-TTS (upstream model code)
+   - https://github.com/QwenLM/Qwen3-TTS
+   - License: Apache License 2.0
+   - Copyright Alibaba Cloud
+   - Included as a git submodule under third_party/Qwen3-TTS (not vendored).
+
+2. Qwen3-TTS model weights
+   - Published by Qwen / Alibaba on ModelScope and Hugging Face.
+   - Licensed under the terms shown on the respective model cards.
+   - NOT distributed with this repository; downloaded by the user at setup time.
+
+3. NVIDIA TensorRT and Triton Inference Server
+   - Provided as NVIDIA NGC container images (nvcr.io/nvidia/tensorrt,
+     nvcr.io/nvidia/tritonserver).
+   - Proprietary NVIDIA software, subject to the NVIDIA EULA.
+   - NOT bundled with this repository; pulled by the user at build/run time.
+
+4. Key open-source dependencies (permissive licenses)
+   - PyTorch (BSD-3-Clause), ONNX Runtime (MIT), gRPC (Apache-2.0),
+     protobuf (BSD-3-Clause), NumPy (BSD-3-Clause), PyYAML (MIT),
+     React / Vite / lucide-react (MIT), TypeScript (Apache-2.0).
+   - See each project for full license texts.
+
+------------------------------------------------------------------------------
+Reference audio
+------------------------------------------------------------------------------
+
+Reference audio under resources/speakers/ is SYNTHETIC and the speaker name is
+FICTITIOUS. It does not correspond to, or clone, any real person's voice.

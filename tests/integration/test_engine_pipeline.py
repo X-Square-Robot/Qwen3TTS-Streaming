@@ -93,25 +93,29 @@ class TestSpliter:
         assert len(segments) == 1
         assert len(segments[0]) == 10
 
-    def test_pre_split_at_l1_punct(self):
-        """Text with L1 punct should split at the punct boundary."""
+    def test_pre_split_packs_to_capacity_and_cuts_at_latest_l1(self):
+        """Bin-packing: an over-capacity sequence is cut at the LATEST L1 that
+        fits (not the first L1 past a low threshold), packing segments fuller."""
         from engine.frontend.spliter.spliter import Spliter
 
         spliter = Spliter(engine_max_decode_len=100, ema_ratio=2.0)
         th = spliter._make_thresholds()
 
-        tokens = []
-        for i in range(th.min_tokens_l1 + 5):
-            tokens.append((i, f"tok{i}"))
+        # Under-capacity prefix, an L1 near capacity, then enough more to push
+        # the total past capacity so a cut is forced.
+        tokens = [(i, f"tok{i}") for i in range(th.force_split_at - 5)]
         tokens.append((999, "句号。"))
-        tokens.append((1000, "后续"))
-        tokens.append((1001, "文本"))
+        tokens += [(1000 + i, f"more{i}") for i in range(th.force_split_at)]
 
         segments = spliter.pre_split(tokens)
-        assert len(segments) >= 2, f"Expected >=2 segments, got {len(segments)}"
+        assert len(segments) >= 2
+        # The forced cut lands on the L1 boundary (latest L1 within capacity).
+        assert segments[0][-1].punct_level == 1
 
-    def test_pre_split_does_not_snap_to_l2_in_offline_mode(self):
-        """Offline pre-split should avoid comma-level snap cuts."""
+    def test_pre_split_falls_back_to_l2_when_no_l1_fits(self):
+        """Bin-packing hierarchy: a single over-capacity run with no L1 is cut
+        at the latest L2 (a comma is a better breath point than a mid-phrase
+        hard cut) — the deliberate inverse of the old hard-cut philosophy."""
         from engine.frontend.spliter.spliter import Spliter
 
         spliter = Spliter(engine_max_decode_len=100, ema_ratio=2.0)
@@ -125,7 +129,7 @@ class TestSpliter:
 
         segments = spliter.pre_split(tokens)
         assert len(segments) >= 2
-        assert segments[0][-1].punct_level != 2, "offline pre-split should not end on L2 punctuation"
+        assert segments[0][-1].punct_level == 2, "no L1 fits -> fall back to L2 boundary"
 
     def test_streaming_feed_tokens(self):
         """Streaming mode: feed tokens one by one, expect segment actions."""

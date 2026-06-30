@@ -74,7 +74,7 @@ services:
 
   triton:
     profiles: ["triton"]
-    image: ${TRITON_IMAGE:-qwen3-tts-triton:26.02}
+    image: ${TRITON_IMAGE:-qwen3tts-streaming:26.02}
     build:
       context: ../..
       dockerfile: infra/docker/Dockerfile.triton
@@ -82,7 +82,7 @@ services:
         BASE_IMAGE: ${TRITON_BASE_IMAGE:-nvcr.io/nvidia/tritonserver:26.02-py3}
         TENSORRT_PYTHON_VERSION: ${TRITON_TENSORRT_PYTHON_VERSION:-10.15.1.29}
         PYTORCH_CUDA_TAG: ${TRITON_PYTORCH_CUDA_TAG:-cu130}
-    container_name: ${TRITON_CONTAINER_NAME:-qwen3-tts-triton}
+    container_name: ${TRITON_CONTAINER_NAME:-qwen3tts-streaming}
     environment:
       MAX_BATCH_SLOTS: ${TRITON_MAX_BATCH_SLOTS:-128}
       ENGINE_MAX_DECODE_LEN: ${TRITON_MAX_SEQ_LEN:-512}

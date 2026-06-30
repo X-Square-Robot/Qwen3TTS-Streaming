@@ -79,6 +79,43 @@ def _next_non_emoji_char(text: str, start: int) -> str:
     return text[i] if i < len(text) else ""
 
 
+def _incomplete_emoji_suffix_len(text: str) -> int:
+    """Length of a trailing suffix that may begin an *incomplete* emoji sequence
+    split across transport packets.
+
+    The only sequence whose stripping flips based on following code points is the
+    keycap: a base ``0-9 # *`` (NOT an emoji on its own) optionally followed by
+    VS-16 (U+FE0F), still awaiting the combining keycap U+20E3. If a packet ends
+    on such a prefix, the base would otherwise leak into spoken text (e.g. the
+    ``1`` of ``1️⃣`` split as ``...1`` | ``️⃣...``). ZWJ / skin-tone / flag /
+    variation-selector splits don't leak (both halves are emoji code points and
+    get stripped independently), so they need no holding.
+    """
+    n = len(text)
+    if n == 0:
+        return 0
+    if text[-1] in "0123456789#*":
+        return 1
+    if n >= 2 and ord(text[-1]) == 0xFE0F and text[-2] in "0123456789#*":
+        return 2
+    return 0
+
+
+def split_pending_emoji(text: str) -> tuple[str, str]:
+    """Split ``text`` into ``(emit_now, hold_for_next_packet)``.
+
+    The held suffix is a potential incomplete emoji-sequence prefix (see
+    ``_incomplete_emoji_suffix_len``); a stateful Stage-0 filter prepends it to
+    the next packet, or flushes it at end-of-input. Stateless callers that have
+    the whole text (e.g. FULL_TEXT) don't need this.
+    """
+    hold = _incomplete_emoji_suffix_len(text)
+    if not hold:
+        return text, ""
+    cut = len(text) - hold
+    return text[:cut], text[cut:]
+
+
 def strip_emoji(text: str) -> str:
     """Remove emoji while keeping normal text and punctuation intact."""
     if not text:
@@ -126,4 +163,4 @@ def strip_emoji(text: str) -> str:
     return "".join(out)
 
 
-__all__ = ("is_emoji_char", "strip_emoji")
+__all__ = ("is_emoji_char", "strip_emoji", "split_pending_emoji")

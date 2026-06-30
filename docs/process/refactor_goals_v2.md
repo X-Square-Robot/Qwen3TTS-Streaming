@@ -163,7 +163,7 @@ qwen3tts probe
 
 ```toml
 [project]
-name = "qwen3-tts-triton"
+name = "qwen3tts-streaming"
 version = "0.1.0"
 
 [project.optional-dependencies]
@@ -183,7 +183,7 @@ demo = ["aiohttp>=3.9", "qwen3-tts-client[all]"]
 export = ["torch>=2.1", "safetensors", "transformers"]
 
 # 开发全量
-dev = ["qwen3-tts-triton[test,engine,client,demo,export]"]
+dev = ["qwen3tts-streaming[test,engine,client,demo,export]"]
 
 [project.scripts]
 qwen3tts = "qwen3tts_cli:main"

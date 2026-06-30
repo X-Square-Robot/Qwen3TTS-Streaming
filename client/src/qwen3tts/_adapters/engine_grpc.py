@@ -222,7 +222,9 @@ def _input_mode_to_proto(value: str):
         "long_segment": tts_pb2.INPUT_MODE_LONG_SEGMENT,
         "full_text": tts_pb2.INPUT_MODE_FULL_TEXT,
     }
-    return mapping.get(str(value or "").strip().lower(), tts_pb2.INPUT_MODE_LONG_SEGMENT)
+    # Unset or "auto" -> UNSPECIFIED so the server applies its per-RPC default
+    # (AUTO for streaming, FULL_TEXT for once) rather than the client pinning a mode.
+    return mapping.get(str(value or "").strip().lower(), tts_pb2.INPUT_MODE_UNSPECIFIED)
 
 
 def _group_policy_to_proto(value: str):

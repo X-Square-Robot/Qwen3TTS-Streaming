@@ -10,5 +10,15 @@ dist/
 webui/node_modules/
 webui/dist/
 webui/tsconfig.tsbuildinfo
-.*
 *.egg-info
+
+# Local / secrets / tooling dotfiles (NOT a blanket ".*", which would also
+# hide .github/, .gitmodules, .env.example, etc.)
+.env
+.venv/
+venv/
+.DS_Store
+.idea/
+.claude/
+.vscode/*
+!.vscode/launch.json

@@ -158,7 +158,7 @@ class WebSocketGateway:
                                 raise ValueError("websocket session has already been started")
                             start_request = _start_request_from_ws_message(
                                 message,
-                                default_mode=InputMode.LONG_SEGMENT,
+                                default_mode=InputMode.AUTO,
                             )
                             session_id = await self._create_session(
                                 message.get("session_id"),
@@ -631,11 +631,13 @@ def _input_mode_from_ws_value(value: Any, *, default_mode: InputMode) -> InputMo
             2: InputMode.CLAUSE,
             3: InputMode.LONG_SEGMENT,
             4: InputMode.FULL_TEXT,
+            5: InputMode.AUTO,
         }
         if value in mapping:
             return mapping[value]
     normalized = str(value).strip().lower()
     mapping = {
+        "auto": InputMode.AUTO,
         "token": InputMode.TOKEN,
         "clause": InputMode.CLAUSE,
         "long_segment": InputMode.LONG_SEGMENT,

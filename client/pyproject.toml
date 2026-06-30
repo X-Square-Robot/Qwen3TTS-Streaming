@@ -46,8 +46,8 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/user/Qwen3-TTS-Triton"
-Documentation = "https://github.com/user/Qwen3-TTS-Triton/blob/main/docs/user/client_sdk.md"
+Homepage = "https://github.com/X-Square-Robot/Qwen3TTS-Streaming"
+Documentation = "https://github.com/X-Square-Robot/Qwen3TTS-Streaming/blob/main/docs/user/client_sdk.md"
 
 [tool.setuptools]
 include-package-data = true

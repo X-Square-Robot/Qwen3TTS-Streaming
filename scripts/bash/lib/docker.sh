@@ -21,7 +21,7 @@
 #      - Phase C: Triton server with tensorrt + onnxruntime + python backends
 #                 + torch/tokenizers + COPY engine/ (Dockerfile.triton)
 #
-#  Deploy image: qwen3-tts-triton:xx.yy (Triton base + pip + bundled engine/)
+#  Deploy image: qwen3tts-streaming:xx.yy (Triton base + pip + bundled engine/)
 # ===========================================================================
 
 [[ -n "${_LIB_DOCKER_LOADED:-}" ]] && return 0
@@ -36,7 +36,7 @@ _NGC_TRITON_BASE="nvcr.io/nvidia/tritonserver"
 _NGC_PY3_SUFFIX="-py3"
 
 # Deploy image name (built from -py3 + torch/tokenizers)
-_DEPLOY_IMAGE_NAME="qwen3-tts-triton"
+_DEPLOY_IMAGE_NAME="qwen3tts-streaming"
 
 # Minimum driver for NGC images with TensorRT 10+ and CUDA 12.4+
 _QWEN3_MIN_DRIVER="550.54"

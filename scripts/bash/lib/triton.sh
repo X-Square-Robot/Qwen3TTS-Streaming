@@ -911,15 +911,15 @@ DOCKERFILE
 # ---------------------------------------------------------------------------
 triton_resolve_container_name() {
     local repo_dir="$1"
-    local cname="${2:-qwen3-tts-triton}"
+    local cname="${2:-qwen3tts-streaming}"
     local variant_cli="${3:-}"
 
-    if [ "$cname" != "qwen3-tts-triton" ]; then
+    if [ "$cname" != "qwen3tts-streaming" ]; then
         printf '%s\n' "$cname"
         return 0
     fi
     if [ -n "$variant_cli" ]; then
-        printf '%s\n' "qwen3-tts-triton-${variant_cli}"
+        printf '%s\n' "qwen3tts-streaming-${variant_cli}"
         return 0
     fi
     local config_file="$repo_dir/tts_orchestrator/config.pbtxt"
@@ -927,11 +927,11 @@ triton_resolve_container_name() {
         local var_val
         var_val=$(grep -A 1 'key: "model_variant"' "$config_file" | grep 'string_value' | cut -d'"' -f2 || true)
         if [ -n "$var_val" ]; then
-            printf '%s\n' "qwen3-tts-triton-${var_val}"
+            printf '%s\n' "qwen3tts-streaming-${var_val}"
             return 0
         fi
     fi
-    printf '%s\n' "qwen3-tts-triton"
+    printf '%s\n' "qwen3tts-streaming"
 }
 
 # ---------------------------------------------------------------------------
@@ -942,7 +942,7 @@ triton_resolve_container_name() {
 triton_run() {
     local repo_dir="$1"
     local image="${2:-}"
-    local cname_arg="${3:-qwen3-tts-triton}"
+    local cname_arg="${3:-qwen3tts-streaming}"
     shift 3 2>/dev/null || true
 
     if [ -z "$image" ]; then
@@ -1045,7 +1045,7 @@ triton_health_check() {
 #  Stops and removes a running Triton container.
 # ---------------------------------------------------------------------------
 triton_stop() {
-    local container_name="${1:-qwen3-tts-triton}"
+    local container_name="${1:-qwen3tts-streaming}"
 
     # Exact name only (docker ps --filter name= is substring match and caused false positives)
     if ! docker container inspect "$container_name" &>/dev/null; then

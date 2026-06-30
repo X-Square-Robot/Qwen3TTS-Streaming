@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://qwen3-tts-triton.local/schemas/triton_manifest.schema.json",
+  "$id": "https://qwen3tts-streaming.local/schemas/triton_manifest.schema.json",
   "title": "Triton deployment manifest",
   "type": "object",
   "required": ["schema_version", "variant"],

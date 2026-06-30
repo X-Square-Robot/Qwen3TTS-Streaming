@@ -380,71 +380,81 @@ class Spliter:
     def pre_split(
         self, tokens: List[SegmentToken],
     ) -> List[List[SegmentToken]]:
-        """Split a fully-known token sequence at L1 punctuation boundaries.
+        """Pack a fully-known token sequence into capacity-sized segments,
+        cutting at the LATEST safe boundary (hierarchical bin-packing).
 
-        Returns list of segments, each segment is ``SegmentToken`` sequence.
+        Unlike the streaming Driver (first-fit past a low threshold, no
+        foresight), offline pre-split sees the whole sequence, so it packs L1
+        units up to one segment's capacity and cuts at the *latest* boundary
+        that fits — preferring L1 (。！？), falling back to L2 (，；：) then L3,
+        and hard-cutting only when a single unit alone exceeds capacity. This
+        yields fewer, fuller, prosody-continuous segments than cutting at the
+        first L1, and avoids orphaning a trailing punctuation token.
 
-        Unlike the streaming Driver (which uses L1/L2/L3 thresholds because it
-        lacks global visibility), offline pre-split only cuts at L1 (。！？)
-        for optimal prosody and fewer segments.
-
-        Algorithm:
-          1. Greedy scan; split at L1 punctuation when token_count >= min_tokens_l1.
-          2. If force_split_at is reached without an L1 split, prefer L1 only;
-             otherwise hard-cut at the current position instead of snapping
-             to L2/L3 punctuation. This avoids exaggerated prosodic breaks
-             on commas / formatting newlines in fully-known long sentences.
+        Capacity is the live ``force_split_at`` (EMA-derived single-segment
+        budget). Each resulting group is driven in obey mode (raised driver
+        thresholds, see ``_open_segment``) so the Driver does not re-fragment
+        the packed group at its own internal L1/L2/L3 thresholds.
         """
         if not tokens:
             return []
 
         th = self._make_thresholds()
+        capacity = th.force_split_at
         source_tokens = self._coerce_tokens(tokens)
         segments: List[List[SegmentToken]] = []
         current: List[SegmentToken] = []
-        last_l1: int = -1
+        last = {1: -1, 2: -1, 3: -1}   # latest index of each punct tier in `current`
+
         def _flush_at(pos: int) -> None:
-            nonlocal current, last_l1
-            split_at = pos + 1
-            segments.append(current[:split_at])
-            remaining = current[split_at:]
-            current = remaining
-            last_l1 = -1
-            for j, token in enumerate(current):
-                if token.punct_level == 1:
-                    last_l1 = j
+            nonlocal current
+            segments.append(current[: pos + 1])
+            current = current[pos + 1:]
+            last[1] = last[2] = last[3] = -1
+            for j, tok in enumerate(current):
+                if tok.punct_level in last:
+                    last[tok.punct_level] = j
 
         for token in source_tokens:
             current.append(token)
             n = len(current)
+            if token.punct_level in last:
+                last[token.punct_level] = n - 1
 
-            if token.punct_level == 1:
-                last_l1 = n - 1
-
-            if token.punct_level == 1 and n >= th.min_tokens_l1:
-                _flush_at(n - 1)
-                self._record_split(
-                    "l1_punct", th, segments[-1], n - 1, 1,
-                    f"L1 punct at {n} tokens >= min_tokens_l1({th.min_tokens_l1})",
-                )
-            elif n >= th.force_split_at:
-                if last_l1 >= 0:
-                    prev_last_l1 = last_l1
-                    _flush_at(last_l1)
+            if n >= capacity:
+                # Must cut: take the latest boundary that fits, by tier; only
+                # hard-cut when a single unit has no usable punctuation.
+                # (positions captured before _flush_at resets the `last` map.)
+                if last[1] >= 0:
+                    pos = last[1]
+                    _flush_at(pos)
                     self._record_split(
-                        "force_fallback_l1", th, segments[-1], prev_last_l1, 1,
-                        f"force_split_at({th.force_split_at}) reached without fresh L1; "
-                        f"fell back to last L1 at pos {prev_last_l1}",
+                        "l1", th, segments[-1], pos, 1,
+                        f"packed to capacity({capacity}); cut at latest L1 boundary pos {pos}",
+                    )
+                elif last[2] >= 0:
+                    pos = last[2]
+                    _flush_at(pos)
+                    self._record_split(
+                        "l2", th, segments[-1], pos, 2,
+                        f"packed to capacity({capacity}); no L1, cut at latest L2 boundary pos {pos}",
+                    )
+                elif last[3] >= 0:
+                    pos = last[3]
+                    _flush_at(pos)
+                    self._record_split(
+                        "l3", th, segments[-1], pos, 3,
+                        f"packed to capacity({capacity}); no L1/L2, cut at latest L3 boundary pos {pos}",
                     )
                 else:
                     segments.append(current)
                     self._record_split(
-                        "force_hard_cut", th, segments[-1], -1, 0,
-                        f"force_split_at({th.force_split_at}) reached, no L1 since "
-                        f"segment start; hard cut",
+                        "hard_cut", th, segments[-1], -1, 0,
+                        f"packed to capacity({capacity}); single unit has no usable "
+                        f"punctuation; hard cut",
                     )
                     current = []
-                    last_l1 = -1
+                    last[1] = last[2] = last[3] = -1
 
         if current:
             segments.append(current)
@@ -601,9 +611,25 @@ class Spliter:
         thresholds = self._make_thresholds()
         if key is not None:
             self._presplit_thresholds = thresholds
+            # Obey mode: Stage 1 (pre_split bin-packing) already chose this
+            # group's boundary, fed as a forced END at the group's last token.
+            # Raise the driver's L1/L2/L3 thresholds to capacity so it does not
+            # re-fragment the packed group at an internal punctuation; force_split_at
+            # stays as the KV-overflow safety floor (the group is sized <= it).
+            cap = thresholds.force_split_at
+            thresholds = SplitThresholds(
+                min_tokens_l1=cap, min_tokens_l2=cap,
+                min_tokens_l3=cap, force_split_at=cap,
+            )
         idx, driver = self._create_driver(thresholds)
         if key is None:
-            group_idx, local_idx = idx, 0            # streaming: each segment its own group
+            # Streaming: each segment is its own group. Allocate from the shared
+            # _next_group_idx (NOT segment_idx) so streaming and offline group ids
+            # never collide when auto mixes both paths in one session. In a
+            # pure-streaming session this still equals segment_idx (counters move
+            # in lockstep), so behavior is unchanged.
+            group_idx, local_idx = self._next_group_idx, 0
+            self._next_group_idx += 1
         else:
             group_idx, local_idx = key, self._group_next_local.get(key, 0)
         self._seg_coords[idx] = (group_idx, local_idx)
@@ -644,6 +670,40 @@ class Spliter:
         """
         for tok in self._coerce_tokens(tokens):
             self._pending.append(_PendingToken(tok, None, boundary=False))
+        return self._drive_events()
+
+    def feed_auto(
+        self, tokens: List[SegmentToken],
+    ) -> List[SegmentAction]:
+        """Auto mode: route a packet by size; Stage 1 engages only when long.
+
+        Stage 1 (offline pre-split) adds value only through *global foresight*,
+        which exists only when a packet is longer than one segment can hold. For
+        a small streaming packet, Stage 1 sees no more than the driver would, so
+        it is transparent: the tokens stream (``group_idx=None``) and coalesce
+        across packets exactly like plain streaming, and the driver segments
+        them. A long packet (more tokens than one segment's capacity) is
+        pre-split with foresight, yielding offline-quality L1 boundaries.
+
+        Quality therefore scales with packet size, with no buffering latency:
+        the client implicitly chooses the optimization scope by how much text it
+        hands over per packet.
+        """
+        coerced = self._coerce_tokens(tokens)
+        if not coerced:
+            return []
+        # Online capacity from the live EMA ratio + KV budget, minus what the
+        # in-flight segment already holds: the gate couples the pipeline's
+        # in-flight state (consistent with Stage 0), so the question is whether
+        # the packet fits the *remaining* room, not an empty segment.
+        capacity = self._make_thresholds().force_split_at
+        active = self._get_active_driver_idx()
+        occupied = self._drivers[active].token_count if active is not None else 0
+        if len(coerced) > capacity - occupied:
+            self._enqueue_presplit_groups(coerced)   # won't fit remaining room: Stage 1 foresight
+        else:
+            for tok in coerced:                       # fits: transparent stream (coalesce)
+                self._pending.append(_PendingToken(tok, None, boundary=False))
         return self._drive_events()
 
     def input_done(self) -> List[SegmentAction]:

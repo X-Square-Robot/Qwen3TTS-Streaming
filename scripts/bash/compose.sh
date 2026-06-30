@@ -272,11 +272,11 @@ resolve_compose_image_defaults() {
 
     if [[ "$GATEWAY" == "triton" || "$GATEWAY" == "all" ]]; then
         local triton_ngc_tag=""
-        if [[ -z "${IMAGE_OVERRIDE:-}" && ( -z "${TRITON_IMAGE:-}" || "${TRITON_IMAGE:-}" == "qwen3-tts-triton:26.02" ) ]]; then
+        if [[ -z "${IMAGE_OVERRIDE:-}" && ( -z "${TRITON_IMAGE:-}" || "${TRITON_IMAGE:-}" == "qwen3tts-streaming:26.02" ) ]]; then
             manifest_ngc_tag="${manifest_ngc_tag:-$(_compose_manifest_ngc_tag)}"
             triton_ngc_tag="$manifest_ngc_tag"
             if [[ -n "$triton_ngc_tag" ]]; then
-                export TRITON_IMAGE="qwen3-tts-triton:${triton_ngc_tag}"
+                export TRITON_IMAGE="qwen3tts-streaming:${triton_ngc_tag}"
                 log_info "Using Triton image from Phase B manifest: $TRITON_IMAGE"
             fi
         elif [[ -n "${TRITON_IMAGE:-}" ]]; then
@@ -433,7 +433,7 @@ compose_service_container_name() {
     local service="$1"
     case "$service" in
         engine) printf '%s\n' "${ENGINE_CONTAINER_NAME:-qwen3-engine}" ;;
-        triton) printf '%s\n' "${TRITON_CONTAINER_NAME:-qwen3-tts-triton}" ;;
+        triton) printf '%s\n' "${TRITON_CONTAINER_NAME:-qwen3tts-streaming}" ;;
         *)
             log_error "Unknown compose service: $service"
             return 1

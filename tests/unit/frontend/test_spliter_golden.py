@@ -22,7 +22,7 @@ from __future__ import annotations
 import pytest
 
 from engine.frontend.spliter.spliter import Spliter
-from engine.text_normalization import strip_emoji
+from engine.text_normalization import strip_emoji, split_pending_emoji
 
 
 SIGNATURE = "你好吗？明天天气不错，有没有什么想吃的？"
@@ -65,13 +65,14 @@ def test_offline_set_full_text_finds_global_optimal_l1_cut():
     sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
     segs = _summarize(sp.set_full_text(_toks(SIGNATURE)))
 
-    # NOTE: a flush-triggering punct emits FLUSH_EOS with empty token_text, so
-    # seg1's terminal "？" does not appear in the reconstructed text (it triggered
-    # the flush). seg0's "？" appears because that group flushes on END, not on
-    # the punct. This per-path asymmetry is itself frozen here.
+    # Bin-packing: "你好吗？" is one packed group; the over-capacity unit
+    # "明天天气不错，有没有什么想吃的？" (16 > cap 15) is cut at its latest L2 (，),
+    # leaving "有没有什么想吃的？" as a third group (pending under concurrency=2,
+    # so not in this synchronous batch). The orphaned trailing "？" of the old
+    # first-fit force-cut is gone.
     assert [(s["seg"], s["group"], s["text"]) for s in segs] == [
         (0, 0, "你好吗？"),
-        (1, 1, "明天天气不错，有没有什么想吃的"),
+        (1, 1, "明天天气不错，"),
     ]
     assert segs[0]["acts"] == ["PREFILL", "DECODE", "DECODE", "DECODE", "FLUSH_EOS"]
     assert segs[1]["acts"][0] == "PREFILL"
@@ -148,17 +149,98 @@ def test_concurrency_backpressure_gates_at_max_concurrent():
     assert sp._next_segment_idx == 2
 
 
+def test_auto_long_packet_engages_stage1_global_optimal():
+    """Auto mode: a packet longer than one segment is pre-split with foresight,
+    yielding the SAME global-optimal L1 cut as offline set_full_text."""
+    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
+    segs = _summarize(sp.feed_auto(_toks(SIGNATURE)))   # 20 tokens > force_split_at(15)
+
+    assert [(s["seg"], s["group"], s["text"]) for s in segs] == [
+        (0, 0, "你好吗？"),
+        (1, 1, "明天天气不错，"),
+    ]
+    # Matches the offline path exactly — Stage 1 had full foresight over the packet.
+    off = _summarize(Spliter(engine_max_decode_len=100, ema_ratio=10.0).set_full_text(_toks(SIGNATURE)))
+    assert [(s["seg"], s["group"], s["text"]) for s in segs] == \
+           [(s["seg"], s["group"], s["text"]) for s in off]
+
+
+def test_auto_token_by_token_is_transparent_streaming():
+    """Auto mode: each 1-token packet is small, so Stage 1 is transparent and
+    the tokens stream/coalesce — identical to plain feed_tokens (incl. L2-snap,
+    which is the irreducible no-foresight cost of a true token stream)."""
+    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
+    acc = []
+    for t in _toks(SIGNATURE):
+        acc.extend(sp.feed_auto([t]))
+    acc.extend(sp.input_done())
+    segs = _summarize(acc)
+
+    assert [(s["seg"], s["group"], s["text"]) for s in segs] == [
+        (0, 0, "你好吗？明天天气不错，"),
+        (1, 1, "有没有什么想吃的？"),
+    ]
+
+
+def test_auto_short_packet_does_not_overfragment():
+    """Auto mode: a short complete packet streams transparently (driver
+    coalesces) rather than flushing a tiny segment per L1."""
+    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
+    acc = sp.feed_auto(_toks("你好。"))
+    acc.extend(sp.input_done())
+    segs = _summarize(acc)
+
+    assert [(s["seg"], s["text"]) for s in segs] == [(0, "你好。")]
+
+
+def test_auto_mixed_streaming_then_long_packet_no_group_collision():
+    """Auto mode mixing streaming + offline in one session must not collide
+    group ids. A small streaming residual (its own group) followed by a long
+    packet that engages Stage 1 (occupancy-aware gate) must yield distinct
+    group ids — streaming and offline groups share one _next_group_idx
+    namespace. Regression guard for the namespace-collision bug."""
+    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
+    a1 = sp.feed_auto(_toks("今天天气真的很不错"))           # 9 tok, no L1 → streams (group 0)
+    a2 = sp.feed_auto(_toks("，我们出去玩吧。好不好呀？"))   # won't fit remaining room → Stage 1
+
+    groups_by_seg: dict[int, int] = {}
+    for sa in a1 + a2:
+        groups_by_seg.setdefault(sa.segment_idx, sa.group_idx)
+
+    assert groups_by_seg[0] == 0, groups_by_seg                     # streaming residual, own group
+    assert all(g != 0 for s, g in groups_by_seg.items() if s != 0), groups_by_seg  # no collision
+
+
 def test_emoji_whole_keycap_in_one_packet_is_stripped():
     """A complete keycap sequence in one packet strips cleanly (base digit too)."""
     assert strip_emoji("第1️⃣步完成✅。") == "第步完成。"
 
 
-def test_emoji_keycap_split_across_packets_leaks_base_digit():
-    """CROSS-PACKET keycap leaks the base digit — the confirmed latent bug.
+def _stage0_stream(packets):
+    """Simulate the stateful Stage-0 filter: hold a partial-emoji suffix across
+    packets (split_pending_emoji), strip each emitted body, flush the carry."""
+    carry = ""
+    out = []
+    for p in packets:
+        body, carry = split_pending_emoji(carry + p)
+        out.append(strip_emoji(body))
+    out.append(strip_emoji(carry))   # end-of-input flush
+    return "".join(out)
 
-    # WILL CHANGE @ Step 5: a stateful Stage 0 filter that holds a dangling
-    # partial-emoji suffix across packets should make this -> "hello" + "world".
-    """
-    p1 = strip_emoji("hello1")        # keycap base, sequence incomplete in this packet
-    p2 = strip_emoji("️⃣world")       # VS-16 + combining keycap from the split 1️⃣
-    assert p1 + p2 == "hello1world"   # BUG: the '1' leaks into spoken text
+
+def test_emoji_keycap_split_across_packets_healed_by_carry():
+    """FIXED: a keycap split across packets no longer leaks the base digit. The
+    stateful Stage-0 carry holds the trailing base until the next packet
+    completes (or flushes) the sequence."""
+    # base | VS+keycap
+    assert _stage0_stream(["hello1", "️⃣world"]) == "helloworld"
+    # base+VS | keycap  (2-char hold)
+    assert _stage0_stream(["tier1️", "⃣done"]) == "tierdone"
+    assert "1" not in _stage0_stream(["hello1", "️⃣world"])
+
+
+def test_emoji_carry_does_not_drop_normal_trailing_digits():
+    """A held digit that turns out NOT to be a keycap is emitted intact — the
+    carry never loses normal numeric text, only delays it by one packet."""
+    assert _stage0_stream(["price5", "6dollars"]) == "price56dollars"
+    assert _stage0_stream(["count3"]) == "count3"        # flushed at end of input

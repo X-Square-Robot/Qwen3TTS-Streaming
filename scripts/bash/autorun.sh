@@ -265,7 +265,7 @@ Examples:
   autorun.sh deploy --gateway engine-docker  # Phase C (engine container image)
   autorun.sh make-bundle -m custom-1.7b --target-profile target_profile.json --out workspace/engine_build_bundle.tar.zst
   autorun.sh import-artifact workspace/engine_artifact_bundle.tar.zst
-  autorun.sh remote-build -m custom-1.7b --target-profile target_profile.json --remote-host user@prod-gpu-host
+  autorun.sh remote-build -m custom-1.7b --target-profile target_profile.json --remote-host user@your-gpu-host
   autorun.sh deploy --runtime-max-batch-size 32 --runtime-max-seq-len 512
   autorun.sh status                   # show pipeline status
   autorun.sh update-matrix            # fetch latest NGC compat data
@@ -417,7 +417,7 @@ build_forward_args() {
         fi
         export TRITON_BASE_IMAGE="${TRITON_BASE_IMAGE:-$_ngc_image}"
         export ENGINE_BASE_IMAGE="${ENGINE_BASE_IMAGE:-nvcr.io/nvidia/tensorrt:${NGC_TAG}-py3}"
-        export TRITON_IMAGE="${TRITON_IMAGE:-qwen3-tts-triton:${NGC_TAG}}"
+        export TRITON_IMAGE="${TRITON_IMAGE:-qwen3tts-streaming:${NGC_TAG}}"
         if ! $ENGINE_DOCKER_IMAGE_EXPLICIT; then
             ENGINE_DOCKER_IMAGE="qwen3-engine:${NGC_TAG}"
             export ENGINE_IMAGE="$ENGINE_DOCKER_IMAGE"
@@ -1046,7 +1046,7 @@ interactive_cross_host_guide() {
                 a) DISCOVER_MODE="local" ;;
                 b)
                     DISCOVER_MODE="remote"
-                    REMOTE_HOST=$(_prompt_with_default "  SSH 目标主机 user@host" "${REMOTE_HOST:-user@prod-gpu-host}")
+                    REMOTE_HOST=$(_prompt_with_default "  SSH 目标主机 user@host" "${REMOTE_HOST:-user@your-gpu-host}")
                     REMOTE_WORKDIR=$(_prompt_with_default "  远端工作目录" "$REMOTE_WORKDIR")
                     ;;
                 c) DISCOVER_MODE="paste" ;;
@@ -1081,7 +1081,7 @@ interactive_cross_host_guide() {
                 export MODEL_VARIANT="$VARIANT"
             fi
             TARGET_PROFILE=$(_prompt_with_default "  目标机器 target_profile.json 路径" "${REPO_ROOT}/workspace/target_profile.json")
-            REMOTE_HOST=$(_prompt_with_default "  SSH 目标主机 user@host" "${REMOTE_HOST:-user@prod-gpu-host}")
+            REMOTE_HOST=$(_prompt_with_default "  SSH 目标主机 user@host" "${REMOTE_HOST:-user@your-gpu-host}")
             REMOTE_WORKDIR=$(_prompt_with_default "  远端工作目录" "$REMOTE_WORKDIR")
             _prompt_build_dtypes
             build_forward_args
@@ -1125,7 +1125,7 @@ interactive_cross_host_guide() {
       --dtype bf16 \\
       --cp-precision fp32 \\
       --triton-io-float-dtype bf16 \\
-      --remote-host user@prod-gpu-host \\
+      --remote-host user@your-gpu-host \\
       --remote-workdir /tmp/qwen3-engine-build
 
 EOF

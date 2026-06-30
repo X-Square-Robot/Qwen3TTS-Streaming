@@ -196,11 +196,11 @@
 ### 9. 运行时修复已验证：在 `EmbeddingWeights` 中重新计算特殊嵌入消除了 step2 greedy+punish 分歧
 
 已实现的修复：
-- [prefill.py](/home/rime/workspace/Qwen3-TTS-Triton/engine/backend/prefill.py)
+- [prefill.py](engine/backend/prefill.py)
   - `EmbeddingWeights` 现在从加载的 BF16 `text_embedding + text_projection` 重新计算 `tts_pad/bos/eos`
-- [export_01_embeddings.py](/home/rime/workspace/Qwen3-TTS-Triton/scripts/export/export_01_embeddings.py)
+- [export_01_embeddings.py](scripts/export/export_01_embeddings.py)
   - 导出现在使用目标数据类型模块计算保存的特殊嵌入以实现运行时奇偶性
-- [test_prefill_builder.py](/home/rime/workspace/Qwen3-TTS-Triton/tests/unit/test_prefill_builder.py)
+- [test_prefill_builder.py](tests/unit/test_prefill_builder.py)
   - 添加了运行时重新计算特殊嵌入的回归测试
 
 验证：
@@ -808,7 +808,7 @@ halluc_0007 dump，只有 Gumbel 随种子变。统计 504 步内是否自然发
 ### 终极对照：用官方未改动代码跑"这个自训 checkpoint"，照样幻觉（`workspace/official_baseline.py`）
 
 > **重要更正**：`workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice` 是软链到
-> `/home/train/tts/qwen3-tts/trained/zehan/0601_trained_model`——**我们自己训练的
+> `0601_trained_model`——**我们自己训练的
 > checkpoint**，不是官方发布权重。引擎、我方串接原型、以及下面这个"官方代码 baseline"
 > 用的全是这个自训权重。所以本节验证的是：**这个自训 checkpoint 经过最干净的路径
 > （官方未改动推理代码、fp32、无导出/TRT/我方脚本）是否仍幻觉**。官方发布权重未在此对比
@@ -827,7 +827,7 @@ temperature=0.9, repetition_penalty=1.05, subtalker_dosample=True。eos_token_id
 
 四方在同一组 40 seed 上的幻觉率（>18s 即 runaway）：
 
-（四方都用同一个**自训 checkpoint** `zehan/0601_trained_model`，speaker=`001`）
+（四方都用同一个**自训 checkpoint** `0601_trained_model`，speaker=`001`）
 
 | 实现 | 幻觉 | 比例 | 幻觉 seed |
 |------|------|------|------|
@@ -847,7 +847,7 @@ temperature=0.9, repetition_penalty=1.05, subtalker_dosample=True。eos_token_id
 约 1/6~1/8 的随机种子无法自然发 EOS。
 
 **尚未回答**：是 Qwen3-TTS 本身就这样，还是**这次训练（0601）把权重训坏了**——需用
-**官方发布的 1.7B CustomVoice 权重**（`/home/train/tts/qwen3-tts/official/...`，本地已有）
+**官方发布的 1.7B CustomVoice 权重**（`本地官方权重`，本地已有）
 跑同一测试对比。用户当前要求先聚焦这个 checkpoint，故暂未跑官方权重。
 
 **可行动方向**：换精度/查导图/逐行对官方代码都无效（已验证）；要么在**采样/终止策略**上

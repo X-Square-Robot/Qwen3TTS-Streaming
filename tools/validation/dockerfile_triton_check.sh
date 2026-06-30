@@ -3,13 +3,13 @@
 #  L2 test T2.2: Dockerfile.triton build and runtime checks.
 #
 #  Verifies the slim Triton runtime image:
-#    - Build succeeds (qwen3-tts-triton:<tag> or custom BUILD_TAG)
+#    - Build succeeds (qwen3tts-streaming:<tag> or custom BUILD_TAG)
 #    - Container can import torch, tokenizers, tensorrt
 #    - tritonserver --help works
 #
 #  Run from repo root:
 #    bash tools/validation/dockerfile_triton_check.sh
-#  Optional: BUILD_TAG=qwen3-tts-triton:26.01 bash tools/validation/dockerfile_triton_check.sh
+#  Optional: BUILD_TAG=qwen3tts-streaming:26.01 bash tools/validation/dockerfile_triton_check.sh
 # ===========================================================================
 
 set -euo pipefail

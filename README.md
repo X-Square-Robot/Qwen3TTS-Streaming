@@ -1,12 +1,12 @@
-# Qwen3-TTS Triton
+# Qwen3TTS-Streaming
 
 *让我们像播放音频一样播放文本！*
 
 ## 引言
 
-Qwen3-TTS Triton 是一个**工程预览版**项目：把官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运行时，围绕 Triton/standalone engine 做 token 级流式 TTS、模型 fuse、前端分词、prefix cache、连续批处理和 WebUI 性能展示。项目开放一条已高度优化、可复现、可继续验证的工程链路，让社区一起打磨成可靠的开源推理系统。
+Qwen3TTS-Streaming 是一个**工程预览版**项目：把官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运行时，围绕 Triton/standalone engine 做 token 级流式 TTS、模型 fuse、前端分词、prefix cache、连续批处理和 WebUI 性能展示。项目开放一条已高度优化、可复现、可继续验证的工程链路，让社区一起打磨成可靠的开源推理系统。
 
-**当前建议 v0.1 稳定范围为 `custom-1.7b` / `custom_voice` 路径**；`design-1.7b`、`base-1.7b` / x-vector 语音克隆、`icl` 语音克隆处于实验状态；`0.6b` 变体未作为 v0.1 主线。流式模式仍可能出现幻觉、重复、漏读等问题，请勿直接用于生产内容生成。
+> ⚠️ **状态：v0.1 工程预览，非生产就绪。** 流式模式仍可能出现**幻觉、重复、漏读**（当前 checkpoint 上约 10–18%，根因在模型+采样，见 [已知限制](docs/user/known_limitations.md)）。**当前建议稳定范围为 `custom-1.7b` / `custom_voice` 路径**；`design-1.7b`、`base-1.7b` / x-vector 语音克隆、`icl` 语音克隆处于实验状态；`0.6b` 变体未作为 v0.1 主线。请勿直接用于生产内容生成。
 
 ## 性能声明
 
@@ -29,11 +29,21 @@ Qwen3-TTS Triton 是一个**工程预览版**项目：把官方 Qwen3-TTS PyTorc
 | `icl` voice clone | 实验 | standalone 已接入 ref audio + ref text → ref codec/code 注入；需 TRT ref-audio engine 和真实端到端验证 |
 | `0.6b` variants | 未作为 v0.1 主线 | 可保留导出/下载入口，发布前需单独验证 |
 
+## 前置要求
+
+- **GPU**：NVIDIA GPU，建议 ≥16GB 显存（1.7B + KV pool + TensorRT 运行时）；需匹配的 NVIDIA 驱动。
+- **CUDA / TensorRT**：通过 NVIDIA NGC 容器提供（`nvcr.io/nvidia/tensorrt`、`nvcr.io/nvidia/tritonserver`）；版本矩阵见 `scripts/bash/ngc_matrix.conf`。**拉取 NGC 镜像即表示接受 NVIDIA EULA。**
+- **Docker**：用于引擎/Triton 容器编排（含 NVIDIA Container Toolkit 以启用 `--gpus`）。
+- **磁盘**：模型 + 导出/编译产物约需 20–40GB。
+- **模型权重**：首次运行需从 ModelScope / Hugging Face 下载（见下方流程），本仓库不分发权重。
+
+> 首次端到端跑通包含「下载权重 → 导出 ONNX → 编译 TensorRT」，耗时取决于 GPU；后续可复用产物或跨机导入。
+
 ## 快速开始
 
 ```bash
-git clone --recursive https://github.com/user/Qwen3-TTS-Triton.git
-cd Qwen3-TTS-Triton
+git clone --recursive https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git
+cd Qwen3TTS-Streaming
 
 # 交互模式
 bash scripts/bash/autorun.sh
@@ -238,7 +248,7 @@ standalone engine 同时支持 gRPC 和 WebSocket。WebSocket 控制帧示例：
 ## 项目结构
 
 ```text
-Qwen3-TTS-Triton/
+Qwen3TTS-Streaming/
 ├── engine/                     # 推理引擎：frontend/backend/gateway/core
 ├── client/                     # 独立 Python SDK 包 (pip install qwen3-tts-client)
 │   ├── src/qwen3tts/  #   客户端实现与传输适配器
@@ -274,4 +284,10 @@ Qwen3-TTS-Triton/
 
 ## 许可证
 
-本项目基于 [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) 进行工程化部署与优化。模型权重和上游代码的许可证请以 QwenLM 官方仓库为准。
+- **本项目自有代码**（`engine/`、`client/`、`demo_api/`、`webui/`、`scripts/` 等）按 [MIT](LICENSE) 许可证发布，版权归 XSquareRobot。
+- **上游 [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)**（`third_party/` 子模块）为 Apache 2.0，与 MIT 兼容。
+- **模型权重**由 Qwen/Alibaba 发布，许可证以其 [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [Hugging Face](https://huggingface.co/Qwen) 模型卡为准；本仓库不分发任何权重。
+- **TensorRT / Triton Inference Server**（NVIDIA NGC 镜像）为 NVIDIA 专有软件，本仓库不打包，使用即表示接受 NVIDIA EULA。
+- `resources/speakers/` 下的参考音频为**合成音频**、说话人名为**虚构**，不对应任何真实个人。
+
+完整第三方归属见 [NOTICE](NOTICE)。
