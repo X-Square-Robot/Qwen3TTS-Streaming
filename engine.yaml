@@ -65,6 +65,24 @@ sampling:
   top_k: 50
   random_seed: 0
 
+# Tiered observability (see docs/dev/design/observability_tiers.md).
+#   level:             daily | debug | dump  —— global default tier (L1/L2/L3)
+#   max_session_level: cap for per-request `obs_level` escalation (keep `daily`
+#                      in production so clients cannot crank a session to dump).
+# Override globally with ENGINE_OBSERVABILITY_LEVEL=debug (or ENGINE_OBS_LEVEL).
+observability:
+  level: daily
+  max_session_level: daily
+  text_capture: preview          # disabled | preview | hashed | full
+  text_preview_chars: 64
+  health_interval_sec: 30.0      # engine.health gauge cadence (0 to disable)
+  # L3 dump (equivalent to ENGINE_DUMP_*); only active at level=dump or a
+  # per-session escalation to dump.
+  dump_dir: ""
+  dump_limit: 0
+  dump_include_wav: true
+  dump_sessions: ""
+
 # Prefill: CustomVoice client speaker missing / invalid (must exist in weights spk_id)
 prefill:
   default_speaker: "001"

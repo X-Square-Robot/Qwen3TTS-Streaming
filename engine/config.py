@@ -201,6 +201,27 @@ class ReferencesConfig:
 
 
 @dataclass
+class ObservabilityConfig:
+    """Tiered observability control (see docs/dev/design/observability_tiers.md).
+
+    ``level`` is the global default tier: daily | debug | dump (L1/L2/L3).
+    ``max_session_level`` caps how high a per-request override may escalate a
+    single session (production防滥用; keep ``daily`` in prod).
+    ``text_capture`` governs synthesized-text logging privacy.
+    The ``dump_*`` fields feed the L3 dumper (equivalent to ENGINE_DUMP_*).
+    """
+    level: str = "daily"
+    max_session_level: str = "daily"
+    text_capture: str = "preview"          # disabled | preview | hashed | full
+    text_preview_chars: int = 64
+    health_interval_sec: float = 30.0      # engine.health periodic gauge cadence (0=off)
+    dump_dir: str = ""
+    dump_limit: int = 0
+    dump_include_wav: bool = True
+    dump_sessions: str = ""
+
+
+@dataclass
 class EngineConfig:
     """Top-level engine configuration (no model architecture)."""
     paths: PathsConfig = field(default_factory=PathsConfig)
@@ -212,6 +233,7 @@ class EngineConfig:
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
     prefill: PrefillConfig = field(default_factory=PrefillConfig)
     references: ReferencesConfig = field(default_factory=ReferencesConfig)
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +250,7 @@ _CONFIG_SECTION_NAMES = (
     "sampling",
     "prefill",
     "references",
+    "observability",
 )
 
 def _deep_update(base: dict, override: dict) -> dict:
@@ -301,6 +324,7 @@ def _dict_to_config(raw: dict) -> EngineConfig:
         ("sampling", SamplingConfig),
         ("prefill", PrefillConfig),
         ("references", ReferencesConfig),
+        ("observability", ObservabilityConfig),
     ]:
         section_data = raw.get(section_name, {})
         if not isinstance(section_data, dict):

@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Optional
 
+from .observability import ObsLevel
+
 
 # ---------------------------------------------------------------------------
 # Session lifecycle
@@ -131,6 +133,9 @@ class SessionConfig:
     audio: AudioConfig = field(default_factory=AudioConfig)
     output_policy: OutputPolicyConfig = field(default_factory=OutputPolicyConfig)
     timing: TimingConfig = field(default_factory=TimingConfig)
+    # Resolved per-session observability level (raise-only override of the global
+    # floor, clamped to max_session_level). None ⇒ use the global level.
+    observability_level: Optional[ObsLevel] = None
 
 
 # ---------------------------------------------------------------------------

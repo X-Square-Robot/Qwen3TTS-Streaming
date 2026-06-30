@@ -56,6 +56,7 @@ from .runtime.fingerprint import (
     enforce_engine_fingerprint,
 )
 from .core.mlfq import MLFQConfig
+from .core import observability as obs
 from .core.types import SessionConfig
 from .interface import normalize_capabilities
 from .frontend.interface import FrontendInterface
@@ -1099,6 +1100,22 @@ def main():
         cli_overrides.setdefault("server", {})["websocket_path"] = args.ws_path
 
     cfg = load_config(args.config, cli_overrides=cli_overrides)
+
+    # Install the observability control plane and drive the root log level from
+    # the resolved config. ENGINE_OBS_LEVEL is accepted as a shorthand alias for
+    # ENGINE_OBSERVABILITY_LEVEL (the generic env override).
+    obs_alias = os.environ.get("ENGINE_OBS_LEVEL", "").strip()
+    if obs_alias:
+        cfg.observability.level = obs_alias
+    obs.configure(
+        cfg.observability.level,
+        cfg.observability.max_session_level,
+        text_capture=cfg.observability.text_capture,
+        text_preview_chars=cfg.observability.text_preview_chars,
+        health_interval_sec=cfg.observability.health_interval_sec,
+    )
+    logging.getLogger().setLevel(obs.to_logging_level(obs.global_level()))
+
     if cfg.paths.model_package_dir:
         apply_model_package_paths(
             cfg,
