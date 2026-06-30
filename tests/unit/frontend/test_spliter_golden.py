@@ -1,0 +1,161 @@
+"""Golden characterization tests for the frontend Spliter / driver / emoji filter.
+
+These pin the **current** SegmentAction behavior so the planned segmentation
+pipeline refactor (see docs/dev/design/frontend_segmentation_pipeline.md) can be
+done with a safety net. They are CHARACTERIZATION tests: they encode behavior as
+it is today, captured empirically, not behavior as it ought to be.
+
+Some assertions deliberately encode behavior the refactor will CHANGE. Those are
+marked with ``# WILL CHANGE @ Step N`` — when that step lands, update the golden
+value and document the diff in the commit. Specifically:
+
+  * group_idx == -1 sentinel on the streaming path        -> Step 2 (explicit coords)
+  * streaming L2-snap fragmentation of the signature case  -> Step 3/5 (auto + bin-packing)
+  * cross-packet emoji leak                                -> Step 5 (stateful Stage 0 filter)
+
+The signature case ``你好吗？明天天气不错，有没有什么想吃的？`` is the crux of the
+whole redesign: offline pre-split finds the global-optimal L1 cut, while the
+streaming driver, lacking foresight, snaps to the L2 comma. Both are frozen here.
+"""
+from __future__ import annotations
+
+import pytest
+
+from engine.frontend.spliter.spliter import Spliter
+from engine.text_normalization import strip_emoji
+
+
+SIGNATURE = "你好吗？明天天气不错，有没有什么想吃的？"
+
+
+def _toks(s: str):
+    return [(i, ch) for i, ch in enumerate(s)]
+
+
+def _summarize(actions):
+    """Reduce an action stream to per-segment summaries.
+
+    Returns a list of dicts, one per contiguous segment_idx run:
+    {seg, group, local, final, text, acts} where ``text`` is the concatenation
+    of token_text (captures which characters landed in which segment = the
+    segmentation boundaries) and ``acts`` is the action-type sequence (captures
+    PREFILL/DECODE/FLUSH structure).
+    """
+    segs: list[dict] = []
+    for a in actions:
+        if not segs or segs[-1]["seg"] != a.segment_idx:
+            segs.append({
+                "seg": a.segment_idx,
+                "group": a.group_idx,
+                "local": a.local_idx,
+                "final": a.group_final,
+                "text": "",
+                "acts": [],
+            })
+        segs[-1]["acts"].append(a.action.type.name)
+        segs[-1]["text"] += a.token_text
+    return segs
+
+
+def test_offline_set_full_text_finds_global_optimal_l1_cut():
+    """Offline pre-split keeps the long second sentence whole, cutting only at L1.
+
+    This is the global-optimal behavior the streaming driver cannot achieve.
+    """
+    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
+    segs = _summarize(sp.set_full_text(_toks(SIGNATURE)))
+
+    # NOTE: a flush-triggering punct emits FLUSH_EOS with empty token_text, so
+    # seg1's terminal "？" does not appear in the reconstructed text (it triggered
+    # the flush). seg0's "？" appears because that group flushes on END, not on
+    # the punct. This per-path asymmetry is itself frozen here.
+    assert [(s["seg"], s["group"], s["text"]) for s in segs] == [
+        (0, 0, "你好吗？"),
+        (1, 1, "明天天气不错，有没有什么想吃的"),
+    ]
+    assert segs[0]["acts"] == ["PREFILL", "DECODE", "DECODE", "DECODE", "FLUSH_EOS"]
+    assert segs[1]["acts"][0] == "PREFILL"
+    assert segs[1]["acts"][-1] == "FLUSH_EOS"
+    assert all(s["final"] for s in segs)
+
+
+def test_streaming_feed_once_snaps_to_l2_comma():
+    """Streaming path fragments at the L2 comma — the local-optimum problem.
+
+    # WILL CHANGE @ Step 3/5: auto + bin-packing + watermark should let the
+    # streaming/auto path approach the offline cut instead of snapping to L2.
+    """
+    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
+    segs = _summarize(sp.feed_tokens(_toks(SIGNATURE)))
+
+    assert [(s["seg"], s["group"], s["text"]) for s in segs] == [
+        (0, -1, "你好吗？明天天气不错，"),   # WILL CHANGE @ Step 2 (group -1) and Step 3/5 (L2 snap)
+        (1, -1, "有没有什么想吃的？"),
+    ]
+
+
+def test_streaming_token_by_token_matches_feed_once():
+    """Feeding the signature one token per call yields the same segmentation."""
+    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
+    acc = []
+    for t in _toks(SIGNATURE):
+        acc.extend(sp.feed_tokens([t]))
+    acc.extend(sp.input_done())
+    segs = _summarize(acc)
+
+    assert [(s["seg"], s["text"]) for s in segs] == [
+        (0, "你好吗？明天天气不错，"),
+        (1, "有没有什么想吃的？"),
+    ]
+
+
+def test_push_group_tokens_monotonic_groups():
+    """Long-segment groups get monotonic group_idx, one segment each here."""
+    sp = Spliter(engine_max_decode_len=100, ema_ratio=2.0)
+    acc = []
+    acc.extend(sp.push_group_tokens([(1, "你好"), (2, "。")]))
+    acc.extend(sp.push_group_tokens([(3, "世界"), (4, "。")]))
+    segs = _summarize(acc)
+
+    assert [(s["seg"], s["group"], s["text"]) for s in segs] == [
+        (0, 0, "你好。"),
+        (1, 1, "世界。"),
+    ]
+
+
+def test_concurrency_backpressure_gates_at_max_concurrent():
+    """With max_concurrent=2, only 2 segments drive synchronously; rest buffer.
+
+    Pins the backpressure semantics: buffered tokens wait for on_segment_done
+    (backend feedback) to free a slot, so a 4-sentence input emits 2 segments
+    synchronously and leaves both drivers flushing.
+    """
+    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0, max_concurrent=2)
+    text = "第一句话结束了。第二句话也结束了。第三句话同样结束了。第四句话最后结束。"
+    acc = sp.feed_tokens(_toks(text))
+    acc.extend(sp.input_done())
+    segs = _summarize(acc)
+
+    assert [(s["seg"], s["text"]) for s in segs] == [
+        (0, "第一句话结束了。"),
+        (1, "第二句话也结束了。"),
+    ]
+    assert sorted(sp._drivers.keys()) == [0, 1]
+    assert sorted(sp._flushing) == [0, 1]
+    assert sp._next_segment_idx == 2
+
+
+def test_emoji_whole_keycap_in_one_packet_is_stripped():
+    """A complete keycap sequence in one packet strips cleanly (base digit too)."""
+    assert strip_emoji("第1️⃣步完成✅。") == "第步完成。"
+
+
+def test_emoji_keycap_split_across_packets_leaks_base_digit():
+    """CROSS-PACKET keycap leaks the base digit — the confirmed latent bug.
+
+    # WILL CHANGE @ Step 5: a stateful Stage 0 filter that holds a dangling
+    # partial-emoji suffix across packets should make this -> "hello" + "world".
+    """
+    p1 = strip_emoji("hello1")        # keycap base, sequence incomplete in this packet
+    p2 = strip_emoji("️⃣world")       # VS-16 + combining keycap from the split 1️⃣
+    assert p1 + p2 == "hello1world"   # BUG: the '1' leaks into spoken text

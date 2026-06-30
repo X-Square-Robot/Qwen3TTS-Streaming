@@ -211,6 +211,34 @@ class Spliter:
         self._drivers[idx] = driver
         return idx, driver
 
+    def _results_to_actions(
+        self,
+        idx: int,
+        results: List[ActionResult],
+        *,
+        token_text: str = "",
+        group_idx: int = -1,
+        local_idx: int = 0,
+        group_final: bool = True,
+    ) -> Tuple[List[SegmentAction], bool]:
+        """Map one ``driver.feed()`` result list to SegmentActions.
+
+        PREFILL/DECODE results carry ``token_text``; FLUSH and structural
+        results carry ``""``. Marks the segment flushing on FLUSH. Returns
+        ``(actions, flushed)`` — callers own the post-flush control flow
+        (start-next / break / buffer bookkeeping). Relies on the Driver FSM
+        emitting FLUSH as the terminal action of a ``feed()`` call.
+        """
+        out: List[SegmentAction] = []
+        flushed = False
+        for r in results:
+            tt = token_text if r.type in (ActionType.PREFILL, ActionType.DECODE) else ""
+            out.append(SegmentAction(idx, r, group_idx, local_idx, group_final, token_text=tt))
+            if r.type in (ActionType.FLUSH_EOS, ActionType.FLUSH_NOP):
+                self._flushing.add(idx)
+                flushed = True
+        return out, flushed
+
     # ------------------------------------------------------------------
     # Token classification
     # ------------------------------------------------------------------
@@ -408,35 +436,31 @@ class Spliter:
         group.next_local_idx += 1
 
         start_evt = SpliterEvent(type=ET.START)
-        for r in driver.feed(start_evt):
-            actions.append(SegmentAction(idx, r, group.group_idx, local_idx, False))
+        start_actions, _ = self._results_to_actions(
+            idx, driver.feed(start_evt),
+            group_idx=group.group_idx, local_idx=local_idx, group_final=False,
+        )
+        actions.extend(start_actions)
 
         while group.cursor < len(group.tokens):
             token = group.tokens[group.cursor]
             group.cursor += 1
             evt = self._make_event(token.token_id, token.text, token.punct_level)
-            for r in driver.feed(evt):
-                actions.append(SegmentAction(
-                    idx,
-                    r,
-                    group.group_idx,
-                    local_idx,
-                    False,
-                    token_text=token.text if r.type in (ActionType.PREFILL, ActionType.DECODE) else "",
-                ))
-                if r.type in (ActionType.FLUSH_EOS, ActionType.FLUSH_NOP):
-                    self._flushing.add(idx)
-                    flushed = True
-                    break
+            tok_actions, flushed = self._results_to_actions(
+                idx, driver.feed(evt), token_text=token.text,
+                group_idx=group.group_idx, local_idx=local_idx, group_final=False,
+            )
+            actions.extend(tok_actions)
             if flushed:
                 break
 
         if not flushed:
             end_evt = SpliterEvent(type=ET.END)
-            for r in driver.feed(end_evt):
-                actions.append(SegmentAction(idx, r, group.group_idx, local_idx, False))
-                if r.type in (ActionType.FLUSH_EOS, ActionType.FLUSH_NOP):
-                    self._flushing.add(idx)
+            end_actions, _ = self._results_to_actions(
+                idx, driver.feed(end_evt),
+                group_idx=group.group_idx, local_idx=local_idx, group_final=False,
+            )
+            actions.extend(end_actions)
 
         group_final = group.cursor >= len(group.tokens)
         for sa in actions:
@@ -474,24 +498,19 @@ class Spliter:
 
             driver = self._drivers[active_idx]
             evt = self._make_event(token.token_id, token.text, token.punct_level)
-            results = driver.feed(evt)
-
-            for r in results:
-                actions.append(SegmentAction(
-                    active_idx,
-                    r,
-                    token_text=token.text if r.type in (ActionType.PREFILL, ActionType.DECODE) else "",
-                ))
-                if r.type in (ActionType.FLUSH_EOS, ActionType.FLUSH_NOP):
-                    self._flushing.add(active_idx)
-                    # Only pre-create the follow-up segment if we already know
-                    # there is more text to feed. Creating an empty placeholder
-                    # driver at the end of a chunk can block SESSION_TOKENS_DONE
-                    # and leave the transport waiting forever for a terminal
-                    # event.
-                    has_more_classified = token_idx < len(classified) - 1
-                    if has_more_classified or self._token_buffer:
-                        actions.extend(self._try_start_next())
+            tok_actions, flushed = self._results_to_actions(
+                active_idx, driver.feed(evt), token_text=token.text,
+            )
+            actions.extend(tok_actions)
+            if flushed:
+                # Only pre-create the follow-up segment if we already know
+                # there is more text to feed. Creating an empty placeholder
+                # driver at the end of a chunk can block SESSION_TOKENS_DONE
+                # and leave the transport waiting forever for a terminal
+                # event.
+                has_more_classified = token_idx < len(classified) - 1
+                if has_more_classified or self._token_buffer:
+                    actions.extend(self._try_start_next())
 
         return actions
 
@@ -504,10 +523,8 @@ class Spliter:
         if active_idx is not None:
             driver = self._drivers[active_idx]
             end_evt = SpliterEvent(type=ET.END)
-            for r in driver.feed(end_evt):
-                actions.append(SegmentAction(active_idx, r))
-                if r.type in (ActionType.FLUSH_EOS, ActionType.FLUSH_NOP):
-                    self._flushing.add(active_idx)
+            end_actions, _ = self._results_to_actions(active_idx, driver.feed(end_evt))
+            actions.extend(end_actions)
 
         return actions
 
@@ -526,36 +543,23 @@ class Spliter:
         actions: List[SegmentAction] = []
         idx, driver = self._create_driver()
 
-        start_evt = SpliterEvent(type=ET.START)
-        for r in driver.feed(start_evt):
-            actions.append(SegmentAction(idx, r))
+        start_actions, _ = self._results_to_actions(idx, driver.feed(SpliterEvent(type=ET.START)))
+        actions.extend(start_actions)
 
         # Drain any buffered tokens into the new driver
         remaining: List[SegmentToken] = []
         for i, token in enumerate(self._token_buffer):
             evt = self._make_event(token.token_id, token.text, token.punct_level)
-            results = driver.feed(evt)
-            for r in results:
-                actions.append(SegmentAction(
-                    idx,
-                    r,
-                    token_text=token.text if r.type in (ActionType.PREFILL, ActionType.DECODE) else "",
-                ))
-                if r.type in (ActionType.FLUSH_EOS, ActionType.FLUSH_NOP):
-                    self._flushing.add(idx)
-                    remaining = self._token_buffer[i + 1:]
-                    break
-            else:
-                continue
-            break
+            tok_actions, flushed = self._results_to_actions(idx, driver.feed(evt), token_text=token.text)
+            actions.extend(tok_actions)
+            if flushed:
+                remaining = self._token_buffer[i + 1:]
+                break
         self._token_buffer = remaining
 
         if self._input_complete and not self._token_buffer:
-            end_evt = SpliterEvent(type=ET.END)
-            for r in driver.feed(end_evt):
-                actions.append(SegmentAction(idx, r))
-                if r.type in (ActionType.FLUSH_EOS, ActionType.FLUSH_NOP):
-                    self._flushing.add(idx)
+            end_actions, _ = self._results_to_actions(idx, driver.feed(SpliterEvent(type=ET.END)))
+            actions.extend(end_actions)
 
         return actions
 
