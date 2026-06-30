@@ -1,0 +1,51 @@
+name: CI
+
+# Initial CI scaffold: lint + proto-sync check + CPU unit tests.
+# GPU / Docker / e2e tests are excluded (require hardware + model artifacts).
+# Maintainers: verify dependency install on first run and tune as needed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format check
+        run: ruff format --check .
+
+  proto-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: verify generated proto copies are in sync
+        run: make proto-check
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: install deps (local client + test/engine extras, CPU torch)
+        run: |
+          pip install --upgrade pip
+          pip install -e "./client[all]"
+          pip install -e ".[test,engine]"
+      - name: unit tests (no GPU, no Docker)
+        env:
+          PYTHONPATH: client/src
+        run: pytest tests/unit -m "not gpu and not docker" -q
