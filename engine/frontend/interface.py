@@ -223,6 +223,16 @@ class FrontendInterface:
             return
         if mode != InputMode.TOKEN and not text.strip():
             return
+        if not getattr(session, "_first_text_sent", False):
+            session._first_text_sent = True
+            LifecycleLogger.emit(
+                session_id=session_id,
+                phase="text.first_sent",
+                request_id=session.config.timing.request_id or None,
+                session_level=session.config.observability_level,
+                text_length=len(text),
+                normalized_preview=obs.text_preview(text),
+            )
         if mode == InputMode.FULL_TEXT:
             session.append_text(text)
             return
@@ -381,6 +391,21 @@ class FrontendInterface:
                     if ready and on_audio:
                         for chunk in ready:
                             await on_audio(session.session_id, chunk)
+
+                    # L2 reorder_state: buffered audio waiting on an earlier
+                    # segment at this boundary = reorder stall risk.
+                    rstate = reorder.pending_state()
+                    if rstate["buffered_chunks"] > 0 and obs.is_enabled(
+                        obs.ObsLevel.DEBUG, session.config.observability_level
+                    ):
+                        LifecycleLogger.emit(
+                            session_id=session.session_id,
+                            phase="reorder_state",
+                            segment_idx=seg_idx,
+                            min_level=obs.ObsLevel.DEBUG,
+                            session_level=session.config.observability_level,
+                            **rstate,
+                        )
 
                     if result.metrics:
                         audio_steps = result.metrics.get("audio_steps", 0)
@@ -618,11 +643,14 @@ class FrontendInterface:
             return
         for d in sp.drain_split_decisions():
             d = dict(d)
+            # offline pre-split → split_decision; streaming FSM → driver_transition.
+            phase = "driver_transition" if d.get("obs") == "driver_transition" else "split_decision"
             d.pop("obs", None)
-            d["text_preview"] = obs.text_preview(d.get("text_preview", ""))
+            if "text_preview" in d:
+                d["text_preview"] = obs.text_preview(d.get("text_preview", ""))
             LifecycleLogger.emit(
                 session_id=session.session_id,
-                phase="split_decision",
+                phase=phase,
                 request_id=session.config.timing.request_id or None,
                 session_level=session.config.observability_level,
                 min_level=obs.ObsLevel.DEBUG,

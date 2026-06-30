@@ -136,7 +136,10 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                     **tr,
                 )
 
+        first_effective_logged = False
+
         async def on_audio(sid, data):
+            nonlocal first_effective_logged
             # Apply VAD filtering before output pipeline
             raw = np.frombuffer(data, dtype=np.float32)
             if raw.size == 0:
@@ -149,6 +152,15 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             _drain_vad_transitions()
             if filtered_int16.size == 0:
                 return
+
+            if not first_effective_logged:
+                first_effective_logged = True
+                LifecycleLogger.emit(
+                    session_id=session_id,
+                    phase="output.audio.first_effective",
+                    request_id=config.timing.request_id or None,
+                    session_level=config.observability_level,
+                )
 
             # Convert back to float32 bytes for OutputPipeline
             filtered_f32 = (filtered_int16.astype(np.float32) / 32767.0)
@@ -287,6 +299,7 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
         got_done = False
         got_cancel = False
         input_eof = False
+        first_text_received = False
         start_request: SessionStartRequest | None = None
         request_task: asyncio.Task | None = None
         audio_task: asyncio.Task | None = None
@@ -347,6 +360,16 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                             if session_id:
                                 if start_request is not None and request.text.client_timestamp_ms > 0:
                                     start_request.timing.client_text_ts_ms = int(request.text.client_timestamp_ms)
+                                if not first_text_received:
+                                    first_text_received = True
+                                    LifecycleLogger.emit(
+                                        session_id=session_id,
+                                        phase="text.first_received",
+                                        transport="grpc",
+                                        request_id=(start_request.timing.request_id
+                                                    if start_request else None) or None,
+                                        client_text_ts_ms=request.text.client_timestamp_ms or None,
+                                    )
                                 await self._engine.push_text_input(session_id, request.text.text)
 
                         elif msg_type in {"end", "done"}:

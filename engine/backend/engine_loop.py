@@ -838,6 +838,25 @@ class EngineLoop:
             cache_tokens_reused=best.cache_tokens_reused,
         )
 
+        # L2 prefill_detail: why this prefill looked the way it did.
+        session_level = self._session_obs_level(best_group)
+        if obs.is_enabled(obs.ObsLevel.DEBUG, session_level):
+            sc = best_group.request.session_config
+            LifecycleLogger.emit(
+                session_id=best.session_id,
+                phase="prefill_detail",
+                segment_idx=best.segment_idx,
+                min_level=obs.ObsLevel.DEBUG,
+                session_level=session_level,
+                prefill_source=str(getattr(slot, "prefill_source", "") or ""),
+                language=getattr(sc, "language", "") if sc else "",
+                speaker=getattr(sc, "speaker", None) if sc else None,
+                ref_source=getattr(sc, "ref_source", "") if sc else "",
+                ref_id=getattr(sc, "ref_id", None) if sc else None,
+                ref_audio_sha256=getattr(sc, "ref_audio_sha256", "") if sc else "",
+                x_vector_only=getattr(sc, "x_vector_only", False) if sc else False,
+            )
+
         # Add timing to prefill_metrics
         if best.prefill_started_at is not None:
             prefill_metrics["prefill_started_at"] = str(best.prefill_started_at)
@@ -1197,6 +1216,18 @@ class EngineLoop:
             seg = self._seg_by_slot.get(slot.slot_id)
             if seg is None:
                 continue
+            if seg.max_decode_batch == 0:
+                # First decode step for this segment (L1 lifecycle marker).
+                group = self._groups.get(seg.session_id)
+                LifecycleLogger.emit(
+                    session_id=seg.session_id,
+                    phase="engine.decode.first_step",
+                    segment_idx=seg.segment_idx,
+                    request_id=(
+                        group.request.session_config.timing.request_id
+                        if group and group.request.session_config else None
+                    ) or None,
+                )
             if batch_size > seg.max_decode_batch:
                 seg.max_decode_batch = batch_size
             group = self._groups.get(seg.session_id)
@@ -1420,8 +1451,18 @@ class EngineLoop:
         if eos_reason is None:
             eos_reason = "kv_overflow" if overflow else "codec_eos"
         audio_steps = 0
+        slot_snapshot: Optional[dict] = None
         if seg.slot:
             audio_steps = seg.slot.frame_idx - seg.decode_start_frame
+            sl = seg.slot
+            slot_snapshot = {
+                "slot_id": getattr(sl, "slot_id", None),
+                "past_len": getattr(sl, "past_len", None),
+                "frame_idx": getattr(sl, "frame_idx", None),
+                "text_idx": getattr(sl, "text_idx", None),
+                "trailing_len": len(getattr(sl, "trailing", []) or []),
+                "c2w_kv_len": (int(sl.c2w_kv.shape[3]) if getattr(sl, "c2w_kv", None) is not None else 0),
+            }
         text_tokens = seg.text_tokens_consumed
         audio_text_ratio = round(audio_steps / text_tokens, 2) if text_tokens else 0.0
         batched = seg.max_decode_batch > 1
@@ -1502,6 +1543,15 @@ class EngineLoop:
                 anomaly=anomaly,
                 reason=reason,
             )
+            if slot_snapshot is not None:
+                LifecycleLogger.emit(
+                    session_id=seg.session_id,
+                    phase="slot_state",
+                    segment_idx=seg.segment_idx,
+                    min_level=obs.ObsLevel.DEBUG,
+                    session_level=session_level,
+                    **slot_snapshot,
+                )
 
         self._check_session_done(group)
 

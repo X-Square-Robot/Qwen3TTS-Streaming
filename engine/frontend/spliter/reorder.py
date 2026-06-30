@@ -36,6 +36,15 @@ class AudioReorder:
     def next_emit_segment(self) -> tuple[int, int]:
         return (self._next_group, self._next_local)
 
+    def pending_state(self) -> dict:
+        """Introspection for L2 ``reorder_state`` observability: how much audio
+        is buffered waiting for an earlier segment (reorder stall risk)."""
+        return {
+            "next_emit": [self._next_group, self._next_local],
+            "buffered_keys": len(self._buffers),
+            "buffered_chunks": sum(len(v) for v in self._buffers.values()),
+        }
+
     def push(self, group_idx: int, local_idx: int, audio: bytes) -> List[bytes]:
         """Push an audio chunk; return chunks ready for emission (in order)."""
         key = (group_idx, local_idx)

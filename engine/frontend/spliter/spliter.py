@@ -302,6 +302,19 @@ class Spliter:
             if r.type in (ActionType.FLUSH_EOS, ActionType.FLUSH_NOP):
                 self._flushing.add(idx)
                 flushed = True
+                if self._record_decisions:
+                    th = self._make_thresholds()
+                    self._split_decisions.append({
+                        "obs": "driver_transition",
+                        "path": "streaming_driver",
+                        "segment_idx": idx,
+                        "flush_type": r.type.name,
+                        "ema_ratio": round(self._ema_ratio, 2),
+                        "thresholds": {
+                            "min_tokens_l1": th.min_tokens_l1,
+                            "force_split_at": th.force_split_at,
+                        },
+                    })
         return out, flushed
 
     # ------------------------------------------------------------------
