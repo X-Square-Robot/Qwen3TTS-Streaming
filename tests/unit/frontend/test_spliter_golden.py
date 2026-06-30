@@ -22,7 +22,7 @@ from __future__ import annotations
 import pytest
 
 from engine.frontend.spliter.spliter import Spliter
-from engine.text_normalization import strip_emoji
+from engine.text_normalization import strip_emoji, split_pending_emoji
 
 
 SIGNATURE = "你好吗？明天天气不错，有没有什么想吃的？"
@@ -215,12 +215,31 @@ def test_emoji_whole_keycap_in_one_packet_is_stripped():
     assert strip_emoji("第1️⃣步完成✅。") == "第步完成。"
 
 
-def test_emoji_keycap_split_across_packets_leaks_base_digit():
-    """CROSS-PACKET keycap leaks the base digit — the confirmed latent bug.
+def _stage0_stream(packets):
+    """Simulate the stateful Stage-0 filter: hold a partial-emoji suffix across
+    packets (split_pending_emoji), strip each emitted body, flush the carry."""
+    carry = ""
+    out = []
+    for p in packets:
+        body, carry = split_pending_emoji(carry + p)
+        out.append(strip_emoji(body))
+    out.append(strip_emoji(carry))   # end-of-input flush
+    return "".join(out)
 
-    # WILL CHANGE @ Step 5: a stateful Stage 0 filter that holds a dangling
-    # partial-emoji suffix across packets should make this -> "hello" + "world".
-    """
-    p1 = strip_emoji("hello1")        # keycap base, sequence incomplete in this packet
-    p2 = strip_emoji("️⃣world")       # VS-16 + combining keycap from the split 1️⃣
-    assert p1 + p2 == "hello1world"   # BUG: the '1' leaks into spoken text
+
+def test_emoji_keycap_split_across_packets_healed_by_carry():
+    """FIXED: a keycap split across packets no longer leaks the base digit. The
+    stateful Stage-0 carry holds the trailing base until the next packet
+    completes (or flushes) the sequence."""
+    # base | VS+keycap
+    assert _stage0_stream(["hello1", "️⃣world"]) == "helloworld"
+    # base+VS | keycap  (2-char hold)
+    assert _stage0_stream(["tier1️", "⃣done"]) == "tierdone"
+    assert "1" not in _stage0_stream(["hello1", "️⃣world"])
+
+
+def test_emoji_carry_does_not_drop_normal_trailing_digits():
+    """A held digit that turns out NOT to be a keycap is emitted intact — the
+    carry never loses normal numeric text, only delays it by one packet."""
+    assert _stage0_stream(["price5", "6dollars"]) == "price56dollars"
+    assert _stage0_stream(["count3"]) == "count3"        # flushed at end of input

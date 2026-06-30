@@ -77,6 +77,9 @@ class Session:
     # Accumulated text that hasn't been tokenized yet (streaming buffer)
     _text_buffer: str = ""
     _input_complete: bool = False
+    # Stage-0 cross-packet carry: a trailing suffix held back because it may be
+    # the start of an emoji sequence split across packets (see split_pending_emoji).
+    _emoji_carry: str = ""
 
     # Segment tracking
     segments_submitted: int = 0

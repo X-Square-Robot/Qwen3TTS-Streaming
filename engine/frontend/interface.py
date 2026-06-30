@@ -29,7 +29,7 @@ from ..core.types import (
 )
 from ..core.lifecycle import LifecycleLogger
 from ..core.timing import ServerTimingAccumulator
-from ..text_normalization import strip_emoji
+from ..text_normalization import strip_emoji, split_pending_emoji
 from .dispatcher import Dispatcher
 from .spliter import Spliter
 from .spliter.driver import ActionType
@@ -195,15 +195,30 @@ class FrontendInterface:
         session = self._sessions.get(session_id)
         if session is None or session.state == SessionState.DONE:
             return
-        text = _normalize_tts_text(text)
-
         mode = session.config.input_mode
+        if mode == InputMode.FULL_TEXT:
+            # Whole text is buffered and normalized at completion, so there is no
+            # per-packet emoji seam to heal here.
+            normalized = _normalize_tts_text(text)
+            if normalized.strip():
+                session.append_text(normalized)
+            return
+
+        # Streaming modes: hold back a trailing partial-emoji suffix so an emoji
+        # split across packets (e.g. a keycap base) does not leak into speech.
+        raw = session._emoji_carry + (text or "")
+        body, session._emoji_carry = split_pending_emoji(raw)
+        await self._ingest_streaming_text(session, body)
+
+    async def _ingest_streaming_text(self, session: "Session", body: str) -> None:
+        """Normalize a streaming text body, tokenize, route to the spliter per
+        input mode, and dispatch. Shared by push_text_input and the end-of-input
+        emoji-carry flush."""
+        text = _normalize_tts_text(body)
         if not text:
             return
+        mode = session.config.input_mode
         if mode != InputMode.TOKEN and not text.strip():
-            return
-        if mode == InputMode.FULL_TEXT:
-            session.append_text(text)
             return
 
         tokens = self._tokenize_segment_text(text)
@@ -253,6 +268,14 @@ class FrontendInterface:
                 await self._dispatcher.submit_session_tokens_done(session_id)
                 session.engine_tokens_done_sent = True
             return
+
+        # Flush any held partial-emoji carry as final streaming text before
+        # signalling end-of-input (a held keycap base with no modifier coming
+        # is just a normal digit and should still be spoken).
+        if session._emoji_carry:
+            body = session._emoji_carry
+            session._emoji_carry = ""
+            await self._ingest_streaming_text(session, body)
 
         if mode == InputMode.LONG_SEGMENT and session.config.group_policy != GroupPolicy.NONE:
             await self._dispatcher.maybe_send_session_tokens_done(session)
