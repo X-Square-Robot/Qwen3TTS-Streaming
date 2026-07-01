@@ -405,7 +405,14 @@ assemble_model_repo() {
         rm -rf "$orch_model_dir/engine"
         cp -R "$repo_root/engine" "$orch_model_dir/engine"
 
-        log_info "  tts_orchestrator/python: OK (copied model.py + engine/ package)"
+        # engine/ imports the shared protocol layer qwen3tts_protocol (single
+        # source of truth, lives under client/src). Bundle it next to engine/ so
+        # Triton's BLS Python interpreter can import it — the model version dir is
+        # on sys.path, but qwen3tts_protocol is NOT pip-installed in the image.
+        rm -rf "$orch_model_dir/qwen3tts_protocol"
+        cp -R "$repo_root/client/src/qwen3tts_protocol" "$orch_model_dir/qwen3tts_protocol"
+
+        log_info "  tts_orchestrator/python: OK (copied model.py + engine/ + qwen3tts_protocol)"
     else
         log_warn "  tts_orchestrator/python: source dir not found, using stub"
     fi
