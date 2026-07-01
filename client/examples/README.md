@@ -1,3 +1,5 @@
+**English** | [中文](README.zh-CN.md)
+
 # Examples
 
 Runnable examples for the `qwen3-tts-client` SDK. Each takes an optional

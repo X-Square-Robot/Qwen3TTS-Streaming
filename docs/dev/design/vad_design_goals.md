@@ -1,356 +1,358 @@
-# TTS 输出 VAD 设计目标
+**English** | [中文](vad_design_goals.zh-CN.md)
 
-> 分支：`refact`
-> 编写日期：2026-06-16
-> 状态：**已实现**（核心 VAD 处理器 + 协议层 + 网关集成 + 单元测试）
-> 来源：三轮讨论的共识与决策记录
+# TTS Output VAD Design Goals
+
+> Branch: `refact`
+> Written: 2026-06-16
+> Status: **Implemented** (core VAD processor + protocol layer + gateway integration + unit tests)
+> Source: consensus and decision record from three rounds of discussion
 
 ---
 
-## 0. 问题背景
+## 0. Problem Background
 
-### 0.1 TTS 模型幻觉
+### 0.1 TTS Model Hallucinations
 
-Qwen3-TTS 模型在流式合成中概率性出现幻觉，表现形式包括：
+The Qwen3-TTS model probabilistically produces hallucinations during streaming synthesis, manifesting as:
 
-| 幻觉类型 | 表现 | 处理归属 |
+| Hallucination type | Manifestation | Handled by |
 |---------|------|---------|
-| 开头长静音 | 音频开头 300~500ms 近似静音 | VAD 裁剪 |
-| 低能量随机噪声 | 模型输出低能量但人耳可辨的杂音 | VAD 裁剪 |
-| 高能量随机噪声 | 模型输出有能量但非语音的噪声 | VAD 裁剪 |
-| 重复 token 模式 | 模型陷入 1-2-3-1-2-3 循环 | Backend 检测 |
-| 重复语音片段 | 模型重复输出上文的语音片段 | Backend 检测 |
-| 无关语音内容 | 模型输出与输入文本无关的语音 | 模型侧解决 |
+| Long leading silence | The first 300~500ms of audio is near-silent | VAD trimming |
+| Low-energy random noise | Model outputs low-energy but audible noise | VAD trimming |
+| High-energy random noise | Model outputs noise with energy but no speech content | VAD trimming |
+| Repeated token pattern | Model gets stuck in a 1-2-3-1-2-3 loop | Backend detection |
+| Repeated speech segment | Model repeatedly outputs a preceding speech segment | Backend detection |
+| Irrelevant speech content | Model outputs speech unrelated to the input text | Resolved on the model side |
 
-**VAD 的处理目标**：裁剪开头静音、拦截低/高能量随机噪声。
-**Backend 的处理目标**：检测重复 token 模式并停止 flush。
-**不在 VAD 目标内**：重复语音片段、无关语音内容。
+**VAD's handling goals**: trim leading silence, intercept low/high-energy random noise.
+**Backend's handling goals**: detect repeated token patterns and stop flushing.
+**Out of scope for VAD**: repeated speech segments, irrelevant speech content.
 
-### 0.2 开头静音的体验问题
+### 0.2 The Experience Problem of Leading Silence
 
-合成速率 2x 实时的情况下，500ms 开头静音只需 250ms 就合成完，但用户需要等待 250ms 听静音才能听到有效语音。VAD 裁剪后用户不再听到这段静音。
+At a synthesis rate of 2x realtime, 500ms of leading silence only takes 250ms to synthesize, but the user has to wait 250ms listening to silence before hearing meaningful speech. After VAD trimming, the user no longer hears this silence.
 
-**重要澄清**：VAD 不能减少首字延迟（静音仍需先合成出来 VAD 才能判断），但能改善用户体验——用户宁愿等待沉默也不愿听 500ms 静音/底噪。这在语音交互场景（语音助手）中有显著价值。
+**Important clarification**: VAD cannot reduce time-to-first-word (silence still has to be synthesized before VAD can judge it), but it can improve user experience—users would rather wait in silence than listen to 500ms of silence/background noise. This has significant value in voice interaction scenarios (voice assistants).
 
-### 0.3 现有实现
+### 0.3 Existing Implementations
 
-| 实现 | 位置 | 能力 | 局限 |
+| Implementation | Location | Capability | Limitation |
 |------|------|------|------|
-| dBFS prefix trim | `workspace/qwen3_tts_remote.py` `_trim_prefix_silence_locked()` | 去除开头静音 | 只做 prefix trim，无 end 检测；无法拦截幻觉噪声 |
-| TenVAD (ASR) | `workspace/ten_vad.py` | 完整的 ASR VAD | 为 ASR 设计的多段语音状态机，不适合 TTS 场景 |
-| Backend pad silence | `engine/backend/engine_loop.py` `_is_pad_silence()` | 保护 backend 不超过最大 step | 生成侧停止解码，非输出侧门控 |
+| dBFS prefix trim | `workspace/qwen3_tts_remote.py` `_trim_prefix_silence_locked()` | Removes leading silence | Only does prefix trim, no end detection; cannot intercept hallucinated noise |
+| TenVAD (ASR) | `workspace/ten_vad.py` | Full ASR VAD | Multi-segment speech state machine designed for ASR, unsuitable for the TTS scenario |
+| Backend pad silence | `engine/backend/engine_loop.py` `_is_pad_silence()` | Protects the backend from exceeding the max step | Stops decoding on the generation side, not gating on the output side |
 
 ---
 
-## 1. 设计目标
+## 1. Design Goals
 
-### G1：统一 VAD 协议
+### G1: Unified VAD Protocol
 
-所有 VAD 模式共享同一套参数接口：
+All VAD modes share the same parameter interface:
 
 ```
 mode:           "disabled" | "energy" | "tenvad"
-chunk_ms:       每帧时长（模式配置，energy=16, tenvad=16）
-begin_threshold: 0.0~1.0 float（VAD 内部映射到各自量纲）
-begin_count:    连续 N 帧高于 begin_threshold 触发 begin
+chunk_ms:       per-frame duration (mode config, energy=16, tenvad=16)
+begin_threshold: 0.0~1.0 float (VAD maps internally to its own units)
+begin_count:    N consecutive frames above begin_threshold triggers begin
 end_threshold:  0.0~1.0 float
-end_count:      连续 N 帧低于 end_threshold 触发 end
-start_margin_ms: begin 触发后向前回溯的毫秒数
+end_count:      N consecutive frames below end_threshold triggers end
+start_margin_ms: milliseconds to look back after begin triggers
 ```
 
-**量纲映射**（VAD 内部实现，对外统一 0~1）：
+**Unit mapping** (VAD internal implementation, uniformly exposed as 0~1):
 
-| 模式 | begin/end_threshold 0~1 映射 | 典型 begin | 典型 end |
+| Mode | begin/end_threshold 0~1 mapping | Typical begin | Typical end |
 |------|------------------------------|-----------|---------|
-| energy | 线性映射到 dB 标度（如 0→-80dB, 1→0dB） | ~0.3 (-56dB) | ~0.2 (-64dB) |
-| tenvad | 直接作为概率阈值 | ~0.6 | ~0.35 |
+| energy | Linearly mapped to a dB scale (e.g. 0→-80dB, 1→0dB) | ~0.3 (-56dB) | ~0.2 (-64dB) |
+| tenvad | Used directly as a probability threshold | ~0.6 | ~0.35 |
 
-### G2：三种 VAD 模式
+### G2: Three VAD Modes
 
-| 模式 | 实现 | 能力 | 典型场景 |
+| Mode | Implementation | Capability | Typical scenario |
 |------|------|------|---------|
-| `disabled` | 直通，不做任何裁剪 | 完整体现模型效果 | 调试/基线 |
-| `energy` | 预加重 + Hamming 窗 + 对数能量 + dB 标度门限 | 去除绝对静音；对清辅音开头更敏感 | 轻量级裁剪 |
-| `tenvad` | TenVad ONNX 推理 + TTS 专用状态机 | 拦截静音 + 随机噪声；更好保留正常停顿 | 生产推荐 |
+| `disabled` | Pass-through, no trimming | Fully reflects the model's behavior | Debugging/baseline |
+| `energy` | Pre-emphasis + Hamming window + log energy + dB-scale threshold | Removes absolute silence; more sensitive to unvoiced consonant onsets | Lightweight trimming |
+| `tenvad` | TenVad ONNX inference + TTS-specific state machine | Intercepts silence + random noise; better preserves normal pauses | Recommended for production |
 
-**dBFS 与对数能量融合**：统一为 `energy` 模式，内部使用对数能量（预加重+加窗+log），对外暴露 dB 标度门限。是否启用预加重通过内部参数控制。
+**Fusion of dBFS and log energy**: unified into `energy` mode, using log energy internally (pre-emphasis + windowing + log) while exposing dB-scale thresholds externally. Whether pre-emphasis is enabled is controlled by an internal parameter.
 
-### G3：流式计算
+### G3: Streaming Computation
 
-- 算到哪下发到哪
-- VAD 以 16ms 一帧处理，TTS 以 ~80ms chunk 产出
-- 100ms 待计算音频 → 6 帧 × 16ms = 96ms 可判定 → 下发到 96ms
-- begin 引入延迟极低（begin_count × chunk_ms ≈ 80ms，小于 TTS chunk 大小）
-- end 是连续累计，end 触发后停止下发
+- Emit as far as computation has progressed
+- VAD processes at 16ms per frame, while TTS produces ~80ms chunks
+- 100ms of pending audio → 6 frames × 16ms = 96ms decidable → emit up to 96ms
+- begin introduces very low latency (begin_count × chunk_ms ≈ 80ms, less than a TTS chunk)
+- end accumulates consecutively; once end triggers, emission stops
 
-### G4：VAD 对客户端透明
+### G4: VAD Is Transparent to the Client
 
-- VAD 只做音频门控（下发/暂存/丢弃），不发 begin/end 事件给客户端
-- 客户端收到的是一段连续 PCM 流，中间可能缺少被裁剪的停顿/噪声
-- 相当于 VAD 帮用户跳过了噪音/无意义长静音的部分
+- VAD only performs audio gating (emit/hold/discard) and does not send begin/end events to the client
+- The client receives a continuous PCM stream that may be missing the trimmed pauses/noise
+- Effectively, VAD skips the noise/meaningless long silence on the user's behalf
 
-### G5：滞回设计
+### G5: Hysteresis Design
 
-- begin_threshold > end_threshold（如 0.6 > 0.35）
-- begin_count 小（~5 帧 = 80ms），end_count 大（~31 帧 = 500ms）
-- begin 门限高+数量少 → 快速确认语音开始
-- end 门限低+数量多 → 保护正常停顿/呼吸不被误裁
+- begin_threshold > end_threshold (e.g. 0.6 > 0.35)
+- begin_count is small (~5 frames = 80ms), end_count is large (~31 frames = 500ms)
+- High begin threshold + small count → quickly confirm speech onset
+- Low end threshold + large count → protect normal pauses/breathing from being trimmed by mistake
 
-### G6：end 后重新 begin
+### G6: Re-begin After End
 
-VAD 状态机支持多次 begin→end 循环：
+The VAD state machine supports multiple begin→end cycles:
 
 ```
 SILENCE → (begin) → SPEECH → (end) → SILENCE → (begin) → SPEECH → ... → flush
 ```
 
-场景示例：
+Example scenario:
 ```
-[静音 500ms] [语音 2s] [幻觉噪声 0.5s] [静音 0.5s] [语音 1s] [静音 300ms]
-→ VAD 裁剪后 →
-[语音 2s] [幻觉噪声 0.5s] [语音 1s]  (静音被裁，噪声在 end_count 内会下发一部分)
+[silence 500ms] [speech 2s] [hallucinated noise 0.5s] [silence 0.5s] [speech 1s] [silence 300ms]
+→ after VAD trimming →
+[speech 2s] [hallucinated noise 0.5s] [speech 1s]  (silence trimmed; part of the noise is emitted within end_count)
 ```
 
 ---
 
-## 2. 架构设计
+## 2. Architecture Design
 
-### 2.1 VAD 在引擎中的位置
+### 2.1 The Position of VAD in the Engine
 
 ```
 EngineLoop (GPU thread)
     ↓ EngineResult(AUDIO_CHUNK)
 asyncio result_queue
     ↓
-VAD (asyncio 端，per-session 有状态流式处理器)
-    ↓ 门控后的音频
+VAD (asyncio side, per-session stateful streaming processor)
+    ↓ gated audio
 OutputPipeline
     ↓
 Transport (gRPC / WebSocket)
 ```
 
-**选择 asyncio 端的理由**：
-- engine_loop 是 GPU 线程，不宜做 CPU 密集的 VAD 计算（TenVAD 是 ONNX 推理）
-- asyncio 端音频已是 CPU 上的 bytes，VAD 不影响 GPU 线程
-- asyncio 端已有 timing 逻辑，可与 OutputPipeline 度量集成
-- OutputPipeline 是纯数据转换管道，不应变成有状态管道
+**Reasons for choosing the asyncio side**:
+- engine_loop is a GPU thread and should not do CPU-intensive VAD computation (TenVAD is ONNX inference)
+- On the asyncio side the audio is already CPU-side bytes, so VAD does not affect the GPU thread
+- The asyncio side already has timing logic and can integrate with OutputPipeline metrics
+- OutputPipeline is a pure data-transformation pipeline and should not become a stateful pipeline
 
-### 2.2 VAD 状态机
+### 2.2 The VAD State Machine
 
-为 TTS 场景重新设计，不复用 ASR 的多段语音状态机：
+Redesigned for the TTS scenario, not reusing the ASR multi-segment speech state machine:
 
 ```
                     ┌─────────────────────────────┐
                     │                             │
                     ▼                             │
-┌──────────┐  begin触发  ┌──────────┐  end触发  ┌──────────┐
+┌──────────┐  begin triggers  ┌──────────┐  end triggers  ┌──────────┐
 │ SILENCE  │ ──────────→ │ SPEECH   │ ────────→ │ SILENCE  │
-│ (不下发) │             │ (下发)   │           │ (不下发) │
+│ (no emit)│             │ (emit)   │           │ (no emit)│
 └──────────┘             └──────────┘           └──────────┘
      ▲                                                 │
-     └─────────────── begin触发 ───────────────────────┘
+     └─────────────── begin triggers ──────────────────┘
 
-任何状态 + flush信号 → 下发所有 pending 音频 → 重置
+Any state + flush signal → emit all pending audio → reset
 ```
 
-**与 ASR VAD 的关键区别**：
-- 无 pre_roll 回溯保留（TTS 开头静音就是应该丢掉的）
-- 无 segment 过短丢弃逻辑
-- 无多段语音的 start/end 事件发布
-- flush 信号统一处理（SESSION_DONE / ERROR / CANCEL）
+**Key differences from ASR VAD**:
+- No pre_roll look-back retention (leading silence in TTS is exactly what should be dropped)
+- No too-short-segment discard logic
+- No multi-segment start/end event publishing
+- Unified flush signal handling (SESSION_DONE / ERROR / CANCEL)
 
-### 2.3 缓冲区设计
+### 2.3 Buffer Design
 
-VAD 需要三个缓冲区：
+VAD needs three buffers:
 
-#### (a) 输入帧对齐缓冲区
+#### (a) Input frame alignment buffer
 
-TTS 产出的 AUDIO_CHUNK 大小不一定是 16ms 帧的整数倍（24kHz × 16ms = 384 samples）。
-需要暂存不满一帧的残余样本，与下一个 chunk 拼接。
-
-```
-chunk 到达 → 拼接到 input_buffer → 按帧切分 → 逐帧送入 VAD → 残余留回 input_buffer
-```
-
-#### (b) Start margin 保留缓冲区
-
-begin 触发后需要向前回溯 start_margin_ms（~20ms）的音频。在 SILENCE 状态下，
-最近 start_margin_ms 的音频需暂存不下发也不丢弃，等 begin 确认后决定。
+The AUDIO_CHUNK produced by TTS is not necessarily an integer multiple of a 16ms frame (24kHz × 16ms = 384 samples).
+The residual samples of an incomplete frame need to be held and concatenated with the next chunk.
 
 ```
-SILENCE 状态：每帧音频 → 暂存到 margin_buffer（环形，容量 ≥ start_margin_ms）
-begin 触发：从 margin_buffer 取出 start_margin_ms 音频 + 当前帧 → 一起下发
+chunk arrives → concat to input_buffer → split into frames → feed frames to VAD one by one → residual returned to input_buffer
 ```
 
-**约束**：margin_buffer 容量 < TTS chunk 大小（80ms），引入延迟微乎其微。
+#### (b) Start margin retention buffer
 
-#### (c) 待下发缓冲区
+After begin triggers, we need to look back start_margin_ms (~20ms) of audio. In the SILENCE state,
+the most recent start_margin_ms of audio must be held—neither emitted nor discarded—until begin is confirmed.
 
-SPEECH 状态下，每帧判定为语音的音频暂存于此，批量下发以减少系统调用。
-end 触发时丢弃缓冲区中未下发的音频。
+```
+SILENCE state: each frame of audio → hold in margin_buffer (ring buffer, capacity ≥ start_margin_ms)
+begin triggers: take start_margin_ms of audio from margin_buffer + the current frame → emit together
+```
 
-### 2.4 能量 VAD 实现
+**Constraint**: margin_buffer capacity < TTS chunk size (80ms), so the introduced latency is negligible.
+
+#### (c) Pending-emit buffer
+
+In the SPEECH state, each frame judged to be speech is held here and emitted in batches to reduce system calls.
+When end triggers, the un-emitted audio in the buffer is discarded.
+
+### 2.4 Energy VAD Implementation
 
 ```python
 def compute_energy_score(frame_int16: np.ndarray, *, preemphasis: float = 0.97) -> float:
-    """预加重 → Hamming 加窗 → 对数能量 → dB 标度 → 归一化到 0~1"""
-    # 1. 预加重: y[n] = x[n] - a * x[n-1]
-    # 2. Hamming 加窗
+    """Pre-emphasis → Hamming window → log energy → dB scale → normalize to 0~1"""
+    # 1. Pre-emphasis: y[n] = x[n] - a * x[n-1]
+    # 2. Hamming window
     # 3. energy = sum(y^2)
-    # 4. dB = 10 * log10(energy / (N * 32768^2) + eps)  -- 绝对参考，与帧大小无关
-    # 5. 归一化: score = (dB + 80) / 80  -- -80dB→0, 0dB→1
+    # 4. dB = 10 * log10(energy / (N * 32768^2) + eps)  -- absolute reference, independent of frame size
+    # 5. Normalize: score = (dB + 80) / 80  -- -80dB→0, 0dB→1
     ...
 ```
 
-**dB 标度的优势**：
-- 门限值与帧大小无关（用户设置一次即可）
-- 有绝对参考点（0 dB = 满幅）
-- 预加重的影响只是让清辅音在 dB 标度下"看起来更响"
+**Advantages of the dB scale**:
+- The threshold value is independent of frame size (the user sets it once)
+- It has an absolute reference point (0 dB = full scale)
+- The effect of pre-emphasis is merely to make unvoiced consonants "look louder" on the dB scale
 
-### 2.5 TenVAD 实现
+### 2.5 TenVAD Implementation
 
-只复用 TenVAD 的推理核心（`TenVad.process()` → probability + flags），
-围绕 TTS 场景重写状态机逻辑。
+Reuse only the TenVAD inference core (`TenVad.process()` → probability + flags),
+and rewrite the state machine logic around the TTS scenario.
 
-**TenVAD 推理参数**：
-- hop_size = 256（16ms @ 16kHz）
-- threshold = 0.5（模型内部阈值）
-- RTF ≈ 0.015（极低开销）
+**TenVAD inference parameters**:
+- hop_size = 256 (16ms @ 16kHz)
+- threshold = 0.5 (model-internal threshold)
+- RTF ≈ 0.015 (extremely low overhead)
 
-**TenVAD 输入**：16kHz int16 PCM。VAD 内部负责从 24kHz 原始 PCM 降采样到 16kHz。
+**TenVAD input**: 16kHz int16 PCM. The VAD is internally responsible for downsampling the 24kHz raw PCM to 16kHz.
 
-**TenVAD 相对能量模式的核心优势**：能更好区分"低能量正常停顿/呼吸"和"低能量噪声"，
-因为停顿/呼吸虽然能量低但 TenVAD 可能给较高概率，不容易误触 end。
+**TenVAD's core advantage over energy mode**: it better distinguishes "low-energy normal pauses/breathing" from "low-energy noise,"
+because although pauses/breathing have low energy, TenVAD may assign them a higher probability, making it less prone to false end triggers.
 
 ---
 
-## 3. 协议与配置
+## 3. Protocol and Configuration
 
-### 3.1 VAD 配置
+### 3.1 VAD Configuration
 
 ```python
 @dataclass
 class VADConfig:
     enabled: bool = False
     mode: str = "disabled"      # "disabled" | "energy" | "tenvad"
-    chunk_ms: int = 16          # 每帧时长
+    chunk_ms: int = 16          # per-frame duration
     begin_threshold: float = 0.6  # 0~1
-    begin_count: int = 5        # 连续 N 帧高于 begin_threshold 触发 begin
+    begin_count: int = 5        # N consecutive frames above begin_threshold triggers begin
     end_threshold: float = 0.35  # 0~1
-    end_count: int = 31         # 连续 N 帧低于 end_threshold 触发 end (~500ms)
-    start_margin_ms: int = 20   # begin 后向前回溯
+    end_count: int = 31         # N consecutive frames below end_threshold triggers end (~500ms)
+    start_margin_ms: int = 20   # look back after begin
 ```
 
-### 3.2 模式默认参数
+### 3.2 Per-Mode Default Parameters
 
-| 参数 | energy 默认 | tenvad 默认 | 说明 |
+| Parameter | energy default | tenvad default | Note |
 |------|-----------|-----------|------|
-| chunk_ms | 16 | 16 | 恰好一致，无实际关联 |
-| begin_threshold | 0.3 | 0.6 | energy 映射到 ~-56dB |
+| chunk_ms | 16 | 16 | Coincidentally identical, no actual correlation |
+| begin_threshold | 0.3 | 0.6 | energy maps to ~-56dB |
 | begin_count | 5 | 5 | ~80ms |
-| end_threshold | 0.2 | 0.35 | energy 映射到 ~-64dB |
+| end_threshold | 0.2 | 0.35 | energy maps to ~-64dB |
 | end_count | 31 | 31 | ~500ms |
-| start_margin_ms | 20 | 20 | 向前回溯 20ms |
+| start_margin_ms | 20 | 20 | look back 20ms |
 
-### 3.3 可观测性
+### 3.3 Observability
 
-VAD 需要在 `done_meta` 中注入裁剪信息：
+VAD needs to inject trimming information into `done_meta`:
 
 ```python
-meta["vad_mode"] = "energy"  # 或 "tenvad"
-meta["vad_prefix_trimmed_ms"] = "520.000"   # 开头裁剪的静音时长
-meta["vad_tail_trimmed_ms"] = "0.000"       # 尾部裁剪的时长
-meta["vad_original_audio_ms"] = "3000.000"  # 原始音频总时长
-meta["vad_effective_audio_ms"] = "2480.000" # 裁剪后有效音频时长
-meta["vad_begin_count"] = "1"               # begin 触发次数
-meta["vad_end_count"] = "0"                 # end 触发次数（不含 flush）
+meta["vad_mode"] = "energy"  # or "tenvad"
+meta["vad_prefix_trimmed_ms"] = "520.000"   # duration of leading silence trimmed
+meta["vad_tail_trimmed_ms"] = "0.000"       # duration trimmed from the tail
+meta["vad_original_audio_ms"] = "3000.000"  # total duration of the original audio
+meta["vad_effective_audio_ms"] = "2480.000" # effective audio duration after trimming
+meta["vad_begin_count"] = "1"               # number of begin triggers
+meta["vad_end_count"] = "0"                 # number of end triggers (excluding flush)
 ```
 
-**时长口径**：
-- 引擎侧 RTF = 原始音频时长 / 耗时（不变）
-- 客户端侧 RTF = 有效音频时长 / 耗时
-- 客户端的 `audio_duration` 应基于裁剪后的有效音频时长
+**Duration semantics**:
+- Engine-side RTF = original audio duration / elapsed time (unchanged)
+- Client-side RTF = effective audio duration / elapsed time
+- The client's `audio_duration` should be based on the effective audio duration after trimming
 
 ---
 
-## 4. 关键设计决策
+## 4. Key Design Decisions
 
-### 4.1 Backend 与 VAD 的职责分工
+### 4.1 Division of Responsibility Between Backend and VAD
 
-| 层 | 职责 | 检测手段 | 动作 |
+| Layer | Responsibility | Detection means | Action |
 |----|------|---------|------|
-| **Backend** (engine_loop) | 检测重复 token 模式 | token 序列模式匹配（1-2-3-1-2-3） | 停止 flush，发送 SEGMENT_END/ERROR |
-| **Backend** (engine_loop) | 保护 KV 预算 | pad_silence 检测 + dynamic_silence_limit | 停止 decode |
-| **VAD** (asyncio 端) | 裁剪开头静音 | begin 门限 + begin 数量 | 不下发静音帧 |
-| **VAD** (asyncio 端) | 拦截幻觉噪声 | end 门限 + end 数量 | 停止下发，等重新 begin |
-| **VAD** (asyncio 端) | 保留正常停顿 | end_count 足够大 / TenVAD 概率区分 | 不误裁停顿 |
+| **Backend** (engine_loop) | Detect repeated token patterns | Token sequence pattern matching (1-2-3-1-2-3) | Stop flushing, send SEGMENT_END/ERROR |
+| **Backend** (engine_loop) | Protect the KV budget | pad_silence detection + dynamic_silence_limit | Stop decoding |
+| **VAD** (asyncio side) | Trim leading silence | begin threshold + begin count | Do not emit silence frames |
+| **VAD** (asyncio side) | Intercept hallucinated noise | end threshold + end count | Stop emitting, wait for re-begin |
+| **VAD** (asyncio side) | Preserve normal pauses | Sufficiently large end_count / TenVAD probability discrimination | Do not trim pauses by mistake |
 
-**`SchedulerConfig.pad_silence_*` 的演进**：当前用于保护 backend 不超过最大 step。
-本期演进为：backend 专注于检测重复 token 模式，pad_silence 检测保留作为安全兜底
-（防止模型陷入重复输出静音的模式导致超过 max_seq_len）。
+**Evolution of `SchedulerConfig.pad_silence_*`**: currently used to protect the backend from exceeding the max step.
+This iteration evolves it so that the backend focuses on detecting repeated token patterns, while pad_silence detection is kept as a safety fallback
+(preventing the model from getting stuck in a repeated-silence-output pattern that would exceed max_seq_len).
 
-### 4.2 Flush 信号机制
+### 4.2 Flush Signal Mechanism
 
-当音频流终止时（无论正常还是异常），VAD 需要收到 flush 信号并立即下发所有 pending 音频：
+When the audio stream terminates (whether normally or abnormally), VAD needs to receive a flush signal and immediately emit all pending audio:
 
-| 信号来源 | 信号类型 | VAD 行为 |
+| Signal source | Signal type | VAD behavior |
 |---------|---------|---------|
-| SESSION_DONE | 正常结束 | 处理完所有 pending audio → flush → 重置 |
-| SEGMENT_END | 段结束 | 同上 |
-| ERROR | 异常终止 | 立即 flush all pending（不做 end 判断）→ 重置 |
-| CANCEL_SESSION | 手动取消 | 丢弃所有 pending → 重置 |
+| SESSION_DONE | Normal completion | Process all pending audio → flush → reset |
+| SEGMENT_END | Segment end | Same as above |
+| ERROR | Abnormal termination | Immediately flush all pending (no end judgment) → reset |
+| CANCEL_SESSION | Manual cancellation | Discard all pending → reset |
 
-**SESSION_DONE 时的残余帧处理**：
-1. 处理 input buffer 中的所有完整帧
-2. 残余帧不满一帧时，补零到一帧大小并处理
-3. flush 所有待下发缓冲区中的音频（无论 VAD 当前状态）
-4. 重置 VAD 状态
+**Residual frame handling on SESSION_DONE**:
+1. Process all complete frames in the input buffer
+2. When the residual frame is incomplete, zero-pad it to a full frame and process it
+3. Flush all audio in the pending-emit buffers (regardless of the current VAD state)
+4. Reset the VAD state
 
-### 4.3 能量模式 vs TenVAD 模式的 end 行为差异
+### 4.3 Difference in End Behavior Between Energy Mode and TenVAD Mode
 
-**能量模式**：无法区分"低能量正常停顿"和"低能量噪声"。end 只看能量低于阈值就累计，
-正常呼吸/停顿也会被计入 end_count。因此能量模式下 end_count 需要设得更大（如 1000ms），
-但这又导致长幻觉噪声无法拦住。**这是能量模式的固有限制**。
+**Energy mode**: cannot distinguish "low-energy normal pauses" from "low-energy noise." end simply accumulates whenever the energy is below threshold,
+so normal breathing/pauses are also counted toward end_count. Therefore end_count must be set larger in energy mode (e.g. 1000ms),
+but this in turn makes it unable to intercept long hallucinated noise. **This is an inherent limitation of energy mode.**
 
-**TenVAD 模式**：停顿/呼吸虽然能量低但 TenVAD 可能给较高概率（停顿/呼吸有语音特征），
-不容易误触 end。因此 TenVAD 可以用较小的 end_count（如 500ms）同时保留停顿和拦住噪声。
-**这是 TenVAD 的核心优势**。
+**TenVAD mode**: although pauses/breathing have low energy, TenVAD may assign them a higher probability (pauses/breathing have speech characteristics),
+making it less prone to false end triggers. Therefore TenVAD can use a smaller end_count (e.g. 500ms) while both preserving pauses and blocking noise.
+**This is TenVAD's core advantage.**
 
-**建议**：生产环境优先使用 TenVAD 模式。能量模式作为轻量级替代（无 ONNX 依赖），
-适用于对停顿保留不敏感的场景。
+**Recommendation**: prefer TenVAD mode in production. Energy mode serves as a lightweight alternative (no ONNX dependency),
+suitable for scenarios that are not sensitive to pause preservation.
 
-### 4.4 VAD 裁剪后音频时长的影响
+### 4.4 Impact of Post-VAD Audio Duration
 
-VAD 裁剪后下发到客户端的音频总时长变短。影响：
+After VAD trimming, the total duration of audio emitted to the client becomes shorter. Impacts:
 
-1. **播放端计时**：如果客户端用 `audio_duration / sample_rate` 决定何时请求下一段，
-   裁剪后的时长会导致客户端过早请求下一段。客户端应基于有效音频时长。
-2. **timing metadata**：`done_meta` 中需区分原始时长和有效时长（见 3.3）。
-3. **RTF 口径**：引擎侧 RTF = 原始音频时长 / 耗时（不变），
-   客户端侧 RTF = 有效音频时长 / 耗时。
+1. **Playback-side timing**: if the client uses `audio_duration / sample_rate` to decide when to request the next segment,
+   the trimmed duration will cause the client to request the next segment too early. The client should base this on the effective audio duration.
+2. **timing metadata**: `done_meta` must distinguish the original duration from the effective duration (see 3.3).
+3. **RTF semantics**: engine-side RTF = original audio duration / elapsed time (unchanged),
+   client-side RTF = effective audio duration / elapsed time.
 
 ---
 
-## 5. 实现要点
+## 5. Implementation Notes
 
-### 5.1 VAD 处理器接口
+### 5.1 VAD Processor Interface
 
 ```python
 class TTSVADProcessor:
-    """Per-session 流式 VAD 处理器。"""
+    """Per-session streaming VAD processor."""
 
     def __init__(self, config: VADConfig, sample_rate: int = 24000): ...
 
     def process_chunk(self, pcm_int16: np.ndarray) -> np.ndarray:
-        """输入一个 PCM chunk，返回应下发的音频（可能为空）。"""
+        """Take one PCM chunk as input, return the audio to be emitted (possibly empty)."""
         ...
 
     def flush(self) -> np.ndarray:
-        """音频流结束，返回所有 pending 音频。"""
+        """The audio stream has ended, return all pending audio."""
         ...
 
     def reset(self) -> None:
-        """重置状态（session 结束时调用）。"""
+        """Reset state (called when the session ends)."""
         ...
 
     @property
@@ -365,64 +367,64 @@ class TTSVADProcessor:
     def end_count(self) -> int: ...
 ```
 
-### 5.2 TenVAD 模式的内部降采样
+### 5.2 Internal Downsampling for TenVAD Mode
 
-TenVAD 要求 16kHz 输入，但引擎原始 PCM 是 24kHz。VAD 内部做降采样：
+TenVAD requires 16kHz input, but the engine's raw PCM is 24kHz. VAD downsamples internally:
 
 ```python
-# 简单的 3/2 降采样（24kHz → 16kHz）
-# 每 3 个 24kHz 样本 → 2 个 16kHz 样本
-# 使用线性插值或简单的 FIR 滤波
+# Simple 3/2 downsampling (24kHz → 16kHz)
+# Every 3 samples at 24kHz → 2 samples at 16kHz
+# Use linear interpolation or a simple FIR filter
 ```
 
-### 5.3 begin_count 的模式差异
+### 5.3 Per-Mode Difference in begin_count
 
-| 模式 | 建议 begin_count | 理由 |
+| Mode | Suggested begin_count | Rationale |
 |------|-----------------|------|
-| energy | 5 帧 (80ms) | 能量判断稳定，1-2 帧即可，5 帧留余量 |
-| tenvad | 5 帧 (80ms) | TenVAD 单帧概率可能抖动，需 2-3 帧确认，5 帧留余量 |
+| energy | 5 frames (80ms) | Energy judgment is stable; 1-2 frames suffice, 5 leaves headroom |
+| tenvad | 5 frames (80ms) | TenVAD single-frame probability may jitter; 2-3 frames are needed to confirm, 5 leaves headroom |
 
-### 5.4 end_count 的权衡
+### 5.4 The end_count Trade-off
 
-end_count 是**响应速度 vs 效果**的核心取舍：
+end_count is the core trade-off between **responsiveness vs. effectiveness**:
 
-- end_count 大 → 保护正常停顿，但幻觉噪声可能下发更多
-- end_count 小 → 拦住更多幻觉噪声，但可能切断正常停顿
+- Large end_count → protects normal pauses, but more hallucinated noise may be emitted
+- Small end_count → blocks more hallucinated noise, but may cut off normal pauses
 
-**需要实现后用真实幻觉样本做 A/B 测试确定最优值**。初始建议：
-- energy 模式：end_count = 62 帧 (~1000ms)，因为能量模式无法区分停顿和噪声
-- tenvad 模式：end_count = 31 帧 (~500ms)，因为 TenVAD 能更好保留停顿
+**Determine the optimal value through A/B testing with real hallucination samples after implementation.** Initial suggestions:
+- energy mode: end_count = 62 frames (~1000ms), because energy mode cannot distinguish pauses from noise
+- tenvad mode: end_count = 31 frames (~500ms), because TenVAD better preserves pauses
 
 ---
 
-## 6. 待验证项
+## 6. Items to Validate
 
-| # | 项目 | 验证方式 |
+| # | Item | Validation method |
 |---|------|---------|
-| 1 | TenVAD ONNX 在 TTS 实时约束下的 CPU 开销 | Benchmark：24kHz→16kHz 降采样 + TenVAD process() 的 P99 延迟 |
-| 2 | 最优 end_count | A/B 测试：用真实幻觉样本测试不同 end_count 的噪声拦截率和停顿保留率 |
-| 3 | 能量模式门限映射 | 录制真实 TTS 输出，统计静音帧/语音帧/噪声帧的 dB 分布，标定 begin/end 门限 |
-| 4 | start_margin 是否足够 | 测试清辅音开头（f/s/sh 等）的 VAD 检测延迟，确认 20ms 回溯不截音 |
-| 5 | 降采样质量 | 对比 24kHz→16kHz 线性插值 vs FIR 滤波对 TenVAD 概率的影响 |
-| 6 | VAD 裁剪后客户端行为 | 验证客户端基于有效音频时长的播放/请求逻辑是否正常 |
+| 1 | CPU overhead of TenVAD ONNX under TTS realtime constraints | Benchmark: P99 latency of 24kHz→16kHz downsampling + TenVAD process() |
+| 2 | Optimal end_count | A/B test: measure noise interception rate and pause preservation rate for different end_count values using real hallucination samples |
+| 3 | Energy-mode threshold mapping | Record real TTS output, gather the dB distribution of silence/speech/noise frames, calibrate begin/end thresholds |
+| 4 | Whether start_margin is sufficient | Test the VAD detection latency for unvoiced consonant onsets (f/s/sh, etc.), confirm that a 20ms look-back does not clip audio |
+| 5 | Downsampling quality | Compare the effect of 24kHz→16kHz linear interpolation vs. FIR filtering on TenVAD probability |
+| 6 | Post-VAD client behavior | Verify that the client's playback/request logic based on effective audio duration works correctly |
 
 ---
 
-## 7. 不在本次范围
+## 7. Out of Scope for This Iteration
 
-- Backend 重复 token 模式检测（1-2-3-1-2-3）——独立任务，本期演进 `pad_silence_*` 职责
-- 模型侧幻觉根因修复
-- VAD 训练/微调
-- 客户端多段音频拼接逻辑（VAD 对客户端透明，不需要）
+- Backend repeated token pattern detection (1-2-3-1-2-3)—a separate task; this iteration evolves the `pad_silence_*` responsibility
+- Root-cause fix of hallucinations on the model side
+- VAD training/fine-tuning
+- Client-side multi-segment audio concatenation logic (VAD is transparent to the client, so this is not needed)
 
 ---
 
-## 8. 参考资料
+## 8. References
 
-- `workspace/ten_vad.py`：现有 ASR TenVAD 实现（参考推理核心，不复用状态机）
-- `workspace/qwen3_tts_remote.py`：现有 dBFS prefix trim 实现（参考能量计算，将被替换）
-- `engine/backend/engine_loop.py`：Backend pad silence 检测（职责分工参考）
-- `engine/interface/output.py`：OutputPipeline（VAD 可观测性集成点）
-- `engine/core/types.py`：VADConfig 定义（协议扩展点）
-- [TEN VAD GitHub](https://github.com/TEN-framework/ten-vad)：TenVAD 推理核心参考
-- [streaming_hallucination.md](../investigation/streaming_hallucination.md)：幻觉调查背景
+- `workspace/ten_vad.py`: existing ASR TenVAD implementation (reference for the inference core, state machine not reused)
+- `workspace/qwen3_tts_remote.py`: existing dBFS prefix trim implementation (reference for energy computation, to be replaced)
+- `engine/backend/engine_loop.py`: Backend pad silence detection (reference for the division of responsibility)
+- `engine/interface/output.py`: OutputPipeline (VAD observability integration point)
+- `engine/core/types.py`: VADConfig definition (protocol extension point)
+- [TEN VAD GitHub](https://github.com/TEN-framework/ten-vad): reference for the TenVAD inference core
+- [streaming_hallucination.md](../investigation/streaming_hallucination.md): hallucination investigation background

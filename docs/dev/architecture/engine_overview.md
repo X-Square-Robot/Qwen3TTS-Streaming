@@ -1,135 +1,137 @@
-# 引擎设计全景总览（约束 → 设计 → 缺陷 → 可避免性）
+**English** | [中文](engine_overview.zh-CN.md)
 
-> 编写日期：2026-06-30
-> 状态：**索引/综述**——这是理解全引擎的入口地图，链接到各细分文档，不重复其内容
-> 用途：**防止反复调研**。后续要理解"某个设计为什么这么干、缺陷在哪、能不能避免"，先读本文，再按链接深入
-> 关联：[[engine_decisions]] [[decode_fsm]] [[mixed_precision_plan]] [[trt_llm_runtime_route_report]] [[frontend_segmentation_pipeline]] [[observability_goals]] [[observability_tiers]] [[realtime_audio]] [[vad_design_goals]] · 投资调查 `docs/dev/investigation/streaming_hallucination.md`、`code2wav_state_size.md`
+# Engine Design Panorama (Constraints → Design → Flaws → Avoidability)
+
+> Written: 2026-06-30
+> Status: **Index/synthesis** — this is the entry map for understanding the whole engine; it links to the detailed documents rather than repeating their content
+> Purpose: **Prevent repeated investigation**. Later, to understand "why a design works this way, where its flaws are, and whether they can be avoided," read this first, then follow the links deeper
+> Related: [[engine_decisions]] [[decode_fsm]] [[mixed_precision_plan]] [[trt_llm_runtime_route_report]] [[frontend_segmentation_pipeline]] [[observability_goals]] [[observability_tiers]] [[realtime_audio]] [[vad_design_goals]] · investigation reports `docs/dev/investigation/streaming_hallucination.md`, `code2wav_state_size.md`
 
 ---
 
-## 0. 一切的源头：四个硬约束（C1–C4）
+## 0. The Source of Everything: Four Hard Constraints (C1–C4)
 
-整台引擎每一个设计都是这四个约束的下游产物。所有"为什么"都回指这里。
+Every design in the whole engine is a downstream product of these four constraints. Every "why" points back here.
 
-| # | 约束 | 性质 |
+| # | Constraint | Nature |
 |---|---|---|
-| **C1** | 模型**自回归**，每段**固定 KV 预算**（512 step/slot 硬上限） | 硬件/模型，不可消除 |
-| **C2** | 文本**异步到达**（接上游 LLM token 流），decode 必须能"等文本"（WAIT_TEXT） | 业务语义，不可消除 |
-| **C3** | 前端**只能控文本 token**，音频 step 是下游产物，只能用 EMA 估（~3 step/中文字） | 三阶段架构所致，不可消除 |
-| **C4** | 模型**不可靠吐 EOS**——某些 seed/采样组合永不收尾 → 跑满 512 → 幻觉（~10–18%） | 模型+采样，**非实现 bug** |
+| **C1** | The model is **autoregressive**, with a **fixed KV budget per segment** (a hard cap of 512 steps/slot) | Hardware/model, cannot be eliminated |
+| **C2** | Text **arrives asynchronously** (fed from an upstream LLM token stream); decode must be able to "wait for text" (WAIT_TEXT) | Business semantics, cannot be eliminated |
+| **C3** | The frontend **can only control text tokens**; audio steps are a downstream product and can only be estimated with an EMA (~3 steps per Chinese character) | Caused by the three-stage architecture, cannot be eliminated |
+| **C4** | The model **does not reliably emit EOS** — certain seed/sampling combinations never finish → run out the full 512 → hallucinate (~10–18%) | Model + sampling, **not an implementation bug** |
 
-> 一句话：这台引擎是**在一个会溢出、会不收尾、只能间接控制、还要边等文本边干活的自回归模型上做实时流式 TTS**。复杂度几乎全部来自硬扛这四点。
-
----
-
-## 1. 模型与运行时层
-
-### 1.1 自建引擎而非 Triton
-- **是什么**：抛弃 Triton 作主调度，自建 gateway + continuous batching + session 流控。
-- **为什么**：Triton `dynamic_batching` 为无状态模型设计；自回归 decode 每请求 KV 长度不同，且需 C2 的 WAIT_TEXT 暂停/恢复，Triton 给不了。
-- **缺陷**：运维设施（健康检查/加载/指标/优雅关闭）全自研。
-- **可避免**：否，正确取舍。
-- 详见 [[engine_decisions]]。
-
-### 1.2 三阶段 decode + WAIT_TEXT（C1+C2 核心）
-- **是什么**：prefill → 文本流式输入（边喂边出音频，无文本则 `WAIT_TEXT` 挂起保 KV）→ flush（注 EOS pad、drain）。`engine_loop.py:1187-1201`。
-- **为什么**：流式 TTS 必须能在文本断流时保 KV 原地等，而非 pad 或重 prefill。
-- **缺陷**：① pad 容忍实测**仅 1 token**，上游卡顿 pad≥2 即可感知停顿；② **无 EOS 保证**（C4），flush 靠 silence-abort 启发式硬切，阈值 cliff 式硬编码（`engine_loop.py:1280-1293`）。
-- **可避免**：三阶段不可避免（C2）；pad/EOS 是模型能力，工程只能缓解。
-- 详见 [[decode_fsm]]。
-
-### 1.3 Padded continuous batching + MLFQ 调度
-- **是什么**：迭代级调度，KV 用 **padding 到 batch 最大长 + mask** 对齐（**非 paged KV**）；MLFQ 风格优先级（新段保 TTFB、老段降级防饿死）。`scheduler.py`。
-- **为什么**：编译好的 TRT engine `seq_len` 固定，paged/varlen 需 kernel 级改动，.plan 改不了。
-- **缺陷**：长短请求混批 padding 浪费（~10%）；无抢占。
-- **可避免**：能但代价高——需换 TRT-LLM PyTorch backend，评估为**中期路线非现在**（[[trt_llm_runtime_route_report]]）。
-
-### 1.4 Code Predictor 展开、无 KV
-- **是什么**：CP 15 步展开成单个静态 TRT 图，每步从头重算。`architecture.md §5`。
-- **为什么**：CP 的 KV 省下来仅占 ~3% 延迟，但展开成 GEMM 比 GEMV 的 GPU 利用率高。
-- **缺陷**：**FP16 坏掉**（stage argmax 敏感），只能 fp32/bf16；图大编译慢。
-- **可避免**：FP16 不可用是数值本质。
-
-### 1.5 混合精度 bf16/fp32/bf16
-- **是什么**：backbone=bf16、CP=fp32、code2wav=bf16。
-- **为什么**：CP bf16 下 stage2 近似平局被舍入翻转 → 级联幻觉（Finding #15）。
-- **缺陷（关键认知）**：**精度不是幻觉根因**（Finding #17-18）——各精度同种子都 ~10-18%，全 fp32 反而 17.5% 更糟。CP→fp32 是数值必要、非幻觉充分解，只是"换一批坏种子"。
-- **可避免**：CP fp32 必须留；别指望它治幻觉。
-- 详见 [[mixed_precision_plan]]、`streaming_hallucination.md`。
-
-### 1.6 Prefix KV cache
-- **是什么**：16 条 LRU，缓存固定前缀 talker KV，命中跳过 prefill。`prefix_cache.py`。
-- **为什么**：custom_voice 类请求 system prompt 相同，省 10-50ms。
-- **缺陷**：仅精确 token 匹配；⚠️**子 agent 推断（未复核）**：miss 时可能跑两遍 TRT、多 token suffix 命中收益不均。
-- **可避免**：exact-match 限制可用前缀树改进，属可优化项。
+> In one sentence: this engine does **real-time streaming TTS on an autoregressive model that will overflow, may never finish, can only be controlled indirectly, and must work while waiting for text**. Nearly all of the complexity comes from bearing these four points head-on.
 
 ---
 
-## 2. 文本切分 / 流控层（重设计进行中，见 [[frontend_segmentation_pipeline]]）
+## 1. Model and Runtime Layer
 
-### 2.1 文本 token 唯一控制面 + EMA（C3）
-- **是什么**：前端只能决定何时停喂/flush，音频开销=文本token×EMA比；EMA 在 SEGMENT_END 更新、clamp[2,10]、overflow 时 α=0.5。`spliter.py:583`。
-- **缺陷**：① EMA 是估计，估错时整条阈值阶梯一起平移；② **clamp 在 10 饱和**，真实比>10 永远低估不收敛；③ **反馈延迟**，溢出后 1-2 段仍可能溢出。
-- **可避免**：能大幅缓解——**KV 水位根治**（flush 时机判断换实测）；但段间装箱在 decode 前、无水位，**仍靠 EMA**（C3 残留硬核）。
+### 1.1 Custom Engine Instead of Triton
+- **What it is**: Drop Triton as the main scheduler and build a custom gateway + continuous batching + session flow control.
+- **Why**: Triton's `dynamic_batching` is designed for stateless models; autoregressive decode has a different KV length per request and needs the WAIT_TEXT pause/resume of C2, which Triton cannot provide.
+- **Flaw**: All operational infrastructure (health checks/loading/metrics/graceful shutdown) is built in-house.
+- **Avoidable**: No, it's a correct trade-off.
+- See [[engine_decisions]] for details.
 
-### 2.2 三层阶梯 FSM + spliter 双路径
-- **是什么**：driver FSM 用 L1/L2/L3+force 三层阈值反应式切；spliter 有流式 `feed_tokens` 与离线 `pre_split` 两条路径。`driver.py`、`spliter.py`。
-- **缺陷**：① **碎片化**——driver 在 0.7cap 第一个 L1 就切；② **双路径各带一套驱动循环+背压队列**，是分叉非流水线，emoji/auto 横切需求无处安放。
-- **可避免**：**能**，纯意外复杂度——统一 `_drive_events`+单 `_pending`+层级装箱+auto。
+### 1.2 Three-Stage Decode + WAIT_TEXT (Core of C1+C2)
+- **What it is**: prefill → streaming text input (emit audio while feeding; with no text, `WAIT_TEXT` suspends and preserves KV) → flush (inject EOS pad, drain). `engine_loop.py:1187-1201`.
+- **Why**: Streaming TTS must be able to hold the KV in place and wait when the text stream stalls, rather than pad or re-prefill.
+- **Flaw**: ① pad tolerance is measured at **only 1 token**, so an upstream stall of pad≥2 produces a perceptible pause; ② **no EOS guarantee** (C4), so flush relies on a silence-abort heuristic hard cut, with cliff-style hard-coded thresholds (`engine_loop.py:1280-1293`).
+- **Avoidable**: The three stages are unavoidable (C2); pad/EOS are model capabilities, and engineering can only mitigate.
+- See [[decode_fsm]] for details.
 
-### 2.3 AudioReorder 分层重排
-- **是什么**：`(group_idx, local_idx)` 二级坐标，并发段乱序完成时按文本序重排。`reorder.py`。
-- **缺陷**：**无 stall 超时**，某段后端永不送 SEGMENT_END 则后续音频永久卡住。
-- **可避免**：能，加超时/健康检查。
+### 1.3 Padded Continuous Batching + MLFQ Scheduling
+- **What it is**: Iteration-level scheduling, with KV aligned by **padding to the batch max length + mask** (**not paged KV**); MLFQ-style priority (new segments protect TTFB, old segments are demoted to avoid starvation). `scheduler.py`.
+- **Why**: A compiled TRT engine has a fixed `seq_len`; paged/varlen requires kernel-level changes, and the .plan cannot be modified.
+- **Flaw**: Mixing long and short requests in a batch wastes padding (~10%); no preemption.
+- **Avoidable**: Possible but costly — it would require switching to the TRT-LLM PyTorch backend, assessed as a **mid-term route, not now** ([[trt_llm_runtime_route_report]]).
+
+### 1.4 Code Predictor Unrolled, No KV
+- **What it is**: The CP's 15 steps are unrolled into a single static TRT graph, recomputing from scratch each step. `architecture.md §5`.
+- **Why**: Saving the CP's KV only accounts for ~3% of latency, but unrolling into a GEMM has higher GPU utilization than a GEMV.
+- **Flaw**: **FP16 is broken** (the stage argmax is sensitive), so only fp32/bf16 work; the large graph compiles slowly.
+- **Avoidable**: The unavailability of FP16 is numerically intrinsic.
+
+### 1.5 Mixed Precision bf16/fp32/bf16
+- **What it is**: backbone=bf16, CP=fp32, code2wav=bf16.
+- **Why**: Under CP bf16, stage2's near-ties get flipped by rounding → cascading hallucination (Finding #15).
+- **Flaw (key insight)**: **Precision is not the root cause of hallucination** (Findings #17-18) — every precision at the same seed gives ~10-18%, and full fp32 is actually worse at 17.5%. CP→fp32 is a numerical necessity, not a sufficient fix for hallucination; it merely "swaps in a different batch of bad seeds."
+- **Avoidable**: CP fp32 must stay; do not expect it to cure hallucination.
+- See [[mixed_precision_plan]] and `streaming_hallucination.md` for details.
+
+### 1.6 Prefix KV Cache
+- **What it is**: A 16-entry LRU that caches the fixed-prefix talker KV; a hit skips prefill. `prefix_cache.py`.
+- **Why**: custom_voice-type requests share the same system prompt, saving 10-50ms.
+- **Flaw**: Exact token match only; ⚠️**sub-agent inference (not reviewed)**: on a miss it may run TRT twice, and a multi-token suffix hit yields uneven benefit.
+- **Avoidable**: The exact-match limitation can be improved with a prefix tree; it's an optimizable item.
 
 ---
 
-## 3. 输出层（均为 C4 善后）
+## 2. Text Segmentation / Flow-Control Layer (Redesign in Progress, see [[frontend_segmentation_pipeline]])
 
-VAD 输出门控（裁前导/尾部幻觉静音）、等时音频流（补静音给 WebRTC jitter buffer）、14 阶段可观测性。
-- **为什么**：C4 幻觉模型层治不了，在输出端事后补救（VAD ~0.1-0.2ms，对引擎透明）。
-- **共同缺陷**：**都不降 TTFT**——裁掉/填充的部分仍先合成了。改善体验（断音、噪声），非延迟。
-- 详见 [[vad_design_goals]]、[[realtime_audio]]、[[observability_goals]]。
+### 2.1 Text Tokens as the Sole Control Surface + EMA (C3)
+- **What it is**: The frontend can only decide when to stop feeding/flush; audio cost = text tokens × the EMA ratio; the EMA is updated at SEGMENT_END, clamped to [2,10], and uses α=0.5 on overflow. `spliter.py:583`.
+- **Flaw**: ① the EMA is an estimate, and when it's wrong the entire threshold ladder shifts together; ② **the clamp saturates at 10**, so a true ratio > 10 is always underestimated and never converges; ③ **feedback lag**, so 1-2 segments after an overflow may still overflow.
+- **Avoidable**: Can be greatly mitigated — a **KV watermark root fix** (replace the flush-timing judgment with a real measurement); but inter-segment packing happens before decode with no watermark, so it **still relies on the EMA** (a residual hard core of C3).
+
+### 2.2 Three-Tier Ladder FSM + Spliter Dual Path
+- **What it is**: The driver FSM cuts reactively using the three-tier L1/L2/L3+force thresholds; the spliter has two paths, streaming `feed_tokens` and offline `pre_split`. `driver.py`, `spliter.py`.
+- **Flaw**: ① **fragmentation** — the driver cuts at the first L1 at 0.7cap; ② **each of the two paths carries its own drive loop + backpressure queue**, so it's a fork rather than a pipeline, and the emoji/auto cross-cutting requirements have nowhere to live.
+- **Avoidable**: **Yes**, pure accidental complexity — unify `_drive_events` + a single `_pending` + hierarchical packing + auto.
+
+### 2.3 AudioReorder Hierarchical Reordering
+- **What it is**: A two-level `(group_idx, local_idx)` coordinate; when concurrent segments finish out of order, they are reordered into text order. `reorder.py`.
+- **Flaw**: **No stall timeout** — if the backend of some segment never sends SEGMENT_END, subsequent audio is stuck forever.
+- **Avoidable**: Yes, add a timeout / health check.
 
 ---
 
-## 4. 协议 / 客户端层
+## 3. Output Layer (All C4 Cleanup)
 
-- **是什么**：`SynthesizeOnce`（一元强制 FULL_TEXT）+ `SynthesizeStream`（双向）；InputMode/GroupPolicy 暴露给客户端；元数据用 string map；gRPC+WS 共享 transport-agnostic 核心。`proto/tts.proto`、`engine/gateway/`。
-- **缺陷（抽象泄漏一串）**：① **InputMode 把内部切分粒度泄漏给用户**；② `ref_audio` 暴露 `c2w`/`ref_codec` 引擎内部条件；③ **`SynthesizeOnce` 静默覆盖** 客户端 InputMode→FULL_TEXT；④ **输入完成度 transport-scoped**，引擎区分不了"流还开着在等" vs "流关了该收尾"；⑤ VAD 参数**字段+config dict 双重表示**；⑥ timing accumulator 塞 `timing.extra` 协议字段（破坏序列化）；⑦ 元数据 schema 在注释里、无版本协商。
-- **可避免**：大部分能（意外复杂度）。auto 默认+保留显式档解决①；其余协议卫生可收敛。唯④由 C2 决定（完成度必须显式告知）不可完全消除。
+VAD output gating (trimming leading/trailing hallucinated silence), isochronous audio streaming (padding silence for the WebRTC jitter buffer), and 14-stage observability.
+- **Why**: C4 hallucination cannot be cured at the model layer, so it is patched after the fact at the output end (VAD ~0.1-0.2ms, transparent to the engine).
+- **Common flaw**: **None of them reduces TTFT** — the trimmed/padded parts were still synthesized first. They improve experience (clipping, noise), not latency.
+- See [[vad_design_goals]], [[realtime_audio]], and [[observability_goals]] for details.
 
 ---
 
-## 5. 核心结论：硬约束 vs 意外复杂度
+## 4. Protocol / Client Layer
 
-### 🔴 不可避免（C1–C4 本质，只能缓解）
-| 缺陷 | 根 | 能做的 |
+- **What it is**: `SynthesizeOnce` (unary, forcing FULL_TEXT) + `SynthesizeStream` (bidirectional); InputMode/GroupPolicy exposed to the client; metadata uses a string map; gRPC+WS share a transport-agnostic core. `proto/tts.proto`, `engine/gateway/`.
+- **Flaw (a string of abstraction leaks)**: ① **InputMode leaks the internal segmentation granularity to the user**; ② `ref_audio` exposes the engine-internal `c2w`/`ref_codec` conditions; ③ **`SynthesizeOnce` silently overrides** the client's InputMode → FULL_TEXT; ④ **input completeness is transport-scoped**, so the engine cannot distinguish "the stream is still open and waiting" vs "the stream is closed and should finish"; ⑤ VAD parameters have a **dual representation of fields + a config dict**; ⑥ the timing accumulator is stuffed into the `timing.extra` protocol field (breaking serialization); ⑦ the metadata schema is in comments, with no version negotiation.
+- **Avoidable**: Mostly yes (accidental complexity). An auto default + a preserved explicit tier solves ①; the rest is protocol hygiene that can be consolidated. Only ④ is determined by C2 (completeness must be signaled explicitly) and cannot be fully eliminated.
+
+---
+
+## 5. Core Conclusion: Hard Constraints vs Accidental Complexity
+
+### 🔴 Unavoidable (Intrinsic to C1–C4, Can Only Be Mitigated)
+| Flaw | Root | What Can Be Done |
 |---|---|---|
-| 幻觉 ~10-18% | C4 模型+采样 | VAD 善后、EOS 调温、强制截断；**治本靠训练** |
-| KV 512 溢出风险 | C1 硬预算 | 装箱、水位提前切、尾巴结转（不丢） |
-| 只能控文本、音频靠估 | C3 三阶段 | 水位把段内估计换实测；段间装箱仍靠 EMA |
-| 完成度要显式告知 | C2 异步文本 | 协议理清信号，消不掉 |
-| pad≤1 token / 无 EOS 保证 | C4 模型 | silence 启发式；治本靠训练 |
+| Hallucination ~10-18% | C4 model + sampling | VAD cleanup, EOS temperature tuning, forced truncation; **the real fix is training** |
+| KV 512 overflow risk | C1 hard budget | Packing, watermark early cut, tail carry-over (no loss) |
+| Only text is controllable, audio is estimated | C3 three-stage | The watermark replaces the intra-segment estimate with a measurement; inter-segment packing still relies on the EMA |
+| Completeness must be signaled explicitly | C2 async text | The protocol clarifies the signal; it cannot be removed |
+| pad≤1 token / no EOS guarantee | C4 model | Silence heuristic; the real fix is training |
 
-### 🟢 可避免（意外复杂度，待清理 = 我们要解决的）
-| 缺陷 | 解 | 状态 |
+### 🟢 Avoidable (Accidental Complexity, Pending Cleanup = What We Are Solving)
+| Flaw | Fix | Status |
 |---|---|---|
-| spliter 双路径分叉 | 统一 `_drive_events`+单队列 | [[frontend_segmentation_pipeline]] 已定 |
-| 切分碎片化 | 层级装箱+抬 t1 | 已定 |
-| EMA 估错致丢句 | KV 水位根治 | 已定 |
-| emoji 跨包漏字 | Stage 0 有状态 filter | 已定 |
-| InputMode 泄漏 | auto 默认+保留显式档 | 已定 |
-| Reorder 无超时 | 加超时 | 待办 |
-| 协议泄漏（c2w/timing accumulator/双 VAD/无版本） | 协议卫生收敛 | 待办 |
-| EMA clamp 饱和、overflow α 猛拽全局 | 区分离群/系统漂移、放开 clamp | 待办 |
+| Spliter dual-path fork | Unify `_drive_events` + a single queue | Decided in [[frontend_segmentation_pipeline]] |
+| Segmentation fragmentation | Hierarchical packing + raise t1 | Decided |
+| EMA misestimation drops sentences | KV watermark root fix | Decided |
+| Emoji dropped across packets | Stage 0 stateful filter | Decided |
+| InputMode leak | auto default + preserved explicit tier | Decided |
+| Reorder has no timeout | Add a timeout | To do |
+| Protocol leaks (c2w/timing accumulator/dual VAD/no versioning) | Protocol hygiene consolidation | To do |
+| EMA clamp saturation, overflow α yanks the global | Distinguish outlier / systematic drift, loosen the clamp | To do |
 
 ---
 
-## 6. 一句话总结
+## 6. One-Sentence Summary
 
-> 这台引擎**该硬扛的地方扛得对**（自建 runtime、三阶段 WAIT_TEXT、padded batching、CP fp32、prefix cache）；痛点集中在两处**可消除的意外复杂度**：(a) 文本切分层的双路径分叉 + EMA 估计盲区，(b) 协议层的抽象泄漏。清理这两处即是当前工作主线。
+> This engine **bears the right things head-on** (custom runtime, three-stage WAIT_TEXT, padded batching, CP fp32, prefix cache); the pain points are concentrated in two areas of **eliminable accidental complexity**: (a) the dual-path fork of the text segmentation layer + the EMA estimation blind spot, and (b) the abstraction leaks of the protocol layer. Cleaning up these two is the current main line of work.
 
-## 7. 可信度备注
+## 7. Confidence Note
 
-架构主干（C1–C4、三阶段、padded batching、CP无KV、混合精度、幻觉根因、双路径、协议泄漏）多来源交叉印证，**有把握**。标⚠️"子 agent 推断未复核"的少数项（prefix cache 双 TRT pass、engine_loop 若干竞态、FULL_TEXT 无上限 OOM）落地前建议各花十分钟实证。
+The architectural backbone (C1–C4, three stages, padded batching, CP without KV, mixed precision, hallucination root cause, dual path, protocol leaks) is cross-verified from multiple sources and is **held with confidence**. For the few items marked ⚠️ "sub-agent inference, not reviewed" (the prefix cache dual TRT pass, several engine_loop race conditions, FULL_TEXT unbounded OOM), it is recommended to spend ten minutes empirically confirming each before acting on them.

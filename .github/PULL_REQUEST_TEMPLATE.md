@@ -1,25 +1,27 @@
-<!-- 感谢贡献！提交前请阅读 CONTRIBUTING.md。标题建议遵循 Conventional Commits（如 feat: / fix: / docs:）。 -->
+**English** | [中文](PULL_REQUEST_TEMPLATE.zh-CN.md)
 
-## 改动说明
+<!-- Thanks for contributing! Please read CONTRIBUTING.md before submitting. Titles are recommended to follow Conventional Commits (e.g. feat: / fix: / docs:). -->
 
-<!-- 这个 PR 做了什么、为什么。关联 issue 请写 Closes #123。 -->
+## Description of Changes
 
-## 改动类型
+<!-- What this PR does and why. To link an issue, write Closes #123. -->
 
-- [ ] Bug 修复
-- [ ] 新功能 / 改进
-- [ ] 文档
-- [ ] 重构 / 内部清理（无行为变化）
-- [ ] 其他：
+## Type of Change
 
-## 自查清单
+- [ ] Bug fix
+- [ ] New feature / improvement
+- [ ] Documentation
+- [ ] Refactor / internal cleanup (no behavior change)
+- [ ] Other:
 
-- [ ] 已阅读 [CONTRIBUTING.md](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/blob/main/CONTRIBUTING.md)
-- [ ] 受影响范围的单元测试通过：`PYTHONPATH=client/src pytest tests/unit -m "not gpu and not docker" -q`
-- [ ] 代码风格自查：`ruff check` / `ruff format`（Python）、shellcheck（Bash）
-- [ ] 如改动 `proto/tts.proto`，已 `make proto` 重新生成并 `make proto-sync` 同步（生成代码未手改）
-- [ ] 如有行为变化，已更新相关文档（`docs/`）
+## Self-Check Checklist
 
-## 测试方式
+- [ ] Read [CONTRIBUTING.md](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/blob/main/CONTRIBUTING.md)
+- [ ] Unit tests in the affected scope pass: `PYTHONPATH=client/src pytest tests/unit -m "not gpu and not docker" -q`
+- [ ] Code style self-check: `ruff check` / `ruff format` (Python), shellcheck (Bash)
+- [ ] If `proto/tts.proto` was changed, regenerated with `make proto` and synced with `make proto-sync` (generated code not hand-edited)
+- [ ] If behavior changed, updated the relevant documentation (`docs/`)
 
-<!-- 你如何验证这些改动？给出命令 / 环境 / 结果。 -->
+## How to Test
+
+<!-- How did you validate these changes? Provide the command / environment / results. -->

@@ -1,3 +1,5 @@
+**English** | [中文](README.zh-CN.md)
+
 # Manual Tools
 
 `tools/validation/` contains scripts for validation, benchmarking, audio inspection, and debugging.

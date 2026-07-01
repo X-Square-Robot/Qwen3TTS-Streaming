@@ -1,232 +1,233 @@
-# 引擎可观测性指标目录（实现前·单一真相源）
+**English** | [中文](observability_metrics_catalog.zh-CN.md)
 
-> 编写日期：2026-06-30
-> 状态：**实现前契约 / 实现检查单**——本文是分层可观测性的**完整指标集**，实现时照此逐项落地，
-> 避免"边写边发现缺指标再补"。新增指标先进本目录，再写代码。
-> 关联：[[observability_tiers]]（四层模型与控制面）· [[observability_goals]]（计时语义契约）· [[engine-design-overview]]
+# Engine Observability Metrics Catalog (Pre-Implementation · Single Source of Truth)
+
+> Written: 2026-06-30
+> Status: **Pre-implementation contract / implementation checklist** — this document is the **complete metric set** for tiered observability; implement it item by item accordingly,
+> avoiding "discovering a missing metric mid-implementation and patching it in." New metrics enter this catalog first, then the code is written.
+> Related: [[observability_tiers]] (the four-tier model and control plane) · [[observability_goals]] (the timing-semantics contract) · [[engine-design-overview]]
 
 ---
 
-## 0. 本目录怎么来的 / 怎么读
+## 0. How this catalog came to be / how to read it
 
-通过对全引擎三路穷举扫描（后端 / 前端文本路径 / 输出·网关·VAD），抽出约 **400 个原始可观测字段**。
-原始字段直接列清单既冗长又无法导航，故本目录把它们**折叠成约 45 个"观测点"**——每个观测点是一个
-**事件 / 记录 / 汇总**，打包一组相关字段，在同一时机一次性发出。实现按观测点为单位埋点。
+Through an exhaustive three-path scan of the whole engine (backend / frontend text path / output·gateway·VAD), about **400 raw observable fields** were extracted.
+Listing the raw fields directly would be both verbose and impossible to navigate, so this catalog **folds them into about 45 "observation points"** — each observation point is a single
+**event / record / summary** that packages a group of related fields and emits them all at once at the same moment. Implementation instruments per observation point.
 
-每个观测点标注：
+Each observation point is annotated with:
 
-| 标注 | 含义 |
+| Annotation | Meaning |
 |---|---|
-| **触发** | 何时发出（生命周期时机 / 每段 / 每切点 / 周期） |
-| **字段** | 打包的字段集 |
-| **来源** | `file:function`（已校验路径） |
-| **现状** | ✅已有 · 🟡部分(零散/仅DEBUG/仅meta) · 🆕新增 |
-| **协议** | 是否进客户端 meta（决定 L0 能否自分析） |
+| **Trigger** | When it is emitted (lifecycle moment / per segment / per split point / periodic) |
+| **Fields** | The packaged field set |
+| **Source** | `file:function` (verified path) |
+| **State** | ✅ existing · 🟡 partial (scattered/DEBUG-only/meta-only) · 🆕 new |
+| **Protocol** | Whether it goes into the client meta (determines whether L0 can self-analyze) |
 
-层级语义见 [[observability_tiers]] §2：**L1 常开低量** / **L2 决策"为什么"** / **L3 原始举证**，且 `L3⊃L2⊃L1`。
-事件/字段命名沿用 [[observability_goals]]，协议字段统一 `server_*` 前缀。
+For the tier semantics, see [[observability_tiers]] §2: **L1 always-on low-volume** / **L2 decision "why"** / **L3 raw evidence**, with `L3⊃L2⊃L1`.
+Event/field naming follows [[observability_goals]]; protocol fields uniformly use the `server_*` prefix.
 
-> **核心 vs 穷举尾**：标 ⭐ 的是该层**核心指标**（实现第一优先、构成验收）；未标的是兜底细节，
-> 按观测点已分组，需要时随该观测点一起落地，不会变成"又发现缺一个字段"。
+> **Core vs the exhaustive tail**: those marked ⭐ are that tier's **core metrics** (first priority to implement, constitute the acceptance criteria); the unmarked ones are fallback details,
+> already grouped under an observation point and landed together with it when needed, so they won't turn into "another missing field discovered."
 
 ---
 
-## A. L1 日常日志（常开、量少而精）
+## A. L1 Daily Logs (always on, low-volume and lean)
 
-目标体量：稳态每请求 = 规范生命周期事件（结构化）+ 每段一行 + 一条 `session.summary` + 周期性 health。
-全部经 `LifecycleLogger.emit`（`engine/core/lifecycle.py`），机读 JSON + 人读伴随行。
+Target volume: per request in steady state = canonical lifecycle events (structured) + one line per segment + one `session.summary` + a periodic health.
+All go through `LifecycleLogger.emit` (`engine/core/lifecycle.py`), machine-readable JSON + a human-readable accompanying line.
 
-### A1. 规范生命周期事件（18 phase，补齐到全集）
+### A1. Canonical lifecycle events (18 phases, completed to the full set)
 
-沿用 [[observability_goals]] §事件定义表。现已发 7 个（✅），其余 🆕 补齐。均 L1·强。
+Following [[observability_goals]] §Event definition table. 7 are already emitted (✅); the rest are 🆕 completed. All L1·strong.
 
-| ⭐ | phase | 触发 | 关键字段 | 来源 | 现状 |
+| ⭐ | phase | Trigger | Key fields | Source | State |
 |---|---|---|---|---|---|
-| ⭐ | `request.accepted` | 网关收到请求 | transport, request_id, turn_id, client_request_ts_ms | grpc_server.py / websocket_server.py | 🆕 |
-| ⭐ | `session.config.validated` | 配置校验通过 | input_mode, group_policy, task_type, vad_strategy, output_policy, protocol_version, **obs_level**, obs_level_clamped? | frontend/interface.py | 🟡 |
-| ⭐ | `session.created` | Session 对象建好 | speaker, ref_audio_mode, session_state | frontend/interface.py | ✅ |
-| | `session.registered` | 注册到后端 | kv_pool_slot, free_slots_at_register | backend/engine_loop.py | 🆕 |
-| | `text.first_received` | 首文到网关 | text_preview(钳), client_text_ts_ms, raw_len | gateway | 🆕 |
-| | `text.first_sent` | 首文发向引擎 | text_length, normalized_preview(钳) | frontend/interface.py | 🆕 |
-| ⭐ | `text.first_enqueued` | 首文入 inbox | queue_depth | frontend/dispatcher.py | ✅ |
-| ⭐ | `text.first_dequeued` | 引擎线程取出 | queue_wait_ms, queue_depth_at_dequeue | backend/engine_loop.py | ✅ |
-| ⭐ | `engine.prefill.started` | prefill 开始 | segment_id, cache_hit, cache_tokens_reused | backend/engine_loop.py | 🆕 |
-| ⭐ | `engine.prefill.completed` | prefill 完成 | segment_id, prefill_ms, prefill_source, prefill_tokens | backend/engine_loop.py | ✅ |
-| | `engine.decode.first_step` | 首 decode step | segment_id | backend/engine_loop.py | 🆕 |
-| ⭐ | `engine.audio.first_raw` | 首原始音频产出 | segment_id, audio_shape, first_raw_audio_epoch_ms | backend/engine_loop.py | 🟡 |
-| ⭐ | `output.audio.first_effective` | 首有效音频发出 | segment_id, prefix_trim_applied, prefix_trimmed_ms, gating_delay_ms | interface/output.py | 🟡 |
-| ⭐ | `session.completed` | 会话完成 | total_segments, total_audio_ms | frontend/interface.py | 🟡 |
+| ⭐ | `request.accepted` | Gateway receives request | transport, request_id, turn_id, client_request_ts_ms | grpc_server.py / websocket_server.py | 🆕 |
+| ⭐ | `session.config.validated` | Config validation passed | input_mode, group_policy, task_type, vad_strategy, output_policy, protocol_version, **obs_level**, obs_level_clamped? | frontend/interface.py | 🟡 |
+| ⭐ | `session.created` | Session object built | speaker, ref_audio_mode, session_state | frontend/interface.py | ✅ |
+| | `session.registered` | Registered to backend | kv_pool_slot, free_slots_at_register | backend/engine_loop.py | 🆕 |
+| | `text.first_received` | First text reaches gateway | text_preview(clamped), client_text_ts_ms, raw_len | gateway | 🆕 |
+| | `text.first_sent` | First text sent to engine | text_length, normalized_preview(clamped) | frontend/interface.py | 🆕 |
+| ⭐ | `text.first_enqueued` | First text enters inbox | queue_depth | frontend/dispatcher.py | ✅ |
+| ⭐ | `text.first_dequeued` | Engine thread pulls it out | queue_wait_ms, queue_depth_at_dequeue | backend/engine_loop.py | ✅ |
+| ⭐ | `engine.prefill.started` | prefill starts | segment_id, cache_hit, cache_tokens_reused | backend/engine_loop.py | 🆕 |
+| ⭐ | `engine.prefill.completed` | prefill completes | segment_id, prefill_ms, prefill_source, prefill_tokens | backend/engine_loop.py | ✅ |
+| | `engine.decode.first_step` | First decode step | segment_id | backend/engine_loop.py | 🆕 |
+| ⭐ | `engine.audio.first_raw` | First raw audio produced | segment_id, audio_shape, first_raw_audio_epoch_ms | backend/engine_loop.py | 🟡 |
+| ⭐ | `output.audio.first_effective` | First effective audio sent | segment_id, prefix_trim_applied, prefix_trimmed_ms, gating_delay_ms | interface/output.py | 🟡 |
+| ⭐ | `session.completed` | Session completed | total_segments, total_audio_ms | frontend/interface.py | 🟡 |
 
-### A2. 段级收尾事件 `engine.segment.eos`（每段一条）⭐
+### A2. Segment-level close-out event `engine.segment.eos` (one per segment) ⭐
 
-> 答日常"每段花了多久、合成了什么、拼了batch没、为啥这段短"——日常排查命中率最高的一条。
+> Answers the daily "how long did each segment take, what was synthesized, was it batched, why is this segment short" — the highest hit-rate line for daily troubleshooting.
 
-- **触发**：每段 EOS（`_handle_segment_eos`）
-- **字段**：`segment_id` · `segment_text_preview`(钳) · `audio_steps` · `text_tokens` · `audio_text_ratio` ·
+- **Trigger**: each segment's EOS (`_handle_segment_eos`)
+- **Fields**: `segment_id` · `segment_text_preview`(clamped) · `audio_steps` · `text_tokens` · `audio_text_ratio` ·
   `eos_reason`(codec_eos/silence_abort/kv_overflow) · `overflow` · `cache_hit` · `segment_prefill_ms` · `batched`(bool) · `batch_size_at_prefill`
-- **来源**：`backend/engine_loop.py:_handle_segment_eos`
-- **现状**：🟡（segment_end meta 已有部分，缺 `eos_reason`/`batched`/`ratio`）·**协议**：是（segment_end 事件 meta）
+- **Source**: `backend/engine_loop.py:_handle_segment_eos`
+- **State**: 🟡 (segment_end meta already has some, missing `eos_reason`/`batched`/`ratio`) · **Protocol**: yes (segment_end event meta)
 
-### A3. 会话汇总 `session.summary`（每请求一条）⭐
+### A3. Session summary `session.summary` (one per request) ⭐
 
-替代含糊 `first_audio=231.6ms`。聚合五个日常问题 + 吞吐 + 缓存。字段复用 `core/timing.py:ServerTimingAccumulator`
-派生指标 + 🆕 `batch_summary`。完整字段见 [[observability_tiers]] §4.3。分组：
+Replaces the vague `first_audio=231.6ms`. Aggregates the five daily questions + throughput + cache. Fields reuse `core/timing.py:ServerTimingAccumulator`
+derived metrics + 🆕 `batch_summary`. For the full fields, see [[observability_tiers]] §4.3. Grouping:
 
-| 组 | 字段 | 来源 | 现状 |
+| Group | Fields | Source | State |
 |---|---|---|---|
 | TTFT⭐ | prefill_ms, dequeue_to_first_raw_ms, create_to_first_raw_ms | timing.py | ✅ |
-| 链路六分段⭐ | session_create / text_ingress / engine_queue / inference / gating / transport(ctx) | timing.py | 🟡 汇总 |
-| 合成内容⭐ | final_synthesized_text(钳), total_chars, total_segments, coalesced, progress_protected | interface.py | 🟡 |
-| **batch 汇总**⭐ | segments, batched, solo, max_batch_size_seen | engine_loop.py | 🆕 |
-| VAD 汇总⭐ | policy, prefix_trimmed_ms, tail_trimmed_ms, begin_count, end_count, original/effective_audio_ms | interface/vad.py, gateway | 🟡 提炼 |
-| 缓存路径 | prefix_cache_hit, cache_tokens_reused, full_prefill_count | engine_loop.py | ✅ |
-| 吞吐 | total_steps, total_prefills, batch_size_avg | engine_loop.py | 🟡 |
-| 总延迟⭐ | total_latency_ms | timing.py | ✅ |
+| Pipeline six segments⭐ | session_create / text_ingress / engine_queue / inference / gating / transport(ctx) | timing.py | 🟡 aggregate |
+| Synthesized content⭐ | final_synthesized_text(clamped), total_chars, total_segments, coalesced, progress_protected | interface.py | 🟡 |
+| **batch summary**⭐ | segments, batched, solo, max_batch_size_seen | engine_loop.py | 🆕 |
+| VAD summary⭐ | policy, prefix_trimmed_ms, tail_trimmed_ms, begin_count, end_count, original/effective_audio_ms | interface/vad.py, gateway | 🟡 distill |
+| Cache path | prefix_cache_hit, cache_tokens_reused, full_prefill_count | engine_loop.py | ✅ |
+| Throughput | total_steps, total_prefills, batch_size_avg | engine_loop.py | 🟡 |
+| Total latency⭐ | total_latency_ms | timing.py | ✅ |
 
-人读伴随行：`session=<id> DONE ttft=… infer=… batch=2/3 vad_trim=… cache=HIT segs=3 "首句…"`
+Accompanying human-readable line: `session=<id> DONE ttft=… infer=… batch=2/3 vad_trim=… cache=HIT segs=3 "first sentence…"`
 
-### A4. 错误事件（L1·强，结构化）⭐
+### A4. Error events (L1·strong, structured) ⭐
 
-| phase | 字段 | 来源 | 现状 |
+| phase | Fields | Source | State |
 |---|---|---|---|
 | `session.timeout` | waited_ms, last_active_phase, session_age | engine_loop.py:~1514 | 🟡 |
 | `session.evicted` | reason("idle>{n}s"), active_steps | engine_loop.py:~1095 | 🟡 |
 | `engine.prefill.failed` | segment_id, error_type, error_msg | engine_loop.py:~562/1418 | 🟡 |
 | `session.cancelled` | completed_segments | engine_loop.py:~490 | 🟡 |
-| `session.error`(backpressure等) | error_type, error_msg, current_phase, segments_completed, audio_produced_ms | engine_loop.py:~371 | 🟡 |
+| `session.error`(backpressure etc.) | error_type, error_msg, current_phase, segments_completed, audio_produced_ms | engine_loop.py:~371 | 🟡 |
 
-错误字段集沿用 [[observability_goals]] §3.6。**协议**：是（error 事件 meta，供 L0 定位阶段）。
+The error field set follows [[observability_goals]] §3.6. **Protocol**: yes (error event meta, for L0 to locate the stage).
 
-### A5. 引擎健康周期 gauge `engine.health`（非每请求，周期发）⭐
+### A5. Engine health periodic gauge `engine.health` (not per request, emitted periodically) ⭐
 
-> 此前枚举未覆盖但属日常运维核心：聚合态健康，按固定间隔或显著变化发一条。
+> Not covered by the earlier enumeration but a core of daily ops: aggregate-state health, emitted at a fixed interval or on a significant change.
 
-- **字段**：`active_sessions` · `pool_used/free/utilization` · `prefix_cache_hit_rate` · `total_pool_memory_mb` ·
+- **Fields**: `active_sessions` · `pool_used/free/utilization` · `prefix_cache_hit_rate` · `total_pool_memory_mb` ·
   `queue_depth` · `cum_backpressure_rejected` · `cum_timeouts` · `cum_evictions` · `cum_eos`
-- **来源**：`engine_loop.py`（计数器已在）/ `kv_cache_pool.py:stats` / `prefix_cache.py:stats`
-- **现状**：🟡（计数器已存在，缺周期性汇总行）·**协议**：否（服务端运维用）
+- **Source**: `engine_loop.py` (counters already present) / `kv_cache_pool.py:stats` / `prefix_cache.py:stats`
+- **State**: 🟡 (counters already exist, missing a periodic summary line) · **Protocol**: no (server-side ops use)
 
 ---
 
-## B. L2 debug 日志（开发机/定点、决策"为什么"）
+## B. L2 Debug Logs (dev box / targeted, the decision "why")
 
-L2 在 L1 之上叠加决策理由记录，结构化、派生、人读、不含 tensor。每类带 `obs:<name>` 标签便于过滤。
+L2 layers decision-reason records on top of L1: structured, derived, human-readable, no tensors. Each kind carries an `obs:<name>` tag for easy filtering.
 
-### B1. 文本切分（答"子句怎么切、为什么这么切"）⭐ 最大缺口
+### B1. Text splitting (answers "how clauses were split, why they were split this way") ⭐ the biggest gap
 
-| ⭐ | obs | 触发 | 字段 | 来源 | 现状 |
+| ⭐ | obs | Trigger | Fields | Source | State |
 |---|---|---|---|---|---|
-| ⭐ | `split_decision` | 每个切点 | path(offline/streaming), trigger(l1_punct/force_fallback_l1/force_hard_cut/driver_l1-3), remaining_kv, prefill_len, ema_ratio, thresholds{min_tokens_l1, force_split_at, l1/l2/l3_cap}, token_count_at_split, last_l1_pos, chosen_level, reason, text_preview | spliter.py:pre_split / driver.py | 🆕 |
-| | `presplit_group` | 离线预切完成 | groups_created, tokens_per_group[], last_l1_pos, hard_cut_engaged, forced_split_count | spliter.py:_enqueue_presplit_groups | 🆕 |
-| | `driver_transition` | 流式 FSM 跳转 | driver_state, token_count, threshold_met{l1,l2,l3,force}, fsm_rule_name, action_type, is_final | driver.py / spliter/core.py | 🆕 |
-| | `punct_classify` | 标点 token(可采样) | token_text, punct_level, saw_level3_break, trailing_closer_handled | spliter.py:classify_punct_level | 🆕 |
-| | `coalesce` | 合并/进度保护触发 | coalesced_from_tokens, accumulation_pos, progress_protected | spliter.py / interface.py | 🆕 |
-| | `ema_update` | SEGMENT_END 更新 EMA | ema_before, ema_after, observed_ratio, alpha_used(normal/overflow), clamped_at | spliter.py:~601 | 🟡(零散 debug) |
+| ⭐ | `split_decision` | Each split point | path(offline/streaming), trigger(l1_punct/force_fallback_l1/force_hard_cut/driver_l1-3), remaining_kv, prefill_len, ema_ratio, thresholds{min_tokens_l1, force_split_at, l1/l2/l3_cap}, token_count_at_split, last_l1_pos, chosen_level, reason, text_preview | spliter.py:pre_split / driver.py | 🆕 |
+| | `presplit_group` | Offline pre-split done | groups_created, tokens_per_group[], last_l1_pos, hard_cut_engaged, forced_split_count | spliter.py:_enqueue_presplit_groups | 🆕 |
+| | `driver_transition` | Streaming FSM transition | driver_state, token_count, threshold_met{l1,l2,l3,force}, fsm_rule_name, action_type, is_final | driver.py / spliter/core.py | 🆕 |
+| | `punct_classify` | Punctuation token (sampleable) | token_text, punct_level, saw_level3_break, trailing_closer_handled | spliter.py:classify_punct_level | 🆕 |
+| | `coalesce` | Coalesce / progress protection triggered | coalesced_from_tokens, accumulation_pos, progress_protected | spliter.py / interface.py | 🆕 |
+| | `ema_update` | SEGMENT_END updates EMA | ema_before, ema_after, observed_ratio, alpha_used(normal/overflow), clamped_at | spliter.py:~601 | 🟡 (scattered debug) |
 
-### B2. 调度 / 批处理（答"为什么和它拼/没拼、为什么被饿"）⭐
+### B2. Scheduling / batching (answers "why it was/wasn't batched with X, why it was starved") ⭐
 
-| ⭐ | obs | 触发 | 字段 | 来源 | 现状 |
+| ⭐ | obs | Trigger | Fields | Source | State |
 |---|---|---|---|---|---|
-| ⭐ | `batch_compose`(prefill) | 每次 prefill 批 | batch_size, kv_free_before, members[{session,segment,priority}], skipped[{session,segment,reason}] | engine_loop.py:_try_prefill_pending/_one | 🆕 |
-| ⭐ | `batch_compose`(decode) | 每次 decode 批(可采样) | batch_size, candidate_count, mlfq_level_dist, boosted_count, members[] | engine_loop.py:_get_active_slots_mlfq | 🆕 |
-| | `mlfq_state` | 每段(采样/跳级时) | mlfq_level, decode_steps, steps_since_schedule, global_step, boosted | core/mlfq.py | 🟡 |
-| | `queue_dynamics` | inbox 排空(采样) | pending_queue_size, drained_count, concurrent_backpressure_active | engine_loop.py:_drain_inbox / spliter.py | 🟡 |
-| | `backpressure` | 拒绝时 | rejected, active_count, limit | engine_loop.py:~362 | ✅ |
+| ⭐ | `batch_compose`(prefill) | Each prefill batch | batch_size, kv_free_before, members[{session,segment,priority}], skipped[{session,segment,reason}] | engine_loop.py:_try_prefill_pending/_one | 🆕 |
+| ⭐ | `batch_compose`(decode) | Each decode batch (sampleable) | batch_size, candidate_count, mlfq_level_dist, boosted_count, members[] | engine_loop.py:_get_active_slots_mlfq | 🆕 |
+| | `mlfq_state` | Per segment (sampled / on level change) | mlfq_level, decode_steps, steps_since_schedule, global_step, boosted | core/mlfq.py | 🟡 |
+| | `queue_dynamics` | inbox drain (sampled) | pending_queue_size, drained_count, concurrent_backpressure_active | engine_loop.py:_drain_inbox / spliter.py | 🟡 |
+| | `backpressure` | On rejection | rejected, active_count, limit | engine_loop.py:~362 | ✅ |
 
-### B3. Prefill / 缓存 / 参考音频
+### B3. Prefill / cache / reference audio
 
-| obs | 触发 | 字段 | 来源 | 现状 |
+| obs | Trigger | Fields | Source | State |
 |---|---|---|---|---|
-| `prefill_detail` | 每段 prefill | prefill_source, plan_warnings[], ref_warnings[], cache_key, language, speaker, x_vector_only, instruct_preview | engine_loop.py / prefill.py | 🟡 |
-| `cache_event` | 查缓存 | cache_hit, cache_tokens_reused, prefix_cache_{hits,misses,evictions,hit_rate,entries} | prefix_cache.py:stats | 🟡 |
-| `ref_audio` | 用参考音频 | ref_source, ref_id, ref_audio_sha256, ref_text_hash, ref_preprocess_ms | prefill.py:~121 | 🟡 |
+| `prefill_detail` | Each segment prefill | prefill_source, plan_warnings[], ref_warnings[], cache_key, language, speaker, x_vector_only, instruct_preview | engine_loop.py / prefill.py | 🟡 |
+| `cache_event` | Cache lookup | cache_hit, cache_tokens_reused, prefix_cache_{hits,misses,evictions,hit_rate,entries} | prefix_cache.py:stats | 🟡 |
+| `ref_audio` | Using reference audio | ref_source, ref_id, ref_audio_sha256, ref_text_hash, ref_preprocess_ms | prefill.py:~121 | 🟡 |
 
-### B4. KV / Slot / Pad-EOS（答"为什么这段被截/补静音"）⭐
+### B4. KV / Slot / Pad-EOS (answers "why this segment was truncated / padded with silence") ⭐
 
-| ⭐ | obs | 触发 | 字段 | 来源 | 现状 |
+| ⭐ | obs | Trigger | Fields | Source | State |
 |---|---|---|---|---|---|
-| | `slot_state` | 每段(采样/转换时) | slot_id, past_len, frame_idx, text_idx, c2w_kv_length, trailing_count, active_slot_count, idle_seconds | kv_cache_pool.py / engine_loop.py | 🟡 |
-| ⭐ | `pad_phase` | 进入/退出 pad | in_pad, pad_start_frame, pad_steps, pad_consecutive_silence, remaining_kv, dynamic_silence_limit, silence_abort_triggered | engine_loop.py:~1178-1244 | 🟡 |
+| | `slot_state` | Per segment (sampled / on transition) | slot_id, past_len, frame_idx, text_idx, c2w_kv_length, trailing_count, active_slot_count, idle_seconds | kv_cache_pool.py / engine_loop.py | 🟡 |
+| ⭐ | `pad_phase` | Enter/exit pad | in_pad, pad_start_frame, pad_steps, pad_consecutive_silence, remaining_kv, dynamic_silence_limit, silence_abort_triggered | engine_loop.py:~1178-1244 | 🟡 |
 | ⭐ | `kv_overflow` | past_len≥max_seq_len | past_len, max_seq_len, segment_overflow | engine_loop.py:~1036 | 🟡 |
 
-### B5. 段合成 / 异常（答"合成为什么错了"）⭐
+### B5. Segment synthesis / anomaly (answers "why synthesis went wrong") ⭐
 
-| ⭐ | obs | 触发 | 字段 | 来源 | 现状 |
+| ⭐ | obs | Trigger | Fields | Source | State |
 |---|---|---|---|---|---|
-| ⭐ | `segment_synthesis` | 每段收尾 | do_sample, temperature, repetition_penalty, sampling_seed, audio_steps, text_tokens, audio_text_ratio, eos_reason, **anomaly[]**(hit_kv_512/ratio_outlier/no_codec_eos), reason | engine_loop.py:_handle_segment_eos + executor.py | 🆕 |
+| ⭐ | `segment_synthesis` | Each segment close-out | do_sample, temperature, repetition_penalty, sampling_seed, audio_steps, text_tokens, audio_text_ratio, eos_reason, **anomaly[]**(hit_kv_512/ratio_outlier/no_codec_eos), reason | engine_loop.py:_handle_segment_eos + executor.py | 🆕 |
 
-`eos_reason=kv_overflow/silence_abort` + ratio 离群 + 命中 512 = [[engine-design-overview]] 记录的 C4 幻觉/不收尾征兆。
+`eos_reason=kv_overflow/silence_abort` + an outlier ratio + hitting 512 = the C4 hallucination / non-termination sign recorded in [[engine-design-overview]].
 
-### B6. 输出门控 / 重排
+### B6. Output gating / reordering
 
-| obs | 触发 | 字段 | 来源 | 现状 |
+| obs | Trigger | Fields | Source | State |
 |---|---|---|---|---|
-| `vad_transition` | 每次 begin/end | event, frame_ms, score/prob, threshold, begin_counter/end_counter | interface/vad.py | 🆕 |
-| `reorder_state` | 乱序/stall 风险 | group_idx, local_idx, next_emit_segment, buffer_keys_pending, done_keys, stall_risk, reorder_latency_frames | spliter/reorder.py | 🆕 |
+| `vad_transition` | Each begin/end | event, frame_ms, score/prob, threshold, begin_counter/end_counter | interface/vad.py | 🆕 |
+| `reorder_state` | Out-of-order / stall risk | group_idx, local_idx, next_emit_segment, buffer_keys_pending, done_keys, stall_risk, reorder_latency_frames | spliter/reorder.py | 🆕 |
 
-### B7. 重放支撑（原始时间戳 + tokenizer 快照）
+### B7. Replay support (raw timestamps + tokenizer snapshot)
 
-| obs | 字段 | 来源 | 现状 |
+| obs | Fields | Source | State |
 |---|---|---|---|
-| `raw_timestamps` | 全部 monotonic 原始戳(session_created/first_text_enqueued/dequeued/prefill_started/completed/first_raw/first_effective) | core/timing.py | ✅(派生已用,原始随 L2 落) |
-| `tokenizer_observability` | raw_text, normalized_text, token_ids, spans, offsets, pieces(escaped) | interface.py(guarded DEBUG) + spliter/tokenizer.py | ✅ |
+| `raw_timestamps` | All monotonic raw stamps (session_created/first_text_enqueued/dequeued/prefill_started/completed/first_raw/first_effective) | core/timing.py | ✅ (derivations already used, raw landed with L2) |
+| `tokenizer_observability` | raw_text, normalized_text, token_ids, spans, offsets, pieces(escaped) | interface.py (guarded DEBUG) + spliter/tokenizer.py | ✅ |
 
-### B8. 错误细节（L1 错误事件的 L2 补充）
+### B8. Error details (L2 supplement to the L1 error events)
 
 `prefill_error_invalid_task_type` · `prefix_cache_invalid` · `replacing_segment_warning` · `invalid_ref_codec_shape` ·
-`append_after_done(overflow_token_count)`。来源 `engine_loop.py` / `prefill.py`，现状 🟡。
+`append_after_done(overflow_token_count)`. Source `engine_loop.py` / `prefill.py`, state 🟡.
 
 ---
 
-## C. L3 dump 日志（疑难杂症、原始举证）
+## C. L3 Dump Logs (hard cases, raw evidence)
 
-L3 = **B 全部决策日志** + 逐步 tensor。复用 `engine/backend/debug_dump.py:EngineDebugDumper`（`ENGINE_DUMP_*`）。
+L3 = **all of B's decision logs** + per-step tensors. Reuse `engine/backend/debug_dump.py:EngineDebugDumper` (`ENGINE_DUMP_*`).
 
-| ⭐ | obs | 内容 | 来源 | 现状 |
+| ⭐ | obs | Content | Source | State |
 |---|---|---|---|---|
-| ⭐ | `step_tensor_dump` | 逐步 inputs/outputs：next_embed, codec_sum, full_codec, logits, gumbel_noise, cp_gumbel_noise, token_counts, attention_bias, position_ids, c2w_conv/transconv_states, wav | debug_dump.py | ✅ |
-| ⭐ | `step_decision`(对齐) | 逐步：frame_idx, codec_id, eos_check(full_codec[:,0]==codec_eos_id), sampling_seed, in_pad, text_idx —— 与 tensor 同 dump_id | executor.py + debug_dump.py | 🆕 |
+| ⭐ | `step_tensor_dump` | Per-step inputs/outputs: next_embed, codec_sum, full_codec, logits, gumbel_noise, cp_gumbel_noise, token_counts, attention_bias, position_ids, c2w_conv/transconv_states, wav | debug_dump.py | ✅ |
+| ⭐ | `step_decision`(aligned) | Per step: frame_idx, codec_id, eos_check(full_codec[:,0]==codec_eos_id), sampling_seed, in_pad, text_idx —— same dump_id as the tensor | executor.py + debug_dump.py | 🆕 |
 | | `dump_timeline` | timeline.jsonl/.tsv + slot_rows(past_len/frame_idx/text_idx/cache_position/full_codec_head/eos) | debug_dump.py | ✅ |
-| | `split_decisions.jsonl`(对齐) | B1 的 split_decision 快照写入 dump 目录,与 tensor 同 session | spliter.py + debug_dump.py | 🆕 |
-| | `model_config_snapshot` | 每 run 一次：num_layers, kv_heads, head_dim, hidden_size, codec_vocab_size, c2w_{layers,kv_heads,sliding_window}, dtype, max_batch_size, max_seq_len, 全部阈值/采样参数 | kv_cache_pool.py / executor.py / config.py | 🆕 |
-| | `raw_kv_tensors` | talker_kv, c2w_kv, spk_embedding, cacheable_prefix_embeds, request_prefill_embeds | kv_cache_pool.py / prefill.py | ✅(随 dump) |
-| | `dump_enabled` 事件 | dir, limit, sessions, include_wav —— 让日志能定位 dump 产物 | debug_dump.py | 🟡 |
+| | `split_decisions.jsonl`(aligned) | B1's split_decision snapshots written into the dump directory, same session as the tensors | spliter.py + debug_dump.py | 🆕 |
+| | `model_config_snapshot` | Once per run: num_layers, kv_heads, head_dim, hidden_size, codec_vocab_size, c2w_{layers,kv_heads,sliding_window}, dtype, max_batch_size, max_seq_len, all thresholds/sampling params | kv_cache_pool.py / executor.py / config.py | 🆕 |
+| | `raw_kv_tensors` | talker_kv, c2w_kv, spk_embedding, cacheable_prefix_embeds, request_prefill_embeds | kv_cache_pool.py / prefill.py | ✅ (with dump) |
+| | `dump_enabled` event | dir, limit, sessions, include_wav —— lets the logs locate the dump artifacts | debug_dump.py | 🟡 |
 
-排查闭环：L2 `segment_synthesis` 异常段 → 按 `session_id` 进 dump 目录 → `step_decision`+`step_tensor_dump`
-逐步 logits/codec/CP stage + 同步 seed → 决策与原始证据经 `dump_id`/`frame_idx` 对照。
+Troubleshooting closed loop: L2 `segment_synthesis` anomaly segment → into the dump directory by `session_id` → `step_decision`+`step_tensor_dump`
+per-step logits/codec/CP stage + synchronized seed → decision and raw evidence cross-referenced via `dump_id`/`frame_idx`.
 
 ---
 
-## D. L0 客户端可自分析子集（协议暴露）
+## D. L0 Client Self-Analyzable Subset (protocol-exposed)
 
-客户端凭 done/segment_end/error 事件 meta 自答 L1 大部分问题。现协议已暴露 ~90 字段（`interface/output.py`
-+ `core/timing.py:to_meta_dict`），客户端 `qwen3tts.diagnostics` 已能解析时间线。**新增进协议**：
+The client answers most of L1's questions from the done/segment_end/error event meta. The current protocol already exposes ~90 fields (`interface/output.py`
++ `core/timing.py:to_meta_dict`), and the client `qwen3tts.diagnostics` can already parse the timeline. **Added to the protocol**:
 
-| L1 观测点 | 进协议字段 | 现状 |
+| L1 observation point | Field added to protocol | State |
 |---|---|---|
-| TTFT/链路分段/总延迟 | `server_*_ms` 系列 | ✅ |
-| 合成内容 | `final_synthesized_text`(钳), `segment_text_preview` | 🟡 |
-| **batch 汇总** | `server_batch_summary`(json) | 🆕 |
-| VAD 汇总 | `server_prefix_trimmed_ms` 等 | 🟡 提炼 |
-| 段级 eos_reason | `segment_eos_reason` | 🆕 |
-| 错误阶段 | `error_phase`, `error_type` | 🟡 |
+| TTFT/pipeline segmentation/total latency | the `server_*_ms` series | ✅ |
+| Synthesized content | `final_synthesized_text`(clamped), `segment_text_preview` | 🟡 |
+| **batch summary** | `server_batch_summary`(json) | 🆕 |
+| VAD summary | `server_prefix_trimmed_ms` etc. | 🟡 distill |
+| Segment-level eos_reason | `segment_eos_reason` | 🆕 |
+| Error stage | `error_phase`, `error_type` | 🟡 |
 
-L2/L3 不进协议（决策日志/tensor 仅服务端）。客户端 `summary()` 答不出时打印升级指令（见 [[observability_tiers]] §7）。
+L2/L3 do not go into the protocol (decision logs/tensors are server-only). When the client `summary()` can't answer, it prints an escalation instruction (see [[observability_tiers]] §7).
 
 ---
 
-## E. 覆盖统计与实现工作量
+## E. Coverage Statistics and Implementation Effort
 
-| 层 | 观测点数 | 含核心⭐ | 主要 🆕（即实现工作） |
+| Tier | Observation points | Incl. core⭐ | Main 🆕 (i.e. implementation work) |
 |---|---|---|---|
-| L1 | ~14 事件 + summary + health | 11 | request.accepted/prefill.started/decode.first_step 等补齐、`engine.segment.eos` 增 eos_reason/batched、`batch_summary`、health 周期行 |
-| L2 | ~22 记录 | 8 | **split_decision**、batch_compose×2、segment_synthesis、vad_transition、reorder_state、driver_transition |
-| L3 | ~7 | 2 | step_decision 对齐、split_decisions.jsonl、model_config_snapshot |
-| L0 | 协议子集 | — | batch_summary/eos_reason/final_text 进 meta + 客户端 summary() |
+| L1 | ~14 events + summary + health | 11 | Complete request.accepted/prefill.started/decode.first_step etc., add eos_reason/batched to `engine.segment.eos`, `batch_summary`, health periodic line |
+| L2 | ~22 records | 8 | **split_decision**, batch_compose×2, segment_synthesis, vad_transition, reorder_state, driver_transition |
+| L3 | ~7 | 2 | step_decision alignment, split_decisions.jsonl, model_config_snapshot |
+| L0 | Protocol subset | — | batch_summary/eos_reason/final_text into meta + client summary() |
 
-原始字段约 400 → 折叠 ~45 观测点。**绝大多数底层数据已存在于代码中（143/177 后端已记），缺的是
-"按观测点结构化发出 + 分层 gating + 进协议"**，而非新增测量。这意味着实现以"埋点重构"为主，风险低。
+Raw fields ~400 → folded into ~45 observation points. **The vast majority of the underlying data already exists in the code (143/177 recorded in the backend); what's missing is
+"structured emission per observation point + tiered gating + into the protocol"**, not new measurement. This means implementation is mostly "instrumentation refactoring," low risk.
 
-> 实现顺序仍按 [[observability_tiers]] §10 的 P0→P4。本目录是各阶段的逐项检查单：每落一个观测点，
-> 在对应行把现状从 🆕/🟡 改为 ✅。
-</content>
+> The implementation order still follows P0→P4 in [[observability_tiers]] §10. This catalog is the item-by-item checklist for each phase: as each observation point lands,
+> change the state on the corresponding row from 🆕/🟡 to ✅.

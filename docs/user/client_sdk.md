@@ -1,39 +1,41 @@
+**English** | [中文](client_sdk.zh-CN.md)
+
 # Python Client SDK
 
-## 目标
+## Goal
 
-这个 SDK 面向外部调用方，提供统一、轻量、可直接 `pip install` 的 Python 客户端。
+This SDK targets external callers, providing a unified, lightweight Python client that can be installed directly via `pip install`.
 
-支持的服务入口：
+Supported service entry points:
 
 - `engine-websocket`
 - `engine-grpc`
 - `triton-grpc`
 - `triton-http`
 
-默认行为是 `transport="auto"`，客户端会先做探测，再绑定到具体 adaptor。
+The default behavior is `transport="auto"`: the client first probes, then binds to a specific adaptor.
 
-## 目录与发布
+## Layout and Publishing
 
-SDK 作为独立子项目放在仓库的 [`client/`](../../client) 目录下：
+The SDK lives as an independent subproject under the repository's [`client/`](../../client) directory:
 
-- 打包配置：[`client/pyproject.toml`](../../client/pyproject.toml)
-- 源码入口：[`client/src/qwen3tts`](../../client/src/qwen3tts)
-- 共享协议层：[`client/src/qwen3tts_protocol`](../../client/src/qwen3tts_protocol)
-- SDK 单测：[`client/tests`](../../client/tests)
+- Packaging config: [`client/pyproject.toml`](../../client/pyproject.toml)
+- Source entry point: [`client/src/qwen3tts`](../../client/src/qwen3tts)
+- Shared protocol layer: [`client/src/qwen3tts_protocol`](../../client/src/qwen3tts_protocol)
+- SDK unit tests: [`client/tests`](../../client/tests)
 
-这样做的目的，是避免把服务端重量依赖和部署逻辑一起打进客户端 wheel。
+The purpose of this is to avoid packing heavy server-side dependencies and deployment logic into the client wheel.
 
-## 安装
+## Installation
 
-核心包：
+Core package:
 
 ```bash
 cd client
 pip install .
 ```
 
-可选 extras：
+Optional extras:
 
 ```bash
 pip install .[grpc]
@@ -42,14 +44,14 @@ pip install .[audio]
 pip install .[all]
 ```
 
-依赖策略：
+Dependency strategy:
 
-- `core`：`requests`，以及纯 Python websocket/http 逻辑
-- `grpc`：standalone gRPC 所需 runtime
-- `triton`：Triton gRPC / HTTP 所需 runtime
-- `audio`：`numpy`，用于 `synthesize_array`
+- `core`: `requests`, plus pure-Python websocket/http logic
+- `grpc`: runtime required for standalone gRPC
+- `triton`: runtime required for Triton gRPC / HTTP
+- `audio`: `numpy`, used by `synthesize_array`
 
-## 快速开始
+## Quick Start
 
 ```python
 from qwen3tts import TTSClient, SynthesisConfig
@@ -66,7 +68,7 @@ print(result.audio_format)
 print(len(result.audio_bytes))
 ```
 
-## 统一流式接口
+## Unified Streaming Interface
 
 ```python
 from qwen3tts import SessionStartRequest, SynthesisConfig, TTSClient
@@ -87,51 +89,51 @@ for message in session.iter_messages():
     print(type(message).__name__, getattr(message, "meta", {}))
 ```
 
-## 自动探测规则
+## Auto-Probing Rules
 
-显式 `transport=` 时不探测，直接走指定 adaptor。
+When `transport=` is set explicitly, no probing is done and the specified adaptor is used directly.
 
-`transport="auto"` 时：
+When `transport="auto"`:
 
-- `ws://` / `wss://`：直接判定为 `engine-websocket`
-- `http://` / `https://`：先探测 standalone `GET /v1/capabilities`，失败后探测 Triton HTTP `/v2/health/live`、`/v2/health/ready`、`/v2/models/<model>/ready`
-- 裸 `host:port`：优先按端口规则探测 standalone，再探测 Triton，再回落 HTTP
-- 裸 `host`：自动扩展默认候选端口 `50052`、`50051`、`8001`、`8000`
+- `ws://` / `wss://`: directly resolved as `engine-websocket`
+- `http://` / `https://`: first probe standalone `GET /v1/capabilities`, then on failure probe Triton HTTP `/v2/health/live`, `/v2/health/ready`, `/v2/models/<model>/ready`
+- Bare `host:port`: probe standalone first by port rules, then Triton, then fall back to HTTP
+- Bare `host`: automatically expand to the default candidate ports `50052`, `50051`, `8001`, `8000`
 
-探测结果会暴露在：
+The probing results are exposed at:
 
 - `client.resolved_transport`
 - `client.probe_report`
 - `client.detected_transport`
 
-## Triton HTTP 的流式语义
+## Triton HTTP Streaming Semantics
 
-Triton HTTP 本身不支持真正的 decoupled streaming infer。
+Triton HTTP itself does not support true decoupled streaming infer.
 
-因此 SDK 的统一策略是：
+Therefore the SDK's unified strategy is:
 
-- `synthesize_bytes` / `synthesize_array`：直接走一次 HTTP infer
-- `open_stream(...)`：本地缓存 `start/text/end`
-- 调用 `end()` 后，才触发一次 HTTP infer
-- 返回的 session 会显式标记 `degraded_to_oneshot=True`
+- `synthesize_bytes` / `synthesize_array`: go directly through a single HTTP infer
+- `open_stream(...)`: buffer `start/text/end` locally
+- Only after calling `end()` is a single HTTP infer triggered
+- The returned session is explicitly marked `degraded_to_oneshot=True`
 
-这意味着：
+This means:
 
-- 它不会伪装成服务端边收边合成
-- 但上层调用代码仍可复用同一套 session API
+- It does not pretend to be server-side incremental synthesis
+- But upper-layer calling code can still reuse the same session API
 
-## 当前状态说明
+## Current Status
 
-当前版本已经完成这些结构目标：
+The current release has completed these structural goals:
 
-- SDK 代码被收敛到 `client/` 子项目
-- 提供统一同步 / 异步 façade
-- 引入共享协议层 `qwen3tts_protocol`
-- 提供 auto-detect 骨架和四类 adaptor 入口
-- 为 `triton-http` 提供显式的流式降级语义
+- The SDK code is consolidated into the `client/` subproject
+- A unified sync / async façade is provided
+- The shared protocol layer `qwen3tts_protocol` is introduced
+- An auto-detect skeleton and four adaptor entry points are provided
+- Explicit streaming-degradation semantics are provided for `triton-http`
 
-当前仍建议把它视为 v1 alpha：
+It is still recommended to treat it as v1 alpha:
 
-- transport 适配已成型，但还需要继续补更完整的集成验证
-- `engine-websocket` / `engine-grpc` 路径最接近现有服务端真实合同
-- Triton 相关路径后续建议继续补真实环境 smoke test
+- The transport adaptation is in place, but more complete integration validation still needs to be added
+- The `engine-websocket` / `engine-grpc` paths are closest to the real contract of the existing server
+- For the Triton-related paths, it is recommended to add real-environment smoke tests later

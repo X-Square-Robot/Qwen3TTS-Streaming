@@ -1,75 +1,77 @@
-# G7：客户端实时音频流（RealtimeAudioStream）
+**English** | [中文](realtime_audio.zh-CN.md)
 
-> 分支：`refact`
-> 编写日期：2026-06-16
-> 状态：已完成
-> 关联：[[REFACTOR_GOALS.md]] G5 中 `tests/save.py` 的处理方案
+# G7: Client-Side Realtime Audio Stream (RealtimeAudioStream)
 
----
-
-## 0. 背景
-
-当前引擎以最快速度推帧（首帧 ~800ms，后续每 ~2s 一块），输出节奏不均匀。`tests/save.py` 实现了"非等时音频 → 等时音频"的适配逻辑，但仅作为测试脚本存在，未被集成到正式代码中。
-
-在以下场景中，消费者需要等时（isochronous）音频流：
-
-- **WebRTC 服务器**：用户到云走 WebRTC，WebRTC 服务器到引擎走自定义客户端-服务端协议。WebRTC 的 jitter buffer 需要稳定的音频输入节奏，否则会出现 underrun 断音。
-- **本地实时播放**：客户端直接播放音频时，需要静音填充来掩盖生成空隙。
-- **测试/基准**：验证实时场景下的 TTFT、断音率、缓冲区水位。
-
-`save.py` 的核心价值不是"播放模拟"，而是**非等时源 → 等时消费的适配**。WebRTC 服务器就是一个等时消费者。
+> Branch: `refact`
+> Written: 2026-06-16
+> Status: Done
+> Related: the handling of `tests/save.py` in G5 of [[REFACTOR_GOALS.md]]
 
 ---
 
-## 1. 架构决策
+## 0. Background
 
-| 选项 | 结论 | 原因 |
+The current engine pushes frames as fast as possible (first frame ~800ms, then a block roughly every ~2s), so the output cadence is uneven. `tests/save.py` implements the "non-isochronous audio → isochronous audio" adaptation logic, but it exists only as a test script and has not been integrated into the production code.
+
+In the following scenarios, the consumer needs an isochronous audio stream:
+
+- **WebRTC server**: the user reaches the cloud over WebRTC, and the WebRTC server reaches the engine over a custom client-server protocol. WebRTC's jitter buffer needs a steady audio input cadence, otherwise underrun dropouts occur.
+- **Local realtime playback**: when the client plays audio directly, silence padding is needed to mask generation gaps.
+- **Testing/benchmarking**: validating TTFT, dropout rate, and buffer watermark in realtime scenarios.
+
+The core value of `save.py` is not "playback simulation," but **adapting a non-isochronous source to isochronous consumption**. A WebRTC server is exactly such an isochronous consumer.
+
+---
+
+## 1. Architecture Decision
+
+| Option | Conclusion | Reason |
 |------|------|------|
-| 集成到引擎（类似 VAD） | ❌ | 引擎应尽快出帧，`time.sleep()` 和队列阻塞违背引擎设计目标；引擎不知道播放状态 |
-| 集成到客户端 SDK | ✅ | 客户端拥有播放上下文，与现有 `iter_messages()` 消费接口一致，可选且无侵入 |
-| 仅作为测试工具 | ❌ | 测试只是消费场景之一，实时播放和 WebRTC 服务器同样需要 |
-| Gateway 层可选包装 | ⚠️ 可选 | 如果服务端需要按实时节奏推流给浏览器，可在 gateway 做轻量 wrapper，但核心逻辑归客户端 |
+| Integrate into the engine (like VAD) | ❌ | The engine should emit frames as soon as possible; `time.sleep()` and queue blocking violate the engine's design goals, and the engine does not know the playback state |
+| Integrate into the client SDK | ✅ | The client owns the playback context, it is consistent with the existing `iter_messages()` consumption interface, and it is optional and non-intrusive |
+| Only as a testing tool | ❌ | Testing is just one of the consumption scenarios; realtime playback and the WebRTC server need it equally |
+| Optional wrapper at the gateway layer | ⚠️ Optional | If the server needs to push the stream to the browser at a realtime cadence, a lightweight wrapper can be added in the gateway, but the core logic belongs to the client |
 
-**目标架构**：
+**Target architecture**:
 
 ```
-用户浏览器/APP
-      │ WebRTC (音频 RTP，自带 jitter buffer + 播放节奏)
+User browser/app
+      │ WebRTC (audio RTP, with built-in jitter buffer + playback cadence)
       ▼
-  WebRTC 服务器 (SFU/MCU)
-      │ 自定义 WebSocket/gRPC 协议
+  WebRTC server (SFU/MCU)
+      │ Custom WebSocket/gRPC protocol
       ▼
-  TTS Client SDK（RealtimeAudioStream 可选启用）
+  TTS Client SDK (RealtimeAudioStream optionally enabled)
       │
       ▼
-  TTS 引擎（不变，继续最快速度出帧）
+  TTS engine (unchanged, still emits frames as fast as possible)
 ```
 
 ---
 
-## 2. 具体变更
+## 2. Specific Changes
 
-### 2.1 新增 `client/src/qwen3tts/realtime.py`
+### 2.1 Add `client/src/qwen3tts/realtime.py`
 
 ```python
 @dataclass
 class TimedAudio:
-    """带时间信息的音频帧。"""
-    data: bytes          # PCM 音频数据
-    duration_s: float    # 帧时长（秒）
-    is_silence: bool = False  # 是否为填充静音
+    """An audio frame with timing information."""
+    data: bytes          # PCM audio data
+    duration_s: float    # frame duration (seconds)
+    is_silence: bool = False  # whether it is padding silence
 
 class RealtimeAudioStream:
-    """将非等时的 AudioChunk 流转换为等时音频流。
+    """Convert a non-isochronous AudioChunk stream into an isochronous audio stream.
 
-    用于给 WebRTC 服务器、本地播放器等需要实时节奏的消费者提供输入。
-    默认不启用，用户按需创建。
+    Used to provide input to consumers that need a realtime cadence, such as WebRTC
+    servers and local players. Disabled by default; the user creates it on demand.
 
     Args:
-        session: BaseStreamSession，音频来源
-        fill_silence: 是否在空隙处填充静音（默认 True）
-        chunk_s: 等时输出粒度，默认 0.02（20ms，对齐 WebRTC Opus 帧长）
-        sample_rate: 采样率（Hz），默认 24000
+        session: BaseStreamSession, the audio source
+        fill_silence: whether to fill gaps with silence (default True)
+        chunk_s: isochronous output granularity, default 0.02 (20ms, aligned with the WebRTC Opus frame length)
+        sample_rate: sample rate (Hz), default 24000
     """
 
     def __init__(
@@ -83,52 +85,52 @@ class RealtimeAudioStream:
     def __iter__(self) -> Iterator[TimedAudio]: ...
 ```
 
-### 2.2 `chunk_s` 默认 0.02 而非 0.01
+### 2.2 `chunk_s` Defaults to 0.02 Rather Than 0.01
 
-- WebRTC 音频标准帧长 20ms（Opus 默认帧长）
-- 10ms 粒度会产生过多队列操作和静音帧切片
-- 对齐到 20ms 可直接映射到 WebRTC 音频帧，减少切片和重打包
+- The standard WebRTC audio frame length is 20ms (the Opus default frame length)
+- A 10ms granularity produces too many queue operations and silence-frame slices
+- Aligning to 20ms maps directly to a WebRTC audio frame, reducing slicing and re-packetization
 
-### 2.3 更新 `client/src/qwen3tts/__init__.py`
+### 2.3 Update `client/src/qwen3tts/__init__.py`
 
-- 导出 `RealtimeAudioStream`、`TimedAudio`
+- Export `RealtimeAudioStream` and `TimedAudio`
 
-### 2.4 删除 `tests/save.py`
+### 2.4 Remove `tests/save.py`
 
-- 核心逻辑已迁入 `realtime.py`
-- 测试验证改用 `RealtimeAudioStream` 的单元测试
+- The core logic has been migrated into `realtime.py`
+- Test validation switches to unit tests of `RealtimeAudioStream`
 
-### 2.5 新增 `client/tests/test_realtime.py`
+### 2.5 Add `client/tests/test_realtime.py`
 
-- 测试静音填充正确性
-- 测试首帧延迟处理
-- 测试帧迟到场景
-- 测试哨兵值（None）终止
-- 测试 `fill_silence=False` 模式（直出，不填充）
+- Test correctness of silence padding
+- Test first-frame latency handling
+- Test the late-frame scenario
+- Test termination via the sentinel value (None)
+- Test the `fill_silence=False` mode (pass-through, no padding)
 
-### 2.6 Gateway 层可选包装（后续，不在本次重构范围）
+### 2.6 Optional Wrapper at the Gateway Layer (Later, Out of Scope for This Refactor)
 
-- 如果需要服务端按实时节奏推流，可在 `engine/gateway/` 新增 pacing wrapper
-- 根据 session 配置决定是否对输出做节奏控制
-- 引擎核心不变
-
----
-
-## 3. 实施阶段
-
-本目标属于 REFACTOR_GOALS.md Phase 1（协议层建立）的扩展，应在 Phase 1 完成后、Phase 3（tests/ 清理）之前实施：
-
-1. **Phase 1 扩展**：在 `client/src/qwen3tts/` 新增 `realtime.py`
-2. **Phase 3 前置**：删除 `tests/save.py`，改用 `RealtimeAudioStream`
-3. **Phase 5 文档**：更新 `client/README.md`，补充 RealtimeAudioStream 用法
+- If the server needs to push the stream at a realtime cadence, a pacing wrapper can be added in `engine/gateway/`
+- Decide whether to apply cadence control to the output based on the session config
+- The engine core stays unchanged
 
 ---
 
-## 4. 验收标准
+## 3. Implementation Phases
 
-1. ✅ `from qwen3tts import RealtimeAudioStream, TimedAudio` 可用
-2. ✅ `RealtimeAudioStream(session)` 产生等时音频流，空隙处自动填充静音
-3. ✅ `fill_silence=False` 时行为与直接 `iter_messages()` 等价
-4. ✅ `tests/save.py` 已删除
-5. ✅ client 包单测全部通过
-6. ✅ `client/README.md` 包含 RealtimeAudioStream 使用示例
+This goal is an extension of REFACTOR_GOALS.md Phase 1 (establishing the protocol layer), and should be implemented after Phase 1 is complete and before Phase 3 (tests/ cleanup):
+
+1. **Phase 1 extension**: add `realtime.py` under `client/src/qwen3tts/`
+2. **Phase 3 prerequisite**: remove `tests/save.py`, switch to `RealtimeAudioStream`
+3. **Phase 5 documentation**: update `client/README.md`, adding RealtimeAudioStream usage
+
+---
+
+## 4. Acceptance Criteria
+
+1. ✅ `from qwen3tts import RealtimeAudioStream, TimedAudio` works
+2. ✅ `RealtimeAudioStream(session)` produces an isochronous audio stream, automatically padding gaps with silence
+3. ✅ When `fill_silence=False`, the behavior is equivalent to calling `iter_messages()` directly
+4. ✅ `tests/save.py` has been removed
+5. ✅ All client-package unit tests pass
+6. ✅ `client/README.md` contains a RealtimeAudioStream usage example

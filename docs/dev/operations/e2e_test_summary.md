@@ -1,60 +1,62 @@
-# 端到端测试与验收入口
+**English** | [中文](e2e_test_summary.zh-CN.md)
 
-## 1. 入口分层
+# End-to-End Testing and Acceptance Entry Points
 
-E2E 相关入口现在按职责分开：
+## 1. Entry-point Layering
 
-| 入口 | 类型 | 说明 |
+The E2E-related entry points are now separated by responsibility:
+
+| Entry point | Type | Description |
 | --- | --- | --- |
-| `tests/e2e/test_e2e.py` | pytest | Triton gRPC `tts_orchestrator` 端到端断言，覆盖基础合成、错误处理、首包延迟 smoke。 |
-| `tests/e2e/test_engine_standalone.py` | pytest | 裸 standalone engine gRPC 端到端断言，服务不可达时自动 skip。 |
-| `tools/validation/serving_endpoints.py` | 手动验收/benchmark | 统一 serving 工具，覆盖 `engine-grpc`、`engine-websocket`、`triton-grpc`、`triton-http`。 |
-| `tools/validation/*.py` | 手动工具 | 音频生成、全链路试听、ONNX/TRT 对比、长文本调查、导出验证等。 |
+| `tests/e2e/test_e2e.py` | pytest | End-to-end assertions for the Triton gRPC `tts_orchestrator`, covering basic synthesis, error handling, and a first-chunk latency smoke test. |
+| `tests/e2e/test_engine_standalone.py` | pytest | End-to-end assertions for the bare standalone engine gRPC, auto-skipped when the service is unreachable. |
+| `tools/validation/serving_endpoints.py` | Manual acceptance / benchmark | Unified serving tool covering `engine-grpc`, `engine-websocket`, `triton-grpc`, and `triton-http`. |
+| `tools/validation/*.py` | Manual tools | Audio generation, full-path listening, ONNX/TRT comparison, long-text investigation, export verification, etc. |
 
-完整测试地图见 [`tests/README.md`](../../../tests/README.md)。
+See [`tests/README.md`](../../../tests/README.md) for the full test map.
 
 ## 2. Triton Pytest E2E
 
-启动 Triton 后运行：
+After starting Triton, run:
 
 ```bash
 bash scripts/bash/deploy.sh run --gateway triton
 pytest tests/e2e/test_e2e.py -v -s
 ```
 
-覆盖范围：
+Coverage:
 
-| 用例 | 说明 |
+| Case | Description |
 | --- | --- |
-| `test_e2e_voice_design_or_custom` | `custom_voice`/`voice_design` 基础流式音频。 |
-| `test_e2e_custom_voice` | `speaker + instruct` custom voice 路径。 |
-| `test_e2e_error_*` | 空文本、非法 task type、voice clone 缺少或损坏 ref audio。 |
-| `test_e2e_first_chunk_latency` | Triton orchestrator 首个 audio chunk 延迟 smoke。 |
+| `test_e2e_voice_design_or_custom` | Basic `custom_voice`/`voice_design` streaming audio. |
+| `test_e2e_custom_voice` | The `speaker + instruct` custom voice path. |
+| `test_e2e_error_*` | Empty text, invalid task type, and voice clone with missing or corrupted ref audio. |
+| `test_e2e_first_chunk_latency` | Smoke test for the Triton orchestrator's first audio chunk latency. |
 
-`voice_clone` 相关 pytest 默认 skip，因为需要真实 ref audio 和完整 ref audio 链路。
+The `voice_clone`-related pytest cases are skipped by default, because they require real ref audio and the full ref audio path.
 
 ## 3. Standalone Engine Pytest E2E
 
-启动裸 engine 后运行：
+After starting the bare engine, run:
 
 ```bash
 python -m engine.server --config engine.yaml
 pytest tests/e2e/test_engine_standalone.py -v -s
 ```
 
-覆盖范围：
+Coverage:
 
-| 用例组 | 说明 |
+| Case group | Description |
 | --- | --- |
-| `TestEngineSmokeAndStreaming` | capabilities、单次合成、英文文本、流式文本。 |
-| `TestEngineCustomVoiceInstruct` | custom voice instruct，非支持模型自动 skip。 |
-| `TestEngineLongText` | medium/very long 文本 rollover。 |
-| `TestEngineBadCases` | 空文本、空白文本、单字、cancel。 |
-| `TestEnginePerformance` | 首包延迟 smoke，阈值为 CI 友好的宽松断言。 |
+| `TestEngineSmokeAndStreaming` | capabilities, single-shot synthesis, English text, streaming text. |
+| `TestEngineCustomVoiceInstruct` | custom voice instruct, auto-skipped for unsupported models. |
+| `TestEngineLongText` | medium/very long text rollover. |
+| `TestEngineBadCases` | empty text, whitespace text, single character, cancel. |
+| `TestEnginePerformance` | first-chunk latency smoke test, with a CI-friendly loose threshold assertion. |
 
-## 4. 完整 Serving 验收工具
+## 4. Full Serving Acceptance Tool
 
-`tools/validation/serving_endpoints.py` 是推荐的人工验收入口：
+`tools/validation/serving_endpoints.py` is the recommended manual acceptance entry point:
 
 ```bash
 mamba run -n qwen3-tts python tools/validation/serving_endpoints.py
@@ -62,14 +64,14 @@ mamba run -n qwen3-tts python tools/validation/serving_endpoints.py --targets en
 mamba run -n qwen3-tts python tools/validation/serving_endpoints.py --targets triton-grpc,triton-http
 ```
 
-默认矩阵：
+Default matrix:
 
-- standalone engine gRPC：接近裸 engine pytest 的完整 suite。
-- standalone engine WebSocket：同一 suite 的 WebSocket transport。
-- Triton gRPC：health + 真实合成请求 + 可选长文本。
-- Triton HTTP：health + model metadata/config + 真实合成请求 + 可选长文本。
+- standalone engine gRPC: close to the full bare-engine pytest suite.
+- standalone engine WebSocket: the same suite over the WebSocket transport.
+- Triton gRPC: health + a real synthesis request + optional long text.
+- Triton HTTP: health + model metadata/config + a real synthesis request + optional long text.
 
-常用快速验收：
+Common quick acceptance:
 
 ```bash
 mamba run -n qwen3-tts python tools/validation/serving_endpoints.py \
@@ -77,9 +79,9 @@ mamba run -n qwen3-tts python tools/validation/serving_endpoints.py \
   --skip-long --skip-badcase
 ```
 
-## 5. 裸 Engine TTFT 分布 Benchmark
+## 5. Bare-engine TTFT Distribution Benchmark
 
-如果要测“裸引擎更准确一点的 TTFT”，使用统一 serving 工具的 TTFT 分布模式：
+If you want to measure "a somewhat more accurate bare-engine TTFT", use the unified serving tool's TTFT distribution mode:
 
 ```bash
 mamba run -n qwen3-tts python tools/validation/serving_endpoints.py \
@@ -91,28 +93,28 @@ mamba run -n qwen3-tts python tools/validation/serving_endpoints.py \
   --ttft-text "今天天气真好。"
 ```
 
-输出包含：
+The output includes:
 
 - `mean_ms`
-- `variance_ms2`（样本方差）
+- `variance_ms2` (sample variance)
 - `population_variance_ms2`
 - `stdev_ms`
 - `coefficient_of_variation`
 - `min/p50/p90/p95/max/range`
-- 每次采样相对均值的 fluctuation bar
-- `--json` 下的结构化明细
+- a fluctuation bar for each sample relative to the mean
+- structured details under `--json`
 
-TTFT 这里定义为客户端发出 standalone engine `SynthesizeOnce` 请求到收到第一个 audio chunk 的 wall-clock 时间。它包含客户端 gRPC、本地调度、prefill/decode/code2wav 到首包产出的整条裸 engine 路径，不包含 Triton orchestrator。
+TTFT here is defined as the wall-clock time from when the client issues the standalone engine `SynthesizeOnce` request to when it receives the first audio chunk. It covers the entire bare-engine path — client gRPC, local scheduling, prefill/decode/code2wav through to first-chunk emission — and does not include the Triton orchestrator.
 
-## 6. 指标口径
+## 6. Metric Definitions
 
-| 指标 | 含义 |
+| Metric | Meaning |
 | --- | --- |
-| `first_chunk_ms` / `ttft_ms` | 请求开始到第一个可播放 audio chunk 到达客户端的 wall-clock 时间。 |
-| `total_ms` | 请求开始到终止事件/最终响应完成。 |
-| `chunks` | 收到的音频 chunk 数。 |
-| `samples` / `duration_sec` | 生成音频采样点数和换算时长。 |
-| `rtf` | wall-clock 总耗时 / 音频时长。 |
-| `decode_step_*` | 连续 audio chunk 到达间隔统计，用于观察流式稳定性。 |
+| `first_chunk_ms` / `ttft_ms` | Wall-clock time from request start to the first playable audio chunk arriving at the client. |
+| `total_ms` | Request start to the termination event / final response completion. |
+| `chunks` | Number of audio chunks received. |
+| `samples` / `duration_sec` | Number of generated audio samples and the corresponding duration. |
+| `rtf` | Total wall-clock time / audio duration. |
+| `decode_step_*` | Statistics of the inter-arrival intervals of consecutive audio chunks, used to observe streaming stability. |
 
-benchmark 数字必须带完整条件：硬件、driver、镜像/环境、engine profile、输入文本、warmup、样本数、目标 endpoint、采样参数、失败率。
+Benchmark numbers must always carry the full conditions: hardware, driver, image/environment, engine profile, input text, warmup, sample count, target endpoint, sampling parameters, and failure rate.

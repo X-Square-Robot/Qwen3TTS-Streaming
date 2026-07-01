@@ -1,16 +1,18 @@
-# 部署说明
+**English** | [中文](deployment.zh-CN.md)
 
-本文档说明当前推荐的部署方式、profile 参数和开发期容器策略。
+# Deployment Guide
 
-## 推荐路径
+This document describes the currently recommended deployment modes, profile parameters, and the container strategy used during development.
 
-v0.1 推荐先使用：
+## Recommended Path
+
+For v0.1, start with:
 
 ```bash
 bash scripts/bash/autorun.sh all -m custom-1.7b
 ```
 
-首次部署建议分阶段执行，便于定位问题：
+For the first deployment, running the phases separately makes troubleshooting easier:
 
 ```bash
 bash scripts/bash/autorun.sh setup -m custom-1.7b
@@ -18,56 +20,56 @@ bash scripts/bash/autorun.sh build -m custom-1.7b
 bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway standalone
 ```
 
-## 统一入口与控制参数
+## Unified Entry Point and Control Parameters
 
-生命周期统一入口是 `bash scripts/bash/autorun.sh`，它同时支持两种方式：
+The unified lifecycle entry point is `bash scripts/bash/autorun.sh`, which supports two invocation styles:
 
-- 交互式：`bash scripts/bash/autorun.sh`
-- 一次性调用：`bash scripts/bash/autorun.sh <command> -m <variant> [options]`
+- Interactive: `bash scripts/bash/autorun.sh`
+- One-shot: `bash scripts/bash/autorun.sh <command> -m <variant> [options]`
 
-所有关键控制项都可以从 autorun 进入：导出 GPU、TensorRT 编译 GPU、engine profile、runtime 上限、部署方式和端口。
+All key controls are accessible through autorun: export GPU, TensorRT build GPU, engine profile, runtime limits, deployment mode, and ports.
 
-Phase C 被拆成两个显式命令：
+Phase C is split into two explicit commands:
 
 ```bash
-# 只组装部署产物，不启动服务；跨机/打包机场景用这个
+# Only assemble deployment artifacts, do not start the service; use this for cross-host / packaging-host scenarios
 bash scripts/bash/autorun.sh package -m custom-1.7b --gateway engine-docker
 
-# 只在当前机器启动服务；当前机器不是生产服务机时不要执行这个
+# Only start the service on the current machine; do not run this if the current machine is not the production serving host
 bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway engine-docker
 ```
 
-`autorun.sh all` 是"本机完整流程"，会执行 `setup → build → package → deploy`。如果你是在导图/打包机上为云端生产容器准备产物，通常应在导入云端返回的 engine artifact 后执行 `package`，然后把镜像和模型包交给生产部署系统；不要在打包机上执行 `deploy`。
+`autorun.sh all` is the "full local pipeline" and runs `setup → build → package → deploy`. If you are preparing artifacts on an export/packaging host for a cloud production container, you should normally run `package` after importing the engine artifact returned from the cloud, then hand the image and model package off to the production deployment system; do not run `deploy` on the packaging host.
 
-配置优先级是：命令行参数 > 已导出的环境变量 > manifest/default。常用环境变量包括 `MODEL_VERSION`、`EXPORT_DEVICE`、`BUILD_GPU_DEVICE`、`RUNTIME_GPU_DEVICE`、`MAX_BATCH_SIZE`、`MAX_INPUT_LEN`、`MAX_SEQ_LEN`、`RUNTIME_MAX_BATCH_SIZE`、`RUNTIME_MAX_SEQ_LEN`；但推荐日常都从 autorun 参数进入，便于复现。
+Configuration precedence is: command-line arguments > exported environment variables > manifest/default. Common environment variables include `MODEL_VERSION`, `EXPORT_DEVICE`, `BUILD_GPU_DEVICE`, `RUNTIME_GPU_DEVICE`, `MAX_BATCH_SIZE`, `MAX_INPUT_LEN`, `MAX_SEQ_LEN`, `RUNTIME_MAX_BATCH_SIZE`, `RUNTIME_MAX_SEQ_LEN`; but for day-to-day use it is recommended to go through autorun parameters for reproducibility.
 
-### Phase B 参数
+### Phase B Parameters
 
 ```text
 Phase B:
-  --max-batch-size <N>          TensorRT profile 最大 batch
-  --max-input-len <N>           prefill/input 最大 token 长度
-  --max-seq-len <N>             KV cache 最大 sequence 长度
+  --max-batch-size <N>          TensorRT profile max batch
+  --max-input-len <N>           prefill/input max token length
+  --max-seq-len <N>             KV cache max sequence length
   --dtype bf16|fp16|fp32|fp8    TensorRT build precision
-  --triton-io-float-dtype <T>   TensorRT/Triton float I/O dtype，默认等于 --dtype
-  --target-driver <ver>         按部署机 NVIDIA driver 选择 NGC 镜像
-  --build-device <dev>          trtexec 编译 GPU
+  --triton-io-float-dtype <T>   TensorRT/Triton float I/O dtype, defaults to --dtype
+  --target-driver <ver>         select NGC image by deployment host NVIDIA driver
+  --build-device <dev>          trtexec build GPU
 ```
 
-### Phase C 参数
+### Phase C Parameters
 
 ```text
 Phase C:
   --gateway standalone|triton|engine-docker
   --engine-mode trt|onnx
-  --runtime-max-batch-size <N>  runtime scheduler batch 上限
-  --runtime-max-seq-len <N>     runtime scheduler seq 上限
-  --runtime-device <dev>        runtime 服务 GPU
+  --runtime-max-batch-size <N>  runtime scheduler batch limit
+  --runtime-max-seq-len <N>     runtime scheduler seq limit
+  --runtime-device <dev>        runtime service GPU
 ```
 
-### 模型版本号
+### Model Version Number
 
-默认会组装 Triton model version 目录 `1`。如果需要生成其他版本目录，可以通过 `--model-version <N>` 指定；这会把共享模型包放到 `workspace/model_repository/tts_orchestrator/<N>`，并让 standalone、engine Docker 和 Triton 都从 `/models/tts_orchestrator/<N>` 读取。
+By default, the Triton model version directory `1` is assembled. If you need to generate a different version directory, specify it with `--model-version <N>`; this places the shared model package under `workspace/model_repository/tts_orchestrator/<N>` and makes standalone, engine Docker, and Triton all read from `/models/tts_orchestrator/<N>`.
 
 ```bash
 bash scripts/bash/autorun.sh deploy -m custom-1.7b \
@@ -75,17 +77,17 @@ bash scripts/bash/autorun.sh deploy -m custom-1.7b \
   --model-version 2
 ```
 
-这个版本号是 Triton model repository 的版本目录，不是 Hugging Face / ModelScope 权重 revision。HTTP 客户端如果显式带版本，需要请求 `/v2/models/tts_orchestrator/versions/<N>/infer`；不显式带版本时则由 Triton 按仓库状态选择可用版本。
+This version number is the Triton model repository version directory, not a Hugging Face / ModelScope weights revision. HTTP clients that explicitly pass a version must request `/v2/models/tts_orchestrator/versions/<N>/infer`; when no version is passed explicitly, Triton selects an available version based on the repository state.
 
-## GPU 选择
+## GPU Selection
 
-默认 `--device auto`：脚本会选择当前空闲显存最多的 GPU。你也可以显式指定同一张卡用于所有阶段：
+The default is `--device auto`: the script selects the GPU with the most free memory currently available. You can also explicitly assign the same card to all phases:
 
 ```bash
 bash scripts/bash/autorun.sh all -m custom-1.7b --device 1
 ```
 
-也可以按阶段拆开指定：
+You can also assign devices per phase:
 
 ```bash
 bash scripts/bash/autorun.sh all -m custom-1.7b \
@@ -94,26 +96,26 @@ bash scripts/bash/autorun.sh all -m custom-1.7b \
   --runtime-device 1
 ```
 
-参数含义：
+Parameter meanings:
 
 ```text
---device <dev>          同时作用于导出、编译、运行阶段；dev 可为 auto、0、1、cuda:1
---export-device <dev>   仅 Phase A 导出模型使用；额外支持 cpu
---build-device <dev>    仅 Phase B trtexec 编译 engine 使用；支持 auto、all、0、1、cuda:1
---runtime-device <dev>  仅 Phase C 服务运行使用；支持 auto、0、1、cuda:1
+--device <dev>          applies to export, build, and runtime phases; dev can be auto, 0, 1, cuda:1
+--export-device <dev>   Phase A model export only; also supports cpu
+--build-device <dev>    Phase B trtexec engine build only; supports auto, all, 0, 1, cuda:1
+--runtime-device <dev>  Phase C service runtime only; supports auto, 0, 1, cuda:1
 ```
 
-Phase B 会在 Docker 层限制构建 GPU，例如 `--build-device 1` 会使用类似 `docker run --gpus device=1 ...` 的方式运行 `trtexec`。因此 `trtexec` 日志里可能显示容器内 `Selected Device ID: 0`，但 UUID 会对应物理 GPU 1。
+Phase B restricts the build GPU at the Docker layer; for example, `--build-device 1` runs `trtexec` in a way similar to `docker run --gpus device=1 ...`. As a result, the `trtexec` log may show `Selected Device ID: 0` inside the container, but the UUID will correspond to physical GPU 1.
 
-## Phase A: 导出
+## Phase A: Export
 
-Phase A 下载模型、安装依赖、导出 ONNX/weights/manifest。
+Phase A downloads the model, installs dependencies, and exports ONNX/weights/manifest.
 
 ```bash
 bash scripts/bash/autorun.sh setup -m custom-1.7b
 ```
 
-常用参数：
+Common parameters:
 
 ```text
 --source auto|hf|modelscope
@@ -123,9 +125,9 @@ bash scripts/bash/autorun.sh setup -m custom-1.7b
 --target-driver <driver>
 ```
 
-## Phase B: 构建 TensorRT engine
+## Phase B: Build the TensorRT Engine
 
-Phase B 在 NGC 容器里运行 trtexec，并把实际 profile 写入 manifest：
+Phase B runs trtexec inside the NGC container and writes the actual profile into the manifest:
 
 ```bash
 bash scripts/bash/autorun.sh build -m custom-1.7b \
@@ -135,13 +137,13 @@ bash scripts/bash/autorun.sh build -m custom-1.7b \
   --dtype bf16
 ```
 
-写入位置：
+Write location:
 
 ```text
 workspace/exported/custom-1.7b/triton_manifest.json
 ```
 
-关键字段：
+Key fields:
 
 ```json
 {
@@ -157,35 +159,35 @@ workspace/exported/custom-1.7b/triton_manifest.json
 }
 ```
 
-runtime 的 batch/seq 不能超过这里的 profile。需要更大 batch 或更长文本时，重新跑 Phase B。
+The runtime batch/seq cannot exceed the profile recorded here. When you need a larger batch or longer text, rerun Phase B.
 
-### Engine Profile 详细计算逻辑
+### Detailed Engine Profile Calculation Logic
 
-如果不显式传 `--max-batch-size`、`--max-input-len`、`--max-seq-len`，Phase B 会优先读取
-`workspace/exported/<variant>/triton_manifest.json` 和导出的权重/engine/ONNX 文件，估算：
+If you do not explicitly pass `--max-batch-size`, `--max-input-len`, or `--max-seq-len`, Phase B first reads
+`workspace/exported/<variant>/triton_manifest.json` and the exported weights/engine/ONNX files to estimate:
 
-- 固定占用：TRT/ONNX 主模型、runtime embedding 权重、必要的 reference preprocessing engine
-- 每路持久状态：Talker KV pool、Code2Wav KV、conv/transconv 双缓冲、token_counts
-- 每步峰值：batched talker KV 输入、C2W KV/state 输入、TRT 输出缓存和少量采样/attention scratch
+- Fixed footprint: TRT/ONNX main model, runtime embedding weights, and the required reference preprocessing engines
+- Per-stream persistent state: Talker KV pool, Code2Wav KV, conv/transconv double buffers, token_counts
+- Per-step peak: batched talker KV inputs, C2W KV/state inputs, TRT output buffers, and a small amount of sampling/attention scratch
 
-然后结合目标机器 `target_profile.json` 里的 GPU 总显存，向下取到支持的 profile 档位：
+It then combines this with the total GPU memory from the target machine's `target_profile.json` and rounds down to a supported profile tier:
 
 ```text
 16 / 32 / 64 / 128
 ```
 
-因此跨机编译时 profile 应以生产机 `target_profile.json` 和导出产物估算为准，而不是打包机显存。例如 `custom-1.7b` 在 48G 目标卡上，如果固定占用、TRT 自留和 KV/cache 估算后仍满足余量，默认建议可以落到 `max_batch_size=128`。
+Therefore, for cross-host builds, the profile should be estimated from the production host's `target_profile.json` and the export artifacts, not from the packaging host's memory. For example, `custom-1.7b` on a 48G target card can, if the fixed footprint, TRT reserve, and KV/cache estimates still leave enough headroom, default to `max_batch_size=128`.
 
-如果导出 manifest 不存在，才回退到粗略显存档位：
+Only if the export manifest does not exist does it fall back to coarse memory tiers:
 
 ```text
-约 24 GB GPU:  max_batch=16   max_input_len=96   max_seq_len=384
-约 32 GB GPU:  max_batch=32   max_input_len=128  max_seq_len=512
-约 48 GB GPU:  max_batch=64   max_input_len=128  max_seq_len=512
-约 80 GB GPU:  max_batch=128  max_input_len=128  max_seq_len=512
+~24 GB GPU:  max_batch=16   max_input_len=96   max_seq_len=384
+~32 GB GPU:  max_batch=32   max_input_len=128  max_seq_len=512
+~48 GB GPU:  max_batch=64   max_input_len=128  max_seq_len=512
+~80 GB GPU:  max_batch=128  max_input_len=128  max_seq_len=512
 ```
 
-这只是默认建议，不是限制；显式参数仍然最高优先级。比如你可以在 24G 机器上为 48G 部署机尝试构建更大的 profile：
+These are only default suggestions, not limits; explicit parameters still take the highest precedence. For instance, on a 24G machine you can try building a larger profile for a 48G deployment host:
 
 ```bash
 bash scripts/bash/autorun.sh build -m custom-1.7b \
@@ -195,24 +197,24 @@ bash scripts/bash/autorun.sh build -m custom-1.7b \
   --max-seq-len 512
 ```
 
-但 TensorRT 编译本身也需要显存。如果构建机显存不足，`trtexec` 仍可能 OOM；这时需要换更大构建卡、释放显存，或降低 profile。
+However, TensorRT compilation itself also requires GPU memory. If the build machine has insufficient memory, `trtexec` may still OOM; in that case you need to switch to a larger build card, free memory, or lower the profile.
 
-这些值会写入 `workspace/exported/<variant>/triton_manifest.json` 的 `engine_profile` 字段。runtime 启动时如果请求的 batch/seq 超过 profile，会直接报错；prefill 长度超过 `max_input_len` 时也会报出明确错误，避免 silent clamp 或运行时才暴露 TensorRT shape 问题。
+These values are written into the `engine_profile` field of `workspace/exported/<variant>/triton_manifest.json`. When the runtime starts, if the requested batch/seq exceeds the profile, it fails immediately; if the prefill length exceeds `max_input_len`, it also raises a clear error, avoiding a silent clamp or exposing TensorRT shape issues only at runtime.
 
-示例：
+Examples:
 
 ```bash
-# 构建较小 profile，便于低显存机器验证
+# Build a smaller profile for validation on low-memory machines
 bash scripts/bash/autorun.sh build -m custom-1.7b \
   --max-batch-size 16 --max-input-len 96 --max-seq-len 384
 
-# runtime 使用不得超过 manifest 里记录的 profile
+# Runtime usage must not exceed the profile recorded in the manifest
 bash scripts/bash/autorun.sh deploy -m custom-1.7b \
   --gateway standalone \
   --runtime-max-batch-size 16 \
   --runtime-max-seq-len 384
 
-# Triton gateway 也走同一套 runtime 上限和 GPU 入口
+# The Triton gateway uses the same runtime limits and GPU entry point
 bash scripts/bash/autorun.sh deploy -m custom-1.7b \
   --gateway triton \
   --runtime-device 1 \
@@ -220,7 +222,7 @@ bash scripts/bash/autorun.sh deploy -m custom-1.7b \
   --runtime-max-seq-len 384
 ```
 
-## Phase C: 启动服务
+## Phase C: Start the Service
 
 ### Standalone
 
@@ -232,24 +234,24 @@ bash scripts/bash/autorun.sh deploy \
   --max-seq-len 512
 ```
 
-端点：
+Endpoints:
 
 - gRPC: `localhost:50051`
 - WebSocket: `ws://localhost:50052/v1/ws`
 - capabilities: `http://localhost:50052/v1/capabilities`
 - health: `http://localhost:8080/health`
 
-`base` / `icl` reference preprocessing 在 standalone TRT 路径中由
-`speaker_encoder.engine`、`speech_tokenizer_codec_fused.engine` 和可选
-`code2wav_decoder.engine` 串行执行，目前不做 batch。`spliter.max_concurrent_segments`
-只影响后续文本分段和 EngineLoop slot 并发，不控制 speech encoder。reference
-音频最大时长以 capabilities 中的 `ref_audio_max_duration_sec` 为准，当前
-TRT 构建默认是 8 秒。`reference_cache` 缓存 ref-audio preprocessing
-features，`prefix_cache` 缓存 Talker ICL prefix KV，两者独立配置。启用
-`reference_cache` 时，standalone engine 会在加载主 `model.plan` 之前预热
-`references.default` 和 registry entries，并在每个 preprocessing 阶段后释放
-ref TRT engine，减少 24GB 级显存上 request path 再加载 speaker/codec engine
-触发 OOM 的概率。
+In the standalone TRT path, `base` / `icl` reference preprocessing is executed serially by
+`speaker_encoder.engine`, `speech_tokenizer_codec_fused.engine`, and the optional
+`code2wav_decoder.engine`, without batching for now. `spliter.max_concurrent_segments`
+only affects subsequent text segmentation and EngineLoop slot concurrency; it does not control the speech encoder. The maximum reference
+audio duration is governed by `ref_audio_max_duration_sec` in capabilities; the current
+TRT build defaults to 8 seconds. `reference_cache` caches ref-audio preprocessing
+features, and `prefix_cache` caches Talker ICL prefix KV; the two are configured independently. When
+`reference_cache` is enabled, the standalone engine warms up
+`references.default` and registry entries before loading the main `model.plan`, and releases the
+ref TRT engine after each preprocessing stage, reducing the probability that reloading the speaker/codec engine
+on the request path triggers an OOM on 24GB-class memory.
 
 ### Engine Docker
 
@@ -259,32 +261,31 @@ bash scripts/bash/autorun.sh deploy \
   -m custom-1.7b
 ```
 
-这个模式使用 engine 镜像作为固定应用层：镜像内包含 TensorRT/Python
-运行时、`/app/engine` 引擎代码、默认 `/app/engine.yaml` 和启动脚本；
-运行时只读挂载和 Triton 相同的模型包
-`workspace/model_repository/tts_orchestrator/1`。普通镜像里已经包含
-`/app/engine` 代码，因此代码更新后需要重新构建并发布镜像。
+This mode uses the engine image as a fixed application layer: the image contains the TensorRT/Python
+runtime, the `/app/engine` engine code, a default `/app/engine.yaml`, and startup scripts;
+at runtime it read-only mounts the same model package as Triton,
+`workspace/model_repository/tts_orchestrator/1`. The regular image already contains the
+`/app/engine` code, so after a code update you need to rebuild and publish the image.
 
-本机 standalone gateway 也使用同一个模型包，只是由本机 Python 承载
-`engine.server`。也就是说，standalone、engine-docker 和 Triton 的模型产物
-都是 `model_repository/tts_orchestrator/1`，差异只在运行时进程和容器层。
-Phase C assemble 会同步仓库 `resources/` 到
-`model_repository/tts_orchestrator/<version>/resources/`。Base/ICL 的
-reference registry 可以直接使用模型包相对路径，例如
-`resources/speakers/<alias>/ref.wav` 和 `resources/speakers/<alias>/ref.txt`
-（通过 `ref_text_path` 配置）。
+The local standalone gateway also uses the same model package, only served by the local Python
+process running `engine.server`. In other words, the model artifacts for standalone, engine-docker, and Triton
+are all `model_repository/tts_orchestrator/1`; the only difference is the runtime process and container layer.
+Phase C assemble syncs the repository's `resources/` into
+`model_repository/tts_orchestrator/<version>/resources/`. The Base/ICL
+reference registry can directly use model-package-relative paths, for example
+`resources/speakers/<alias>/ref.wav` and `resources/speakers/<alias>/ref.txt`
+(configured via `ref_text_path`).
 
-生产环境推荐把"应用镜像、模型产物、部署配置"拆成三层：
+For production, it is recommended to split "application image, model artifacts, deployment config" into three layers:
 
-- 应用镜像：`qwen3-engine:<tag>`，包含依赖和引擎代码，不挂载源码目录。
-- 模型产物：统一的 Triton-compatible `model_repository`。engine 和 Triton
-  都从 `/models/tts_orchestrator/1` 读取 `runtime/`、`weights/`、
-  `tokenizer/` 和 manifest。engine-docker 当前要求 `runtime/model.plan`
-  这种 `trt` 包。
-- 部署配置：端口、batch、seq_len、session、speaker 默认值等，通过
-  `ENGINE_CONFIG` 指向只读挂载的 YAML，或通过 `ENGINE_*` 环境变量覆盖。
+- Application image: `qwen3-engine:<tag>`, containing dependencies and engine code, without mounting a source directory.
+- Model artifacts: a unified Triton-compatible `model_repository`. Both engine and Triton
+  read `runtime/`, `weights/`, `tokenizer/`, and the manifest from `/models/tts_orchestrator/1`. engine-docker currently requires a `trt`
+  package with `runtime/model.plan`.
+- Deployment config: ports, batch, seq_len, session, speaker defaults, etc., pointed to via
+  `ENGINE_CONFIG` referencing a read-only mounted YAML, or overridden via `ENGINE_*` environment variables.
 
-示例：
+Example:
 
 ```bash
 ENGINE_CONFIG=/etc/qwen3-tts/engine.yaml \
@@ -293,7 +294,7 @@ MODEL_REPO_DIR=/srv/qwen3/model_repository \
 bash scripts/bash/autorun.sh deploy --gateway engine-docker -m custom-1.7b
 ```
 
-如果直接写 compose volume，可挂载：
+If you write compose volumes directly, you can mount:
 
 ```yaml
 volumes:
@@ -303,19 +304,19 @@ environment:
   ENGINE_CONFIG: /etc/qwen3-tts/engine.yaml
 ```
 
-开发期推荐改用：
+During development, it is recommended to use instead:
 
 ```bash
 bash scripts/bash/compose.sh up --gateway engine --variant custom-1.7b --dev
 ```
 
-或：
+or:
 
 ```bash
 bash scripts/bash/compose.sh watch --gateway engine --variant custom-1.7b
 ```
 
-这样可以把环境层和代码层拆开，避免每次改 Python 代码都重新构建依赖镜像。
+This separates the environment layer from the code layer and avoids rebuilding the dependency image every time you change Python code.
 
 ### Triton
 
@@ -330,7 +331,7 @@ bash scripts/bash/autorun.sh deploy \
   -m custom-1.7b
 ```
 
-Triton 默认端口：
+Triton default ports:
 
 - HTTP: `localhost:8000`
 - gRPC: `localhost:8001`
@@ -338,7 +339,7 @@ Triton 默认端口：
 
 ## WebUI
 
-本地运行：
+Run locally:
 
 ```bash
 python -m demo_api --host 0.0.0.0 --port 7860
@@ -348,44 +349,44 @@ npm install
 npm run dev
 ```
 
-Compose 运行：
+Run with Compose:
 
 ```bash
 bash scripts/bash/autorun.sh deploy --gateway triton -m custom-1.7b
 docker compose --profile demo up --build demo-api webui
 ```
 
-## 常见问题
+## FAQ
 
-### runtime max_seq_len 超过 profile
+### runtime max_seq_len exceeds profile
 
-错误类似：
+The error looks like:
 
 ```text
 runtime max_seq_len=1024 exceeds engine profile max_seq_len=512
 ```
 
-解决方式：
+Solutions:
 
-- 降低 `--max-seq-len` / `ENGINE_SCHEDULER_MAX_SEQ_LEN`。
-- 或重新构建 engine：`bash scripts/bash/autorun.sh build -m custom-1.7b --max-seq-len 1024`。
+- Lower `--max-seq-len` / `ENGINE_SCHEDULER_MAX_SEQ_LEN`.
+- Or rebuild the engine: `bash scripts/bash/autorun.sh build -m custom-1.7b --max-seq-len 1024`.
 
-### dtype 不匹配
+### dtype mismatch
 
-如果 Triton 报 `TYPE_FP32` / `TYPE_BF16` 之类错误，确保：
+If Triton reports errors like `TYPE_FP32` / `TYPE_BF16`, make sure:
 
-- Phase B 的 `--dtype` 和 `--triton-io-float-dtype` 符合目标。
-- `triton_manifest.json` 已被 Phase B 更新。
-- 重新 assemble model_repository。
+- Phase B's `--dtype` and `--triton-io-float-dtype` match the target.
+- `triton_manifest.json` has been updated by Phase B.
+- Re-assemble model_repository.
 
-### TensorRT plan 无法反序列化
+### TensorRT plan fails to deserialize
 
-TensorRT plan 与 runtime 版本强绑定。更换 TensorRT/NGC image 后需要重新构建 engine。
+The TensorRT plan is tightly bound to the runtime version. After switching the TensorRT/NGC image, you need to rebuild the engine.
 
-### WebUI 显示 fixture fallback
+### WebUI shows fixture fallback
 
-说明 live Triton 或 live engine 当前不可达。检查：
+This indicates that live Triton or live engine is currently unreachable. Check:
 
-- Triton gRPC 端口是否是 `localhost:8001`。
-- demo API 的 `QWEN_DEMO_TRITON_GRPC` 是否正确。
-- standalone engine WebSocket 是否是 `localhost:50052`。
+- Whether the Triton gRPC port is `localhost:8001`.
+- Whether the demo API's `QWEN_DEMO_TRITON_GRPC` is correct.
+- Whether the standalone engine WebSocket is `localhost:50052`.

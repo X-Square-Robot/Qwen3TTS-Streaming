@@ -1,60 +1,62 @@
+**English** | [中文](README.zh-CN.md)
+
 # Qwen3TTS-Streaming
 
-*让我们像播放音频一样播放文本！*
+*Let's play text the way we play audio!*
 
-## 引言
+## Introduction
 
-Qwen3TTS-Streaming 是一个**工程预览版**项目：把官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运行时，围绕 Triton/standalone engine 做 token 级流式 TTS、模型 fuse、前端分词、prefix cache、连续批处理和 WebUI 性能展示。项目开放一条已高度优化、可复现、可继续验证的工程链路，让社区一起打磨成可靠的开源推理系统。
+Qwen3TTS-Streaming is an **engineering preview** project: it exports the official Qwen3-TTS PyTorch weights into an ONNX/TensorRT runtime and builds token-level streaming TTS around a Triton/standalone engine, together with model fusion, frontend segmentation, prefix cache, continuous batching, and a WebUI performance showcase. The project opens up a highly optimized, reproducible, and continuously verifiable engineering pipeline, inviting the community to polish it together into a reliable open-source inference system.
 
-> ⚠️ **状态：v0.1 工程预览，非生产就绪。** 流式模式仍可能出现**幻觉、重复、漏读**（当前 checkpoint 上约 10–18%，根因在模型+采样，见 [已知限制](docs/user/known_limitations.md)）。**当前建议稳定范围为 `custom-1.7b` / `custom_voice` 路径**；`design-1.7b`、`base-1.7b` / x-vector 语音克隆、`icl` 语音克隆处于实验状态；`0.6b` 变体未作为 v0.1 主线。请勿直接用于生产内容生成。
+> ⚠️ **Status: v0.1 engineering preview, not production-ready.** Streaming mode may still exhibit **hallucination, repetition, and dropped reading** (roughly 10–18% on the current checkpoint, rooted in the model and sampling; see [Known Limitations](docs/user/known_limitations.md)). **The currently recommended stable scope is the `custom-1.7b` / `custom_voice` path.** `design-1.7b`, `base-1.7b` / x-vector voice cloning, and `icl` voice cloning are experimental; the `0.6b` variants are not part of the v0.1 mainline. Do not use it directly for production content generation.
 
-## 性能声明
+## Performance Claims
 
-项目里提到的低延迟数字是有条件结果，不是通用承诺：
+The low-latency numbers mentioned in this project are conditional results, not general guarantees:
 
-- `13ms TTFT`：最低观测值，依赖指定硬件、warm engine、prefix/cache 命中、单路请求和本地链路。
-- standalone `engine-grpc` TTFT 默认按 ready/reused gRPC channel 统计，和 WebSocket 一样不把客户端建连成本计入首包延迟；cold/lazy channel 会额外增加约 10ms。
-- `180ms 128-stream avg TTFT`：并发压测口径，需明确硬件、cache、输入、profile、采样参数和客户端测量方式。
-- WebUI 只在结果 source 标记为 `live_triton` 或 `live_engine_websocket` 且带 `audio` 字段时代表可回放的实时合成音频。
+- `13ms TTFT`: the lowest observed value, dependent on the specified hardware, a warm engine, prefix/cache hits, single-request load, and a local link.
+- Standalone `engine-grpc` TTFT is measured by default over a ready/reused gRPC channel and, like WebSocket, does not count the client connection setup cost toward first-packet latency; a cold/lazy channel adds roughly 10ms.
+- `180ms 128-stream avg TTFT`: a concurrency stress-test measure that requires specifying the hardware, cache, input, profile, sampling parameters, and client-side measurement method.
+- The WebUI only represents replayable real-time synthesized audio when the result source is marked `live_triton` or `live_engine_websocket` and carries an `audio` field.
 
-详细 benchmark 口径见 [Benchmark 方法](docs/user/benchmark_methodology.md)。
+For detailed benchmark methodology, see [Benchmark Methodology](docs/user/benchmark_methodology.md).
 
-## 能力状态
+## Capability Status
 
-| 路径 | 当前状态 | 开源口径 |
+| Path | Current status | Open-source scope |
 | --- | --- | --- |
-| `custom-1.7b` / `custom_voice` | 优先稳定 | v0.1 推荐路径，WebUI 和 demo 默认围绕它展示 |
-| `design-1.7b` / `voice_design` | 实验 | 可保留代码和导出入口，需标注未充分测通 |
-| `base-1.7b` / x-vector voice clone | 实验 | standalone 已接入 ref audio → speaker embedding；需 base 导出产物和真实端到端验证 |
-| `icl` voice clone | 实验 | standalone 已接入 ref audio + ref text → ref codec/code 注入；需 TRT ref-audio engine 和真实端到端验证 |
-| `0.6b` variants | 未作为 v0.1 主线 | 可保留导出/下载入口，发布前需单独验证 |
+| `custom-1.7b` / `custom_voice` | Prioritized/stable | The v0.1 recommended path; the WebUI and demo showcase it by default |
+| `design-1.7b` / `voice_design` | Experimental | Code and export entry points can be kept, but must be marked as not fully validated |
+| `base-1.7b` / x-vector voice clone | Experimental | Standalone already wires up ref audio → speaker embedding; needs the base export artifacts and real end-to-end validation |
+| `icl` voice clone | Experimental | Standalone already wires up ref audio + ref text → ref codec/code injection; needs the TRT ref-audio engine and real end-to-end validation |
+| `0.6b` variants | Not part of the v0.1 mainline | Export/download entry points can be kept, but need separate validation before release |
 
-## 前置要求
+## Prerequisites
 
-- **GPU**：NVIDIA GPU，建议 ≥16GB 显存（1.7B + KV pool + TensorRT 运行时）；需匹配的 NVIDIA 驱动。
-- **CUDA / TensorRT**：通过 NVIDIA NGC 容器提供（`nvcr.io/nvidia/tensorrt`、`nvcr.io/nvidia/tritonserver`）；版本矩阵见 `scripts/bash/ngc_matrix.conf`。**拉取 NGC 镜像即表示接受 NVIDIA EULA。**
-- **Docker**：用于引擎/Triton 容器编排（含 NVIDIA Container Toolkit 以启用 `--gpus`）。
-- **磁盘**：模型 + 导出/编译产物约需 20–40GB。
-- **模型权重**：首次运行需从 ModelScope / Hugging Face 下载（见下方流程），本仓库不分发权重。
+- **GPU**: an NVIDIA GPU, ≥16GB VRAM recommended (1.7B + KV pool + TensorRT runtime); a matching NVIDIA driver is required.
+- **CUDA / TensorRT**: provided via NVIDIA NGC containers (`nvcr.io/nvidia/tensorrt`, `nvcr.io/nvidia/tritonserver`); see `scripts/bash/ngc_matrix.conf` for the version matrix. **Pulling an NGC image constitutes acceptance of the NVIDIA EULA.**
+- **Docker**: used to orchestrate the engine/Triton containers (with the NVIDIA Container Toolkit to enable `--gpus`).
+- **Disk**: roughly 20–40GB for the model plus export/build artifacts.
+- **Model weights**: on first run, download from ModelScope / Hugging Face (see the flow below); this repository does not distribute weights.
 
-> 首次端到端跑通包含「下载权重 → 导出 ONNX → 编译 TensorRT」，耗时取决于 GPU；后续可复用产物或跨机导入。
+> The first end-to-end run includes "download weights → export ONNX → build TensorRT," whose duration depends on your GPU; afterward you can reuse the artifacts or import them across hosts.
 
-## 快速开始
+## Quick Start
 
 ```bash
 git clone --recursive https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git
 cd Qwen3TTS-Streaming
 
-# 交互模式
+# Interactive mode
 bash scripts/bash/autorun.sh
 
-# 一次性跑本机完整流程（custom-1.7b + standalone + TensorRT）
+# Run the full local pipeline in one shot (custom-1.7b + standalone + TensorRT)
 bash scripts/bash/autorun.sh all -m custom-1.7b
 ```
 
-三阶段：**Phase A** `setup_env.sh`（下载模型、安装环境、导出 ONNX/weights/manifest）→ **Phase B** `build_engines.sh`（trtexec 编译 TensorRT engine）→ **Phase C** `package` + `deploy`（组装模型包/镜像、启动服务）。
+Three phases: **Phase A** `setup_env.sh` (download the model, install the environment, export ONNX/weights/manifest) → **Phase B** `build_engines.sh` (build the TensorRT engine with trtexec) → **Phase C** `package` + `deploy` (assemble the model package/image and start the service).
 
-也可以分阶段执行，适合排查问题或复用已导出的产物：
+You can also run the phases separately, which is convenient for troubleshooting or reusing already-exported artifacts:
 
 ```bash
 bash scripts/bash/autorun.sh setup   -m custom-1.7b          # Phase A
@@ -63,83 +65,83 @@ bash scripts/bash/autorun.sh package -m custom-1.7b --gateway standalone --engin
 bash scripts/bash/autorun.sh deploy  -m custom-1.7b --gateway standalone --engine-mode trt  # Phase C2
 ```
 
-## 部署方式
+## Deployment Options
 
-详细参数（统一入口控制参数、Engine Profile 计算逻辑、GPU 选择、模型版本号）见 [部署指南](docs/user/deployment.md)。
+For detailed parameters (the unified entry-point control parameters, Engine Profile computation logic, GPU selection, and model version number), see the [Deployment Guide](docs/user/deployment.md).
 
 ### Standalone
 
-本机 Python 运行 `engine.server`，适合调试 engine、协议和 WebSocket/gRPC。启动前会组装 `workspace/model_repository/tts_orchestrator/<model-version>` 模型包，然后通过 `--model-package-dir` 读取 `runtime/`、`weights/`、`tokenizer/` 和 manifest。
+Run `engine.server` in local Python, suitable for debugging the engine, protocol, and WebSocket/gRPC. Before startup it assembles the `workspace/model_repository/tts_orchestrator/<model-version>` model package, then reads `runtime/`, `weights/`, `tokenizer/`, and the manifest via `--model-package-dir`.
 
 ```bash
 bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway standalone --engine-mode trt
 ```
 
-默认端口：gRPC `50051`，WebSocket `ws://localhost:50052/v1/ws`，HTTP capabilities `http://localhost:50052/v1/capabilities`，health `http://localhost:8080/health`。
+Default ports: gRPC `50051`, WebSocket `ws://localhost:50052/v1/ws`, HTTP capabilities `http://localhost:50052/v1/capabilities`, health `http://localhost:8080/health`.
 
 ### Engine Docker
 
-独立 engine 容器，使用相同模型包，镜像包含运行时和 `/app/engine` 代码。
+A standalone engine container that uses the same model package; the image contains the runtime and the `/app/engine` code.
 
 ```bash
-# 组装产物 + 重建镜像
+# Assemble artifacts + rebuild the image
 bash scripts/bash/autorun.sh package -m custom-1.7b --gateway engine-docker --build
-# 启动服务
+# Start the service
 bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway engine-docker --engine-mode trt
 ```
 
-开发期可用 bind mount 或 watch 模式，避免频繁重建镜像：
+During development you can use bind mount or watch mode to avoid frequently rebuilding the image:
 
 ```bash
 bash scripts/bash/compose.sh up --gateway engine --variant custom-1.7b --dev
 bash scripts/bash/compose.sh watch --gateway engine --variant custom-1.7b
 ```
 
-engine-docker 当前要求模型包为 `--engine-mode trt`，因为 `engine.server` 消费的是 `runtime/model.plan`；Triton 仍可用同一包结构跑 `trt` 或 `onnx`。
+engine-docker currently requires the model package to be `--engine-mode trt`, because `engine.server` consumes `runtime/model.plan`; Triton can still run `trt` or `onnx` with the same package structure.
 
 ### Triton
 
-组装 `workspace/model_repository` 并启动 Triton：
+Assemble `workspace/model_repository` and start Triton:
 
 ```bash
 bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway triton --engine-mode trt
 ```
 
-高级调试时可以直接使用 compose：
+For advanced debugging you can use compose directly:
 
 ```bash
 bash scripts/bash/compose.sh prepare --gateway triton --variant custom-1.7b --engine-mode trt
 bash scripts/bash/compose.sh up --gateway triton --variant custom-1.7b
 ```
 
-### Base / ICL 实验路径
+### Base / ICL Experimental Paths
 
-部署 `base-1.7b` / `icl` 实验路径时，需准备默认参考音频和 reference registry：
+When deploying the `base-1.7b` / `icl` experimental paths, you need to prepare a default reference audio and a reference registry:
 
 ```bash
 mkdir -p workspace/default_refs
-# 放入一段 3-10 秒、24k 或可重采样的 wav:
+# Put in a 3-10 second wav at 24k (or resampleable):
 # workspace/default_refs/base_ref.wav
 
 ENGINE_DEFAULT_BASE_REF_AUDIO_PATH=workspace/default_refs/base_ref.wav \
-ENGINE_DEFAULT_BASE_REF_TEXT="参考音频对应文本" \
+ENGINE_DEFAULT_BASE_REF_TEXT="text corresponding to the reference audio" \
 bash scripts/bash/autorun.sh all -m base-1.7b --gateway standalone --engine-mode trt
 ```
 
-也可以在 `engine.yaml` 中配置 reference library 和 reference cache，详细字段语义和 ICL 预处理要求见 [部署指南](docs/user/deployment.md)。
+You can also configure the reference library and reference cache in `engine.yaml`; for detailed field semantics and ICL preprocessing requirements, see the [Deployment Guide](docs/user/deployment.md).
 
 ## Client SDK
 
-独立 Python SDK 包，统一访问 engine 和 Triton 端点，支持 engine-websocket / engine-grpc / triton-grpc / triton-http 四种传输。默认 `transport="auto"` 自动探测端点。
+A standalone Python SDK package that provides unified access to the engine and Triton endpoints, supporting four transports: engine-websocket / engine-grpc / triton-grpc / triton-http. The default `transport="auto"` auto-detects the endpoint.
 
 ```bash
-pip install qwen3-tts-client           # 核心包
-pip install qwen3-tts-client[grpc]     # + gRPC 传输
-pip install qwen3-tts-client[triton]   # + Triton 传输
-pip install qwen3-tts-client[all]      # 全部传输 + audio
+pip install qwen3-tts-client           # Core package
+pip install qwen3-tts-client[grpc]     # + gRPC transport
+pip install qwen3-tts-client[triton]   # + Triton transport
+pip install qwen3-tts-client[all]      # All transports + audio
 ```
 
-快速使用：
+Quick usage:
 
 ```python
 from qwen3tts import TTSClient, SynthesisConfig
@@ -151,7 +153,7 @@ result = client.synthesize_bytes(
 )
 ```
 
-流式 session：
+Streaming session:
 
 ```python
 from qwen3tts import TTSClient, SessionStartRequest, SynthesisConfig
@@ -167,22 +169,22 @@ for message in session.iter_messages():
     print(type(message).__name__, getattr(message, "meta", {}))
 ```
 
-详细文档见 [Client SDK](docs/user/client_sdk.md) 和 [`client/`](client) 子项目。
+For detailed documentation, see [Client SDK](docs/user/client_sdk.md) and the [`client/`](client) subproject.
 
-## 测试与验收
+## Testing and Acceptance
 
-测试入口统一在 `tests/`，详细地图见 [tests/README.md](tests/README.md)。
+Test entry points are unified under `tests/`; for a detailed map, see [tests/README.md](tests/README.md).
 
 ```bash
-# 单元 + 集成测试
+# Unit + integration tests
 pytest tests/unit tests/integration -q
 
-# Serving 验收与 benchmark 主入口
+# Main entry point for serving acceptance and benchmarks
 mamba run -n qwen3-tts python tools/validation/serving_endpoints.py --targets engine-grpc
 mamba run -n qwen3-tts python tools/validation/serving_endpoints.py --targets triton-grpc,triton-http
 ```
 
-验证 base/icl reference resolver 与 ICL prefix cache：
+Validate the base/icl reference resolver and the ICL prefix cache:
 
 ```bash
 mamba run -n qwen3-tts python tools/validation/serving_endpoints.py \
@@ -195,47 +197,47 @@ mamba run -n qwen3-tts python tools/validation/serving_endpoints.py \
 
 ## WebUI Demo
 
-WebUI 包含三个板块：**Text Player**（按 engine decode step 播放文本，前半段 text token，flush 后显示 PAD step，合成完成后 slider seek 实际 WAV 音频）、**LLM PK**（模拟上游 LLM 逐 token 吐字，流式 vs 非流式同时间轴对比）、**Concurrency**（多路合成 TTFT 分布与吞吐，默认请求 live Triton 并保存真实音频）。
+The WebUI contains three panels: **Text Player** (plays text by engine decode step — text tokens in the first half, PAD steps shown after flush, and the slider seeks the actual WAV audio once synthesis completes), **LLM PK** (simulates an upstream LLM emitting tokens one by one, comparing streaming vs. non-streaming on the same timeline), and **Concurrency** (the TTFT distribution and throughput of multi-stream synthesis, requesting live Triton by default and saving the real audio).
 
 **Text Player**
 
-![Text Player 演示](docs/images/文本播放器.gif)
+![Text Player demo](docs/images/文本播放器.gif)
 
 **LLM PK**
 
-![流式非流式对比演示](docs/images/流式非流式对比.gif)
+![Streaming vs. non-streaming comparison demo](docs/images/流式非流式对比.gif)
 
 **Concurrency**
 
-![多路合成演示](docs/images/多路合成.gif)
+![Multi-stream synthesis demo](docs/images/多路合成.gif)
 
-完整录屏：[演示视频.mp4](docs/videos/演示视频.mp4)
+Full screen recording: [演示视频.mp4](docs/videos/演示视频.mp4)
 
-一键启动（WebUI dev server、Demo API 和 Triton 都由 launcher 启动/复用）：
+One-click startup (the WebUI dev server, Demo API, and Triton are all started/reused by the launcher):
 
 ```bash
 bash scripts/demo/start_webui_demo.sh --variant custom-1.7b
 ```
 
-也可手动分步启动：
+You can also start it manually in separate steps:
 
 ```bash
 python -m demo_api --host 0.0.0.0 --port 7860   # Terminal 1
 cd webui && npm install && npm run dev             # Terminal 2
 ```
 
-浏览器打开 `http://localhost:5173`。如果 live backend 不可用，WebUI 展示 warning；音频按钮只在捕获到真实 waveform bytes 时启用，不使用嘟声占位。
+Open `http://localhost:5173` in your browser. If the live backend is unavailable, the WebUI shows a warning; the audio button is enabled only when real waveform bytes are captured, and no beep placeholder is used.
 
-Docker Compose demo profile：
+Docker Compose demo profile:
 
 ```bash
 bash scripts/bash/compose.sh up --gateway triton --variant custom-1.7b
 docker compose --profile demo -f infra/docker/compose.yaml up --build demo-api webui
 ```
 
-## 流式协议
+## Streaming Protocol
 
-standalone engine 同时支持 gRPC 和 WebSocket。WebSocket 控制帧示例：
+The standalone engine supports both gRPC and WebSocket. Example WebSocket control frames:
 
 ```json
 {"type":"start","session_id":"demo","config":{"task_type":"custom_voice","speaker":"Serena"}}
@@ -243,51 +245,67 @@ standalone engine 同时支持 gRPC 和 WebSocket。WebSocket 控制帧示例：
 {"type":"end"}
 ```
 
-服务端返回 JSON event frame（协议事件、文本 token、边界、完成）和 Binary frame（PCM audio chunk，格式由 start/event 元数据声明）。
+The server returns JSON event frames (protocol events, text tokens, boundaries, completion) and binary frames (PCM audio chunks, whose format is declared by the start/event metadata).
 
-## 项目结构
+## Project Structure
 
 ```text
 Qwen3TTS-Streaming/
-├── engine/                     # 推理引擎：frontend/backend/gateway/core
-├── client/                     # 独立 Python SDK 包 (pip install qwen3-tts-client)
-│   ├── src/qwen3tts/  #   客户端实现与传输适配器
-│   └── src/qwen3tts_protocol/ #  共享协议层（单一真相源）
-├── demo_api/                   # WebUI Demo API（依赖 client 包）
+├── engine/                     # Inference engine: frontend/backend/gateway/core
+├── client/                     # Standalone Python SDK package (pip install qwen3-tts-client)
+│   ├── src/qwen3tts/           #   Client implementation and transport adapters
+│   └── src/qwen3tts_protocol/  #   Shared protocol layer (single source of truth)
+├── demo_api/                   # WebUI Demo API (depends on the client package)
 ├── webui/                      # Vite/React WebUI
+├── proto/                      # Single source of the protocol definition (tts.proto + generated code)
+├── model_repository/           # Triton Python BLS model definitions
 ├── infra/
-│   └── docker/                 # Dockerfile + compose 配置
-├── model_repository/           # Triton Python BLS 模型定义
+│   └── docker/                 # Dockerfile + compose configuration
 ├── scripts/
-│   ├── bash/                   # autorun/setup/build/deploy 生命周期
-│   ├── export/                 # PyTorch → ONNX/manifest 导出
-│   └── python/                 # 配置/manifest/audit 工具
+│   ├── bash/                   # autorun/setup/build/deploy lifecycle
+│   ├── compose/                # Container entry-point scripts
+│   ├── demo/                   # Demo startup scripts (start_webui_demo.sh)
+│   ├── export/                 # PyTorch → ONNX/manifest export
+│   └── python/                 # Config/manifest/audit tools
 ├── tests/
-│   ├── unit/                   # pytest 单元测试
-│   ├── integration/            # pytest 集成测试
-│   ├── e2e/                    # pytest 端到端测试
-│   └── support/                # 测试共享代码
+│   ├── unit/                   # pytest unit tests
+│   ├── integration/            # pytest integration tests
+│   ├── e2e/                    # pytest end-to-end tests
+│   └── support/                # Shared test code
 ├── tools/
-│   ├── validation/             # 手动验证与 benchmark
-│   ├── repro/                  # 冻结的 bug 复现案例
-│   └── data/                   # 工具数据
+│   ├── validation/             # Manual validation and benchmarks
+│   ├── repro/                  # Frozen bug reproduction cases
+│   └── data/                   # Tool data
 ├── docs/
-│   ├── user/                   # 用户文档（部署、SDK、Benchmark、限制）
-│   └── dev/                    # 开发者文档（架构、设计、调查、运维）
-└── workspace/                  # 运行时产物（gitignored）
+│   ├── user/                   # User documentation (deployment, SDK, benchmark, limitations)
+│   ├── dev/                    # Developer documentation (architecture, design, investigation, operations)
+│   └── process/                # Process/historical documentation (archived)
+├── resources/                  # Static resources (synthetic reference audio, etc.)
+├── third_party/                # git submodule (Qwen3-TTS upstream, Apache-2.0)
+└── workspace/                  # Runtime artifacts (gitignored)
 ```
 
-## 文档导航
+## Documentation Navigation
 
-- 📖 [用户文档](docs/user/README.md) — 部署、SDK、Benchmark、已知限制
-- 📖 [开发者文档](docs/dev/README.md) — 架构、设计、调查、运维
+- 📖 [User Documentation](docs/user/README.md) — deployment, SDK, benchmark, known limitations
+- 📖 [Developer Documentation](docs/dev/README.md) — architecture, design, investigation, operations
 
-## 许可证
+## Contributing
 
-- **本项目自有代码**（`engine/`、`client/`、`demo_api/`、`webui/`、`scripts/` 等）按 [MIT](LICENSE) 许可证发布，版权归 XSquareRobot。
-- **上游 [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)**（`third_party/` 子模块）为 Apache 2.0，与 MIT 兼容。
-- **模型权重**由 Qwen/Alibaba 发布，许可证以其 [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [Hugging Face](https://huggingface.co/Qwen) 模型卡为准；本仓库不分发任何权重。
-- **TensorRT / Triton Inference Server**（NVIDIA NGC 镜像）为 NVIDIA 专有软件，本仓库不打包，使用即表示接受 NVIDIA EULA。
-- `resources/speakers/` 下的参考音频为**合成音频**、说话人名为**虚构**，不对应任何真实个人。
+This project is a **v0.1 engineering preview**, and streaming quality is still being polished; you are welcome to participate via issues, discussions, and PRs.
 
-完整第三方归属见 [NOTICE](NOTICE)。
+- 🤝 [Contributing Guide](CONTRIBUTING.md) — development environment, testing, proto workflow, code style
+- 💬 [Support Channels](SUPPORT.md) — how questions / bug reports / suggestions are routed
+- 🔒 [Security Policy](SECURITY.md) — the private vulnerability reporting process (please do not file public issues)
+- 📜 [Code of Conduct](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1
+- 📝 [Changelog](CHANGELOG.md) — record of version changes
+
+## License
+
+- **This project's own code** (`engine/`, `client/`, `demo_api/`, `webui/`, `scripts/`, etc.) is released under the [MIT](LICENSE) license, copyright XSquareRobot.
+- **Upstream [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)** (the `third_party/` submodule) is Apache 2.0, which is compatible with MIT.
+- **Model weights** are released by Qwen/Alibaba; their license is governed by the respective [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [Hugging Face](https://huggingface.co/Qwen) model cards; this repository does not distribute any weights.
+- **TensorRT / Triton Inference Server** (NVIDIA NGC images) are NVIDIA proprietary software, not bundled in this repository; using them constitutes acceptance of the NVIDIA EULA.
+- The reference audio under `resources/speakers/` is **synthetic audio** with **fictional** speaker names, corresponding to no real individuals.
+
+For full third-party attribution, see [NOTICE](NOTICE).

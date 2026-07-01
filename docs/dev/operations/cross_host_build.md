@@ -1,16 +1,18 @@
-# 跨机 TensorRT Engine 编译
+**English** | [中文](cross_host_build.zh-CN.md)
 
-TensorRT `.engine` 绑定目标 GPU 架构、TensorRT 版本和构建 profile。导图机或打包机不应假设自己和生产机一致；推荐流程是：当前机器导出 ONNX，在目标生产同构 GPU 上编译 engine，再把 engine artifact 带回当前机器组装模型包和运行镜像。启动服务是独立步骤，只应在当前机器就是生产服务机或本机验证机时执行。
+# Cross-host TensorRT Engine Build
 
-## 离线 Bundle 流程
+A TensorRT `.engine` is bound to the target GPU architecture, the TensorRT version, and the build profile. The export host or packaging host must not assume it is identical to the production host; the recommended flow is: export ONNX on the current machine, build the engine on a production-homogeneous target GPU, then bring the engine artifact back to the current machine to assemble the model package and runtime image. Starting the service is a separate step that should only be run when the current machine is itself the production serving host or a local validation host.
 
-1. 在目标生产同构机器上采集指纹：
+## Offline Bundle Flow
+
+1. Collect the fingerprint on a production-homogeneous target machine:
 
 ```bash
 bash scripts/bash/autorun.sh probe-target --out target_profile.json
 ```
 
-2. 把 `target_profile.json` 拷回导图/构建包：
+2. Copy `target_profile.json` back to the export/build-bundle host:
 
 ```bash
 bash scripts/bash/autorun.sh make-bundle -m custom-1.7b \
@@ -18,7 +20,7 @@ bash scripts/bash/autorun.sh make-bundle -m custom-1.7b \
   --out workspace/engine_build_bundle.tar.zst
 ```
 
-3. 把 `engine_build_bundle.tar.zst` 拷到目标机器并执行：
+3. Copy `engine_build_bundle.tar.zst` to the target machine and run:
 
 ```bash
 mkdir -p /tmp/qwen3-engine-build
@@ -27,29 +29,29 @@ cd /tmp/qwen3-engine-build
 bash run.sh
 ```
 
-4. 把 `engine_artifact_bundle.tar.zst` 拷回打包机并导入：
+4. Copy `engine_artifact_bundle.tar.zst` back to the packaging host and import it:
 
 ```bash
 bash scripts/bash/autorun.sh import-artifact workspace/engine_artifact_bundle.tar.zst
 ```
 
-5. 回到打包机组装部署产物，不启动服务：
+5. Back on the packaging host, assemble the deployment artifacts without starting the service:
 
 ```bash
 bash scripts/bash/autorun.sh package -m custom-1.7b --gateway engine-docker
 ```
 
-`package --gateway engine-docker` 会组装 `workspace/model_repository/tts_orchestrator/<version>`，并用当前 checkout 重建 engine 镜像。镜像 tag 默认从 Phase B manifest 的 NGC tag 推导，例如 `qwen3-engine:25.03`。
+`package --gateway engine-docker` assembles `workspace/model_repository/tts_orchestrator/<version>` and rebuilds the engine image from the current checkout. The image tag is by default derived from the NGC tag in the Phase B manifest, for example `qwen3-engine:25.03`.
 
-6. 只有当前机器就是要提供服务的机器时，才启动服务：
+6. Start the service only when the current machine is the one that will actually serve:
 
 ```bash
 bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway engine-docker
 ```
 
-## Remote SSH 流程
+## Remote SSH Flow
 
-当打包机可以 SSH 到目标机器时，可以把 bundle 流程自动化：
+When the packaging host can SSH into the target machine, the bundle flow can be automated:
 
 ```bash
 bash scripts/bash/autorun.sh remote-build -m custom-1.7b \
@@ -58,20 +60,20 @@ bash scripts/bash/autorun.sh remote-build -m custom-1.7b \
   --remote-workdir /tmp/qwen3-engine-build
 ```
 
-该命令会在本机打 bundle、上传到远端、远端执行 `build_on_target.sh`、拉回 artifact 并导入 `workspace/exported/`。
+This command builds the bundle locally, uploads it to the remote, runs `build_on_target.sh` remotely, pulls the artifact back, and imports it into `workspace/exported/`.
 
-## NGC Tag 的来源
+## Where the NGC Tag Comes From
 
-跨机场景下，`target_profile.json` 是 NGC tag 的唯一事实来源：
+In the cross-host scenario, `target_profile.json` is the single source of truth for the NGC tag:
 
-- `probe-target` 在目标机器根据生产驱动选择 `recommended_ngc_tag`
-- `make-bundle` 使用该 tag 写入 `build_manifest.json`
--同一 NGC 镜像编译 engine
-- Phase C package/run 从 manifest 推导运行镜像，不再用打包机本机 driver 回退猜测
+- `probe-target` selects `recommended_ngc_tag` on the target machine based on the production driver.
+- `make-bundle` uses that tag to write `build_manifest.json`.
+- The engine is built with the same NGC image.
+- Phase C package/run derives the runtime image from the manifest, and no longer falls back to guessing from the packaging host's local driver.
 
-## 严格指纹校验
+## Strict Fingerprint Validation
 
-导入 artifact 后会写入 `workspace/exported/artifact_manifest.json`。`package` 和 `run` 在 TRT 模式下会校验：
+After importing an artifact, `workspace/exported/artifact_manifest.json` is written. In TRT mode, `package` and `run` validate:
 
 - `ngc_tag`
 - `tensorrt_version` major.minor
@@ -81,32 +83,32 @@ bash scripts/bash/autorun.sh remote-build -m custom-1.7b \
 - `max_input_len`
 - `max_seq_len`
 
-没有 artifact manifest 的旧本地构建会保留兼容，只打印警告。跨机流程导入的 artifact 若不匹配会直接失败；开发调试可显式设置 `--allow-fingerprint-mismatch`：
+Older local builds without an artifact manifest remain compatible and only print a warning. An artifact imported through the cross-host flow that does not match fails outright; for development and debugging you can explicitly set `--allow-fingerprint-mismatch`:
 
 ```bash
 bash scripts/bash/autorun.sh import-artifact bundle.tar.zst --allow-fingerprint-mismatch
 ```
 
-## 和 Phase C 的关系
+## Relationship to Phase C
 
-`package` 和 `deploy` 的职责不同：
+`package` and `deploy` have different responsibilities:
 
 ```bash
-# 打包机/发布流水线：只产出模型包和运行镜像
+# Packaging host / release pipeline: produce only the model package and runtime image
 bash scripts/bash/autorun.sh package -m custom-1.7b --gateway engine-docker
 
-# 服务机/本机验证：用已有模型包和运行镜像启动服务
+# Serving host / local validation: start the service from an existing model package and runtime image
 bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway engine-docker
 ```
 
-本地部署可以直接执行 `bash scripts/bash/autorun.sh all -m custom-1.7b --gateway engine-docker`，它会按 `setup → build → package → deploy` 跑完；跨机部署通常不要在打包机执行最后的 `deploy`。
+For a local deployment you can directly run `bash scripts/bash/autorun.sh all -m custom-1.7b --gateway engine-docker`, which runs through `setup → build → package → deploy`; for a cross-host deployment, you should usually not run the final `deploy` on the packaging host.
 
-## 命令速查
+## Command Reference
 
-| 操作 | 命令 |
+| Operation | Command |
 |------|------|
-| 采集目标机指纹 | `bash scripts/bash/autorun.sh probe-target --out target_profile.json` |
-| 创建构建包 | `bash scripts/bash/autorun.sh make-bundle -m custom-1.7b --target-profile p.json` |
-| SSH 远程编译 | `bash scripts/bash/autorun.sh remote-build -m custom-1.7b --target-profile p.json --remote-host user@host` |
-| 导入编译产物 | `bash scripts/bash/autorun.sh import-artifact bundle.tar.zst` |
-| 本地编译 | `bash scripts/bash/autorun.sh build -m custom-1.7b` |
+| Collect target fingerprint | `bash scripts/bash/autorun.sh probe-target --out target_profile.json` |
+| Create build bundle | `bash scripts/bash/autorun.sh make-bundle -m custom-1.7b --target-profile p.json` |
+| Remote build over SSH | `bash scripts/bash/autorun.sh remote-build -m custom-1.7b --target-profile p.json --remote-host user@host` |
+| Import build artifact | `bash scripts/bash/autorun.sh import-artifact bundle.tar.zst` |
+| Local build | `bash scripts/bash/autorun.sh build -m custom-1.7b` |

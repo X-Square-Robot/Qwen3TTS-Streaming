@@ -1,73 +1,75 @@
-# 独立协议重新设计
+**English** | [中文](streaming_protocol.zh-CN.md)
 
-## 目标
+# Standalone Protocol Redesign
 
-围绕显式会话协议统一独立的 `gateway -> interface -> dispatcher -> backend`，以便：
+## Goals
 
-- 传输时序不再决定合成语义
-- 流式和离线共享相同的第二层分割逻辑
-- 第一层分组预分割仅在声明的输入模式需要时启用
-- 未来 `voice_design`、`custom_voice`、`voice_clone_xvec`、`voice_clone_icl`、`base` 和 `instruct` 支持可以在不更改会话协议的情况下添加
+Unify the standalone `gateway -> interface -> dispatcher -> backend` around an explicit session protocol, so that:
 
-## 层级职责
+- Transport timing no longer determines synthesis semantics
+- Streaming and offline share the same second-layer segmentation logic
+- First-layer group pre-splitting is only enabled when the declared input mode requires it
+- Future `voice_design`, `custom_voice`, `voice_clone_xvec`, `voice_clone_icl`, `base`, and `instruct` support can be added without changing the session protocol
+
+## Layer Responsibilities
 
 ### Gateway
 
-Gateway 仅作为协议适配器。
+The Gateway acts only as a protocol adapter.
 
-- 接收 `start -> text* -> end/cancel`
-- 验证并规范化 `SessionConfig`
-- 解析规范的 `OutputPolicy`、`VADPolicy` 和 `TimingContext`
-- 通过共享输出流水线将输出音频转换为请求的输出格式
-- 不从分块时序推断离线/流式行为
-- 不拥有传输特定协议分支，仅保留线路兼容性适配
+- Receives `start -> text* -> end/cancel`
+- Validates and normalizes `SessionConfig`
+- Parses the canonical `OutputPolicy`, `VADPolicy`, and `TimingContext`
+- Converts output audio to the requested output format via the shared output pipeline
+- Does not infer offline/streaming behavior from chunk timing
+- Does not own transport-specific protocol branches, only retaining wire-compatibility adaptation
 
 ### Interface
 
-Interface 是面向 gateway/triton 适配器的传输无关外部会话门面。
+The Interface is the transport-agnostic external session facade facing the gateway/triton adapters.
 
-- 位于 `engine/interface/*`
-- 拥有规范的请求/会话/事件契约：
-  `SessionStartRequest`、`StreamTextChunk`、`SessionEndRequest`、
-  `StreamCancelRequest`、`OutputPolicy`、`VADPolicy`、`TimingContext`、
-  `StreamEvent`、`AudioFrame`
-- 拥有会话生命周期和回调绑定
-- 拥有文本/token 摄取和基于 `input_mode` 的路由
-- 拥有有序音频发射回调用方
-- 拥有时序规范化和输出元数据发射
-- 不直接构造后端请求，仅委托给 dispatcher
+- Located under `engine/interface/*`
+- Owns the canonical request/session/event contracts:
+  `SessionStartRequest`, `StreamTextChunk`, `SessionEndRequest`,
+  `StreamCancelRequest`, `OutputPolicy`, `VADPolicy`, `TimingContext`,
+  `StreamEvent`, `AudioFrame`
+- Owns the session lifecycle and callback binding
+- Owns text/token ingestion and `input_mode`-based routing
+- Owns ordered audio emission back to the caller
+- Owns timing normalization and output metadata emission
+- Does not construct backend requests directly, only delegates to the dispatcher
 
 ### Dispatcher
 
-Dispatcher 是面向后端的请求转换器。
+The Dispatcher is the backend-facing request transformer.
 
-- 将 `SegmentAction` 转换为后端 `EngineRequest`
-- 发射 `NEW_SESSION`、`SESSION_TEXT_DONE` 和取消/控制事件
-- 保留分割语义，如 `FLUSH_EOS` vs `FLUSH_NOP`
+- Converts `SegmentAction` into a backend `EngineRequest`
+- Emits `NEW_SESSION`, `SESSION_TEXT_DONE`, and cancel/control events
+- Preserves segmentation semantics, such as `FLUSH_EOS` vs `FLUSH_NOP`
 
 ### Spliter
 
-Spliter 拥有两层文本分割策略。
+The Spliter owns the two-layer text segmentation strategy.
 
-- 第一层：分组预分割
-  - 用于 `LONG_SEGMENT` 和 `FULL_TEXT`
-  - 不用于 `TOKEN` / `CLAUSE`
-- 第二层：状态机驱动的分割
-  - 始终是每段刷新和解码预算控制的权威
+- Layer 1: group pre-splitting
+  - Used for `LONG_SEGMENT` and `FULL_TEXT`
+  - Not used for `TOKEN` / `CLAUSE`
+- Layer 2: state-machine-driven segmentation
+  - Always the authority for per-segment flushing and decode budget control
 
 ### Backend
 
-Backend 拥有合成状态。
+The Backend owns the synthesis state.
 
-- Prefill/解码执行
-- 缓存和暂停/恢复状态
-- 文本暂时不可用时的真正流式语义
+- Prefill/decode execution
+- Cache and pause/resume state
+- True streaming semantics when text is temporarily unavailable
 
-## 会话协议
+## Session Protocol
 
-### 规范契约
+### Canonical Contracts
 
-所有外部传输现在映射到单一的规范会话契约：
+All external transports now map to a single canonical session contract:
 
 - `SessionStartRequest`
 - `StreamTextChunk`
@@ -79,41 +81,41 @@ Backend 拥有合成状态。
 - `StreamEvent`
 - `AudioFrame`
 
-接口契约版本为：
+The interface contract version is:
 
 - `protocol_version = tts-session-v2alpha1`
 
-当前传输保持向后兼容：
+Current transports remain backward-compatible:
 
-- gRPC 遗留 `init/text_complete`
+- gRPC legacy `init/text_complete`
 - WebSocket `start/text/end/cancel/oneshot`
-- Triton 遗留 JSON 请求字段
-- 远程 worker 顶层兼容字段
+- Triton legacy JSON request fields
+- Remote worker top-level compatibility fields
 
-缺失的新字段始终默认为现有行为。
+Missing new fields always default to the existing behavior.
 
-### 能力查询
+### Capability Query
 
-在打开合成会话之前，客户端可以调用 `GetCapabilities`。
+Before opening a synthesis session, the client can call `GetCapabilities`.
 
-这返回独立引擎已加载的契约：
+This returns the contract the standalone engine has loaded:
 
 - `variant`
 - `loaded_model_type`
 - `declared_supported_task_types`
-- 支持的输入模式 / 分组策略 / 音频格式
-- 独立预处理用的 ref-audio 可用性
-- 详细的参考预处理可用性：
-  `speaker_encoder_available`、`ref_codec_available`、`icl_available`、
-  `ref_audio_max_duration_sec`、`ref_c2w_warm_state_available`、
+- Supported input modes / group policies / audio formats
+- ref-audio availability for standalone preprocessing
+- Detailed reference preprocessing availability:
+  `speaker_encoder_available`, `ref_codec_available`, `icl_available`,
+  `ref_audio_max_duration_sec`, `ref_c2w_warm_state_available`,
   `ref_codec_reason`
-- 接口契约元数据：
-  `protocol_version`、
-  `supported_output_policy_features`、
-  `supported_vad_strategies`、
+- Interface contract metadata:
+  `protocol_version`,
+  `supported_output_policy_features`,
+  `supported_vad_strategies`,
   `supported_timing_fields`
 
-当前规范能力特性标志为：
+The current canonical capability feature flags are:
 
 - `supported_output_policy_features`
   - `request_context`
@@ -125,24 +127,24 @@ Backend 拥有合成状态。
   - `tail_guard`
   - `hybrid`
 - `supported_timing_fields`
-  - 客户端提供的时间戳，如 `client_request_ts_ms`
-  - 服务器规范化的时间戳，如 `server_first_audio_epoch_ms`
-  - 派生延迟指标，如 `server_ttft_ms`
+  - Client-provided timestamps, such as `client_request_ts_ms`
+  - Server-normalized timestamps, such as `server_first_audio_epoch_ms`
+  - Derived latency metrics, such as `server_ttft_ms`
 
-已加载的模型类型在引擎启动时选择。运行时请求不切换模型；它们只能确认客户端和服务器使用相同的模型契约。
+The loaded model type is selected at engine startup. Runtime requests do not switch models; they can only confirm that the client and server use the same model contract.
 
-在独立模式下，外部已加载模型类型和后端合成分支相关但不相同：
+In standalone mode, the external loaded model type and the backend synthesis branch are related but not identical:
 
-- `base` -> 内部 `voice_clone` 使用 x-vector 路径
-- `icl` -> 内部 `voice_clone` 使用 ICL 路径
-- `custom_voice` -> 内部 `custom_voice`
-- `voice_design` -> 内部 `voice_design`
+- `base` -> internal `voice_clone` using the x-vector path
+- `icl` -> internal `voice_clone` using the ICL path
+- `custom_voice` -> internal `custom_voice`
+- `voice_design` -> internal `voice_design`
 
 ### Start
 
-`StartRequest` 声明一个 `SessionConfig`。
+`StartRequest` declares a `SessionConfig`.
 
-重要字段：
+Key fields:
 
 - `task_type`
 - `language`
@@ -158,7 +160,7 @@ Backend 拥有合成状态。
 - `timing`
 - `protocol_version`
 
-规范 `OutputPolicy` 字段：
+Canonical `OutputPolicy` fields:
 
 - `vad_policy`
 - `chunk_ms`
@@ -166,14 +168,14 @@ Backend 拥有合成状态。
 - `emit_text_events`
 - `config`
 
-规范 `VADPolicy` 字段：
+Canonical `VADPolicy` fields:
 
 - `enabled`
 - `strategy`
 - `implementation`
 - `config`
 
-规范 `TimingContext` 字段：
+Canonical `TimingContext` fields:
 
 - `request_id`
 - `turn_id`
@@ -182,28 +184,28 @@ Backend 拥有合成状态。
 - `client_end_ts_ms`
 - `extra`
 
-`task_type` 不再是运行时模型选择器。独立引擎将请求绑定到 manifest 中已加载的模型类型。客户端可以省略 `task_type`，或发送相同值作为显式握手检查。
+`task_type` is no longer a runtime model selector. The standalone engine binds the request to the model type loaded in the manifest. The client can omit `task_type`, or send the same value as an explicit handshake check.
 
-服务器还在合成前验证模型特定字段：
+The server also validates model-specific fields before synthesis:
 
-- `base`：首先解析参考；没有 `ref_text` 的显式 `ref_audio` 仍为 x-vector-only，显式 `ref_audio + ref_text` 进入 ICL，当没有显式参考时 `speaker` 是参考别名
-- `icl`：首先解析完整参考；显式参考必须同时包含 `ref_audio` 和 `ref_text`，当没有显式参考时 `speaker` 是参考别名
-- `custom_voice`：`speaker` 是内置自定义音色名称；拒绝 `ref_audio`、`ref_text` 和 `x_vector_only`
-- `voice_design`：需要 `instruct`
+- `base`: resolve the reference first; explicit `ref_audio` without `ref_text` is still x-vector-only, explicit `ref_audio + ref_text` enters ICL, and when there is no explicit reference `speaker` is a reference alias
+- `icl`: resolve the full reference first; an explicit reference must contain both `ref_audio` and `ref_text`, and when there is no explicit reference `speaker` is a reference alias
+- `custom_voice`: `speaker` is a built-in custom voice name; rejects `ref_audio`, `ref_text`, and `x_vector_only`
+- `voice_design`: requires `instruct`
 
-没有为参考别名引入新的协议字段。`speaker` 的含义取决于已加载的模型契约：
+No new protocol field was introduced for the reference alias. The meaning of `speaker` depends on the loaded model contract:
 
-- `custom_voice`：内置自定义音色名称，如 `Serena`
-- `base` / `icl`：当 `ref_audio` / `ref_text` 缺失时的参考别名
+- `custom_voice`: a built-in custom voice name, such as `Serena`
+- `base` / `icl`: a reference alias when `ref_audio` / `ref_text` are missing
 
-`base` / `icl` 的参考解析顺序为：
+The reference resolution order for `base` / `icl` is:
 
-1. 显式 `ref_audio + ref_text` 优先。如果也存在 `speaker`，它仅作为参考元数据保留，不用于查找。
-2. 如果没有显式参考且设置了 `speaker`，服务器在 `engine.yaml` 的 `references.entries` 中进行不区分大小写的查找。
-3. 如果 `ref_audio`、`ref_text` 和 `speaker` 都缺失，服务器使用默认参考。优先使用 `references.default`；否则使用遗留的 `ENGINE_DEFAULT_BASE_REF_AUDIO_PATH` / `ENGINE_DEFAULT_BASE_REF_TEXT` / `workspace/default_refs/base_ref.wav` 机制。
-4. 部分参考对 `icl` 被拒绝。对于 `base`，仅 `ref_audio` 仍为 x-vector-only，而仅 `ref_text` 被拒绝。
+1. Explicit `ref_audio + ref_text` takes priority. If `speaker` is also present, it is retained only as reference metadata and not used for lookup.
+2. If there is no explicit reference and `speaker` is set, the server performs a case-insensitive lookup in `references.entries` of `engine.yaml`.
+3. If `ref_audio`, `ref_text`, and `speaker` are all missing, the server uses the default reference. `references.default` is preferred; otherwise the legacy `ENGINE_DEFAULT_BASE_REF_AUDIO_PATH` / `ENGINE_DEFAULT_BASE_REF_TEXT` / `workspace/default_refs/base_ref.wav` mechanism is used.
+4. A partial reference is rejected for `icl`. For `base`, `ref_audio` only is still x-vector-only, while `ref_text` only is rejected.
 
-可选参考库配置：
+Optional reference library configuration:
 
 ```yaml
 references:
@@ -223,27 +225,27 @@ reference_cache:
   max_entries: 16
 ```
 
-对于 `base` / `icl`，仅当请求语言为空或 `auto` 时才应用注册表 `language`；显式请求语言优先。显式 `ref_audio + ref_text` 即使同时存在 `speaker` 作为参考元数据，也不会从注册表加载语言。
+For `base` / `icl`, the registry `language` is applied only when the request language is empty or `auto`; an explicit request language takes priority. Explicit `ref_audio + ref_text` does not load the language from the registry, even when `speaker` is also present as reference metadata.
 
-ICL 参考预处理故意是单请求的，并在 TRT 引擎周围序列化。它不是批处理的，`spliter.max_concurrent_segments` 仅影响下游文本段 / EngineLoop 槽位并发。参考音频硬限制报告为 `ref_audio_max_duration_sec`；当前 TRT 构建对 `speech_tokenizer_codec_fused.engine` 默认为 8 秒。
+ICL reference preprocessing is intentionally single-request and serialized around the TRT engine. It is not batched, and `spliter.max_concurrent_segments` only affects downstream text segment / EngineLoop slot concurrency. The reference audio hard limit is reported as `ref_audio_max_duration_sec`; the current TRT build defaults to 8 seconds for `speech_tokenizer_codec_fused.engine`.
 
-对于 TRT 模式下的独立 ICL 预处理，运行时包必须包含 TensorRT 产物：
+For standalone ICL preprocessing in TRT mode, the runtime package must contain the TensorRT artifacts:
 
 ```text
 runtime/speaker_encoder.engine
 runtime/speech_tokenizer_codec_fused.engine
 ```
 
-或等效的 plan 布局：
+or the equivalent plan layout:
 
 ```text
 runtime/speaker_encoder/model.plan
 runtime/speech_tokenizer_codec_fused/model.plan
 ```
 
-独立 ICL 路径故意不回退到 ONNX Runtime。如果 `speech_tokenizer_codec_fused.engine` / `model.plan` 缺失，请求将失败并返回 `speech_tokenizer_codec_fused_trt_missing`。
+The standalone ICL path intentionally does not fall back to ONNX Runtime. If `speech_tokenizer_codec_fused.engine` / `model.plan` is missing, the request fails with `speech_tokenizer_codec_fused_trt_missing`.
 
-参考元数据通过 prefill 事件/日志暴露：
+Reference metadata is exposed through prefill events/logs:
 
 ```text
 ref_source
@@ -256,78 +258,78 @@ ref_preprocess_runtime=trt
 
 ### Text
 
-`TextChunk` 仅承载文本。其传输到达模式不得改变会话语义。
+`TextChunk` carries only text. Its transport arrival pattern must not change session semantics.
 
-它也可以承载可选的时序元数据，如 `client_timestamp_ms`，这作为上下文记录，不改变合成行为。
+It may also carry optional timing metadata, such as `client_timestamp_ms`, which is recorded as context and does not change synthesis behavior.
 
 ### End
 
-`EndRequest` 表示此会话不再有文本到达。
+`EndRequest` indicates that no more text will arrive for this session.
 
-它不得用于推断会话是"离线"还是"流式"。
+It must not be used to infer whether the session is "offline" or "streaming."
 
-它可以承载可选的 `client_timestamp_ms` 用于时序分析。
+It may carry an optional `client_timestamp_ms` for timing analysis.
 
-## 输入模式
+## Input Modes
 
 ### TOKEN
 
-- 客户端发送 token 级别的文本更新
-- 无第一层分组预分割
-- dispatcher 立即将 token 化文本转发到第二层分割
+- The client sends token-level text updates
+- No first-layer group pre-splitting
+- The dispatcher forwards the tokenized text straight to second-layer segmentation
 
 ### CLAUSE
 
-- 客户端发送子句级文本更新
-- 无第一层分组预分割
-- dispatcher 直接将子句文本转发到第二层分割
+- The client sends clause-level text updates
+- No first-layer group pre-splitting
+- The dispatcher forwards the clause text directly to second-layer segmentation
 
 ### LONG_SEGMENT
 
-- 客户端发送长文本单元
-- 每个长文本单元首先预分割为分组
-- 每个结果分组然后送入第二层分割
+- The client sends long text units
+- Each long text unit is first pre-split into groups
+- Each resulting group is then fed into second-layer segmentation
 
 ### FULL_TEXT
 
-- 显式离线模式
-- 完整文本缓冲直到 `end`
-- 然后在整个文本上运行第一层预分割
+- Explicit offline mode
+- The full text is buffered until `end`
+- First-layer pre-splitting then runs over the entire text
 
-## 分组策略
+## Group Policies
 
 ### AUTO
 
-- 当 `input_mode` 为 `LONG_SEGMENT` 或 `FULL_TEXT` 时使用第一层预分割
+- Uses first-layer pre-splitting when `input_mode` is `LONG_SEGMENT` or `FULL_TEXT`
 
 ### NONE
 
-- 即使对于长输入单元也禁用第一层预分割
-- 仍使用第二层分割
+- Disables first-layer pre-splitting even for long input units
+- Still uses second-layer segmentation
 
-## 音频输出契约
+## Audio Output Contract
 
-Gateway 接受 `AudioFormat` 请求，并通过共享的 `engine.interface.output.OutputPipeline` 将引擎输出从原生 `PCM_F32@24kHz` 转换为请求的线路格式。
+The Gateway accepts an `AudioFormat` request and converts engine output from the native `PCM_F32@24kHz` to the requested wire format via the shared `engine.interface.output.OutputPipeline`.
 
-当前实现支持：
+The current implementation supports:
 
-- `PCM_F32`，单声道，`24000` 或 `16000`
-- `PCM_S16LE`，单声道，`24000` 或 `16000`
+- `PCM_F32`, mono, `24000` or `16000`
+- `PCM_S16LE`, mono, `24000` or `16000`
 
-输出流水线还负责：
+The output pipeline is also responsible for:
 
-- 分块索引
-- 首块标记
-- start/done 事件规范化
-- 规范时序元数据
-- 共享 `protocol_version` 和 `output_policy_json` / `timing_context_json`
-- 传输无关的 VAD 策略暴露
+- Chunk indexing
+- First-chunk marking
+- start/done event normalization
+- Canonical timing metadata
+- Shared `protocol_version` and `output_policy_json` / `timing_context_json`
+- Transport-agnostic VAD policy exposure
 
-当前时序契约：
+The current timing contract:
 
 - `timing_contract = server_monotonic_v1`
 
-服务器是强时序指标的真相来源：
+The server is the source of truth for the strong timing metrics:
 
 - `server_request_received_epoch_ms`
 - `server_first_audio_epoch_ms`
@@ -335,83 +337,83 @@ Gateway 接受 `AudioFormat` 请求，并通过共享的 `engine.interface.outpu
 - `server_ttft_ms`
 - `server_total_latency_ms`
 
-客户端时间戳仅为可选上下文：
+Client timestamps are optional context only:
 
-- 尽可能记录并回显
-- 稍后可能用于网络延迟估计
-- 不被视为强一致性指标
+- Recorded and echoed back when possible
+- May later be used for network latency estimation
+- Not treated as strongly consistent metrics
 
-## VAD 契约
+## VAD Contract
 
-此阶段不在规范接口中实现实际的输出门控。相反，它预留稳定的策略契约，以便未来实现可以在不更改传输语义的情况下插入。
+This stage does not implement actual output gating in the canonical interface. Instead, it reserves a stable policy contract so that future implementations can be plugged in without changing transport semantics.
 
-支持的语义策略模式：
+Supported semantic policy modes:
 
 - `disabled`
 - `prefix_trim`
-  - 用于仅修剪前导静音
+  - For trimming leading silence only
 - `tail_guard`
-  - 用于切断幻觉非语音尾部
+  - For cutting off a hallucinated non-speech tail
 - `hybrid`
-  - 用于组合前导修剪和尾部保护
+  - For combining leading trimming and tail guarding
 
-重要设计规则：
+Important design rule:
 
-- `vad_policy` 描述*何时*应进行输出流门控
-- 它不对检测*如何*实现进行硬编码
+- `vad_policy` describes *when* output stream gating should occur
+- It does not hard-code *how* detection is implemented
 
-这使未来实现保持兼容：
+This keeps future implementations compatible:
 
-- 基于能量的前导修剪
-- mel/对数能量前导修剪
-- TenVad 尾部保护
-- 混合组合
+- Energy-based leading trim
+- mel/log-energy leading trim
+- TenVad tail guard
+- Hybrid combinations
 
-在 v1 中：
+In v1:
 
-- 默认为 `vad_policy.enabled=false`
-- 独立引擎契约不执行实际门控
-- 启用策略仅更改元数据/契约字段，除非后续实现显式消费它
+- `vad_policy.enabled=false` by default
+- The standalone engine contract performs no actual gating
+- Enabling a policy only changes metadata/contract fields, unless a subsequent implementation explicitly consumes it
 
-## 传输映射
+## Transport Mapping
 
-所有外部适配器现在应为规范接口之上的薄壳：
+All external adapters should now be thin shells on top of the canonical interface:
 
 - gRPC
-  - 将 proto 字段映射到规范会话契约
-  - 保留遗留 `init/text_complete`
+  - Maps proto fields to the canonical session contract
+  - Retains legacy `init/text_complete`
 - WebSocket
-  - 将 JSON 消息映射到规范会话契约
-  - 为兼容性保留二进制音频帧
+  - Maps JSON messages to the canonical session contract
+  - Retains binary audio frames for compatibility
 - Triton
-  - 保留 `audio_chunk`、`event_type`、`event_json`、`is_final`
-  - 在 `event_json.meta` 中发射规范元数据
-- 远程 worker
-  - 转发规范 `output_policy` / `timing_context`
-  - 保持现有 query/turn 兼容字段
+  - Retains `audio_chunk`, `event_type`, `event_json`, `is_final`
+  - Emits canonical metadata in `event_json.meta`
+- Remote worker
+  - Forwards the canonical `output_policy` / `timing_context`
+  - Keeps the existing query/turn compatibility fields
 
-传输层不应重复：
+The transport layer should not duplicate:
 
-- 音频转换逻辑
-- 时序规范化逻辑
-- 协议版本协商
-- 未来 VAD 契约绑定
+- Audio conversion logic
+- Timing normalization logic
+- Protocol version negotiation
+- Future VAD contract binding
 
-不支持的组合应显式失败，而非静默降级。
+Unsupported combinations should fail explicitly rather than silently degrade.
 
-## 当前实现说明
+## Current Implementation Notes
 
-在独立引擎中已实现：
+Already implemented in the standalone engine:
 
-- 显式 `SessionConfig` 贯穿 gateway、interface、dispatcher 和 backend
-- 按 `input_mode` 进行接口路由
-- `Spliter` 中的长段 `push_group_tokens()` 路径
-- backend prefill 不再等待 `text_complete`（如果初始文本已存在）
-- `FLUSH_EOS` / `FLUSH_NOP` 区分保留到后端请求
-- backend 中的流式暂停/恢复语义，而非无条件 pad 注入
-- 独立 `base` / `icl` 参考解析器、仅 TensorRT 参考预处理、进程内参考特征缓存和 ICL 参考前缀 KV cache
+- Explicit `SessionConfig` threaded through the gateway, interface, dispatcher, and backend
+- Interface routing by `input_mode`
+- The long-segment `push_group_tokens()` path in the `Spliter`
+- Backend prefill no longer waits for `text_complete` (if the initial text is already present)
+- The `FLUSH_EOS` / `FLUSH_NOP` distinction preserved through to backend requests
+- Streaming pause/resume semantics in the backend, rather than unconditional pad injection
+- Standalone `base` / `icl` reference resolver, TensorRT-only reference preprocessing, in-process reference feature cache, and ICL reference prefix KV cache
 
-仍待实现以与 Triton 编排器完全对等：
+Still to be implemented for full parity with the Triton orchestrator:
 
-- 完整采样参数传递
-- 替换当前手写 gRPC 层的 Triton gateway
+- Full sampling parameter passing
+- A Triton gateway to replace the current hand-written gRPC layer

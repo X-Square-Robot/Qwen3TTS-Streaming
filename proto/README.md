@@ -1,3 +1,5 @@
+**English** | [中文](README.zh-CN.md)
+
 # Protocol Definitions
 
 This directory is the **single source of truth** for protocol definitions used by the Qwen3TTS-Streaming project.

@@ -1,163 +1,129 @@
-# 引擎架构决策：脱离 Triton，自建 TTS 推理引擎
+**English** | [中文](engine_decisions.zh-CN.md)
 
-> 日期：2026-04-03  
-> 状态：已决策 — 采用路线 1（自建引擎），保留未来 Triton 集成选项
+# Engine Architecture Decision: Leaving Triton, Building a Custom TTS Inference Engine
+
+> Date: 2026-04-03  
+> Status: Decided — adopt Route 1 (custom engine), keeping future Triton integration as an option
 
 ---
 
-## 背景
+## Background
 
-项目原计划以 Triton Inference Server 为推理框架，通过 Python BLS
-编排子模型（TRT/ORT backend）完成 TTS 流式推理。在实际开发中发现
-Triton 对有状态自回归模型的价值有限，需要重新评估技术路线。
+The project originally planned to use Triton Inference Server as the inference framework, orchestrating sub-models (TRT/ORT backends) via a Python BLS to perform streaming TTS inference. During actual development we found that Triton offers limited value for stateful autoregressive models, and the technical route needed to be re-evaluated.
 
-## 评估的两条路线
+## The Two Routes Evaluated
 
-### 路线 1：自建推理引擎（已采用）
+### Route 1: Custom Inference Engine (Adopted)
 
-完全脱离 Triton，自己实现 gRPC 服务、GPU 调度、continuous batching。
+Leave Triton entirely and implement the gRPC service, GPU scheduling, and continuous batching ourselves.
 
-| 维度 | 评估 |
-|------|------|
-| 性能控制 | **最优** — 直接管理 CUDA stream，CPU-GPU 流水线，无框架中间层 |
-| 调度精细度 | **最优** — 可实现首包优先、segment 级并行、长文本限流 |
-| 可扩展性 | 中 — 需自建模型加载、健康检查、指标等生产组件 |
-| 工程量 | 中 — 核心骨架已搭建完成（`engine/`） |
-| 可靠性 | 需积累 — 异常恢复、内存泄漏等需要持续打磨 |
+| Dimension | Assessment |
+|-----------|------------|
+| Performance control | **Best** — directly manage the CUDA stream and the CPU-GPU pipeline, no framework middle layer |
+| Scheduling granularity | **Best** — can implement first-packet priority, segment-level parallelism, long-text throttling |
+| Extensibility | Medium — must build production components such as model loading, health checks, and metrics ourselves |
+| Engineering effort | Medium — the core skeleton is already in place (`engine/`) |
+| Reliability | Needs maturing — exception recovery, memory leaks, etc. require ongoing polishing |
 
-### 路线 2：重构 BLS + Triton Dynamic Batching（已否决）
+### Route 2: Rebuild BLS + Triton Dynamic Batching (Rejected)
 
-开 64 个 BLS 实例各管一个 session，利用 Triton 的 dynamic batcher
-收集 decode 请求统一推理。
+Spin up 64 BLS instances, each managing one session, and use Triton's dynamic batcher to collect decode requests for unified inference.
 
-| 维度 | 评估 |
-|------|------|
-| 性能控制 | **差** — KV cache 需 seq_len 维 padding，计算/显存浪费严重 |
-| 调度精细度 | **差** — Triton dynamic batcher 按到达时间聚合，无法表达优先级 |
-| GIL 瓶颈 | **严重** — 64 个 Python BLS 实例共享 GIL，CPU 准备工作串行化 |
-| BLS→TRT 开销 | **不可忽略** — pb_utils + dlpack 路径在 ~4ms 单步预算内占比可观 |
-| 首包优先级 | **无法实现** — 长文本并发合成会抢占首 token 紧急请求的 GPU 资源 |
+| Dimension | Assessment |
+|-----------|------------|
+| Performance control | **Poor** — the KV cache needs padding along the seq_len dimension, wasting significant compute/VRAM |
+| Scheduling granularity | **Poor** — Triton's dynamic batcher aggregates by arrival time and cannot express priority |
+| GIL bottleneck | **Severe** — 64 Python BLS instances share the GIL, serializing the CPU preparation work |
+| BLS→TRT overhead | **Non-negligible** — the pb_utils + dlpack path takes a noticeable share of the ~4ms per-step budget |
+| First-packet priority | **Impossible** — concurrent long-text synthesis preempts GPU resources from urgent first-token requests |
 
-**否决核心原因：** Triton dynamic batching 为无状态请求设计（batch 维
-concat），不适用于 KV cache 长度各异的自回归 decode。所有主流 LLM
-推理引擎（vLLM、TRT-LLM、SGLang）均自建 continuous batching
-而非使用 Triton dynamic batcher。
+**Core reason for rejection:** Triton dynamic batching is designed for stateless requests (concatenation along the batch dimension) and does not apply to autoregressive decode where the KV cache lengths differ. All mainstream LLM inference engines (vLLM, TRT-LLM, SGLang) build their own continuous batching rather than using Triton's dynamic batcher.
 
-#### Triton Dynamic Batching 的前提条件
+#### Preconditions for Triton Dynamic Batching
 
-Dynamic batching 生效需要同时满足以下条件，说明了它的适用边界：
+For dynamic batching to take effect, all of the following conditions must be met simultaneously, which illustrates its applicability boundary:
 
-1. **模型输入第一维必须是 batch 维度** — Triton 沿 dim-0 拼接请求
-2. **`max_batch_size > 0`** — 设为 0 表示模型不支持 batching
-3. **`config.pbtxt` 显式开启** — `dynamic_batching { preferred_batch_size: [...] }`
-4. **batch 内所有请求的非 batch 维度形状必须一致** — 否则需要 padding
+1. **The model input's first dimension must be the batch dimension** — Triton concatenates requests along dim-0
+2. **`max_batch_size > 0`** — setting it to 0 means the model does not support batching
+3. **Explicitly enabled in `config.pbtxt`** — `dynamic_batching { preferred_batch_size: [...] }`
+4. **The non-batch dimension shapes of all requests in a batch must be identical** — otherwise padding is required
 
-对于自回归 decode，条件 4 天然不满足：每个请求的 KV Cache `seq_len`
-维度不同，Triton 不会自动 pad — 它只做 batch 维度的 concat。这意味着
-要么所有请求恰好同长（不现实），要么由 BLS 手动 pad 后以 batch=1 的
-假象送入（绕过了 dynamic batcher 的意义）。
+For autoregressive decode, condition 4 is inherently unmet: each request's KV Cache `seq_len` dimension differs, and Triton does not auto-pad — it only concatenates along the batch dimension. This means either all requests happen to be the same length (unrealistic), or the BLS manually pads them and feeds them in under the illusion of batch=1 (bypassing the point of the dynamic batcher).
 
-## Triton Server 的真正价值域
+## Where Triton Server Truly Adds Value
 
-Triton 在以下场景有不可替代的价值：
+Triton offers irreplaceable value in the following scenarios:
 
-- **无状态模型**：图像分类、embedding、reranking、推荐 CTR —
-  dynamic batching 可将 GPU 利用率从 10% 拉到 90%
-- **模型动物园**：同一集群托管数十种异构模型，统一运维
-- **企业基础设施**：K8s 集成、模型版本管理、A/B 测试、Prometheus 指标
+- **Stateless models**: image classification, embedding, reranking, recommendation CTR — dynamic batching can lift GPU utilization from 10% to 90%
+- **Model zoos**: hosting dozens of heterogeneous models in the same cluster with unified operations
+- **Enterprise infrastructure**: K8s integration, model version management, A/B testing, Prometheus metrics
 
-对于**单模型、有状态、自回归、需要精细调度**的 TTS 场景，Triton
-退化为 gRPC 代理 + 进程容器。在 TRT-LLM 的 Triton backend 中，
-Triton 也只是一个壳，所有调度逻辑在 TRT-LLM Executor 内部。
+For a **single-model, stateful, autoregressive, fine-scheduling-required** TTS scenario, Triton degenerates into a gRPC proxy + process container. In TRT-LLM's Triton backend, Triton is also just a shell, with all scheduling logic living inside the TRT-LLM Executor.
 
-## Batching 策略选型
+## Batching Strategy Selection
 
 ### Dynamic Batching vs Continuous Batching
 
-两者的核心区别在于**调度粒度**：
+The core difference between the two is **scheduling granularity**:
 
-- **Dynamic Batching**（请求级调度）：多个请求拼成 batch 一起执行，
-  **整个 batch 必须全部完成才能返回**。短请求跑完后空等长请求，GPU
-  后期利用率下降。适合无状态、单次前向的模型（分类、embedding）。
+- **Dynamic Batching** (request-level scheduling): multiple requests are assembled into a batch and executed together, and **the entire batch must all finish before returning**. After short requests finish, they idle-wait for long ones, so GPU utilization drops later on. Suitable for stateless, single-forward-pass models (classification, embedding).
 
-- **Continuous Batching**（迭代级调度）：以每个 decode step 为调度
-  单位，**每步都可以增减请求**。完成的请求立即释放资源，新请求下一步
-  即可加入，GPU 始终在做有效计算。
+- **Continuous Batching** (iteration-level scheduling): scheduling is per decode step, and **requests can be added or removed every step**. Completed requests release resources immediately, new requests can join at the next step, and the GPU is always doing useful compute.
 
-### Continuous Batching 如何处理不同 shape
+### How Continuous Batching Handles Different Shapes
 
-continuous batching 能工作的核心机制：
+The core mechanisms that make continuous batching work:
 
-1. **Decode 阶段天然对齐** — 每个请求的"当前输入"都是 1 个 token
-   （shape `[1, hidden]`），QKV 线性层可以直接 batch，无需 padding。
+1. **The decode phase is naturally aligned** — each request's "current input" is a single token (shape `[1, hidden]`), so the QKV linear layers can batch directly, with no padding needed.
 
-2. **Paged KV Cache** — KV Cache 按固定大小的 page 分配（类似 OS
-   虚拟内存），每个请求通过 page table 索引不连续的物理显存。请求完成
-   后 page 立即回收，新请求按需分配，不需要预留 max_len 的连续显存。
+2. **Paged KV Cache** — the KV Cache is allocated in fixed-size pages (like OS virtual memory), and each request indexes non-contiguous physical VRAM through a page table. After a request finishes, its pages are reclaimed immediately, and new requests allocate on demand, so there is no need to reserve max_len of contiguous VRAM.
 
-3. **特殊 Attention kernel** — 标准 Attention 要求 batch 内 KV 长度
-   一致。Continuous batching 使用：
-   - **PagedAttention**：kernel 接受 `block_tables[batch, max_pages]`
-     和 `context_lens[batch]`，按 page table 到不连续地址取 KV
-   - **FlashAttention varlen**：QKV 打平为 `[total_tokens, H, D]`，
-     通过 `cu_seqlens`（cumulative sequence lengths）划分请求边界
+3. **Special Attention kernel** — standard Attention requires consistent KV lengths within a batch. Continuous batching uses:
+   - **PagedAttention**: the kernel accepts `block_tables[batch, max_pages]` and `context_lens[batch]`, fetching KV from non-contiguous addresses via the page table
+   - **FlashAttention varlen**: QKV is flattened to `[total_tokens, H, D]` and request boundaries are delimited by `cu_seqlens` (cumulative sequence lengths)
 
-4. **Chunked Prefill** — 长 prefill 拆成固定大小 chunk 与 decode
-   请求混合执行，防止长文本编码阻塞在途 decode 请求。
+4. **Chunked Prefill** — long prefills are split into fixed-size chunks and executed mixed with decode requests, preventing long-text encoding from blocking in-flight decode requests.
 
-### 为什么本项目不能用标准 Continuous Batching
+### Why This Project Cannot Use Standard Continuous Batching
 
-上述机制依赖两个前提，本项目均不满足：
+The mechanisms above depend on two preconditions, neither of which this project satisfies:
 
-1. **PagedAttention / varlen kernel** — 需要自定义 CUDA kernel。
-   本项目的 Attention 已编译进 TRT engine（ONNX → trtexec → .plan），
-   计算图固定，无法运行时替换 Attention kernel 或注入 `cu_seqlens`
-   参数。
+1. **PagedAttention / varlen kernel** — requires a custom CUDA kernel. This project's Attention is already compiled into the TRT engine (ONNX → trtexec → .plan), the compute graph is fixed, and there is no way to swap the Attention kernel at runtime or inject `cu_seqlens` parameters.
 
-2. **灵活的 KV Cache 内存管理** — TRT engine 的 KV Cache 输入 shape
-   是 `[batch, num_heads, seq_len, head_dim]`，要求 batch 内所有请求
-   的 `seq_len` 维度一致。不支持 page table 寻址或打平模式。
+2. **Flexible KV Cache memory management** — the TRT engine's KV Cache input shape is `[batch, num_heads, seq_len, head_dim]`, requiring the `seq_len` dimension to be consistent across all requests in a batch. Page-table addressing or the flattened mode is not supported.
 
-**根本约束**：TRT engine 是固定计算图。要实现标准 continuous batching
-需要改造 Attention 图并嵌入 PagedAttention kernel — 等价于从 ONNX
-导出层重写，或迁移到 TRT-LLM。
+**Fundamental constraint**: the TRT engine is a fixed compute graph. Implementing standard continuous batching would require reworking the Attention graph and embedding a PagedAttention kernel — equivalent to rewriting from the ONNX export layer, or migrating to TRT-LLM.
 
-### 采用的方案：Padded Iteration-Level Batching
+### The Adopted Approach: Padded Iteration-Level Batching
 
-调度粒度为 iteration-level（每个 decode step 可增减请求），但 KV Cache
-对齐方式为 padding（受 TRT engine 限制）：
+The scheduling granularity is iteration-level (each decode step can add or remove requests), but the KV Cache is aligned by padding (constrained by the TRT engine):
 
-- 请求可在任意 step 加入或完成，无需等整个 batch 结束
-- 每步将活跃请求的 KV Cache pad 到 batch 内最大长度
-- 完成的请求立即释放 KV Cache slot，新请求下一步即可加入
+- Requests can join or complete at any step, without waiting for the entire batch to finish
+- Each step pads the active requests' KV Cache to the maximum length in the batch
+- Completed requests release their KV Cache slot immediately, and new requests can join at the next step
 
-这是 "continuous scheduling + padded execution" 的混合策略 — 在 TRT
-固定图约束下的最优折中。
+This is a "continuous scheduling + padded execution" hybrid strategy — the optimal compromise under the fixed-graph constraint of TRT.
 
-### 演进路线
+### Evolution Path
 
-| 阶段 | 策略 | 说明 |
-|------|------|------|
-| 早期验证 | batch_size=1 + Multi-Instance | 见下方说明 |
-| 生产 V1 | Padded iteration-level batching | Dispatcher 管理 slot 池，pad 开销可控 |
-| 未来可选 | 自定义 PagedAttention kernel | 消除 padding 浪费，需 CUDA 开发 |
-| 未来可选 | TRT-LLM 迁移 | 内置 inflight batching，但需重构模型构建流程 |
+| Stage | Strategy | Notes |
+|-------|----------|-------|
+| Early validation | batch_size=1 + Multi-Instance | See the note below |
+| Production V1 | Padded iteration-level batching | The Dispatcher manages a slot pool, with controllable padding overhead |
+| Future optional | Custom PagedAttention kernel | Eliminates padding waste, requires CUDA development |
+| Future optional | TRT-LLM migration | Built-in inflight batching, but requires reworking the model build pipeline |
 
-#### 早期验证：Multi-Instance 策略
+#### Early Validation: The Multi-Instance Strategy
 
-不做 batch，而是跑多个模型实例，每个实例 batch_size=1 独立 decode：
+Rather than batching, run multiple model instances, each with batch_size=1 decoding independently:
 
-- **零代码改动** — 纯配置：Triton 下设 `instance_group[{count:N}]`，
-  自建引擎下起多个 executor 线程
-- **无 shape 对齐问题** — 每个实例独立管理 KV Cache，互不干扰
-- **CUDA Stream 并行** — 多实例可分配到不同 stream，GPU 计算核心有
-  一定并行性（视算力余量）
+- **Zero code changes** — pure configuration: under Triton set `instance_group[{count:N}]`, under the custom engine spin up multiple executor threads
+- **No shape-alignment problem** — each instance manages its own KV Cache independently, without interference
+- **CUDA Stream parallelism** — multiple instances can be assigned to different streams, giving some parallelism among GPU compute cores (subject to available compute headroom)
 
-**代价**：显存 × N（每个实例一份 engine context + KV Cache）。对于
-talker ~1.7B 模型，单 GPU（24GB+）开 2-4 实例可行，是性价比最高的
-初始并发方案。
+**Cost**: VRAM × N (each instance holds one engine context + KV Cache). For the ~1.7B talker model, running 2-4 instances on a single GPU (24GB+) is feasible, and is the most cost-effective initial concurrency approach.
 
-## 采用的架构
+## The Adopted Architecture
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -185,92 +151,78 @@ talker ~1.7B 模型，单 GPU（24GB+）开 2-4 实例可行，是性价比最�
    (asyncio)    (GPU thread)     (预分配 slot)
 ```
 
-### 分层职责
+### Layer Responsibilities
 
-| 层 | 目录 | 职责 |
-|----|------|------|
-| Gateway | `engine/gateway/` | gRPC 双向流、协议转换、连接管理 |
-| Frontend | `engine/frontend/` | 会话管理、文本分句（Spliter）、segment 调度 |
-| Core | `engine/core/` | 纯数据结构（EngineRequest/Result/Session），无 GPU 依赖 |
-| Backend | `engine/backend/` | GPU 线程、KV cache 池、prefill、batch decode、executor |
+| Layer | Directory | Responsibility |
+|-------|-----------|----------------|
+| Gateway | `engine/gateway/` | gRPC bidirectional streaming, protocol conversion, connection management |
+| Frontend | `engine/frontend/` | Session management, text segmentation (Spliter), segment scheduling |
+| Core | `engine/core/` | Pure data structures (EngineRequest/Result/Session), no GPU dependency |
+| Backend | `engine/backend/` | GPU thread, KV cache pool, prefill, batch decode, executor |
 
-### 关键设计约束
+### Key Design Constraints
 
-1. **Engine 生命周期自包含** — `start()`/`stop()` 可被外部调用者
-   在任意线程调用，不假设自己拥有进程（为未来 Triton 集成做准备）
+1. **Self-contained engine lifecycle** — `start()`/`stop()` can be called by an external caller from any thread and do not assume the engine owns the process (preparing for future Triton integration)
 
-2. **请求/响应用纯数据结构** — `EngineRequest`/`EngineResult` 是
-   纯 dataclass，不绑定 gRPC stub 也不绑定 Triton `pb_utils`
+2. **Pure data structures for request/response** — `EngineRequest`/`EngineResult` are pure dataclasses, bound neither to a gRPC stub nor to Triton `pb_utils`
 
-3. **CPU-GPU 流水线** — GPU 执行 step N 的同时，CPU 处理 step N-1
-   结果并准备 step N+1 输入
+3. **CPU-GPU pipeline** — while the GPU executes step N, the CPU processes step N-1 results and prepares step N+1 inputs
 
-4. **优先级调度** — prefill 优先级 `FIRST_SEGMENT > CONTINUATION
-   > PREFETCHED`；decode batch 可按首包紧迫性排序
+4. **Priority scheduling** — prefill priority `FIRST_SEGMENT > CONTINUATION > PREFETCHED`; the decode batch can be ordered by first-packet urgency
 
-### 长文本 Offline 预切分语义
+### Long-Text Offline Pre-Split Semantics
 
-离线场景下，`Spliter` 中的 `presplit` 与 `driver` 不是同一层概念：
+In the offline scenario, `presplit` and `driver` in the `Spliter` are not the same conceptual layer:
 
-- **presplit = 分组（group）**：利用全文视野把长文本切成多个较自然、长度接近的组，
-  目标是提高离线合成时的并行度，并尽量降低单组触碰 `max_seq_len` 的风险
-- **driver = 组内分句（segment）**：每个 group 内仍由 driver 按 L1/L2/L3/d
-  阈值和后端状态协同决定真正的 flush 时机，driver 是最终裁决者
-- **backend segment**：真正提交到 engine 的执行单元；一个 group 可以产出多个
-  backend segment
+- **presplit = grouping (group)**: uses full-text visibility to split long text into several fairly natural, close-to-equal-length groups, aiming to increase parallelism during offline synthesis and minimize the risk of any single group hitting `max_seq_len`
+- **driver = intra-group segmentation (segment)**: within each group, the driver still decides the real flush timing in coordination with the L1/L2/L3/d thresholds and backend state; the driver is the final arbiter
+- **backend segment**: the execution unit actually submitted to the engine; one group can produce multiple backend segments
 
-因此，offline 路径的真实层次是：
+Therefore, the true hierarchy of the offline path is:
 
-`全文 -> presplit groups -> driver flush -> backend segments`
+`full text -> presplit groups -> driver flush -> backend segments`
 
-而不是“presplit 直接决定最终 segment 边界”。
+rather than "presplit directly determines the final segment boundaries."
 
-### 超长 presplit 队列的执行模型
+### Execution Model for Very Long Presplit Queues
 
-当长文本被 `presplit` 切成远多于 `max_batch_size` 的 group 时，系统仍可正常执行，
-因为 frontend 与 backend 都做了分层限流：
+When long text is `presplit` into far more groups than `max_batch_size`, the system still executes correctly, because both the frontend and the backend apply layered throttling:
 
-- **frontend 限流**：offline group 不会一次性全部提交，只会启动到
-  `max_concurrent_segments` 为止；其余 group 留在队列中等待前面的 segment 完成
-- **backend 限流**：每个 decode iteration 只会从活跃 segment 中选择最多
-  `max_batch_size` 个进入本轮 batch
-- **顺序保证**：音频下发顺序按 `group_idx + local_idx` 进行层级重排，避免
-  “前面 group 的后续句子被后面 group 抢先播放”
+- **Frontend throttling**: offline groups are not all submitted at once, only launched up to `max_concurrent_segments`; the remaining groups stay queued waiting for earlier segments to complete
+- **Backend throttling**: each decode iteration selects at most `max_batch_size` active segments to enter the batch this round
+- **Ordering guarantee**: audio emission order is hierarchically reordered by `group_idx + local_idx`, avoiding "a later sentence of an earlier group being played ahead of it by a later group"
 
-这意味着“presplit 很长”带来的主要问题是**排队和尾延迟**，而不是 correctness
-失效或 engine 被一次性灌爆。
+This means the main problem introduced by "a very long presplit" is **queuing and tail latency**, not a correctness failure or the engine being flooded all at once.
 
-### EMA 与 Offline 长文本
+### EMA and Offline Long Text
 
-对于超长 offline 请求，未来 group 不能一直复用最初的切分阈值。随着前面 segment
-完成，audio/text ratio 的 EMA 会持续更新，因此：
+For very long offline requests, future groups cannot keep reusing the initial split thresholds. As earlier segments complete, the EMA of the audio/text ratio keeps updating, so:
 
-- active driver 的阈值会随 EMA 刷新
-- 新启动的 offline group 也必须基于**最新 EMA**重新计算阈值
+- The active driver's thresholds refresh with the EMA
+- Newly launched offline groups must also recompute their thresholds based on the **latest EMA**
 
-否则，后半段文本会长期使用过时阈值，导致分组/分句策略逐渐偏离真实 decode 行为。
+Otherwise, the latter half of the text would use stale thresholds for a long time, causing the grouping/segmentation strategy to gradually diverge from the actual decode behavior.
 
-### 何时引入 Triton 壳
+### When to Introduce a Triton Shell
 
-当遇到以下场景时考虑：
+Consider it in the following scenarios:
 
-- 多模型共存（TTS + ASR + LLM 同 GPU）
-- K8s 大规模部署需要 Triton 的 readiness/liveness probe
-- 运维团队已有 Triton 集群管理经验
-- 需要模型版本管理做 A/B 测试
+- Multiple models coexisting (TTS + ASR + LLM on the same GPU)
+- Large-scale K8s deployment requiring Triton's readiness/liveness probes
+- An operations team that already has Triton cluster management experience
+- A need for model version management to do A/B testing
 
-集成方式：将 `TTSEngine` 封装为 `TritonPythonModel`，Triton 只做
-收发请求，所有调度逻辑仍在 engine 内部。预计工作量：几百行适配代码。
+Integration approach: wrap `TTSEngine` as a `TritonPythonModel`, with Triton only sending and receiving requests while all scheduling logic remains inside the engine. Estimated effort: a few hundred lines of adapter code.
 
-## 自建引擎需要补齐的生产组件
+## Production Components the Custom Engine Needs to Fill In
 
-| 组件 | 工作量 | 优先级 | 备注 |
-|------|--------|--------|------|
-| gRPC 服务 + 健康检查 | 低 | P0 | `grpc.aio` 成熟 |
-| TRT engine 加载 | 低 | P0 | `tensorrt` Python API |
-| Prometheus 指标 | 低 | P1 | `prometheus_client` |
-| 优雅关停 / 请求排空 | 低 | P1 | signal handler + drain |
-| 异常恢复 / session 超时 | 中 | P1 | watchdog + 超时回收 |
-| CUDA Graph 优化 | 中 | P2 | 固定 batch size 场景 |
-| 热更新 / 灰度发布 | 中 | P3 | 可后期做或交给 Triton |
-| 多 GPU 调度 | 高 | P3 | 1.7B 单卡绑定，暂不需要 |
+| Component | Effort | Priority | Remarks |
+|-----------|--------|----------|---------|
+| gRPC service + health check | Low | P0 | `grpc.aio` is mature |
+| TRT engine loading | Low | P0 | `tensorrt` Python API |
+| Prometheus metrics | Low | P1 | `prometheus_client` |
+| Graceful shutdown / request drain | Low | P1 | signal handler + drain |
+| Exception recovery / session timeout | Medium | P1 | watchdog + timeout reclamation |
+| CUDA Graph optimization | Medium | P2 | fixed batch size scenarios |
+| Hot reload / canary release | Medium | P3 | can be done later or delegated to Triton |
+| Multi-GPU scheduling | High | P3 | 1.7B is bound to a single card, not needed for now |

@@ -1,36 +1,38 @@
-# Code2Wav 模块 16 路 × 最大 1024 token 的 KV Cache 与卷积历史大小
+**English** | [中文](code2wav_state_size.zh-CN.md)
 
-## 滑动窗口 KV Cache 说明
+# KV Cache and Convolution History Size for the Code2Wav Module (16 lanes × up to 1024 tokens)
 
-### 什么叫滑动窗口 KV cache？
+## Sliding-window KV cache explained
 
-- **滑动窗口注意力（Sliding Window Attention）**：每个 token 做因果注意力时，**只能看到过去最多 W 个位置**（含自己），而不是“从开头到当前”的全量历史。W 就是窗口大小（这里 72）。
-- **SlidingWindowKVCache**：因为模型**本来就不看**超过 72 步以前的历史，所以 cache 里只保留**最近 72 个时间步**的 K/V 即可；更早的 K/V 写入后就不会再被 attention 用到，可以丢弃，以节省显存并保持计算一致。
+### What is a sliding-window KV cache?
 
-### Transformer 不是需要全量历史吗？
+- **Sliding Window Attention**: when each token performs causal attention, it can **only see at most the past W positions** (including itself), rather than the full history "from the beginning up to the current step". W is the window size (72 here).
+- **SlidingWindowKVCache**: because the model **already does not look** at history more than 72 steps back, the cache only needs to retain the K/V for the **most recent 72 time steps**; once written, earlier K/V will never be used by attention again and can be discarded to save GPU memory while keeping the computation consistent.
 
-- **一般自回归 LM**：通常是**全量因果**（每个位置能看到从 0 到当前的所有 token），所以需要全量 KV cache。
-- **Code2Wav 的 Decoder**：官方架构是 **局部/滑动窗口因果**（`layer_types = ["sliding_attention"] * num_hidden_layers`，使用 `create_sliding_window_causal_mask`）。这是**模型设计**，不是我们导出时改的——vocoder 侧很多设计会用局部注意力换效率和稳定性，72 是配置里的 `sliding_window` 默认值。
+### Doesn't a Transformer need the full history?
 
-### 窗口大小为什么是 72？
+- **A typical autoregressive LM**: usually **fully causal** (each position can see every token from 0 up to the current one), so it needs a full KV cache.
+- **The Code2Wav decoder**: the official architecture is **local / sliding-window causal** (`layer_types = ["sliding_attention"] * num_hidden_layers`, using `create_sliding_window_causal_mask`). This is part of the **model design**, not something we changed during export — many vocoder-side designs use local attention to trade for efficiency and stability, and 72 is the default value of `sliding_window` in the config.
 
-- 来自 **Qwen3TTSTokenizerV2DecoderConfig** 的默认值 `sliding_window=72`（12Hz codec 下约 6 秒上下文），是官方在 tokenizer v2 里定的，用于“local attention mechanism, limiting attention context to improve efficiency”。
+### Why is the window size 72?
 
-### 如果只有 4 个 token 如何处理？
+- It comes from the default value `sliding_window=72` in **Qwen3TTSTokenizerV2DecoderConfig** (about 6 seconds of context under a 12 Hz codec), set officially in tokenizer v2 to serve as a "local attention mechanism, limiting attention context to improve efficiency".
 
-- 当前步**只输入 4 个 token** 时（例如首 chunk 或 cache 为空）：
-  - `S_past = 0` 或很小，当前步的 key/value 只有 4 条（或 4 + past）。
-  - Cache 里**实际长度就是 min(72, S_past + 4)**，不会超过 72，**不会做截断**。
-- 也就是说：**只有 4 个 token 时，就只存 4 个位置的 K/V**；窗口 72 只是“最多保留 72”，不足 72 就全部保留，无需特殊分支。
+### How is the case of only 4 tokens handled?
+
+- When the current step **feeds in only 4 tokens** (for example the first chunk, or an empty cache):
+  - `S_past = 0` or very small, and the current step's key/value has only 4 entries (or 4 + past).
+  - The **actual length in the cache is min(72, S_past + 4)**, which will never exceed 72, so **no truncation is performed**.
+- In other words: **with only 4 tokens, only 4 positions of K/V are stored**; the window of 72 merely means "retain at most 72" — if there are fewer than 72, all of them are retained, and no special branch is needed.
 
 ---
 
-## 配置来源
+## Configuration sources
 
-- **Decoder config**（Qwen3TTSTokenizerV2DecoderConfig）：`third_party/Qwen3-TTS/.../configuration_qwen3_tts_tokenizer_v2.py`
-- **State 定义**：`scripts/export/code2wav_streaming.py`（`get_initial_state_shapes`、`SlidingWindowKVCache`）
+- **Decoder config** (Qwen3TTSTokenizerV2DecoderConfig): `third_party/Qwen3-TTS/.../configuration_qwen3_tts_tokenizer_v2.py`
+- **State definitions**: `scripts/export/code2wav_streaming.py` (`get_initial_state_shapes`, `SlidingWindowKVCache`)
 
-| 参数 | 值 |
+| Parameter | Value |
 |------|-----|
 | num_hidden_layers | 8 |
 | num_key_value_heads | 16 |
@@ -38,37 +40,37 @@
 | head_dim | 1024/16 = 64 |
 | latent_dim | 1024 |
 | decoder_dim | 1536 |
-| codebook_dim | 512（getattr 默认） |
-| **KV window_size** | **72**（滑动窗口，与解码长度无关） |
+| codebook_dim | 512 (getattr default) |
+| **KV window_size** | **72** (sliding window, independent of decode length) |
 
 ---
 
 ## 1. KV Cache
 
-- **滑动窗口**：每层只保留最近 **72** 个时间步的 K/V，与“最大解码 1024 token”无关。
-- 单层单路：`K` / `V` 形状均为 `[1, num_kv_heads, 72, head_dim]` = `[1, 16, 72, 64]`。
+- **Sliding window**: each layer retains only the K/V for the most recent **72** time steps, independent of "up to 1024 decode tokens".
+- Single layer, single lane: `K` / `V` both have shape `[1, num_kv_heads, 72, head_dim]` = `[1, 16, 72, 64]`.
 
-**单路、单层（K+V，BF16）：**
+**Single lane, single layer (K+V, BF16):**
 
-- 元素数：`2 × 16 × 72 × 64 = 147,456`
-- 体积：`147,456 × 2 bytes = 294,912 bytes`
+- Element count: `2 × 16 × 72 × 64 = 147,456`
+- Size: `147,456 × 2 bytes = 294,912 bytes`
 
-**单路、8 层（BF16）：**
+**Single lane, 8 layers (BF16):**
 
-- 元素数：`8 × 147,456 = 1,179,648`
-- 体积：`1,179,648 × 2 = 2,359,296 bytes ≈ 2.25 MB`
+- Element count: `8 × 147,456 = 1,179,648`
+- Size: `1,179,648 × 2 = 2,359,296 bytes ≈ 2.25 MB`
 
-**16 路（B=16）：**
+**16 lanes (B=16):**
 
-- 体积：`16 × 2,359,296 = 37,748,736 bytes ≈ 36.00 MB`
+- Size: `16 × 2,359,296 = 37,748,736 bytes ≈ 36.00 MB`
 
 ---
 
-## 2. 卷积历史（Conv States）
+## 2. Convolution history (Conv States)
 
-17 个 conv state，形状与解码长度无关，仅与 batch 和通道/长度维有关（来自 `get_initial_state_shapes`）：
+17 conv states; their shapes are independent of decode length and depend only on the batch and the channel/length dimensions (from `get_initial_state_shapes`):
 
-| State | Shape (B=1) | 元素数 (B=1) |
+| State | Shape (B=1) | Element count (B=1) |
 |-------|-------------|----------------|
 | conv_state_0 | (1, 512, 2) | 1,024 |
 | conv_state_1,2,3 | (1, 1024, 6) × 3 | 18,432 |
@@ -77,45 +79,45 @@
 | conv_state_10,11,12 | (1, 192, 6), (1, 192, 18), (1, 192, 54) | 14,976 |
 | conv_state_13,14,15 | (1, 96, 6), (1, 96, 18), (1, 96, 54) | 7,488 |
 | conv_state_16 | (1, 96, 6) | 576 |
-| **合计** | | **131,752** |
+| **Total** | | **131,752** |
 
-**单路（BF16）：** `131,752 × 2 = 263,504 bytes ≈ 0.257 MB`  
-**16 路：** `16 × 263,504 = 4,216,064 bytes ≈ 4.02 MB`
+**Single lane (BF16):** `131,752 × 2 = 263,504 bytes ≈ 0.257 MB`  
+**16 lanes:** `16 × 263,504 = 4,216,064 bytes ≈ 4.02 MB`
 
 ---
 
-## 3. Transconv 重叠状态（Overlap-Add）
+## 3. Transconv overlap states (Overlap-Add)
 
-4 个 transconv overlap，`rp = [8, 5, 4, 3]`，`out_dim = decoder_dim // 2^(block_idx+1)`：
+4 transconv overlaps, `rp = [8, 5, 4, 3]`, `out_dim = decoder_dim // 2^(block_idx+1)`:
 
-| State | Shape (B=1) | 元素数 (B=1) |
+| State | Shape (B=1) | Element count (B=1) |
 |-------|-------------|----------------|
 | transconv_overlap_0 | (1, 768, 8) | 6,144 |
 | transconv_overlap_1 | (1, 384, 5) | 1,920 |
 | transconv_overlap_2 | (1, 192, 4) | 768 |
 | transconv_overlap_3 | (1, 96, 3) | 288 |
-| **合计** | | **9,120** |
+| **Total** | | **9,120** |
 
-**单路（BF16）：** `9,120 × 2 = 18,240 bytes ≈ 0.018 MB`  
-**16 路：** `16 × 18,240 = 291,840 bytes ≈ 0.28 MB`
+**Single lane (BF16):** `9,120 × 2 = 18,240 bytes ≈ 0.018 MB`  
+**16 lanes:** `16 × 18,240 = 291,840 bytes ≈ 0.28 MB`
 
 ---
 
-## 4. 汇总（16 路，BF16）
+## 4. Summary (16 lanes, BF16)
 
-| 类别 | 单路 (MB) | 16 路 (MB) |
+| Category | Single lane (MB) | 16 lanes (MB) |
 |------|-----------|------------|
-| KV cache（固定 72 步） | 2.25 | **36.00** |
-| Conv 历史（17 个 state） | 0.257 | **4.02** |
-| Transconv 重叠（4 个） | 0.018 | **0.28** |
-| **合计** | **≈2.53** | **≈40.3** |
+| KV cache (fixed 72 steps) | 2.25 | **36.00** |
+| Conv history (17 states) | 0.257 | **4.02** |
+| Transconv overlap (4) | 0.018 | **0.28** |
+| **Total** | **≈2.53** | **≈40.3** |
 
 ---
 
-## 5. 关于“最大解码 1024 token”
+## 5. On "up to 1024 decode tokens"
 
-- Code2Wav 的序列维度是 **codec 时间步**（每步输入 chunk_T=4 帧）。
-- 使用 **SlidingWindowKVCache(window_size=72)**：每层只保留最近 72 个时间步的 K/V，再长的解码也不会增加 KV 体积。
-- 因此：**16 路、最大解码 1024 token** 时，KV cache 与卷积/transconv 状态总大小约为 **40.3 MB（BF16）**，与解码长度无关。
+- Code2Wav's sequence dimension is the **codec time step** (each step feeds in chunk_T=4 frames).
+- Using **SlidingWindowKVCache(window_size=72)**: each layer retains only the K/V for the most recent 72 time steps, so a longer decode does not increase the KV size.
+- Therefore: at **16 lanes, up to 1024 decode tokens**, the total size of the KV cache plus the conv/transconv states is about **40.3 MB (BF16)**, independent of decode length.
 
-若用 FP32 存状态，上述体积乘以 2，约 **80.6 MB**。
+If the states are stored in FP32, the sizes above are multiplied by 2, giving about **80.6 MB**.

@@ -1,57 +1,59 @@
-# 贡献指南
+**English** | [中文](CONTRIBUTING.zh-CN.md)
 
-感谢你对 Qwen3TTS-Streaming 的关注！本项目是 **v0.1 工程预览**，流式质量仍在打磨（见 [已知限制](docs/user/known_limitations.md)），欢迎以 issue、讨论、PR 形式参与。
+# Contributing Guide
 
-## 开发环境
+Thank you for your interest in Qwen3TTS-Streaming! This project is a **v0.1 engineering preview**, and streaming quality is still being polished (see [Known Limitations](docs/user/known_limitations.md)); you are welcome to participate via issues, discussions, and PRs.
+
+## Development Environment
 
 ```bash
-# 1. 克隆（含子模块）
+# 1. Clone (with submodules)
 git clone --recursive https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git
 cd Qwen3TTS-Streaming
 
-# 2. 安装依赖（建议用项目约定的 conda 环境）
+# 2. Install dependencies (using the project's conventional conda environment is recommended)
 pip install -e ".[dev]"
-# 客户端协议层在 client/src，跑测试需要它在 PYTHONPATH 上
+# The client protocol layer lives in client/src; running tests requires it on PYTHONPATH
 export PYTHONPATH=client/src
 ```
 
-> 完整引擎运行（导出/编译 TRT/起服务）需要 NVIDIA GPU + NGC 容器，见 [README 前置要求](README.md#前置要求) 与 [部署指南](docs/user/deployment.md)。纯逻辑开发与单元测试不需要 GPU。
+> A full engine run (export / build TRT / start the service) requires an NVIDIA GPU + NGC containers; see the [README Prerequisites](README.md#prerequisites) and the [Deployment Guide](docs/user/deployment.md). Pure logic development and unit tests do not require a GPU.
 
-## 运行测试
+## Running Tests
 
 ```bash
-# 单元测试（无需 GPU / Docker —— CI 跑这一档）
+# Unit tests (no GPU / Docker required — this is the tier CI runs)
 PYTHONPATH=client/src pytest tests/unit -m "not gpu and not docker" -q
 
-# 集成 / e2e（可能需要导出产物、GPU 或 Docker）
+# Integration / e2e (may require export artifacts, a GPU, or Docker)
 pytest tests/integration -q
 ```
 
-测试分层 marker：`unit` / `integration` / `e2e` / `gpu` / `docker` / `slow`（见 `pyproject.toml`）。提交前请确保受影响范围的单元测试通过。
+Test-layer markers: `unit` / `integration` / `e2e` / `gpu` / `docker` / `slow` (see `pyproject.toml`). Before submitting, please make sure the unit tests in the affected scope pass.
 
-## 代码风格
+## Code Style
 
-- **Python**：类型注解、docstring、PEP 8；用 `ruff check` / `ruff format`、`mypy` 自查。
-- **Bash**：shellcheck 兼容；`scripts/bash/lib/` 模块用 `snake_case` 函数名。
-- **文档**：正文统一中文，代码块/变量名/路径/命令保持英文（见 `CLAUDE.md` 文档语言策略）。
+- **Python**: type annotations, docstrings, PEP 8; self-check with `ruff check` / `ruff format` and `mypy`.
+- **Bash**: shellcheck-compatible; use `snake_case` function names in `scripts/bash/lib/` modules.
+- **Documentation**: prose is uniformly in Chinese, while code blocks / variable names / paths / commands stay in English (see the documentation language policy in `CLAUDE.md`).
 
-## 协议（proto）改动
+## Protocol (proto) Changes
 
-`proto/tts.proto` 是协议唯一真相源，生成代码不要手改：
+`proto/tts.proto` is the single source of truth for the protocol; do not hand-edit the generated code:
 
 ```bash
-make proto        # 重新生成 *_pb2.py
-make proto-sync   # 同步到 engine/ 与 client/ 消费方
-make proto-check  # 校验已同步（CI 会跑）
+make proto        # Regenerate *_pb2.py
+make proto-sync   # Sync to the engine/ and client/ consumers
+make proto-check  # Verify it is synced (CI runs this)
 ```
 
-## 提交 PR
+## Submitting a PR
 
-1. 从 `main` 切分支；提交信息用 [Conventional Commits](https://www.conventionalcommits.org/) 前缀（`feat`/`fix`/`refactor`/`docs`/`chore` 等）。
-2. 关联相关 issue，说明动机与验证方式（贴测试输出）。
-3. 不引入新的 `TODO`/调试残留；不提交 `workspace/` 运行时产物（已 gitignore）。
-4. 行为有变更时更新对应文档与测试。
+1. Branch off `main`; use [Conventional Commits](https://www.conventionalcommits.org/) prefixes in commit messages (`feat`/`fix`/`refactor`/`docs`/`chore`, etc.).
+2. Link the related issue and explain the motivation and how it was validated (paste the test output).
+3. Do not introduce new `TODO`s / leftover debug code; do not commit `workspace/` runtime artifacts (already gitignored).
+4. When behavior changes, update the corresponding documentation and tests.
 
-## 报告问题
+## Reporting Issues
 
-提 issue 时请尽量包含：模型变体（如 `custom-1.7b`）、流式/非流式、GPU 型号、复现步骤与最小输入。安全问题请按 [SECURITY.md](SECURITY.md)（若存在）私下报告。
+When filing an issue, please try to include: the model variant (e.g. `custom-1.7b`), streaming/non-streaming mode, GPU model, reproduction steps, and a minimal input. For security issues, please report privately per [SECURITY.md](SECURITY.md) (if present).

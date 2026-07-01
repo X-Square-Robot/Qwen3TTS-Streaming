@@ -1,156 +1,159 @@
-# 引擎可观测性分层设计（四层模型 + 升级排查链）
+**English** | [中文](observability_tiers.zh-CN.md)
 
-> 编写日期：2026-06-30
-> 状态：**设计文档（实现前契约）**——本文锁定四层模型、控制面、各层字段与升级排查流程，
-> 后续实现以此为参照，避免再引入一轮含糊命名。
-> 关联：[[observability_goals]]（前置·计时/生命周期维度的目标与契约）· [[engine-design-overview]] ·
+# Engine Observability Tiered Design (Four-Tier Model + Escalation Troubleshooting Chain)
+
+> Written: 2026-06-30
+> Status: **Design document (pre-implementation contract)** — this document locks down the four-tier model, the control plane, per-tier fields, and the escalation troubleshooting flow,
+> so subsequent implementation references it and avoids introducing another round of vague naming.
+> Related: [[observability_goals]] (prerequisite; the goals and contract for the timing/lifecycle dimension) · [[engine-design-overview]] ·
 > [[frontend_segmentation_pipeline]] · [[vad_design_goals]] · [[decode_fsm]]
 
 ---
 
-## 0. 本文与 `observability_goals.md` 的关系
+## 0. This document's relationship to `observability_goals.md`
 
-[[observability_goals]] 定义了**计时/生命周期维度**的目标：稳定的事件命名、强/上下文指标、
-raw/effective 音频、客户端可凭协议重建时间线。它是"**要观测什么**"的契约。
+[[observability_goals]] defines the goals along the **timing/lifecycle dimension**: stable event naming, strong/contextual metrics,
+raw/effective audio, and the client reconstructing the timeline from the protocol. It is the contract for "**what to observe**."
 
-本文回答的是**正交的另一问题：分几层观测、每层装什么、怎么从一层升到下一层**。两者不重复：
+This document answers an **orthogonal question: how many tiers to observe at, what goes in each tier, and how to escalate from one tier to the next**. The two do not overlap:
 
-- `observability_goals.md` 给出**事件命名空间**（`session.created` / `engine.prefill.completed` …）与**字段语义**；
-- 本文把这些事件**按详细度切成四档**，补上它没覆盖的 **debug 决策日志**与 **dump 后验举证**，
-  并定义一条**升级排查链**把四档串成排查流程。
+- `observability_goals.md` gives the **event namespace** (`session.created` / `engine.prefill.completed` …) and **field semantics**;
+- this document **cuts those events into four tiers by verbosity**, adds the **debug decision logs** and **dump post-hoc evidence** it does not cover,
+  and defines an **escalation troubleshooting chain** that strings the four tiers into a troubleshooting flow.
 
-事件名、字段名、强/上下文/原始/派生分类**一律沿用** `observability_goals.md`，本文只新增分层与 debug/dump 专属字段。
+Event names, field names, and the strong/contextual/raw/derived classifications **all follow** `observability_goals.md`; this document only adds the tiering and the debug/dump-specific fields.
 
 ---
 
-## 1. 问题与目标
+## 1. Problem and Goals
 
-### 1.1 现状（零件已散落，缺统一层级）
+### 1.1 Current state (the parts are scattered; a unified tiering is missing)
 
-| 已有零件 | 文件 | 性质 |
+| Existing part | File | Nature |
 |---|---|---|
-| 结构化生命周期 JSON 日志 | `engine/core/lifecycle.py` (`LifecycleLogger.emit`) | 单一事件入口，但只发了规范 18 个 phase 里的 ~7 个 |
-| 跨线程计时累加器 | `engine/core/timing.py` (`ServerTimingAccumulator`) | TTFT/链路分段齐全，序列化进协议 meta |
-| 客户端自分析 | `client/src/qwen3tts/diagnostics.py` 等 | `ServerTimingReport.explain_latency()` 等，时间线分析强 |
-| 全量 tensor dump | `engine/backend/debug_dump.py` (`EngineDebugDumper`) | `ENGINE_DUMP_*` env 控制，逐步 dump |
-| 零散自由日志 | 各模块 `logger.info/debug` | engine_loop ~40 处，无统一语义 |
+| Structured lifecycle JSON logs | `engine/core/lifecycle.py` (`LifecycleLogger.emit`) | A single event entry point, but only emits ~7 of the canonical 18 phases |
+| Cross-thread timing accumulator | `engine/core/timing.py` (`ServerTimingAccumulator`) | TTFT/pipeline segmentation is complete, serialized into protocol meta |
+| Client self-analysis | `client/src/qwen3tts/diagnostics.py` etc. | `ServerTimingReport.explain_latency()` etc., strong timeline analysis |
+| Full tensor dump | `engine/backend/debug_dump.py` (`EngineDebugDumper`) | Controlled by `ENGINE_DUMP_*` env, step-by-step dump |
+| Scattered free-form logs | `logger.info/debug` in various modules | ~40 sites in engine_loop, no unified semantics |
 
-**结构性缺口**：日志级别硬编码 `INFO`（`engine/server.py:1060`），无运行时/配置/按 session 控制；
-dump 是独立 env、debug 是各处 `isEnabledFor`，三者各管各的，**没有"从①升②再升③"的统一旋钮**。
+**Structural gap**: the log level is hardcoded to `INFO` (`engine/server.py:1060`), with no runtime/config/per-session control;
+dump is a separate env, debug is `isEnabledFor` scattered everywhere — the three are managed independently, with **no unified knob for "escalate from ① to ② to ③."**
 
-### 1.2 目标排查流程（本文要建立的主线）
+### 1.2 The target troubleshooting flow (the main line this document establishes)
 
 ```
-客户端自分析  ──无法解决──▶  日常日志(L1)  ──无法解决──▶  debug日志(L2)  ──无法解决──▶  dump日志(L3)
-   L0                          常开                       开发机/定点开            疑难杂症
- 高频问题秒级自助            日常反复排查的问题            偶发疑难                 模型后验/计算决策举证
+Client self-analysis ──can't solve──▶  Daily logs (L1) ──can't solve──▶  Debug logs (L2) ──can't solve──▶  Dump logs (L3)
+   L0                          always on              dev box / targeted            hard cases
+ Self-serve on high-freq       Recurring daily            Rare hard cases       Model post-hoc / compute-decision
+ issues in seconds             troubleshooting                                   evidence
 ```
 
-让**高频问题快速自助**，让**困难问题有确定的升级路径**。每升一级，信息更细、成本更高、开启范围更窄。
+Let **high-frequency issues be self-served quickly**, and let **hard issues have a deterministic escalation path**. Each escalation gives finer info, higher cost, and a narrower enablement scope.
 
 ---
 
-## 2. 四层模型
+## 2. The Four-Tier Model
 
-| 层 | 名称 | 受众/场景 | 默认 | 体量 | 回答的核心问题 |
+| Tier | Name | Audience/scenario | Default | Volume | Core question answered |
 |----|------|----------|------|------|---------------|
-| **L0** | 客户端自分析 | 客户端 SDK 使用者 | 始终可用（协议自带） | 0 服务端成本 | TTFT、链路分段、合成内容、batch、VAD —— **大部分日常问题** |
-| **L1** | 日常日志 (DAILY) | 线上运维 | **常开** | 每请求几行 | 同 L0，但服务端视角更全；定位日常反复排查 |
-| **L2** | debug 日志 (DEBUG) | 开发机/定点 | opt-in | 每请求几十行 | **子句怎么切的、为什么这么切、合成为什么错**（决策"为什么"） |
-| **L3** | dump 日志 (DUMP) | 疑难杂症 | 手动单开 | 每步 tensor 文件 | 模型后验、采样/CP 计算决策的**原始举证** |
+| **L0** | Client self-analysis | Client SDK users | Always available (carried by the protocol) | 0 server cost | TTFT, pipeline segmentation, synthesized content, batch, VAD — **most daily issues** |
+| **L1** | Daily logs (DAILY) | Production ops | **Always on** | A few lines per request | Same as L0, but a fuller server-side view; locating recurring daily troubleshooting |
+| **L2** | Debug logs (DEBUG) | Dev box / targeted | opt-in | Tens of lines per request | **How clauses were split, why they were split that way, why synthesis went wrong** (the decision "why") |
+| **L3** | Dump logs (DUMP) | Hard cases | Manually enabled per case | Per-step tensor files | **Raw evidence** for model post-hoc and sampling/CP compute decisions |
 
-**层级是累加的**：`L3 ⊃ L2 ⊃ L1`。开 L2 自动含 L1 全部；开 L3 自动含 L2 全部决策日志 **再叠加** tensor dump
-（决策日志与 tensor 用同一 `dump_id`/`frame_idx` 对齐，排查时"升到 dump"即拿到决策+原始证据的完整对照）。
+**Tiers are cumulative**: `L3 ⊃ L2 ⊃ L1`. Enabling L2 automatically includes all of L1; enabling L3 automatically includes all of L2's decision logs **plus** the tensor dump on top
+(decision logs and tensors align by the same `dump_id`/`frame_idx`, so when troubleshooting, "escalating to dump" yields a complete side-by-side of decisions + raw evidence).
 
-**设计不变量**：
+**Design invariants**:
 
-1. **同一事件命名空间，逐层加细**。层只决定*详细度*与*哪些可选事件触发*，不改事件名（沿用 `observability_goals.md`）。
-2. **L1 的每条日常事实必须同时进协议 meta**——这是 L0 成立的前提。客户端答不出的，服务端 L1 用同名字段答，只是更全 → 升级链天然衔接。
-3. **L2 = 解释（"为什么"，派生、人读、便宜）；L3 = 举证（原始 tensor/后验、机读、贵）。** 偶发问题用 L2，疑难杂症才升 L3。
+1. **Same event namespace, refined tier by tier**. A tier only decides the *verbosity* and *which optional events fire*; it does not change event names (following `observability_goals.md`).
+2. **Every L1 daily fact must also go into the protocol meta** — this is the precondition for L0 to hold. What the client cannot answer, server L1 answers with the same-named fields, only fuller → the escalation chain connects naturally.
+3. **L2 = explanation ("why," derived, human-readable, cheap); L3 = evidence (raw tensors/post-hoc, machine-readable, expensive).** Use L2 for rare issues; escalate to L3 only for hard cases.
 
 ---
 
-## 3. 控制面（全局 + 按 session 覆盖）
+## 3. Control Plane (global + per-session override)
 
-### 3.1 级别旋钮
+### 3.1 The level knob
 
-引入一等概念 `observability.level`，取值 `daily | debug | dump`（对应 L1/L2/L3；L0 永远在线，不需开关）。
+Introduce a first-class concept `observability.level`, taking `daily | debug | dump` (corresponding to L1/L2/L3; L0 is always online and needs no switch).
 
-**优先级（高 → 低，沿用 engine.yaml 既有约定）**：
+**Priority (high → low, following existing engine.yaml conventions)**:
 
 ```
-单 session 覆盖  >  ENGINE_OBS_LEVEL 环境变量  >  engine.yaml observability.level  >  默认(daily)
+per-session override  >  ENGINE_OBS_LEVEL env var  >  engine.yaml observability.level  >  default (daily)
 ```
 
-`engine.yaml` 新增段：
+New section in `engine.yaml`:
 
 ```yaml
 observability:
-  level: daily                 # daily | debug | dump —— 全局默认档
-  max_session_level: daily     # 允许客户端/请求把单会话升到的最高档（生产防滥用，见 §3.3）
-  text_capture: preview        # disabled | preview | hashed | full（文本隐私，沿用 observability_goals §4）
+  level: daily                 # daily | debug | dump —— global default tier
+  max_session_level: daily     # highest tier a client/request may escalate a single session to (production abuse-prevention, see §3.3)
+  text_capture: preview        # disabled | preview | hashed | full (text privacy, following observability_goals §4)
   text_preview_chars: 64
-  dump:                        # 仅 level=dump 或单会话升到 dump 时生效；等价现有 ENGINE_DUMP_*
+  dump:                        # only takes effect at level=dump or when a single session is escalated to dump; equivalent to existing ENGINE_DUMP_*
     dir: workspace/engine_dump
-    limit: 0                   # 0=不限
+    limit: 0                   # 0=unlimited
     include_wav: true
-    sessions: ""               # 逗号分隔；空=全部
+    sessions: ""               # comma-separated; empty=all
     input_keys: ""
     output_keys: ""
 ```
 
-`ENGINE_OBS_LEVEL=debug` 等 env 覆盖全局档；现有 `ENGINE_DUMP_*` env 保留为 L3 细节旋钮的别名（向后兼容）。
+`ENGINE_OBS_LEVEL=debug` and similar env vars override the global tier; the existing `ENGINE_DUMP_*` env vars are kept as aliases for the L3 detail knob (backward compatible).
 
-### 3.2 按 session 覆盖（生产定点排查）
+### 3.2 Per-session override (production targeted troubleshooting)
 
-客户端在请求里携带 `output_policy.config["obs_level"]`（或 `timing.extra["obs_level"]`），
-在 `session.config.validated` 阶段解析并钉到 `SessionConfig.observability_level` 上，
-随后贯穿 `LifecycleLogger` 调用与 dumper gating。
+The client carries `output_policy.config["obs_level"]` (or `timing.extra["obs_level"]`) in the request,
+which is parsed at the `session.config.validated` stage and pinned onto `SessionConfig.observability_level`,
+then threaded through the `LifecycleLogger` calls and dumper gating.
 
-意义：**生产里定点 debug 单个坏会话，而不必把全局调到 DEBUG 刷爆日志。** 这是排查链能在线上跑通的关键。
+Significance: **targeted debugging of a single bad session in production, without turning the global level to DEBUG and flooding the logs.** This is the key to making the troubleshooting chain runnable in production.
 
-### 3.3 防滥用（重要安全约束）
+### 3.3 Abuse prevention (important safety constraint)
 
-按 session 升级**受服务端 `observability.max_session_level` 钳制**：
+Per-session escalation is **clamped by the server-side `observability.max_session_level`**:
 
-- 生产默认 `max_session_level: daily` → 客户端**无法**自行升到 debug/dump（防 dump IO 放大成 DoS、防文本泄漏）。
-- 开发/预发环境设 `max_session_level: dump` → 允许客户端定点升级。
-- 请求要求的档 > `max_session_level` 时，**钳到上限并在 `session.config.validated` 事件里记一条 `obs_level_clamped` 警告**，不静默吞掉。
+- Production defaults to `max_session_level: daily` → the client **cannot** escalate to debug/dump on its own (to prevent dump IO amplification into a DoS, and to prevent text leakage).
+- Dev/staging environments set `max_session_level: dump` → the client is allowed to escalate in a targeted way.
+- When the tier the request asks for > `max_session_level`, **clamp to the ceiling and record an `obs_level_clamped` warning in the `session.config.validated` event**, rather than silently swallowing it.
 
-### 3.4 运行时级别检查（实现约定）
+### 3.4 Runtime level check (implementation convention)
 
-- 决策/dump 的昂贵 payload 构造，一律先判级别再构造（沿用现有 `if not logger.isEnabledFor(DEBUG): return` 的 guard 风格），避免 L1 下产生 L2/L3 开销。
-- `LifecycleLogger.emit` 增加可选 `level`/`min_level` 形参：低于当前生效档的事件直接 no-op。
+- Expensive payload construction for decisions/dumps must always check the level before constructing (following the existing `if not logger.isEnabledFor(DEBUG): return` guard style), avoiding L2/L3 overhead under L1.
+- `LifecycleLogger.emit` gains optional `level`/`min_level` parameters: events below the currently effective tier become a no-op directly.
 
 ---
 
-## 4. L1 日常日志规范（常开、量少而精）
+## 4. L1 Daily Log Specification (always on, low-volume and lean)
 
-**形态**：每请求 = 少量规范生命周期事件（结构化 JSON，机读）+ **一条人读 session 摘要行**（grep 即懂）。
-目标体量：稳态下每请求 INFO 行个位数。
+**Form**: per request = a small number of canonical lifecycle events (structured JSON, machine-readable) + **one human-readable session summary line** (grep and you get it).
+Target volume: single-digit INFO lines per request in steady state.
 
-### 4.1 五个日常问题 ⇄ 字段映射
+### 4.1 The five daily questions ⇄ field mapping
 
-| 日常问题 | 承载事件/字段 | 现状 |
+| Daily question | Carrying event/field | Current state |
 |---|---|---|
-| **TTFT 多少** | 摘要行 `server_engine_prefill_ms` / `server_first_text_dequeue_to_first_raw_audio_ms` / `server_session_create_to_first_raw_audio_ms` | timing.py 已算，缺人读摘要 |
-| **客户端→链路花了多久** | 链路分段：session创建 / 文本接入 / 排队 / 推理 / 门控 / 传输（`observability_goals §验收标准`六段） | timing.py 已有派生，缺统一一行 |
-| **合成了什么内容** | `final_synthesized_text` + 每段 `segment_text_preview`（受 `text_capture` 钳制） | accumulator/segment_end meta 有 preview，缺 session 级汇总 |
-| **拼没拼 batch** | **新增** `engine.prefill.batched` / 摘要 `batch_summary`：每段 prefill 是单发还是混批、batch_size、同批 session/segment | **缺**——batching 决策现仅 DEBUG 散记 |
-| **VAD 怎么处理的** | 摘要 `vad_summary`：`prefix_trimmed_ms` / `tail_trimmed_ms` / `begin_count` / `end_count` / `original_vs_effective_audio_ms` | `_inject_vad_metrics` 已有，仅进 done_meta，缺日常行 |
+| **What is the TTFT** | Summary line `server_engine_prefill_ms` / `server_first_text_dequeue_to_first_raw_audio_ms` / `server_session_create_to_first_raw_audio_ms` | timing.py already computes; missing a human-readable summary |
+| **How long did the client→pipeline take** | Pipeline segmentation: session creation / text ingress / queueing / inference / gating / transport (the six segments in `observability_goals §Acceptance Criteria`) | timing.py already has the derivations; missing a unified single line |
+| **What content was synthesized** | `final_synthesized_text` + per-segment `segment_text_preview` (clamped by `text_capture`) | accumulator/segment_end meta has the preview; missing a session-level aggregate |
+| **Whether batching happened** | **New** `engine.prefill.batched` / summary `batch_summary`: whether each segment's prefill was solo or mixed-batch, batch_size, same-batch session/segment | **Missing** — the batching decision is currently only scattered in DEBUG |
+| **How VAD handled it** | Summary `vad_summary`: `prefix_trimmed_ms` / `tail_trimmed_ms` / `begin_count` / `end_count` / `original_vs_effective_audio_ms` | `_inject_vad_metrics` exists but only goes into done_meta; missing a daily line |
 
-### 4.2 规范生命周期事件（补齐到全集）
+### 4.2 Canonical lifecycle events (completed to the full set)
 
-沿用 `observability_goals.md §事件定义表` 的 18 个 phase。现已发 7 个，L1 应补齐以下（均 INFO、结构化）：
+Following the 18 phases in `observability_goals.md §Event definition table`. 7 are already emitted; L1 should complete the following (all INFO, structured):
 
 `request.accepted` · `session.registered` · `text.first_received` · `text.first_sent` ·
 `engine.prefill.started` · `engine.decode.first_step` · `engine.audio.first_raw` ·
-`output.audio.first_effective` · `session.completed` · 错误路径 `session.evicted` / `engine.prefill.failed` / `session.cancelled`。
+`output.audio.first_effective` · `session.completed` · error-path `session.evicted` / `engine.prefill.failed` / `session.cancelled`.
 
-### 4.3 Session 摘要行（替代含糊 `first_audio=231.6ms`）
+### 4.3 Session summary line (replacing the vague `first_audio=231.6ms`)
 
-请求完成时发一条结构化摘要，聚合 §4.1 五问 + 缓存路径。字段直接复用 `observability_goals §2 Session 汇总日志`
-与 `timing.py` 的派生指标，**新增** `batch_summary`：
+On request completion, emit one structured summary aggregating the five questions of §4.1 + the cache path. Fields directly reuse `observability_goals §2 Session summary log`
+and the derived metrics of `timing.py`, **plus** `batch_summary`:
 
 ```json
 {
@@ -168,7 +171,7 @@ observability:
 }
 ```
 
-人读伴随行（一行 grep 即懂）：
+Accompanying human-readable line (grep one line and you get it):
 
 ```
 INFO engine.lifecycle session=abc123 DONE ttft=231.6ms infer=190.0ms batch=2/3 vad_trim=8.5ms cache=HIT segs=3 "今天天气…"
@@ -176,16 +179,16 @@ INFO engine.lifecycle session=abc123 DONE ttft=231.6ms infer=190.0ms batch=2/3 v
 
 ---
 
-## 5. L2 debug 日志规范（开发机/定点、解释"为什么"）
+## 5. L2 Debug Log Specification (dev box / targeted, explaining "why")
 
-L2 在 L1 之上叠加**决策理由记录**（结构化、派生、人读、不含 tensor）。核心回答你列的三问：
-**子句怎么切的、为什么这么切、合成为什么错。** 每类记录有稳定 `obs` 标签便于过滤。
+L2 layers **decision-reason records** on top of L1 (structured, derived, human-readable, no tensors). It answers the three questions you listed at its core:
+**how clauses were split, why they were split that way, and why synthesis went wrong.** Each kind of record has a stable `obs` tag for easy filtering.
 
-### 5.1 切分决策（"为什么这么切"）—— 最大缺口
+### 5.1 Split decision ("why it was split this way") — the biggest gap
 
-切分发生在 `engine/frontend/spliter/spliter.py`：阈值由 `_make_thresholds()`→`compute_thresholds(remaining_kv, ema_ratio, …)`
-算出，`pre_split()` 在 L1 标点且 `n >= min_tokens_l1` 处切、`n >= force_split_at` 时回退 last_l1 或硬切；
-流式路径由 driver FSM 用 L1/L2/L3 阈值反应式切。**这些"为什么"目前完全不可见。** L2 每产生一个切点记一条：
+Splitting happens in `engine/frontend/spliter/spliter.py`: thresholds are computed by `_make_thresholds()`→`compute_thresholds(remaining_kv, ema_ratio, …)`;
+`pre_split()` splits at an L1 punctuation where `n >= min_tokens_l1`, and falls back to last_l1 or does a hard cut when `n >= force_split_at`;
+the streaming path is split reactively by the driver FSM using the L1/L2/L3 thresholds. **These "whys" are currently completely invisible.** L2 records one entry per split point:
 
 ```json
 {
@@ -201,12 +204,12 @@ L2 在 L1 之上叠加**决策理由记录**（结构化、派生、人读、不
 }
 ```
 
-排查"这句为什么被切碎/为什么没在该断的地方断"时，一条记录即给出阈值、KV 水位、EMA、触发分支与人读理由。
+When troubleshooting "why was this sentence chopped up / why didn't it break where it should have," a single record gives the thresholds, KV watermark, EMA, triggering branch, and human-readable reason.
 
-### 5.2 batch 组成（"为什么和它拼/没拼"）
+### 5.2 Batch composition ("why it was/wasn't batched with X")
 
-prefill 批在 `engine_loop._try_prefill_pending/_try_prefill_one`（按 `RequestPriority` + `kv_pool.free_count` + 每会话 slot 上限）；
-decode 批在 `_get_active_slots_mlfq`（MLFQ + 溢出/静音剔除）。L2 每批记一条：
+The prefill batch is in `engine_loop._try_prefill_pending/_try_prefill_one` (by `RequestPriority` + `kv_pool.free_count` + the per-session slot cap);
+the decode batch is in `_get_active_slots_mlfq` (MLFQ + overflow/silence eviction). L2 records one entry per batch:
 
 ```json
 {
@@ -218,17 +221,17 @@ decode 批在 `_get_active_slots_mlfq`（MLFQ + 溢出/静音剔除）。L2 每�
 }
 ```
 
-### 5.3 VAD 状态跳变（"为什么裁了这段"）
+### 5.3 VAD state transitions ("why this segment was trimmed")
 
-L1 只给 VAD 汇总；L2 给每次 begin/end 跳变（来自 `vad_processor.process_chunk`）：
+L1 only gives the VAD summary; L2 gives each begin/end transition (from `vad_processor.process_chunk`):
 
 ```json
 {"obs":"vad_transition","session_id":"abc123","event":"begin","frame_ms":120.0,"prob":0.82,"threshold":0.5}
 ```
 
-### 5.4 合成异常/采样汇总（"合成为什么错了"）
+### 5.4 Synthesis anomaly / sampling summary ("why synthesis went wrong")
 
-每段收尾记一条采样+收尾汇总（段级，非每步——每步属 L3），并对可疑段打**启发式异常标记**：
+At each segment's close, record one sampling + close-out summary (segment-level, not per-step — per-step belongs to L3), and mark suspicious segments with a **heuristic anomaly flag**:
 
 ```json
 {
@@ -236,128 +239,126 @@ L1 只给 VAD 汇总；L2 给每次 begin/end 跳变（来自 `vad_processor.pro
   "do_sample": true, "temperature": 0.9, "repetition_penalty": 1.1, "sampling_seed": 178412,
   "audio_steps": 511, "text_tokens": 40, "audio_text_ratio": 12.8,
   "eos_reason": "kv_overflow",              // codec_eos | silence_abort | kv_overflow
-  "anomaly": ["hit_kv_512", "ratio_outlier_gt_clamp"],   // 空数组=正常
+  "anomaly": ["hit_kv_512", "ratio_outlier_gt_clamp"],   // empty array = normal
   "reason": "ran to KV cap 512 without codec EOS; ratio 12.8 > clamp 10 → likely hallucination tail"
 }
 ```
 
-`eos_reason=kv_overflow/silence_abort` + `ratio` 离群 + 命中 512，三者组合正是 [[engine-design-overview]] 记录的
-C4 幻觉/不收尾征兆。L2 把"合成为什么错"从日志考古变成一条带 `reason` 的记录。
+The combination of `eos_reason=kv_overflow/silence_abort` + an outlier `ratio` + hitting 512 is exactly the
+C4 hallucination / non-termination sign recorded in [[engine-design-overview]]. L2 turns "why synthesis went wrong" from log archaeology into a single record carrying a `reason`.
 
 ---
 
-## 6. L3 dump 日志规范（疑难杂症、原始举证）
+## 6. L3 Dump Log Specification (hard cases, raw evidence)
 
-L3 = **L2 全部决策日志** + **`EngineDebugDumper` 逐步 tensor/后验**，两者对齐。
+L3 = **all of L2's decision logs** + **`EngineDebugDumper`'s per-step tensor/post-hoc**, aligned.
 
-复用现有 `engine/backend/debug_dump.py`：`level=dump`（或单会话升 dump）时自动置位等价 `ENGINE_DUMP_DIR`，
-继承其 `.pt` payload + `timeline.jsonl`/`.tsv` 索引 + 按 session/key 过滤能力。**新增对齐**：
+Reuse the existing `engine/backend/debug_dump.py`: at `level=dump` (or when a single session escalates to dump), automatically set the equivalent `ENGINE_DUMP_DIR`,
+inheriting its `.pt` payload + `timeline.jsonl`/`.tsv` index + per-session/key filtering. **New alignment**:
 
-1. 把 §5.1 `split_decision` 决策快照写入 dump 目录（`split_decisions.jsonl`），与 tensor 同 session 目录。
-2. dump 的 `timeline.jsonl` 每行补 `sampling_seed` / `eos_check`（`full_codec[:,0]` vs `codec_eos_id`），
-   使**采样后验、CP 计算决策**与 L2 的 `segment_synthesis` 经 `dump_id`/`frame_idx` 可交叉引用。
-3. dump 入口处发一条 `obs:"dump_enabled"` lifecycle 事件（含 dir/limit/sessions），让日志能定位 dump 产物位置。
+1. Write the §5.1 `split_decision` decision snapshots into the dump directory (`split_decisions.jsonl`), in the same session directory as the tensors.
+2. Each line of the dump's `timeline.jsonl` is augmented with `sampling_seed` / `eos_check` (`full_codec[:,0]` vs `codec_eos_id`),
+   so that **sampling post-hoc and CP compute decisions** can be cross-referenced with L2's `segment_synthesis` via `dump_id`/`frame_idx`.
+3. At the dump entry point, emit one `obs:"dump_enabled"` lifecycle event (with dir/limit/sessions), so the logs can locate where the dump artifacts are.
 
-排查"模型后验为什么这样、CP 哪步翻的"时，从 L2 的 `segment_synthesis` 异常段 → 按 `session_id` 进 dump 目录 →
-逐步 logits/codec/CP stage 输出 + 同步的采样 seed，形成决策→证据闭环。
+When troubleshooting "why the model post-hoc looks like this, which step CP flipped at," go from L2's `segment_synthesis` anomaly segment → into the dump directory by `session_id` →
+per-step logits/codec/CP stage output + the synchronized sampling seed, forming a decision→evidence closed loop.
 
 ---
 
-## 7. L0 客户端自分析规范（高频问题自助）
+## 7. L0 Client Self-Analysis Specification (self-serve on high-frequency issues)
 
-客户端凭返回协议**无需后台捞日志**即可回答 L1 的大部分问题。现有 `qwen3tts.diagnostics`
-（`ServerTimingReport.explain_latency()` / `SegmentTimingReport` / `ErrorTimingReport` / `LatencyAnalyzer` / `TimelineReconstructor`）
-已覆盖时间线；**缺口**是把 §4.1 五问串成一个"先看这个"的统一入口。
+The client can answer most of L1's questions from the returned protocol **without pulling backend logs**. The existing `qwen3tts.diagnostics`
+(`ServerTimingReport.explain_latency()` / `SegmentTimingReport` / `ErrorTimingReport` / `LatencyAnalyzer` / `TimelineReconstructor`)
+already covers the timeline; the **gap** is stringing the five questions of §4.1 into a single "look at this first" entry point.
 
-新增 `SessionDiagnostics.summary()`，对齐 §4.3 服务端摘要，回答同样五问 + 给出**升级建议**：
+Add `SessionDiagnostics.summary()`, aligned with the §4.3 server summary, answering the same five questions + giving an **escalation suggestion**:
 
-| 客户端能自答 | 来源协议字段 | 答不出时升级提示 |
+| What the client can self-answer | Source protocol field | Escalation hint when it can't answer |
 |---|---|---|
-| TTFT、链路分段哪段慢 | done_meta 派生时长 | "推理段占比高 → 看服务端 L1 `session.summary`" |
-| 合成了什么 | `final_synthesized_text` / `segment_text_preview` | "段文本与预期不符 → 升 L2 看 `split_decision`" |
-| 拼没拼 batch | done_meta `batch_summary`（§4 新增进协议） | —— |
-| VAD 裁了多少 | done_meta `vad_summary` | "裁切异常 → 升 L2 看 `vad_transition`" |
-| 失败在哪个阶段 | error 事件 `error_phase` | "阶段定位后 → 升 L2/L3" |
+| TTFT, which pipeline segment is slow | done_meta derived durations | "Inference segment is a large share → check server L1 `session.summary`" |
+| What was synthesized | `final_synthesized_text` / `segment_text_preview` | "Segment text doesn't match expectations → escalate to L2 and check `split_decision`" |
+| Whether batching happened | done_meta `batch_summary` (added to the protocol in §4) | —— |
+| How much VAD trimmed | done_meta `vad_summary` | "Abnormal trimming → escalate to L2 and check `vad_transition`" |
+| Which stage a failure occurred in | error event `error_phase` | "After locating the stage → escalate to L2/L3" |
 
-**关键**：`summary()` 在答不出时**直接打印下一级排查指令**（"在服务端 grep `session=<id>` 看 L1"或"用 `obs_level=debug` 重放"），
-把升级链做成客户端可见的产品路径，而非口口相传。
+**Key**: when `summary()` cannot answer, it **directly prints the next-tier troubleshooting instruction** ("grep `session=<id>` on the server to see L1" or "replay with `obs_level=debug`"),
+making the escalation chain a client-visible product path rather than something passed on by word of mouth.
 
 ---
 
-## 8. 字段矩阵（事件 ⇄ 日志名 ⇄ 协议名 ⇄ 层级）
+## 8. Field Matrix (event ⇄ log name ⇄ protocol name ⇄ tier)
 
-> **完整指标目录见 [[observability_metrics_catalog]]**——对全引擎三路穷举扫描得到的 ~400 原始字段，
-> 折叠成 ~45 个观测点的单一真相源，是实现的逐项检查单。下表仅保留主干示例，避免与目录重复维护。
+> **The full metrics catalog is in [[observability_metrics_catalog]]** — the ~400 raw fields obtained from an exhaustive three-path scan of the whole engine,
+> folded into a single source of truth of ~45 observation points, serving as the item-by-item checklist for implementation. The table below keeps only backbone examples to avoid maintaining duplicates against the catalog.
 
-这是 `observability_goals.md §立即的下一步` 要求产出的矩阵，按本文四层补全。`现状`列：✅已有 / 🟡部分 / 🆕新增。
+This is the matrix required by `observability_goals.md §Immediate next step`, completed per this document's four tiers. The `State` column: ✅ existing / 🟡 partial / 🆕 new.
 
-| 事件/字段 | 组件 | 日志字段名 | 协议字段名 | 层 | 强/上下文 | 现状 |
+| Event/field | Component | Log field name | Protocol field name | Tier | Strong/contextual | State |
 |---|---|---|---|---|---|---|
-| 规范生命周期 7 phase | lifecycle | 各 phase | done_meta epoch 时间戳 | L1 | 强 | ✅ |
-| 规范生命周期补 11 phase | lifecycle | 各 phase | — | L1 | 强 | 🟡 补齐 |
-| TTFT 三度量 | timing | `server_*_first_raw_audio_ms` | 同名 | L1 | 强 | ✅ |
-| 链路六分段 | timing | `pipeline_ms.*` | 各派生时长 | L1 | 强/上下文 | 🟡 汇总 |
-| 合成内容 | interface | `final_synthesized_text` | 同名（受 text_capture 钳制） | L1 | 上下文 | 🟡 |
-| **batch 汇总** | engine_loop | `batch_summary` | `server_batch_summary` | L1 | 强 | 🆕 |
-| VAD 汇总 | gateway | `vad_summary` | done_meta 既有 trim 字段 | L1 | 强 | 🟡 提炼 |
-| **切分决策** | spliter | `obs:split_decision` | —（仅服务端） | L2 | —— | 🆕 |
-| **batch 组成** | engine_loop | `obs:batch_compose` | — | L2 | —— | 🆕 |
-| **VAD 跳变** | gateway/vad | `obs:vad_transition` | — | L2 | —— | 🆕 |
-| **段合成/异常** | engine_loop | `obs:segment_synthesis` | — | L2 | —— | 🆕 |
-| 逐步 tensor/logits | debug_dump | `.pt` + `timeline.jsonl` | — | L3 | —— | ✅ |
-| **dump↔决策对齐** | debug_dump | `split_decisions.jsonl` + seed/eos 字段 | — | L3 | —— | 🆕 |
-| 客户端统一摘要 | client | — | 复用上列协议字段 | L0 | —— | 🆕 |
+| Canonical lifecycle 7 phases | lifecycle | each phase | done_meta epoch timestamps | L1 | strong | ✅ |
+| Canonical lifecycle remaining 11 phases | lifecycle | each phase | — | L1 | strong | 🟡 complete |
+| TTFT three measures | timing | `server_*_first_raw_audio_ms` | same name | L1 | strong | ✅ |
+| Pipeline six segments | timing | `pipeline_ms.*` | each derived duration | L1 | strong/contextual | 🟡 aggregate |
+| Synthesized content | interface | `final_synthesized_text` | same name (clamped by text_capture) | L1 | contextual | 🟡 |
+| **batch summary** | engine_loop | `batch_summary` | `server_batch_summary` | L1 | strong | 🆕 |
+| VAD summary | gateway | `vad_summary` | done_meta existing trim fields | L1 | strong | 🟡 distill |
+| **split decision** | spliter | `obs:split_decision` | — (server-only) | L2 | —— | 🆕 |
+| **batch composition** | engine_loop | `obs:batch_compose` | — | L2 | —— | 🆕 |
+| **VAD transition** | gateway/vad | `obs:vad_transition` | — | L2 | —— | 🆕 |
+| **segment synthesis / anomaly** | engine_loop | `obs:segment_synthesis` | — | L2 | —— | 🆕 |
+| Per-step tensor/logits | debug_dump | `.pt` + `timeline.jsonl` | — | L3 | —— | ✅ |
+| **dump↔decision alignment** | debug_dump | `split_decisions.jsonl` + seed/eos fields | — | L3 | —— | 🆕 |
+| Client unified summary | client | — | reuses the protocol fields listed above | L0 | —— | 🆕 |
 
 ---
 
-## 9. 与现有代码的映射（改造点）
+## 9. Mapping to Existing Code (rework points)
 
-| 关注点 | 文件 | 改造 |
+| Concern | File | Rework |
 |---|---|---|
-| 级别旋钮 | `engine/config.py` + `engine.yaml` | 新增 `observability` 段、`ENGINE_OBS_LEVEL` 解析、优先级合并 |
-| 日志初始化 | `engine/server.py:1060` | `basicConfig` 级别由 `observability.level` 驱动，不再硬编码 INFO |
-| 级别 gating | `engine/core/lifecycle.py` | `emit` 增 `min_level`，低于生效档 no-op |
-| 单会话档 | `engine/core/types.py` (`SessionConfig`) | 新增 `observability_level`，§3.2 解析 + §3.3 钳制 |
-| L1 摘要 | `engine/frontend/interface.py` | `session.summary`/`session.completed` 聚合发射 |
-| batch 观测 | `engine/backend/engine_loop.py` | `_try_prefill_*` / `_get_active_slots_mlfq` 记 L1 汇总 + L2 `batch_compose` |
-| 切分决策 | `engine/frontend/spliter/spliter.py` | `pre_split` / driver 切点处记 L2 `split_decision`（阈值已在 `_make_thresholds`） |
-| 段合成 | `engine/backend/engine_loop.py` | `_handle_segment_eos` 记 L2 `segment_synthesis` + 异常启发式 |
-| VAD 观测 | `engine/gateway/grpc_server.py` | `_inject_vad_metrics` 提炼 L1 `vad_summary`；`process_chunk` 记 L2 `vad_transition` |
-| dump 对齐 | `engine/backend/debug_dump.py` | level=dump 自动启用；timeline 补 seed/eos；写 `split_decisions.jsonl` |
-| 客户端摘要 | `client/src/qwen3tts/diagnostics.py` | `SessionDiagnostics.summary()` + 升级提示 |
+| Level knob | `engine/config.py` + `engine.yaml` | Add the `observability` section, `ENGINE_OBS_LEVEL` parsing, priority merge |
+| Log initialization | `engine/server.py:1060` | The `basicConfig` level is driven by `observability.level`, no longer hardcoded to INFO |
+| Level gating | `engine/core/lifecycle.py` | `emit` gains `min_level`, no-op below the effective tier |
+| Per-session tier | `engine/core/types.py` (`SessionConfig`) | Add `observability_level`, §3.2 parsing + §3.3 clamping |
+| L1 summary | `engine/frontend/interface.py` | Aggregate and emit `session.summary`/`session.completed` |
+| batch observation | `engine/backend/engine_loop.py` | `_try_prefill_*` / `_get_active_slots_mlfq` record the L1 summary + L2 `batch_compose` |
+| split decision | `engine/frontend/spliter/spliter.py` | Record L2 `split_decision` at the `pre_split` / driver split points (thresholds are already in `_make_thresholds`) |
+| segment synthesis | `engine/backend/engine_loop.py` | `_handle_segment_eos` records L2 `segment_synthesis` + the anomaly heuristic |
+| VAD observation | `engine/gateway/grpc_server.py` | `_inject_vad_metrics` distills the L1 `vad_summary`; `process_chunk` records L2 `vad_transition` |
+| dump alignment | `engine/backend/debug_dump.py` | level=dump auto-enables; timeline gains seed/eos; write `split_decisions.jsonl` |
+| Client summary | `client/src/qwen3tts/diagnostics.py` | `SessionDiagnostics.summary()` + escalation hints |
 
 ---
 
-## 10. 分阶段推行
+## 10. Phased Rollout
 
-| 阶段 | 内容 | 产出 |
+| Phase | Content | Output |
 |---|---|---|
-| **P0 控制面** | `observability` 配置段 + 级别旋钮 + 优先级 + 单会话钳制 + lifecycle `min_level` gating | 一个旋钮统管三档，生产可定点升级 |
-| **P1 L1 日常** | 补齐生命周期事件 + `session.summary` 摘要 + `batch_summary` + `vad_summary` 提炼 + 同步进协议 | 五个日常问题各有一行可 grep；客户端拿到同名字段 |
-| **P2 L0 客户端** | `SessionDiagnostics.summary()` + 升级提示 | 高频问题客户端自助，升级链入口可见 |
-| **P3 L2 debug** | `split_decision` / `batch_compose` / `vad_transition` / `segment_synthesis` | 偶发疑难有"为什么"，三问可答 |
-| **P4 L3 dump 对齐** | dump 自动启用 + 决策日志对齐 + seed/eos 字段 | 决策→tensor 证据闭环 |
+| **P0 Control plane** | `observability` config section + level knob + priority + per-session clamping + lifecycle `min_level` gating | One knob governs all three tiers; production can escalate in a targeted way |
+| **P1 L1 daily** | Complete the lifecycle events + `session.summary` summary + `batch_summary` + `vad_summary` distillation + sync into the protocol | Each of the five daily questions has a greppable line; the client gets the same-named fields |
+| **P2 L0 client** | `SessionDiagnostics.summary()` + escalation hints | High-frequency issues are self-served by the client; the escalation-chain entry point is visible |
+| **P3 L2 debug** | `split_decision` / `batch_compose` / `vad_transition` / `segment_synthesis` | Rare issues get a "why"; the three questions are answerable |
+| **P4 L3 dump alignment** | dump auto-enable + decision-log alignment + seed/eos fields | Decision→tensor evidence closed loop |
 
-P0→P1→P2 是排查链的"高频半边"，优先级最高；P3→P4 是"疑难半边"，在前两段稳定后接入。
-
----
-
-## 11. 验收标准
-
-1. **一个旋钮**（config/env/单会话）即可在 daily/debug/dump 间切换，生产默认 daily 且客户端无法越权升级。
-2. **L1 常开下**，一条 `session.summary` + 一行人读摘要即回答 TTFT/链路/合成内容/batch/VAD 五问，无需跨文件对齐时间戳。
-3. **L0 客户端**仅凭协议回答上述五问的大部分，并在答不出时打印明确的升级指令。
-4. **L2** 下，"子句为什么这么切"由一条 `split_decision` 给出阈值+水位+理由；"合成为什么错"由 `segment_synthesis` 的 `eos_reason`+`anomaly`+`reason` 给出。
-5. **L3** 下，L2 决策记录与 tensor dump 经 `session_id`/`dump_id`/`frame_idx` 可交叉引用，形成决策→证据闭环。
-6. 字段名稳定，可作为协议契约一部分（沿用 `observability_goals.md` 命名）。
+P0→P1→P2 is the "high-frequency half" of the troubleshooting chain and has the highest priority; P3→P4 is the "hard-case half," wired in after the first two are stable.
 
 ---
 
-## 12. 非目标
+## 11. Acceptance Criteria
 
-- 不引入 OpenTelemetry / Prometheus（语义稳定后再议，沿用 `observability_goals §非目标`）。
-- 不保证客户端与服务端全局时钟同步。
-- L3 不追求实时——它是离线举证工具，体量大、单开。
-- 不做 UI 仪表盘。
-</content>
-</invoke>
+1. **One knob** (config/env/per-session) can switch between daily/debug/dump, with production defaulting to daily and the client unable to escalate beyond its permissions.
+2. **With L1 always on**, one `session.summary` + one human-readable summary line answers the five questions of TTFT/pipeline/synthesized content/batch/VAD, without cross-file timestamp alignment.
+3. **The L0 client** answers most of the above five questions from the protocol alone, and prints an explicit escalation instruction when it can't.
+4. **Under L2**, "why the clause was split this way" is given by a single `split_decision` with thresholds + watermark + reason; "why synthesis went wrong" is given by `segment_synthesis`'s `eos_reason`+`anomaly`+`reason`.
+5. **Under L3**, L2 decision records and the tensor dump can be cross-referenced via `session_id`/`dump_id`/`frame_idx`, forming a decision→evidence closed loop.
+6. Field names are stable and can be part of the protocol contract (following the `observability_goals.md` naming).
+
+---
+
+## 12. Non-Goals
+
+- Do not introduce OpenTelemetry / Prometheus (to be revisited once the semantics are stable, following `observability_goals §Non-Goals`).
+- Do not guarantee global clock synchronization between client and server.
+- L3 does not aim for real time — it is an offline evidence tool, large in volume and enabled per case.
+- No UI dashboard.

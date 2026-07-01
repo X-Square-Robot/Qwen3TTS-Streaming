@@ -1,31 +1,33 @@
-# 获取帮助
+**English** | [中文](SUPPORT.zh-CN.md)
 
-感谢使用 Qwen3TTS-Streaming！请根据问题类型选择合适的渠道。
+# Getting Help
 
-## 先看文档
+Thank you for using Qwen3TTS-Streaming! Please choose the appropriate channel based on the type of question.
 
-- [README](README.md) —— 项目概览与快速开始
-- [用户文档](docs/user/README.md) —— 部署、SDK、Benchmark、已知限制
-- [部署指南](docs/user/deployment.md) —— 编译、组装、起服务的完整流程
-- [已知限制](docs/user/known_limitations.md) —— **流式质量、变体支持状态等已知现象**
-- [CONTRIBUTING](CONTRIBUTING.md) —— 开发环境与贡献流程
+## Check the Docs First
 
-## 选择渠道
+- [README](README.md) — project overview and quick start
+- [User Documentation](docs/user/README.md) — deployment, SDK, benchmark, known limitations
+- [Deployment Guide](docs/user/deployment.md) — the full flow of build, assemble, and start the service
+- [Known Limitations](docs/user/known_limitations.md) — **known phenomena such as streaming quality and variant support status**
+- [CONTRIBUTING](CONTRIBUTING.md) — development environment and contribution workflow
 
-| 你的情况 | 去哪里 |
-|----------|--------|
-| 使用问题、部署疑问、想法交流 | [GitHub Discussions](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/discussions) |
-| 可复现的 Bug | [提交 Bug issue](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/issues/new?template=bug_report.yml) |
-| 功能 / 改进建议 | [提交 Feature issue](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/issues/new?template=feature_request.yml) |
-| 安全漏洞 | 私密报告，见 [SECURITY.md](SECURITY.md)（**勿公开提交**） |
-| 模型 / 推理质量本身的问题 | 上游 [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) |
+## Choose a Channel
 
-## 提问小贴士
+| Your situation | Where to go |
+|----------------|-------------|
+| Usage questions, deployment questions, idea exchange | [GitHub Discussions](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/discussions) |
+| A reproducible bug | [File a Bug issue](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/issues/new?template=bug_report.yml) |
+| Feature / improvement suggestions | [File a Feature issue](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/issues/new?template=feature_request.yml) |
+| Security vulnerabilities | Report privately, see [SECURITY.md](SECURITY.md) (**do not file publicly**) |
+| Issues with the model / inference quality itself | Upstream [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) |
 
-提问时附上以下信息能让我们更快帮到你：
+## Tips for Asking
 
-- 使用的 variant（如 `custom-1.7b`）、gateway（standalone / triton / engine）与 engine-mode；
-- GPU 型号、驱动 / CUDA 版本、NGC 容器版本、commit hash；
-- 复现命令与相关日志（请删除敏感信息）。
+Including the following information when you ask lets us help you faster:
 
-> ⚠️ 本项目为 **v0.1 工程预览**，流式模式仍可能出现幻觉/重复/漏读，不建议用于生产。这类已知现象见上文「已知限制」，通常无需单独报告。
+- The variant you use (e.g. `custom-1.7b`), the gateway (standalone / triton / engine), and the engine-mode;
+- GPU model, driver / CUDA version, NGC container version, commit hash;
+- The reproduction command and relevant logs (please remove sensitive information).
+
+> ⚠️ This project is a **v0.1 engineering preview**; streaming mode may still exhibit hallucination/repetition/dropped reading, and is not recommended for production. Such known phenomena are covered in "Known Limitations" above and usually do not need to be reported separately.

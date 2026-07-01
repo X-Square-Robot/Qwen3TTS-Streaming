@@ -1,3 +1,5 @@
+**English** | [中文](README.zh-CN.md)
+
 # WebUI — Qwen3-TTS Demo Frontend
 
 Vite + React frontend for the Qwen3-TTS demo application.

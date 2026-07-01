@@ -1,32 +1,34 @@
-# Qwen3-TTS 时序指标参考
+**English** | [中文](timing_metrics.zh-CN.md)
 
-本文档列出了 Qwen3-TTS 引擎暴露的所有时序指标，
-及其精确语义定义。
+# Qwen3-TTS Timing Metrics Reference
 
-> 从 `engine/core/timing_semantics.py` 自动生成。
+This document lists all timing metrics exposed by the Qwen3-TTS engine,
+together with their precise semantic definitions.
 
-## 标准生命周期阶段
+> Auto-generated from `engine/core/timing_semantics.py`.
 
-| # | 阶段名称 | 组件 | 描述 |
+## Standard Lifecycle Stages
+
+| # | Stage name | Component | Description |
 |---|-----------|-----------|-------------|
-| 1 | `request.accepted` | Gateway | Gateway 接收请求 |
-| 2 | `session.config.validated` | Frontend | 配置验证完成 |
-| 3 | `session.created` | Frontend | Session 对象创建 |
-| 4 | `session.registered` | Backend | Session 注册到后端 |
-| 5 | `text.first_received` | Gateway | 首个文本到达 gateway/worker |
-| 6 | `text.first_sent` | Frontend | 首个文本发往引擎 |
-| 7 | `text.first_enqueued` | Frontend | 首个文本入队到引擎收件箱 |
-| 8 | `text.first_dequeued` | Engine thread | 首个文本被引擎线程出队 |
-| 9 | `engine.prefill.started` | Engine thread | Prefill 开始 |
-| 10 | `engine.prefill.completed` | Engine thread | Prefill 完成 |
-| 11 | `engine.decode.first_step` | Engine thread | 首个 decode 步骤开始 |
-| 12 | `engine.audio.first_raw` | Engine thread | 首个原始音频产生 |
-| 13 | `output.audio.first_effective` | Output pipeline | 首个有效音频发布 |
-| 14 | `session.completed` | Frontend | Session 完成 |
+| 1 | `request.accepted` | Gateway | The gateway accepts the request |
+| 2 | `session.config.validated` | Frontend | Config validation completed |
+| 3 | `session.created` | Frontend | The session object is created |
+| 4 | `session.registered` | Backend | The session is registered with the backend |
+| 5 | `text.first_received` | Gateway | The first text arrives at the gateway/worker |
+| 6 | `text.first_sent` | Frontend | The first text is sent to the engine |
+| 7 | `text.first_enqueued` | Frontend | The first text is enqueued to the engine inbox |
+| 8 | `text.first_dequeued` | Engine thread | The first text is dequeued by the engine thread |
+| 9 | `engine.prefill.started` | Engine thread | Prefill starts |
+| 10 | `engine.prefill.completed` | Engine thread | Prefill completes |
+| 11 | `engine.decode.first_step` | Engine thread | The first decode step starts |
+| 12 | `engine.audio.first_raw` | Engine thread | The first raw audio is produced |
+| 13 | `output.audio.first_effective` | Output pipeline | The first effective audio is published |
+| 14 | `session.completed` | Frontend | The session completes |
 
-## 原始时间戳指标（服务器单调时钟）
+## Raw Timestamp Metrics (Server Monotonic Clock)
 
-| 指标名称 | 阶段 | 分类 |
+| Metric name | Stage | Category |
 |-------------|-------|----------------|
 | `server_session_created_monotonic` | session.created | strong |
 | `server_first_text_enqueued_monotonic` | text.first_enqueued | strong |
@@ -36,9 +38,9 @@
 | `server_first_raw_audio_monotonic` | engine.audio.first_raw | strong |
 | `server_first_effective_audio_monotonic` | output.audio.first_effective | strong |
 
-## Epoch 时间戳指标（协议层）
+## Epoch Timestamp Metrics (Protocol Layer)
 
-| 指标名称 | 阶段 | 分类 |
+| Metric name | Stage | Category |
 |-------------|-------|----------------|
 | `server_request_received_epoch_ms` | request.accepted | contextual |
 | `server_session_created_epoch_ms` | session.created | strong |
@@ -51,9 +53,9 @@
 | `server_first_effective_audio_epoch_ms` | output.audio.first_effective | strong |
 | `server_done_epoch_ms` | session.completed | strong |
 
-## 派生时长指标
+## Derived Duration Metrics
 
-| 指标名称 | 起始事件 | 结束事件 | 分类 | 已弃用别名 |
+| Metric name | Start event | End event | Category | Deprecated alias |
 |-------------|-------------|-----------|----------------|------------------|
 | `session_create_to_first_raw_audio_ms` | session.created | engine.audio.first_raw | strong | `first_audio_latency_ms` |
 | `session_create_to_first_effective_audio_ms` | session.created | output.audio.first_effective | strong | |
@@ -66,31 +68,31 @@
 | `first_raw_to_first_effective_audio_ms` | engine.audio.first_raw | output.audio.first_effective | strong | |
 | `total_latency_ms` | request.accepted | session.completed | strong | `server_total_latency_ms` |
 
-## 上下文（跨域）指标
+## Contextual (Cross-domain) Metrics
 
-| 指标名称 | 描述 |
+| Metric name | Description |
 |-------------|-------------|
-| `client_request_to_server_first_audio_ms` | 客户端请求 → 服务器首个有效音频（跨时钟） |
-| `client_request_to_server_first_raw_audio_ms` | 客户端请求 → 服务器首个原始音频（跨时钟） |
+| `client_request_to_server_first_audio_ms` | Client request → server first effective audio (cross-clock) |
+| `client_request_to_server_first_raw_audio_ms` | Client request → server first raw audio (cross-clock) |
 
-## 延迟分解
+## Latency Breakdown
 
-给定一个慢请求，可以计算以下延迟组成：
+For a given slow request, the following latency components can be computed:
 
-| 组件 | 计算方式 |
+| Component | Computation |
 |-----------|-------------|
-| Session 创建延迟 | request.accepted → session.created |
-| 文本入站延迟 | text.first_received → text.first_enqueued |
-| 引擎队列等待 | text.first_enqueued → text.first_dequeued |
-| 推理延迟 | text.first_dequeued → engine.audio.first_raw |
-| 门控延迟 | engine.audio.first_raw → output.audio.first_effective |
-| 传输延迟 | 客户端时间戳 − 服务器时间戳（上下文相关） |
+| Session creation latency | request.accepted → session.created |
+| Text inbound latency | text.first_received → text.first_enqueued |
+| Engine queue wait | text.first_enqueued → text.first_dequeued |
+| Inference latency | text.first_dequeued → engine.audio.first_raw |
+| Gating latency | engine.audio.first_raw → output.audio.first_effective |
+| Transport latency | client timestamp − server timestamp (contextual) |
 
-## 已弃用名称
+## Deprecated Names
 
-| 旧名称 | 新名称 | 说明 |
+| Old name | New name | Note |
 |----------|----------|-------|
-| `first_audio_latency_ms` | `session_create_to_first_raw_audio_ms` | 起始点不明确 |
-| `server_ttft_ms` | `server_ttft_effective_ms` / `server_ttft_raw_ms` | 混淆原始/有效音频 |
-| `server_first_audio_epoch_ms` | `server_first_effective_audio_epoch_ms` | 混淆原始/有效音频 |
-| `server_total_latency_ms` | `total_latency_ms` | 命名一致性 |
+| `first_audio_latency_ms` | `session_create_to_first_raw_audio_ms` | The start point was ambiguous |
+| `server_ttft_ms` | `server_ttft_effective_ms` / `server_ttft_raw_ms` | Conflated raw/effective audio |
+| `server_first_audio_epoch_ms` | `server_first_effective_audio_epoch_ms` | Conflated raw/effective audio |
+| `server_total_latency_ms` | `total_latency_ms` | Naming consistency |

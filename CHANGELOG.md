@@ -1,38 +1,40 @@
+**English** | [中文](CHANGELOG.zh-CN.md)
+
 # Changelog
 
-本项目的所有重要变更都会记录在此文件中。
+All notable changes to this project will be documented in this file.
 
-格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
-版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.1.0] —— 工程预览
+## [0.1.0] — Engineering Preview
 
-> ⚠️ **v0.1 工程预览**：流式模式仍可能出现幻觉/重复/漏读，不建议用于生产。
-> 推荐路径为 `custom-1.7b` / `custom_voice`，其他变体为实验状态。详见
-> [已知限制](docs/user/known_limitations.md)。
+> ⚠️ **v0.1 engineering preview**: streaming mode may still exhibit hallucination/repetition/dropped reading, and is not recommended for production.
+> The recommended path is `custom-1.7b` / `custom_voice`; other variants are experimental. See
+> [Known Limitations](docs/user/known_limitations.md) for details.
 
 ### Added
 
-- **流式 TTS 推理系统**：将官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运行时，
-  围绕 Triton Inference Server / standalone engine 实现流式推理。
-- **推理引擎**（`engine/`）：frontend 前端分词、backend 推理、gateway 网关、core 调度，
-  含 prefix cache 与连续批处理。
-- **生命周期编排**（`scripts/bash/`）：`autorun.sh` 全流程 / 分阶段（setup → build →
-  package → deploy），支持跨机编译（probe-target / make-bundle / import-artifact /
-  remote-build）与分子模块混合精度 TRT 编译。
-- **Python 客户端 SDK**（`client/`，`qwen3-tts-client`）：含共享协议层与传输适配器。
-- **WebUI Demo**：aiohttp 后端（`demo_api/`）+ Vite/React 前端（`webui/`）。
-- **协议单一真相源**（`proto/tts.proto`）：`make proto` 生成、`make proto-sync` 同步。
-- **文档**：用户文档（部署、SDK、Benchmark、限制）、开发者文档（架构、设计、调查、运维）。
+- **Streaming TTS inference system**: exports the official Qwen3-TTS PyTorch weights into an ONNX/TensorRT runtime and
+  implements streaming inference around a Triton Inference Server / standalone engine.
+- **Inference engine** (`engine/`): frontend segmentation, backend inference, gateway, and core scheduling,
+  including prefix cache and continuous batching.
+- **Lifecycle orchestration** (`scripts/bash/`): `autorun.sh` full pipeline / per-phase (setup → build →
+  package → deploy), with support for cross-host builds (probe-target / make-bundle / import-artifact /
+  remote-build) and per-submodule mixed-precision TRT builds.
+- **Python client SDK** (`client/`, `qwen3-tts-client`): includes the shared protocol layer and transport adapters.
+- **WebUI Demo**: an aiohttp backend (`demo_api/`) + a Vite/React frontend (`webui/`).
+- **Protocol single source of truth** (`proto/tts.proto`): generated with `make proto`, synced with `make proto-sync`.
+- **Documentation**: user documentation (deployment, SDK, benchmark, limitations) and developer documentation (architecture, design, investigation, operations).
 
 ### Notes
 
-- 自有代码以 [MIT](LICENSE) 许可证发布，版权归 XSquareRobot；上游 Qwen3-TTS
-  （`third_party/` 子模块）为 Apache-2.0。
-- 模型权重经 ModelScope/HF 获取，不随仓库分发；TensorRT/Triton 不打包（NVIDIA EULA）。
-- `resources/speakers/` 参考音频为合成音 + 假名，无真人录音或个人信息（见 [NOTICE](NOTICE)）。
+- The project's own code is released under the [MIT](LICENSE) license, copyright XSquareRobot; upstream Qwen3-TTS
+  (the `third_party/` submodule) is Apache-2.0.
+- Model weights are obtained via ModelScope/HF and are not distributed with the repository; TensorRT/Triton are not bundled (NVIDIA EULA).
+- The reference audio under `resources/speakers/` is synthetic audio with fictional names, containing no real recordings or personal information (see [NOTICE](NOTICE)).
 
 [Unreleased]: https://github.com/X-Square-Robot/Qwen3TTS-Streaming/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases/tag/v0.1.0

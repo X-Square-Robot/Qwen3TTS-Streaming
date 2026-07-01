@@ -1,3 +1,5 @@
+**English** | [中文](README.zh-CN.md)
+
 # Script Guide
 
 ## Where To Start

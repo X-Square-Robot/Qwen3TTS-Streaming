@@ -1,12 +1,14 @@
-# 用户文档
+**English** | [中文](README.zh-CN.md)
 
-> 面向所有使用 Qwen3TTS-Streaming 的人
+# User Documentation
 
-| 文档 | 说明 |
+> For everyone who uses Qwen3TTS-Streaming
+
+| Document | Description |
 |------|------|
-| [部署指南](deployment.md) | standalone / engine-docker / Triton 三种部署方式的详细参数和配置 |
-| [Client SDK](client_sdk.md) | Python SDK 安装、快速使用、流式 session、传输选择 |
-| [Benchmark 方法](benchmark_methodology.md) | 性能数字的口径定义、硬件条件、测量方式 |
-| [已知限制](known_limitations.md) | 当前版本的已知问题和实验路径状态 |
+| [Deployment Guide](deployment.md) | Detailed parameters and configuration for the three deployment modes: standalone / engine-docker / Triton |
+| [Client SDK](client_sdk.md) | Python SDK installation, quick start, streaming session, transport selection |
+| [Benchmark Methodology](benchmark_methodology.md) | Definitions of performance numbers, hardware conditions, and measurement methods |
+| [Known Limitations](known_limitations.md) | Known issues and the status of experimental paths in the current release |
 
-开发者和贡献者请看 [开发者文档](../dev/)。
+Developers and contributors should see the [Developer Documentation](../dev/).

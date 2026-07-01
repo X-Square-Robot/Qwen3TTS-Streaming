@@ -1,91 +1,93 @@
-# 路线图
+**English** | [中文](roadmap.zh-CN.md)
 
-目标：把当前高性能工程原型演进为可信、可复现、可协作的高质量开源项目。
+# Roadmap
 
-## v0.1: 工程预览版
+Goal: evolve the current high-performance engineering prototype into a trustworthy, reproducible, collaboration-friendly, high-quality open-source project.
 
-范围：
+## v0.1: Engineering Preview
 
-- `custom-1.7b` / `custom_voice` 作为唯一推荐稳定路径。
-- README、WebUI、demo API 明确工程预览版定位。
-- benchmark 只发布带完整条件的数字。
-- autorun/build/deploy 打通 max batch、max input len、max seq len、dtype、engine mode。
-- manifest 记录 engine profile，runtime 启动前校验 profile 上限。
-- WebUI 支持 fixture/live 来源区分和风险提示。
-- 中文文档齐全。
+Scope:
 
-退出标准：
+- `custom-1.7b` / `custom_voice` as the only recommended stable path.
+- README, WebUI, and demo API clearly state the engineering preview positioning.
+- Only publish benchmark numbers that carry complete conditions.
+- autorun/build/deploy wire up max batch, max input len, max seq len, dtype, and engine mode.
+- The manifest records the engine profile, and the runtime validates the profile limits before startup.
+- The WebUI supports fixture/live source differentiation and risk notices.
+- Complete Chinese documentation.
 
-- `custom-1.7b` 完成最小端到端验收。
-- 关键脚本 `bash -n` 通过。
-- Python 单测通过或已记录阻塞原因。
-- WebUI 能构建。
-- README 不再宣传未测通路径为稳定可用。
+Exit criteria:
 
-## v0.2: 稳定性专项
+- `custom-1.7b` passes minimal end-to-end acceptance.
+- Key scripts pass `bash -n`.
+- Python unit tests pass, or blocking reasons are recorded.
+- The WebUI builds.
+- The README no longer advertises untested paths as stable and ready to use.
 
-重点：
+## v0.2: Stability Focus
 
-- 系统性定位流式幻觉、重复、漏读、插入内容问题。
-- 建立文本集合：短句、长句、数字、英文、中英混排、标点密集、长段落。
-- 增加音频质量回归测试和人工验收表。
-- 改进 spliter、EOS/pad、cache、采样默认值。
-- 把失败案例沉淀到 `docs/streaming_hallucination_investigation.md` 或新的中文文档。
+Focus:
 
-退出标准：
+- Systematically locate streaming hallucination, repetition, dropped reading, and inserted content issues.
+- Build a text corpus: short sentences, long sentences, numbers, English, mixed Chinese-English, punctuation-dense text, and long paragraphs.
+- Add audio quality regression tests and a manual acceptance sheet.
+- Improve spliter, EOS/pad, cache, and sampling defaults.
+- Distill failure cases into `docs/streaming_hallucination_investigation.md` or a new Chinese document.
 
-- 公开一组稳定性测试集。
-- 每次 release 都能给出已知问题和复现输入。
-- 默认参数下严重幻觉/重复概率显著降低。
+Exit criteria:
 
-## v0.3: base / ICL 语音克隆
+- Publish a set of stability test cases.
+- Every release can provide known issues and reproduction inputs.
+- The probability of severe hallucination/repetition under default parameters is significantly reduced.
 
-重点：
+## v0.3: base / ICL Voice Cloning
 
-- 完成 ref audio preprocessing。
-- 打通 speaker embedding、ref codes、ref codec sum vec 到 prefill/build plan。
-- 区分 x-vector clone 和 ICL clone 的请求协议。
-- 增加 base/ICL 端到端测试。
-- WebUI 增加参考音频上传和 ref text 输入，但默认仍标注实验状态。
+Focus:
 
-退出标准：
+- Complete ref audio preprocessing.
+- Wire up speaker embedding, ref codes, and ref codec sum vec into the prefill/build plan.
+- Distinguish the request protocols for x-vector clone and ICL clone.
+- Add base/ICL end-to-end tests.
+- Add reference audio upload and ref text input to the WebUI, but still mark it experimental by default.
 
-- base voice clone 可跑通真实 ref audio。
-- ICL voice clone 可跑通 ref audio + ref text。
-- 错误提示能清楚说明缺失字段或未启用能力。
+Exit criteria:
+
+- base voice clone can run through with real ref audio.
+- ICL voice clone can run through with ref audio + ref text.
+- Error messages clearly explain missing fields or capabilities that are not enabled.
 
 ## v0.4: voice design
 
-重点：
+Focus:
 
-- 完整验证 `design-1.7b`。
-- 梳理 instruct 字段、speaker 字段和 custom voice 的互斥关系。
-- 建立 voice design 示例集。
-- 明确它和 custom voice 的质量边界。
+- Fully validate `design-1.7b`.
+- Sort out the mutual exclusivity between the instruct field, the speaker field, and custom voice.
+- Build a voice design example set.
+- Clarify its quality boundary relative to custom voice.
 
-退出标准：
+Exit criteria:
 
-- voice design 有独立 demo 和测试输入。
-- README 可以从“实验路径”升级为“可试用路径”。
+- voice design has its own demo and test inputs.
+- The README can upgrade it from an "experimental path" to a "usable path".
 
-## v0.5: 部署与可维护性
+## v0.5: Deployment and Maintainability
 
-重点：
+Focus:
 
-- 优化 engine Docker 的环境层/代码层体验。
-- 补 K8s/Helm 或 production compose 示例。
-- 增加健康检查、限流、日志、metrics、trace id。
-- 完善 CI：Python 单测、manifest schema 校验、bash 语法、WebUI build。
-- 发布版本化 artifact 和 release note。
+- Optimize the environment-layer/code-layer experience of engine Docker.
+- Add K8s/Helm or production compose examples.
+- Add health checks, rate limiting, logging, metrics, and trace ids.
+- Improve CI: Python unit tests, manifest schema validation, bash syntax, WebUI build.
+- Publish versioned artifacts and release notes.
 
-退出标准：
+Exit criteria:
 
-- 开发期不需要因普通代码改动重建依赖镜像。
-- CI 能阻止 README 口径、manifest schema、WebUI 类型错误和核心单测回归。
+- Development no longer requires rebuilding the dependency image for ordinary code changes.
+- CI can block README convention, manifest schema, WebUI type errors, and core unit test regressions.
 
-## 英文文档
+## English Documentation
 
-英文版不作为当前阶段优先项。中文 README 和 docs 稳定后，再翻译：
+The English version is not a priority for the current phase. Once the Chinese README and docs stabilize, translate:
 
 - README
 - known limitations
@@ -93,4 +95,4 @@
 - benchmark methodology
 - roadmap
 
-翻译时不能弱化风险提示，也不能把实验路径写成稳定能力。
+When translating, do not weaken the risk notices, and do not present experimental paths as stable capabilities.

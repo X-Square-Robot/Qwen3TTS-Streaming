@@ -1,20 +1,22 @@
-# 流式幻觉调查总结
+**English** | [中文](streaming_hallucination.zh-CN.md)
 
-## 范围
+# Streaming Hallucination Investigation Summary
 
-本文档总结了开发分支中流式/采样幻觉问题的调查背景。
+## Scope
 
-调查重点：
-- 比较我们的本地引擎链与官方本地模型行为
-- 确定问题是否由以下原因导致：
-  1. 官方流式+采样参数在长段上不稳定，或
-  2. 我们的链计算了错误的展开状态 / 错误的分布
+This document summarizes the investigation background for the streaming/sampling hallucination issue in the development branch.
 
-## 迄今为止的高级发现
+Investigation focus:
+- Compare our local engine chain against the official local model behavior
+- Determine whether the issue is caused by:
+  1. Official streaming + sampling parameters being unstable on long segments, or
+  2. Our chain computing the wrong rollout state / wrong distribution
 
-### 1. 官方仓库高级流式路径在长段上本身就不稳定
+## High-Level Findings So Far
 
-使用本地官方模型（`Qwen3TTSForConditionalGeneration.generate`），参数为：
+### 1. The official repo's high-level streaming path is inherently unstable on long segments
+
+Using the local official model (`Qwen3TTSForConditionalGeneration.generate`) with the parameters:
 - `non_streaming_mode=False`
 - `do_sample=True`
 - `subtalker_dosample=True`
@@ -23,42 +25,42 @@
 - `temperature=0.9`
 - `repetition_penalty=1.05`
 
-在代表性段落上观察到：
-- 短段：无 EOS（`eos_step = -1`）
-- 中段：无 EOS
-- 长 4a 段：无 EOS
+On representative segments we observed:
+- Short segment: no EOS (`eos_step = -1`)
+- Medium segment: no EOS
+- Long 4a segment: no EOS
 
-这是证据表明官方仓库当前的流式+采样路径在长段上本身不稳定/不能自然终止。
+This is evidence that the official repo's current streaming + sampling path is inherently unstable / unable to terminate naturally on long segments.
 
-修复后在真实 4a 长段（`LONG_TEXT`）上使用 `scripts/python/official_vs_manual_rollout.py` 重新检查：
-- `max_steps=256`，`seed=1234`：`trailing_len=80`，`official_len=255`，`manual_len=256`，`first_divergence=-1`
-- `max_steps=256`，`seed=2025`：`trailing_len=80`，`official_len=255`，`manual_len=256`，`first_divergence=-1`
+After the fix, re-checked on the real 4a long segment (`LONG_TEXT`) using `scripts/python/official_vs_manual_rollout.py`:
+- `max_steps=256`, `seed=1234`: `trailing_len=80`, `official_len=255`, `manual_len=256`, `first_divergence=-1`
+- `max_steps=256`, `seed=2025`: `trailing_len=80`, `official_len=255`, `manual_len=256`, `first_divergence=-1`
 
-解读：
-- 修复引擎端特殊嵌入 bug 后，手动链现在在此长段上跟踪官方采样展开
-- 但官方采样路径在测试的 256 步预算内仍不发射 EOS，因此长段不稳定不能通过剩余引擎展开不匹配来解释
+Interpretation:
+- After fixing the engine-side special-embedding bug, the manual chain now tracks the official sampling rollout on this long segment
+- But the official sampling path still does not emit EOS within the tested 256-step budget, so the long-segment instability cannot be explained by residual engine rollout mismatch
 
-### 2. CP 展开与官方缓存 CP 不是流形输入上的主要问题
+### 2. CP unrolling vs official cached CP is not the primary problem on manifold inputs
 
-实验：`scripts/python/cp_sampled_parity.py`
+Experiment: `scripts/python/cp_sampled_parity.py`
 
-在真实 prefill 派生的流形状态上比较：
-- 官方 `cp.generate(...)`
-- 我们的 `CodePredictorUnrolled(...)`
+On real prefill-derived manifold states, compared:
+- Official `cp.generate(...)`
+- Our `CodePredictorUnrolled(...)`
 
-在代表性短段上的结果：
-- greedy：精确匹配
-- 采样（20 次试验）：20/20 完整序列精确匹配
+Results on a representative short segment:
+- greedy: exact match
+- sampling (20 trials): 20/20 full sequences exact match
 
-这强烈表明 **展开 CP 与缓存 CP 不是观察到的不稳定性的主要来源**，至少对于测试的采样短段情况。
+This strongly suggests that **unrolled CP vs cached CP is not the primary source of the observed instability**, at least for the tested sampled short-segment case.
 
-### 3. 精确手动分解与官方 `talker.generate()` 输入匹配
+### 3. Exact manual decomposition matches the official `talker.generate()` inputs
 
-实验：
+Experiments:
 - `scripts/python/trace_official_streaming.py`
 - `scripts/python/replay_official_talker_stepwise.py`
 
-使用官方 `generate()` 传递给 `talker.forward()` 的确切 kwargs：
+Using the exact kwargs that official `generate()` passes to `talker.forward()`:
 - `input_ids`
 - `attention_mask`
 - `position_ids`
@@ -67,806 +69,711 @@
 - `trailing_text_hidden`
 - `tts_pad_embed`
 
-在文本 `人工智能正在深刻改变我们的世界。` 上观察到：
-- prefill logits：精确匹配
-- decode step0 CP `codec_ids`：精确匹配
-- decode step1 CP `codec_ids`：精确匹配
-- decode step2 CP `codec_ids`：精确匹配
-- talker logits / `past_hidden`：测试步骤上最大差异 `0.0`
+On the text `人工智能正在深刻改变我们的世界。` we observed:
+- prefill logits: exact match
+- decode step0 CP `codec_ids`: exact match
+- decode step1 CP `codec_ids`: exact match
+- decode step2 CP `codec_ids`: exact match
+- talker logits / `past_hidden`: max diff `0.0` on the tested steps
 
-这是有力证据表明：
-- 我们分解的 `talker -> cp.generate -> codec_sum -> talker.model` 逻辑是正确的
-- HF 生成循环管道不是观察到的不匹配的主要来源
-- 早期奇偶校验失败必然来自我们输入到循环的输入，而不是我们未能重现的隐藏 `generate()` 行为
+This is strong evidence that:
+- Our decomposed `talker -> cp.generate -> codec_sum -> talker.model` logic is correct
+- The HF generation-loop plumbing is not the primary source of the observed mismatch
+- Earlier parity failures must come from the inputs we feed into the loop, not from a hidden `generate()` behavior we failed to reproduce
 
-### 4. 支持的官方包装器提示将 prefill/trailing 与引擎路径对齐
+### 4. The supported official wrapper prompt aligns prefill/trailing with the engine path
 
-实验：`scripts/python/compare_prefill_paths.py`
+Experiment: `scripts/python/compare_prefill_paths.py`
 
-对于文本 `人工智能正在深刻改变我们的世界。`：
-- 支持的 assistant 包装 `input_ids`：`[151644, 77091, 198, 104455, 96555, 101295, 101933, 103952, 99489, 1773, 151645, 198, 151644, 77091, 198]`
-- 引擎裸文本 id：`[104455, 96555, 101295, 101933, 103952, 99489, 1773]`
-- 来自 `input_id[:, 4:-5]` 的官方流式尾部文本 id：`[96555, 101295, 101933, 103952, 99489, 1773]`
-- 来自完整文本剩余部分的引擎流式尾部文本 id：`[96555, 101295, 101933, 103952, 99489, 1773]`
-- 官方尾部长度（包含 EOS）：`7`
-- 引擎尾部长度（包含 EOS）：`7`
-- prefill 最大差异 ≈ `0.00195`
-- 尾部 token 差异：除 EOS token 最大差异 ≈ `0.00049` 外全部为 `0.0`
+For the text `人工智能正在深刻改变我们的世界。`:
+- Supported assistant-wrapped `input_ids`: `[151644, 77091, 198, 104455, 96555, 101295, 101933, 103952, 99489, 1773, 151645, 198, 151644, 77091, 198]`
+- Engine bare-text ids: `[104455, 96555, 101295, 101933, 103952, 99489, 1773]`
+- Official streaming trailing text ids from `input_id[:, 4:-5]`: `[96555, 101295, 101933, 103952, 99489, 1773]`
+- Engine streaming trailing text ids from the remainder of the full text: `[96555, 101295, 101933, 103952, 99489, 1773]`
+- Official trailing length (including EOS): `7`
+- Engine trailing length (including EOS): `7`
+- prefill max diff ≈ `0.00195`
+- trailing token diff: all `0.0` except EOS token max diff ≈ `0.00049`
 
-解读：
-- 当通过其支持的包装器样式提示调用官方模型时，prefill 和尾部文本注入与引擎路径对齐
-- 因此支持的官方路径是有效的 prefill/trailing 基准
+Interpretation:
+- When the official model is invoked through its supported wrapper-style prompt, prefill and trailing text injection align with the engine path
+- Therefore the supported official path is a valid prefill/trailing baseline
 
-### 5. 使用短提示的裸核心 `Qwen3TTSForConditionalGeneration.generate(...)` 是无效基准
+### 5. Bare-core `Qwen3TTSForConditionalGeneration.generate(...)` with a short prompt is an invalid baseline
 
-实验：`scripts/python/compare_prefill_paths.py --prompt-mode raw`
+Experiment: `scripts/python/compare_prefill_paths.py --prompt-mode raw`
 
-如果使用以下内容调用裸核心模型：
+If the bare-core model is invoked with:
 - `"<|im_start|>assistant\n{text}<|im_end|>"`
 
-那么内部切片：
-- 第一个文本 token：`input_id[:, 3:4]`
-- 尾部文本：`input_id[:, 4:-5]`
+then the internal slicing:
+- First text token: `input_id[:, 3:4]`
+- Trailing text: `input_id[:, 4:-5]`
 
-将截断文本剩余部分，因为缺少预期的包装器后缀 `"\n<|im_start|>assistant\n"`。
+will truncate the text remainder, because the expected wrapper suffix `"\n<|im_start|>assistant\n"` is missing.
 
-这是低级输入契约不匹配，不是支持的官方路径。
+This is a low-level input-contract mismatch, not the supported official path.
 
-### 6. Greedy+punish 与支持的官方基准的奇偶性仍在 step2 分歧
+### 6. Greedy+punish parity with the supported official baseline still diverges at step2
 
-实验：
+Experiments:
 - `scripts/python/greedy_punish_parity.py`
 - `scripts/python/greedy_punish_stagewise_compare.py`
 - `scripts/python/greedy_punish_mode_matrix.py`
 
-比较：
-- 使用支持的包装器提示的官方本地 `generate(..., do_sample=False, subtalker_dosample=False, repetition_penalty=1.05)`
-- 我们使用 greedy+punish 的手动本地链
+Compared:
+- Official local `generate(..., do_sample=False, subtalker_dosample=False, repetition_penalty=1.05)` with the supported wrapper prompt
+- Our manual local chain using greedy+punish
 
-观察到：
-- step0 talker token 匹配
-- step1 talker token 匹配
-- 分歧从 step2 开始
+Observed:
+- step0 talker token matches
+- step1 talker token matches
+- Divergence begins at step2
 
-在文本 `人工智能正在深刻改变我们的世界。` 上的示例：
-- 官方 talker token 开始：`[1995, 1085, 450, 832, 419, 209, 44, 1098, 1613, 358, 1744]`
-- 我们的 talker token 开始：`[1995, 1085, 1714, 1301, 419, 209, 44, 1098, 1055, 1465, 1744]`
-- 首次分歧 = step2
+Example on the text `人工智能正在深刻改变我们的世界。`:
+- Official talker token start: `[1995, 1085, 450, 832, 419, 209, 44, 1098, 1613, 358, 1744]`
+- Our talker token start: `[1995, 1085, 1714, 1301, 419, 209, 44, 1098, 1055, 1465, 1744]`
+- First divergence = step2
 
-即使在修复官方提示基准后，此分歧仍然存在，因此必须由剩余状态/展开不匹配而非提示切片来解释。
+This divergence persists even after fixing the official prompt baseline, so it must be explained by residual state / rollout mismatch rather than prompt slicing.
 
-### 7. 模式矩阵结果指向导出的 prefill / 早期隐藏状态不匹配，而非手动解码状态机
+### 7. Mode-matrix results point to an exported prefill / early hidden-state mismatch, not the manual decode state machine
 
-实验：`scripts/python/greedy_punish_mode_matrix.py`
+Experiment: `scripts/python/greedy_punish_mode_matrix.py`
 
-比较四种展开模式：
+Compared four rollout modes:
 - `official_generate`
-  - 官方 `model.generate(...)`
+  - Official `model.generate(...)`
 - `official_stepwise`
-  - 官方实时模型 prefill/trailing + `talker.forward` 状态机 + 手动 greedy+punish token 选择
+  - Official realtime-model prefill/trailing + `talker.forward` state machine + manual greedy+punish token selection
 - `engine_stepwise`
-  - 引擎导出 prefill/trailing + `talker.forward` 状态机 + 手动 greedy+punish token 选择
+  - Engine-exported prefill/trailing + `talker.forward` state machine + manual greedy+punish token selection
 - `engine_manual`
-  - 引擎导出 prefill/trailing + 手动 `talker.model / cp.generate / talker.model` 循环
+  - Engine-exported prefill/trailing + manual `talker.model / cp.generate / talker.model` loop
 
-在文本 `人工智能正在深刻改变我们的世界。` 上观察到：
-- `official_generate`：`[1995, 1085, 450, 832, 419, 209, 44, 1098, 1613, 358, 1744]`
-- `official_stepwise`：`[1995, 1085, 450, 832, 419, 209, 44, 1098, 1613, 1465, 1744, 1150]`
-- `engine_stepwise`：`[1995, 1085, 1714, 1301, 419, 209, 44, 1098, 1055, 1465, 1744, 1150]`
-- `engine_manual`：`[1995, 1085, 1714, 1301, 419, 209, 44, 1098, 1055, 1465, 1744, 1150]`
+On the text `人工智能正在深刻改变我们的世界。` we observed:
+- `official_generate`: `[1995, 1085, 450, 832, 419, 209, 44, 1098, 1613, 358, 1744]`
+- `official_stepwise`: `[1995, 1085, 450, 832, 419, 209, 44, 1098, 1613, 1465, 1744, 1150]`
+- `engine_stepwise`: `[1995, 1085, 1714, 1301, 419, 209, 44, 1098, 1055, 1465, 1744, 1150]`
+- `engine_manual`: `[1995, 1085, 1714, 1301, 419, 209, 44, 1098, 1055, 1465, 1744, 1150]`
 
-首次分歧总结：
-- `official_generate` vs `official_stepwise`：step `9`
-- `official_generate` vs `engine_stepwise`：step `2`
-- `official_generate` vs `engine_manual`：step `2`
-- `official_stepwise` vs `engine_stepwise`：step `2`
-- `engine_stepwise` vs `engine_manual`：测试前缀上精确匹配
+First-divergence summary:
+- `official_generate` vs `official_stepwise`: step `9`
+- `official_generate` vs `engine_stepwise`: step `2`
+- `official_generate` vs `engine_manual`: step `2`
+- `official_stepwise` vs `engine_stepwise`: step `2`
+- `engine_stepwise` vs `engine_manual`: exact match on the tested prefix
 
-解读：
-- step2 的第一个问题分歧在使用官方 `talker.forward` 状态机和引擎导出 prefill/trailing 时已经存在
-- 手动直接解码循环在测试前缀上与该引擎逐步路径完全匹配
-- 因此 step2 失败更可能是由导出的 prefill / 早期隐藏状态不匹配导致，而非手动循环中缺失解码状态管道
+Interpretation:
+- The first problematic divergence at step2 already exists when using the official `talker.forward` state machine with engine-exported prefill/trailing
+- The manual direct-decode loop matches that engine stepwise path exactly on the tested prefix
+- Therefore the step2 failure is more likely caused by an exported prefill / early hidden-state mismatch than by a missing decode-state pipeline in the manual loop
 
-### 8. 根本原因已确定：导出的 `tts_bos/eos/pad` 特殊嵌入是唯一有意义的 prefill 组件不匹配
+### 8. Root cause identified: the exported `tts_bos/eos/pad` special embeddings are the only meaningful prefill-component mismatch
 
-实验：`scripts/python/compare_live_vs_exported_prefill.py`
+Experiment: `scripts/python/compare_live_vs_exported_prefill.py`
 
-在相同支持的全文路径上比较实时模型与导出的运行时权重。
+On the same supported full-text path, compared the live model against the exported runtime weights.
 
-在文本 `人工智能正在深刻改变我们的世界。` 上观察到：
-- assistant 角色嵌入差异：精确匹配
-- 完整文本嵌入差异：精确匹配
-- codec prefill 栈差异：精确匹配
-- 导出的 `tts_bos/eos/pad` 与实时原始差异：
-  - 最大差异 ≈ `0.000488`
-  - 平均差异 ≈ `1.06e-05`
-- 运行时重新计算的 `tts_bos/eos/pad` 与实时差异：精确匹配
+On the text `人工智能正在深刻改变我们的世界。` we observed:
+- assistant-role embedding diff: exact match
+- full-text embedding diff: exact match
+- codec prefill stack diff: exact match
+- exported `tts_bos/eos/pad` vs live original diff:
+  - max diff ≈ `0.000488`
+  - mean diff ≈ `1.06e-05`
+- runtime-recomputed `tts_bos/eos/pad` vs live diff: exact match
 
-对完整 prefill 路径的影响：
-- 修复前 prefill 张量差异很小（`max ≈ 0.00195`）
-- 但 prefill 前向 `past_hidden` 差异放大到：
-  - 最大差异 ≈ `0.28125`
-  - 平均差异 ≈ `0.0517`
-- 从加载的 BF16 模块重新计算特殊嵌入后，测试用例上 prefill 张量 / prefill `past_hidden` / 处理后的 logits 全部精确匹配
+Effect on the full prefill path:
+- Before the fix the prefill-tensor diff was tiny (`max ≈ 0.00195`)
+- But the prefill-forward `past_hidden` diff amplified to:
+  - max diff ≈ `0.28125`
+  - mean diff ≈ `0.0517`
+- After recomputing the special embeddings from the loaded BF16 modules, the prefill tensors / prefill `past_hidden` / processed logits all match exactly on the test case
 
-解读：
-- 早期 step2 分歧由微小的导出时特殊嵌入增量触发
-- 这些增量足以移动 prefill 隐藏状态，从而翻转后续 CP stage2 的接近平局
+Interpretation:
+- The early step2 divergence is triggered by the tiny export-time special-embedding delta
+- These deltas are enough to shift the prefill hidden state, which flips a subsequent near-tie in CP stage2
 
-### 9. 运行时修复已验证：在 `EmbeddingWeights` 中重新计算特殊嵌入消除了 step2 greedy+punish 分歧
+### 9. Runtime fix verified: recomputing the special embeddings in `EmbeddingWeights` eliminates the step2 greedy+punish divergence
 
-已实现的修复：
+Implemented fix:
 - [prefill.py](engine/backend/prefill.py)
-  - `EmbeddingWeights` 现在从加载的 BF16 `text_embedding + text_projection` 重新计算 `tts_pad/bos/eos`
+  - `EmbeddingWeights` now recomputes `tts_pad/bos/eos` from the loaded BF16 `text_embedding + text_projection`
 - [export_01_embeddings.py](scripts/export/export_01_embeddings.py)
-  - 导出现在使用目标数据类型模块计算保存的特殊嵌入以实现运行时奇偶性
+  - Export now computes the saved special embeddings with the target-dtype modules for runtime parity
 - [test_prefill_builder.py](tests/unit/test_prefill_builder.py)
-  - 添加了运行时重新计算特殊嵌入的回归测试
+  - Added a regression test for runtime-recomputed special embeddings
 
-验证：
+Verification:
 - `scripts/python/greedy_punish_parity.py`
-  - 测试前缀上官方 talker == 手动 talker
+  - Official talker == manual talker on the tested prefix
 - `scripts/python/greedy_punish_stagewise_compare.py`
-  - 测试前缀上首次 talker 分歧 = `-1`
+  - First talker divergence = `-1` on the tested prefix
 - `scripts/python/greedy_punish_mode_matrix.py`
   - `engine_stepwise == engine_manual`
-  - 两者现在在测试前缀上匹配 `official_generate`
+  - Both now match `official_generate` on the tested prefix
 
-残留说明：
-- `official_stepwise` 仍与 `official_generate` 在 pad 阶段后期分歧（测试样本中的 step9），但这与已修复的 step2 引擎不匹配是分开的
+Residual note:
+- `official_stepwise` still diverges from `official_generate` late in the pad stage (step9 in the test sample), but this is separate from the fixed step2 engine mismatch
 
-### 10. 特殊嵌入修复后，测试前缀上采样官方与手动展开也匹配
+### 10. After the special-embedding fix, sampled official vs manual rollout also match on the tested prefix
 
-实验：`scripts/python/official_vs_manual_rollout.py`
+Experiment: `scripts/python/official_vs_manual_rollout.py`
 
-运行时特殊嵌入修复后观察到：
-- 短文本 `人工智能正在深刻改变我们的世界。`
-  - `official_len=31`，`manual_len=32`
+After the runtime special-embedding fix we observed:
+- Short text `人工智能正在深刻改变我们的世界。`
+  - `official_len=31`, `manual_len=32`
   - `first_divergence=-1`
-  - 公共前缀精确匹配
-- 更长文本 `人工智能正在深刻改变我们的世界。从语音识别到自然语言处理，AI的应用已经渗透到生活的方方面面。`
-  - `official_len=63`，`manual_len=64`
+  - Common prefix exact match
+- Longer text `人工智能正在深刻改变我们的世界。从语音识别到自然语言处理，AI的应用已经渗透到生活的方方面面。`
+  - `official_len=63`, `manual_len=64`
   - `first_divergence=-1`
-  - 公共前缀精确匹配
+  - Common prefix exact match
 
-解读：
-- 特殊嵌入修复不仅改善了 greedy 奇偶性，还改善了测试文本上真实的采样展开路径
-- 剩余的长度不匹配现在只是手动侧的额外尾部 token，而非早期 token 内容分歧
+Interpretation:
+- The special-embedding fix improved not only greedy parity but also the real sampling rollout path on the test texts
+- The remaining length mismatch is now just extra trailing tokens on the manual side, not an early token-content divergence
 
-### 11. 修复后长段采样奇偶性在原始 4a 和 story 样式用例上也成立
+### 11. After the fix, long-segment sampling parity also holds on the original 4a and story-style cases
 
-实验：`scripts/python/official_vs_manual_rollout.py`
+Experiment: `scripts/python/official_vs_manual_rollout.py`
 
-运行时特殊嵌入修复后观察到：
-- 4a `LONG_TEXT`，`max_steps=256`，`seed=1234`
+After the runtime special-embedding fix we observed:
+- 4a `LONG_TEXT`, `max_steps=256`, `seed=1234`
   - `trailing_len=80`
-  - `official_len=255`，`manual_len=256`
+  - `official_len=255`, `manual_len=256`
   - `first_divergence=-1`
-- 4a `LONG_TEXT`，`max_steps=256`，`seed=2025`
+- 4a `LONG_TEXT`, `max_steps=256`, `seed=2025`
   - `trailing_len=80`
-  - `official_len=255`，`manual_len=256`
+  - `official_len=255`, `manual_len=256`
   - `first_divergence=-1`
-- `tests/data/story.txt`，`max_steps=512`，`seed=1234`
+- `tests/data/story.txt`, `max_steps=512`, `seed=1234`
   - `trailing_len=1217`
-  - `official_len=511`，`manual_len=512`
+  - `official_len=511`, `manual_len=512`
   - `first_divergence=-1`
 
-解读：
-- 采样官方/手动奇偶性改善不限于短前缀
-- 在测试的长用例上，修复消除了完整测试公共前缀上的早期内容分歧
-- 对于 4a，官方和手动在测试预算内仍无法终止，因此剩余长段问题现在看起来是官方侧的（或超出本地 PyTorch 展开奇偶路径）
+Interpretation:
+- The sampled official/manual parity improvement is not limited to short prefixes
+- On the tested long cases, the fix eliminates early content divergence over the full tested common prefix
+- For 4a, official and manual still fail to terminate within the test budget, so the remaining long-segment problem now appears to be on the official side (or beyond the local PyTorch rollout parity path)
 
-### 12. Greedy+punish 逐步奇偶性现在延伸通过 4a 文本阶段并进入 pad 阶段
+### 12. Greedy+punish stepwise parity now extends through the 4a text stage and into the pad stage
 
-实验：`scripts/python/greedy_punish_mode_matrix.py`
+Experiment: `scripts/python/greedy_punish_mode_matrix.py`
 
-运行时特殊嵌入修复后在 4a `LONG_TEXT` 上观察到：
+After the runtime special-embedding fix, observed on 4a `LONG_TEXT`:
 - `max_steps=64`
   - `official_stepwise == engine_stepwise == engine_manual`
-  - `official_generate` 仅在 step `63` 首次分歧
+  - `official_generate` first diverges only at step `63`
 - `max_steps=128`
   - `official_stepwise == engine_stepwise == engine_manual`
-  - `official_generate` 仅在 step `127` 首次分歧
+  - `official_generate` first diverges only at step `127`
 
-解读：
-- 修复后，逐步引擎奇偶性保留到远超早期短前缀失败
-- 共享的 `official_stepwise / engine_stepwise / engine_manual` 路径在文本消费和 pad 阶段延续上保持对齐
-- 剩余差异在官方高级 `generate()` 和显式逐步重放之间，而非引擎展开和官方逐步行为之间
+Interpretation:
+- After the fix, stepwise engine parity holds well beyond the early short-prefix failure
+- The shared `official_stepwise / engine_stepwise / engine_manual` path stays aligned through text consumption and into the pad-stage continuation
+- The remaining difference is between the official high-level `generate()` and the explicit stepwise replay, not between the engine rollout and the official stepwise behavior
 
-### 13. 修复后独立引擎重跑在 4a 或 story 上不显示明显的长文本长度膨胀
+### 13. After the fix, standalone engine re-runs show no significant long-text length inflation on 4a or story
 
-实验：
+Experiments:
 - `tests/tools/run_engine_long_case.py --case 4a --speaker Serena`
 - `tests/tools/run_engine_long_case.py --case story --speaker Serena`
 
-在修复的运行时上观察到：
-- 4a 端到端结果
-  - 会话 `longtext-medium-serena-postfix`
-  - 总音频 `30.96s`
-  - 现有保存的比较 WAV `workspace/audio_samples/engine/test4a_long_text_medium.wav` 为 `30.64s`
-- story 端到端结果
-  - 会话 `longtext-story-postfix`
-  - 总音频 `392.80s`
-  - 现有保存的比较 WAV `workspace/audio_samples/engine/test4d_story.wav` 为 `395.52s`
-- story 用例的引擎日志
-  - 会话正常清理，`segments=21/21`
-  - 所有记录的段报告 `overflow=False`
+On the fixed runtime we observed:
+- 4a end-to-end result
+  - Session `longtext-medium-serena-postfix`
+  - Total audio `30.96s`
+  - Existing saved comparison WAV `workspace/audio_samples/engine/test4a_long_text_medium.wav` is `30.64s`
+- story end-to-end result
+  - Session `longtext-story-postfix`
+  - Total audio `392.80s`
+  - Existing saved comparison WAV `workspace/audio_samples/engine/test4d_story.wav` is `395.52s`
+- Engine logs for the story case
+  - Session cleaned up normally, `segments=21/21`
+  - All logged segments report `overflow=False`
 
-解读：
-- 在这些代表性端到端重跑上，修复的分支不重现明显的失控长度失败
-- 如果幻觉仍然可听，下一个有用的复现应该针对确切的违规文本/说话者/请求路径并在该点捕获转储
+Interpretation:
+- On these representative end-to-end re-runs, the fixed branch does not reproduce an obvious runaway length failure
+- If a hallucination is still audible, the next useful reproduction should target the exact offending text/speaker/request path and capture a dump at that point
 
-### 14. 真实 4a greedy+punish 转储仍与 ONNX 参考在 CP 尾部分歧
+### 14. The real 4a greedy+punish dump still diverges from the ONNX reference at the CP tail
 
-实验：
+Experiments:
 - `workspace/engine_dumps/4a_greedy_dump_fix_20260416_202542`
-- 在不良转储步骤 `000003`、`000004`、`000008` 上的融合 ONNX 重放
+- Fused ONNX replay on the bad dump steps `000003`, `000004`, `000008`
 
-观察到：
-- `updated_token_counts` 在转储和 ONNX 重放之间仍匹配
-- `codec_0` 可以仍匹配而 CP 尾部已经不同
-- 代表性步骤 `000003`
-  - 转储完整 codec：
+Observed:
+- `updated_token_counts` still match between the dump and the ONNX replay
+- `codec_0` can still match while the CP tail already differs
+- Representative step `000003`
+  - Dump full codec:
     `[1085, 1989, 550, 206, 767, 1943, 1731, 1977, 327, 948, 294, 269, 761, 1761, 224, 412]`
-  - ONNX / PyTorch 参考：
+  - ONNX / PyTorch reference:
     `[1085, 1989, 550, 206, 767, 1943, 287, 176, 433, 948, 294, 1167, 761, 693, 224, 179]`
-- 代表性步骤 `000008`
-  - 转储完整 codec：
+- Representative step `000008`
+  - Dump full codec:
     `[44, 1558, 1582, 1837, 624, 676, 1699, 1, 287, 223, 1017, 1062, 77, 1320, 499, 1365]`
-  - ONNX / PyTorch 参考：
+  - ONNX / PyTorch reference:
     `[44, 581, 1999, 1280, 624, 1928, 1699, 898, 1199, 117, 682, 454, 953, 118, 1050, 551]`
 
-解读：
-- 修复导出的特殊嵌入 bug 后，剩余的 4a 不良转储不再通过本地 PyTorch 展开不匹配来解释
-- 分歧现在专门出现在 TRT 执行路径中，首先在 CP 尾部而非惩罚簿记
+Interpretation:
+- After fixing the exported special-embedding bug, the remaining 4a bad dump is no longer explained by a local PyTorch rollout mismatch
+- The divergence now appears specifically in the TRT execution path, first at the CP tail rather than in penalty bookkeeping
 
-### 15. 独立 `code_predictor_unrolled` 显示相同的 BF16 TRT 问题，而 FP32 TRT 匹配 ORT
+### 15. Standalone `code_predictor_unrolled` shows the same BF16 TRT problem, while FP32 TRT matches ORT
 
-实验：
-- 使用 TensorRT 10.15.1 构建（`nvcr.io/nvidia/tritonserver:26.02-py3`）
+Experiments:
+- Built with TensorRT 10.15.1 (`nvcr.io/nvidia/tritonserver:26.02-py3`)
   - `code_predictor_unrolled_bf16.engine`
   - `code_predictor_unrolled_fp32.engine`
-- 随机试验奇偶性：
+- Random-trial parity:
   - `python tests/tools/verify_code_predictor_trt.py --engine ...code_predictor_unrolled_bf16.engine --trials 10`
   - `python tests/tools/verify_code_predictor_trt.py --engine ...code_predictor_unrolled_fp32.engine --trials 10`
-- 不良状态奇偶性：
-  - 在 `000003`、`000004`、`000008` 上以转储模式运行相同脚本
+- Bad-state parity:
+  - Ran the same script in dump mode on `000003`, `000004`, `000008`
 
-观察到：
-- 随机输入上的独立 BF16 TRT vs ORT：
-  - 不匹配 `7 / 10`
-- 随机输入上的独立 FP32 TRT vs ORT：
-  - 不匹配 `0 / 10`
-- 在真实不良转储状态 `000003` 上
-  - ORT 尾部：
+Observed:
+- Standalone BF16 TRT vs ORT on random inputs:
+  - Mismatch `7 / 10`
+- Standalone FP32 TRT vs ORT on random inputs:
+  - Mismatch `0 / 10`
+- On real bad-dump state `000003`
+  - ORT tail:
     `[1989, 550, 206, 767, 1943, 287, 176, 433, 948, 294, 1167, 761, 693, 224, 179]`
-  - 独立 BF16 TRT 尾部：
+  - Standalone BF16 TRT tail:
     `[1989, 550, 206, 767, 1943, 1731, 1977, 327, 948, 294, 269, 761, 1761, 224, 412]`
-  - 独立 FP32 TRT 尾部：
+  - Standalone FP32 TRT tail:
     `[1989, 550, 206, 767, 1943, 287, 176, 433, 948, 294, 1167, 761, 693, 224, 179]`
-- 在真实不良转储状态 `000008` 上
-  - 独立 BF16 TRT 仍与 ORT 分歧（首次尾部分歧在 stage `7`）
-  - 独立 BF16 TRT **不**精确匹配融合 TRT 转储尾部
-  - 独立 FP32 TRT 精确匹配 ORT
-- 在真实不良转储状态 `000004` 上
-  - 独立 BF16 TRT 仍与 ORT 分歧，但不精确匹配融合转储尾部
-  - 独立 FP32 TRT 匹配 ORT
+- On real bad-dump state `000008`
+  - Standalone BF16 TRT still diverges from ORT (first tail divergence at stage `7`)
+  - Standalone BF16 TRT does **not** exactly match the fused TRT dump tail
+  - Standalone FP32 TRT matches ORT exactly
+- On real bad-dump state `000004`
+  - Standalone BF16 TRT still diverges from ORT, but does not exactly match the fused dump tail
+  - Standalone FP32 TRT matches ORT
 
-解读：
-- 剩余问题不是"官方缓存 CP vs 我们的展开 CP"
-- 剩余问题不是"融合 ONNX 导出语义"
-- 剩余问题不是"仅惩罚参数"
-- 目前最强的解释是：
-  - **`code_predictor_unrolled` 的 TensorRT BF16 执行本身在数值/语义上不稳定**
-  - 融合 BF16 引擎继承了该 CP 不稳定性
-  - FP32 TRT 是有效对照：在测试的独立 CP 输入上它与 ORT 精确匹配
+Interpretation:
+- The remaining problem is not "official cached CP vs our unrolled CP"
+- The remaining problem is not "fused ONNX export semantics"
+- The remaining problem is not "penalty parameters alone"
+- The strongest explanation currently is:
+  - **The TensorRT BF16 execution of `code_predictor_unrolled` is itself numerically/semantically unstable**
+  - The fused BF16 engine inherits that CP instability
+  - FP32 TRT is a valid control: on the tested standalone CP inputs it matches ORT exactly
 
-### 16. 直接 `官方 BF16` vs `TRT BF16` 比较仍显示 TRT 不匹配
+### 16. The direct `official BF16` vs `TRT BF16` comparison still shows a TRT mismatch
 
-重要更正：
-- `ORT(fp32)` 仅是高精度对照，不是生产比较的最终仲裁者
-- 更相关的问题是 `TRT BF16` 在相同 CP 输入上是否匹配官方 PyTorch BF16 行为
+Important correction:
+- `ORT(fp32)` is only a high-precision control, not the final arbiter for a production comparison
+- The more relevant question is whether `TRT BF16` matches the official PyTorch BF16 behavior on the same CP inputs
 
-实验：
-- 在 `torch.bfloat16` 中加载官方本地模型
-- 比较：
-  - BF16 autocast 下的官方缓存 CP
-  - 独立 TRT `code_predictor_unrolled_bf16.engine`
-- 两边使用相同的固定输入：
-  - 随机 `past_hidden + codec_token_0`
-  - 从融合转储输入重构的 4a 不良状态输入，以隔离 CP 分支
+Experiments:
+- Loaded the official local model in `torch.bfloat16`
+- Compared:
+  - Official cached CP under BF16 autocast
+  - Standalone TRT `code_predictor_unrolled_bf16.engine`
+- Both sides use the same fixed inputs:
+  - Random `past_hidden + codec_token_0`
+  - The 4a bad-state input reconstructed from the fused dump inputs, to isolate the CP branch
 
-在随机 CP 输入上观察到：
-- 测试种子 `42..49`
-- 官方缓存 BF16 vs TRT BF16 在 `7 / 8` 次试验上不匹配
-- 代表性种子 `42`，`codec_token_0=[1809]`
-  - 官方缓存 BF16：
+On random CP inputs we observed:
+- Test seeds `42..49`
+- Official cached BF16 vs TRT BF16 mismatch on `7 / 8` trials
+- Representative seed `42`, `codec_token_0=[1809]`
+  - Official cached BF16:
     `[841, 1591, 305, 889, 943, 1212, 931, 61, 89, 266, 16, 637, 175, 242, 928]`
-  - TRT BF16：
+  - TRT BF16:
     `[841, 1591, 305, 1468, 490, 245, 559, 880, 89, 1014, 481, 1190, 1105, 831, 313]`
 
-在 4a 不良状态派生的 CP 输入上观察到：
-- 步骤 `000003`
-  - 官方缓存 BF16：
+On the 4a bad-state-derived CP inputs we observed:
+- Step `000003`
+  - Official cached BF16:
     `[1989, 550, 206, 767, 1943, 287, 176, 433, 948, 294, 1167, 761, 369, 224, 179]`
-  - TRT BF16：
+  - TRT BF16:
     `[1989, 550, 206, 767, 1943, 1731, 1977, 327, 948, 294, 269, 761, 1761, 224, 412]`
-  - 首次分歧在 stage `5`
-- 步骤 `000004`
-  - 官方缓存 BF16：
+  - First divergence at stage `5`
+- Step `000004`
+  - Official cached BF16:
     `[1542, 1628, 1804, 1774, 1788, 16, 403, 113, 924, 299, 947, 1183, 815, 891, 29]`
-  - TRT BF16：
+  - TRT BF16:
     `[1542, 1628, 271, 21, 1297, 39, 403, 910, 924, 2026, 640, 481, 1007, 1229, 32]`
-  - 首次分歧在 stage `2`
+  - First divergence at stage `2`
 
-解读：
-- 即使从最终基准角色中移除 `ORT(fp32)`，`TRT BF16` 在相同 CP 输入上仍无法匹配官方 BF16
-- 因此早期结论在更严格的比较中仍然成立：
-  - 剩余问题仍在 CP 分支的 TRT BF16 执行中，而非仅参数选择
+Interpretation:
+- Even after removing `ORT(fp32)` from the final-baseline role, `TRT BF16` still fails to match official BF16 on the same CP inputs
+- Therefore the earlier conclusion still holds under a stricter comparison:
+  - The remaining problem is still in the TRT BF16 execution of the CP branch, not just parameter choices
 
-### 17. 在原始 greedy+punish 转储路径上，`updated_token_counts` 匹配官方 BF16 但 `full_codec` 不匹配
+### 17. On the original greedy+punish dump path, `updated_token_counts` match official BF16 but `full_codec` does not
 
-工具更新：
-- 修复了 `scripts/export/talker_unified_modules.py`，使 BF16 重放使用 FP32 softmax 并在值矩阵乘法前转换回来
-- 使 `scripts/python/analyze_engine_dump.py` 在转储不存储可选输出如 `hidden/logits` 时跳过它们
+Tooling updates:
+- Fixed `scripts/export/talker_unified_modules.py` so that BF16 replay uses FP32 softmax and converts back before the value matmul
+- Made `scripts/python/analyze_engine_dump.py` skip optional outputs like `hidden/logits` when the dump does not store them
 
-实验：
-- 通过以下重放真实 `4a_greedy_dump_fix_20260416_202542` 转储：
-  - 原始 TRT 引擎 `talker_code2wav_fused.engine`
-  - `torch.bfloat16` 中的官方融合 PyTorch 重放
-- 命令形式：
+Experiments:
+- Replayed the real `4a_greedy_dump_fix_20260416_202542` dump through:
+  - The original TRT engine `talker_code2wav_fused.engine`
+  - The official fused PyTorch replay in `torch.bfloat16`
+- Command form:
   - `python scripts/python/analyze_engine_dump.py --dump ... --dtype bfloat16 --model-path workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice`
 
-观察到：
-- 原始 TRT 重跑在 `000003`、`000004`、`000008` 上精确重现保存的转储输出
-- 官方 BF16 重放**不**重现 `full_codec`
-  - `000003`：`num_mismatch=13`
-  - `000004`：`num_mismatch=26`
-  - `000008`：`num_mismatch=21`
-- 但官方 BF16 重放确实重现 talker 侧簿记：
-  - `updated_token_counts: match=True` 在所有三个转储上
-  - `talker_new_kv` 余弦保持在 `0.99994 ~ 0.99995` 左右
-- `full_codec` 中代表性首次分歧位置：
-  - `000003` row0：首次差异在索引 `6`
-  - `000004` row0：首次差异在索引 `3`
-  - `000008` row0：首次差异在索引 `1`
+Observed:
+- The original TRT re-run exactly reproduces the saved dump outputs on `000003`, `000004`, `000008`
+- The official BF16 replay does **not** reproduce `full_codec`
+  - `000003`: `num_mismatch=13`
+  - `000004`: `num_mismatch=26`
+  - `000008`: `num_mismatch=21`
+- But the official BF16 replay does reproduce the talker-side bookkeeping:
+  - `updated_token_counts: match=True` on all three dumps
+  - `talker_new_kv` cosine stays around `0.99994 ~ 0.99995`
+- Representative first divergence position in `full_codec`:
+  - `000003` row0: first diff at index `6`
+  - `000004` row0: first diff at index `3`
+  - `000008` row0: first diff at index `1`
 
-解读：
-- 在 greedy+punish 下，**talker/token0 + 重复惩罚簿记是对齐的**
-- 剩余不匹配在 **token0 之后的 CP 尾部 token**，而非 `token_counts` / `penalty`
-- 因此"两侧都变静音，所以这必然只是参数问题"**不**受 token 证据支持：
-  - 实际 `full_codec` 序列仍与官方 BF16 不对齐
+Interpretation:
+- Under greedy+punish, **talker/token0 + repetition-penalty bookkeeping are aligned**
+- The remaining mismatch is in the **CP tail tokens after token0**, not in `token_counts` / `penalty`
+- Therefore "both sides went silent, so this must just be a parameter problem" is **not** supported by the token evidence:
+  - The actual `full_codec` sequence is still misaligned with official BF16
 
-### 18. `hidden/logits -> fp32` 调试融合引擎不是行为保持的
+### 18. The `hidden/logits -> fp32` debug fused engine is not behavior-preserving
 
-实验：
-- 构建调试引擎：
+Experiments:
+- Built a debug engine:
   - `workspace/exported/custom-1.7b/talker_code2wav_fused.hiddenlogits_fp32.engine`
-- 通过以下重跑相同的 `4a_greedy_dump_fix` 转储：
-  - 原始融合引擎
-  - `hidden/logits` 输出强制为 `fp32` 的调试融合引擎
+- Re-ran the same `4a_greedy_dump_fix` dump through:
+  - The original fused engine
+  - The debug fused engine with `hidden/logits` outputs forced to `fp32`
 
-观察到：
-- 调试引擎本身更改 `full_codec`：
-  - `000003`：与原始首次差异在索引 `2`
-  - `000004`：与原始首次差异在索引 `3`
-  - `000008`：与原始首次差异在索引 `0`
-- 因此调试引擎尾部不等于原始生产引擎尾部，即使在相同输入上
+Observed:
+- The debug engine itself changes `full_codec`:
+  - `000003`: first diff from original at index `2`
+  - `000004`: first diff from original at index `3`
+  - `000008`: first diff from original at index `0`
+- Therefore the debug-engine tail does not equal the original production-engine tail, even on the same inputs
 
-解读：
-- 强制 `hidden/logits` 输出格式为 `fp32` 会更改 TRT 构建器/运行时数值，足以改变 token 决策
-- 因此，使用调试引擎导出的 `hidden` 的比较仅作为**诊断探针**有用
-- 它们**不得**被视为原始融合引擎行为的基准
+Interpretation:
+- Forcing the `hidden/logits` output format to `fp32` changes the TRT builder/runtime numerics enough to alter token decisions
+- Therefore comparisons using the `hidden` exported by the debug engine are only useful as a **diagnostic probe**
+- They **must not** be treated as a baseline for the original fused-engine behavior
 
-## 历史修复前收窄
+## Historical Pre-Fix Narrowing
 
-### 在更正的官方基准下，首次剩余分歧是 talker step1 的 CP stage2
+### Under the corrected official baseline, the first remaining divergence is CP stage2 at talker step1
 
-实验：`scripts/python/greedy_punish_stagewise_compare.py`
+Experiment: `scripts/python/greedy_punish_stagewise_compare.py`
 
-对于 step2 的 talker 输出分歧：
-- 官方 talker 处理后 top2 以 `450 > 1714` 开始
-- 手动 talker 处理后 top2 以 `1714 > 450` 开始
-- `small_to_mtp_projection` 后官方/手动 CP 入口差异：
-  - 最大差异 ≈ `0.25`
-  - 平均差异 ≈ `0.01417`
-  - 余弦相似度 ≈ `0.999866`
-- CP stage0 匹配
-- CP stage1 匹配
-- **CP stage2 分歧**
+For the step2 talker output divergence:
+- Official post-processed talker top2 starts with `450 > 1714`
+- Manual post-processed talker top2 starts with `1714 > 450`
+- Official/manual CP entry diff after `small_to_mtp_projection`:
+  - max diff ≈ `0.25`
+  - mean diff ≈ `0.01417`
+  - cosine similarity ≈ `0.999866`
+- CP stage0 matches
+- CP stage1 matches
+- **CP stage2 diverges**
 
-在 talker step1 观察到：
-- 官方 CP stage0 token：1989
-- 我们的 CP stage0 token：1989
-- 官方 CP stage1 token：550
-- 我们的 CP stage1 token：550
-- 官方 CP stage2 token：1815
-- 我们的 CP stage2 token：206
+At talker step1 we observed:
+- Official CP stage0 token: 1989
+- Our CP stage0 token: 1989
+- Official CP stage1 token: 550
+- Our CP stage1 token: 550
+- Official CP stage2 token: 1815
+- Our CP stage2 token: 206
 
-这仍是更正后官方基准下共享公共前缀区域内已知的首次 argmax 翻转点。
+This remains the known first argmax-flip point within the shared common-prefix region under the corrected official baseline.
 
-### CP stage2 分歧看起来像接近平局翻转，而非灾难性分布崩溃
+### The CP stage2 divergence looks like a near-tie flip, not a catastrophic distribution collapse
 
-对于 CP stage2 logits（talker step1）：
-- 官方 top10：`[1815, 206, 1810, 459, 1801, 527, 1166, 350, 1376, 1440]`
-- 我们的 top10：`[206, 1815, 459, 1810, 1801, 527, 1166, 350, 1376, 2008]`
-- 官方 top1-top2 边距：`0.25`
-- 我们的 top1-top2 边距：`0.0`
+For the CP stage2 logits (talker step1):
+- Official top10: `[1815, 206, 1810, 459, 1801, 527, 1166, 350, 1376, 1440]`
+- Our top10: `[206, 1815, 459, 1810, 1801, 527, 1166, 350, 1376, 2008]`
+- Official top1-top2 margin: `0.25`
+- Our top1-top2 margin: `0.0`
 
-解读：
-- 候选集几乎相同
-- top1/top2 顺序翻转
-- 这看起来更像是**接近平局 argmax 敏感性**而非完全错误的分布
+Interpretation:
+- The candidate set is nearly identical
+- top1/top2 order flips
+- This looks more like **near-tie argmax sensitivity** than a completely wrong distribution
 
-### CP 入口输入在官方投影后非常接近
+### The CP entry input is very close after the official projection
 
-在 `small_to_mtp_projection` **之后**比较官方 `cp.model` 输入与我们手动构造的 CP 输入：
+Comparing the official `cp.model` input against our manually constructed CP input **after** `small_to_mtp_projection`:
 
-对于 talker step1 CP 入口：
-- 形状匹配：`[1, 2, 1024]`
-- 最大差异 ≈ 0.25
-- 平均差异 ≈ 0.0142
-- 余弦相似度 ≈ 0.999865
+For the talker step1 CP entry:
+- Shape matches: `[1, 2, 1024]`
+- max diff ≈ 0.25
+- mean diff ≈ 0.0142
+- cosine similarity ≈ 0.999865
 
-因此：
-- CP 入口无明显畸形
-- 输入 CP 的 token 此时正确
-- 状态非常接近但不位相同
+Therefore:
+- No obvious malformation at the CP entry
+- The tokens fed into CP are correct at this point
+- The state is very close but not bit-identical
 
-### CP stage0 和 stage1 logits 也非常接近
+### The CP stage0 and stage1 logits are also very close
 
-对于 talker step1：
-- CP stage0 logits 余弦相似度 ≈ 0.99985
-- CP stage1 logits 余弦相似度 ≈ 0.99968
-- CP stage0 top1 匹配
-- CP stage1 top1 匹配
+For talker step1:
+- CP stage0 logits cosine similarity ≈ 0.99985
+- CP stage1 logits cosine similarity ≈ 0.99968
+- CP stage0 top1 matches
+- CP stage1 top1 matches
 
-这加强了分歧不是在 CP 入口立即发生的证据。
+This reinforces the evidence that the divergence does not happen immediately at the CP entry.
 
-## 调查期间发现的重要更正
+## Important Corrections Found During the Investigation
 
-### 早期"官方尾部切片 bug"是由使用错误提示契约调用裸核心模型导致的
+### The early "official trailing-slice bug" was caused by invoking the bare-core model with the wrong prompt contract
 
-支持的官方包装器构建：
+The supported official wrapper builds:
 - `"<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n"`
 
-在该提示下，`input_id[:, 4:-5]` 正确恢复完整文本剩余部分。
+Under that prompt, `input_id[:, 4:-5]` correctly recovers the full text remainder.
 
-因此：
-- 支持的官方路径**不**存在之前声称的尾部 bug
-- 只有使用短提示的裸核心路径作为黄金基准是无效的
+Therefore:
+- The supported official path does **not** have the previously claimed trailing bug
+- Only the bare-core path with a short prompt is invalid as a golden baseline
 
-## 已排除的内容（部分或完全）
+## What Has Been Excluded (Partially or Fully)
 
-### 强排除
-- 与 HF 处理器的重复惩罚公式不匹配（在隔离比较中精确匹配）
-- 展开式 CP vs 缓存 CP 作为测试流形采样情况的主要问题
-- 支持的官方提示/尾部不匹配作为 greedy+punish 奇偶失败的主要来源
-- HF 生成循环管道作为短段奇偶失败的主要来源
-- 手动 `talker.model / cp.generate / talker.model` 解码状态管道作为 step2 分歧的主要来源
-- 使用相同官方 `talker.forward()` 输入时 talker step0 或 talker step1 的即时灾难性不匹配
-- 更正 `small_to_mtp_projection` 后 CP 输入维度完全错误
-- 导出的文本嵌入/文本投影/codec 嵌入权重作为测试短段 greedy 不匹配的来源
+### Strong exclusions
+- Repetition-penalty formula mismatch against the HF processor (exact match in isolated comparison)
+- Unrolled CP vs cached CP as the primary problem for the tested manifold sampling case
+- Supported official prompt/trailing mismatch as the primary source of greedy+punish parity failures
+- The HF generation-loop plumbing as the primary source of short-segment parity failures
+- The manual `talker.model / cp.generate / talker.model` decode-state pipeline as the primary source of the step2 divergence
+- Immediate catastrophic mismatch at talker step0 or talker step1 when using the same official `talker.forward()` inputs
+- Completely wrong CP input dimension after correcting `small_to_mtp_projection`
+- Exported text embedding / text projection / codec embedding weights as the source of the tested short-segment greedy mismatch
 
-### 未排除/仍在调查中
-- 为什么 `official_stepwise` / `engine_stepwise` 仍与高级 `official_generate` 在后期或终端测试步骤分歧
-- 本地 PyTorch 展开奇偶修复后端到端独立/TRT 服务路径是否仍显示幻觉
-- 官方仓库长段参数不稳定看起来仍然真实，需要与任何服务侧问题分开
+### Not excluded / still under investigation
+- Why `official_stepwise` / `engine_stepwise` still diverge from the high-level `official_generate` at late or terminal test steps
+- Whether the end-to-end standalone/TRT serving path still shows hallucination after the local PyTorch rollout parity fix
+- The official-repo long-segment parameter instability still looks real and needs to be separated from any serving-side issue
 
-## 当前最佳证据支持陈述
+## Currently Best-Supported Statements
 
-当前最强证据是：
+The strongest current evidence is:
 
-1. 在支持的官方提示下，prefill 和尾部文本注入与引擎路径对齐。
-2. 早期短段 greedy+punish 奇偶失败追溯到微小的导出 `tts_bos/eos/pad` 增量。
-3. 从加载的 BF16 模块重新计算这些特殊嵌入修复了该引擎侧 prefill bug。
-4. 修复后，短前缀 greedy+punish 奇偶性恢复。
-5. 相同修复后，4a `LONG_TEXT` greedy+punish 逐步奇偶性也保持至少 128 个测试步骤，包括 pad 阶段，`official_stepwise == engine_stepwise == engine_manual`。
-6. 相同修复后，测试的短、中、4a 和 story 样式前缀上采样官方 vs 手动展开匹配；本地 PyTorch 手动链中未重现早期内容分歧。
-7. 在 4a 上，即使手动奇偶性恢复，官方采样流式在测试的 256 步预算内仍不发射 EOS。
-8. 剩余已知不匹配现在在高级 `official_generate()` 和显式逐步重放之间的后期或终端测试步骤，这与已修复的引擎 prefill 问题分开。
-9. 修复后的独立引擎代表性 4a/story 用例重跑正常完成，时长接近现有保存的输出，无记录的段溢出。
+1. Under the supported official prompt, prefill and trailing text injection align with the engine path.
+2. The early short-segment greedy+punish parity failure traces back to the tiny exported `tts_bos/eos/pad` deltas.
+3. Recomputing these special embeddings from the loaded BF16 modules fixes that engine-side prefill bug.
+4. After the fix, short-prefix greedy+punish parity is restored.
+5. After the same fix, 4a `LONG_TEXT` greedy+punish stepwise parity also holds for at least 128 test steps, including the pad stage, with `official_stepwise == engine_stepwise == engine_manual`.
+6. After the same fix, sampled official vs manual rollout match on the tested short, medium, 4a, and story-style prefixes; no early content divergence is reproduced in the local PyTorch manual chain.
+7. On 4a, even with manual parity restored, the official sampling streaming still does not emit EOS within the tested 256-step budget.
+8. The remaining known mismatch is now at late or terminal test steps between the high-level `official_generate()` and the explicit stepwise replay, which is separate from the fixed engine prefill problem.
+9. The fixed standalone engine's representative 4a/story re-runs complete normally, with durations close to the existing saved outputs and no logged segment overflow.
 
-因此问题目前更像是：
-- 一个已修复的引擎侧 prefill 奇偶 bug，由导出时特殊嵌入导致
-- 官方高级 `generate()` 与显式逐步重放之间的剩余差异
-- 引擎/本地奇偶恢复后仍存在的官方长段流式+采样不稳定问题
-- 以及，如果用户侧幻觉仍存在，可能需要精确用例服务/运行时复现，而非更多通用奇偶追踪
+Therefore the problem currently looks more like:
+- A fixed engine-side prefill parity bug caused by export-time special embeddings
+- A remaining difference between the official high-level `generate()` and the explicit stepwise replay
+- An official long-segment streaming + sampling instability that persists even after engine/local parity is restored
+- And, if user-side hallucination still exists, it may need an exact-case serving/runtime reproduction rather than more generic parity tracing
 
-## 调查期间创建的有用脚本
+## Useful Scripts Created During the Investigation
 
 - `scripts/python/cp_sampled_parity.py`
-  - 官方缓存 CP vs 展开 CP 奇偶性
+  - Official cached CP vs unrolled CP parity
 - `scripts/python/pytorch_streaming_baseline.py`
-  - PyTorch bf16 流式基准
+  - PyTorch bf16 streaming baseline
 - `scripts/python/greedy_punish_parity.py`
-  - 本地官方 vs 手动 greedy+punish 奇偶性
+  - Local official vs manual greedy+punish parity
 - `scripts/python/official_vs_manual_rollout.py`
-  - 官方 vs 手动展开比较
+  - Official vs manual rollout comparison
 - `scripts/python/replay_official_talker_stepwise.py`
-  - 带显式 `position_ids` / `cache_position` 的官方逐步重放
+  - Official stepwise replay with explicit `position_ids` / `cache_position`
 - `scripts/python/trace_official_streaming.py`
-  - 带签名保留钩子的官方追踪
+  - Official trace with signature-preserving hooks
 - `scripts/python/compare_prefill_paths.py`
-  - prefill/trailing 的支持-vs-裸官方提示比较
+  - Supported-vs-bare official prompt comparison for prefill/trailing
 - `scripts/python/greedy_punish_stagewise_compare.py`
-  - 更正的官方基准 vs 手动引擎路径，greedy+punish 下逐阶段比较
+  - Corrected official baseline vs manual engine path, stage-by-stage comparison under greedy+punish
 - `scripts/python/greedy_punish_mode_matrix.py`
-  - 官方 generate / 官方逐步 / 引擎逐步 / 引擎手动模式矩阵
+  - Official generate / official stepwise / engine stepwise / engine manual mode matrix
 - `scripts/python/compare_live_vs_exported_prefill.py`
-  - 原始导出特殊嵌入 vs 运行时重新计算特殊嵌入 vs 实时模型奇偶性
+  - Original exported special embeddings vs runtime-recomputed special embeddings vs live-model parity
 
-## 下一步建议
+## Suggested Next Steps
 
-现在最有价值的实验是：
+The most valuable experiments now are:
 
-- 如果仍有不良用户侧用例，通过修复的独立/TRT 服务器重现确切不良用例
-- 为该确切会话启用转储捕获，并将其 codec/状态演进与本地 PyTorch `official_stepwise` / `engine_stepwise` 追踪比较
-- 确定任何剩余症状是否来自：
-  - 官方高级长段不稳定性，
-  - 服务层分段/滚动行为，
-  - 或已修复 prefill 路径之外的 TRT/下游解码差异
+- If there is still a bad user-side case, reproduce the exact bad case through the fixed standalone/TRT server
+- Enable dump capture for that exact session and compare its codec/state evolution against the local PyTorch `official_stepwise` / `engine_stepwise` traces
+- Determine whether any remaining symptom comes from:
+  - Official high-level long-segment instability,
+  - Serving-layer segmentation/rolling behavior,
+  - Or a TRT/downstream decode difference outside the fixed prefill path
 
-目标是回答：
-1. 之前修复的 prefill bug 是否是主要的引擎侧因素，
-2. 剩余问题现在是否仅可在确切不良用例上复现，而非通用 4a/story 回归，或
-3. 本地展开奇偶恢复后是否仍有独立的服务/运行时问题。
+The goal is to answer:
+1. Whether the previously fixed prefill bug was the primary engine-side factor,
+2. Whether the remaining problem is now only reproducible on exact bad cases rather than generic 4a/story regressions, or
+3. Whether there is still an independent serving/runtime problem after the local rollout parity is restored.
 
-## 2026-06-29 混合精度（CP=fp32）引擎复查
+## 2026-06-29 Mixed-Precision (CP=fp32) Engine Re-Check
 
-### 背景
+### Background
 
-构建了一版混合精度引擎：talker backbone 保持 bf16，code_predictor（CP）改为
-fp32（`--cp-precision fp32`，对应历史发现 #15 的对照结论）。预期 CP 数值不稳定
-被消除后流式幻觉应消失，但 `short` badcase 仍间歇性幻觉（~10s 句子膨胀到 40.32s
-= 504 步 `max_seq_len(512)` overflow、无自然 EOS）。
+Built a mixed-precision engine: the talker backbone stays bf16, while the code_predictor (CP) switches to fp32 (`--cp-precision fp32`, corresponding to the control conclusion in historical finding #15). The expectation was that once the CP numerical instability is eliminated, the streaming hallucination should disappear, but the `short` badcase still intermittently hallucinates (a ~10s sentence inflates to 40.32s = 504 steps of `max_seq_len(512)` overflow, with no natural EOS).
 
-### 复现方法（确定性 session_id → 确定性种子）
+### Reproduction Method (deterministic session_id → deterministic seed)
 
-- 引擎采样种子 = `blake2b(base_seed=0, session_id, segment_idx)`
-  （`engine/backend/executor.py:_stable_sampling_seed`）。因此**固定 session_id
-  即固定种子即可复现的 rollout**。`tests/repeat_case.py` 给 session_id 追加了时间戳，
-  导致不可复现；改用确定性 id 扫描（`workspace/halluc_probe.py`）。
-- 扫描 `halluprobe-0001..0040` 即命中可复现幻觉：**`halluprobe-0007` / `0008`
-  稳定产出 504 步 overflow**（多次重跑完全一致）。
+- The engine sampling seed = `blake2b(base_seed=0, session_id, segment_idx)` (`engine/backend/executor.py:_stable_sampling_seed`). Therefore **a fixed session_id means a fixed seed means a reproducible rollout**. `tests/repeat_case.py` appends a timestamp to the session_id, making it non-reproducible; switched to a deterministic id scan (`workspace/halluc_probe.py`).
+- Scanning `halluprobe-0001..0040` hits a reproducible hallucination: **`halluprobe-0007` / `0008` stably produce a 504-step overflow** (fully consistent across multiple re-runs).
 
-### dump 捕获
+### Dump Capture
 
-- 通过 compose override（`workspace/compose.dump.yaml`）给 docker 引擎注入
-  `ENGINE_DUMP_*` 并挂载 `/dumps`，**保留 `engine.yaml` 采样配置
-  （do_sample=true, temperature=0.9, top_k=50, repetition_penalty=1.05）**——
-  注意不要用 `run_engine_dump.py` 的 greedy 默认值，否则 rollout 不复现。
-- 驱动 `halluprobe-0007` 捕获 1 prefill + 504 decode 共 505 个 `.pt`。dump 输入含
-  `gumbel_noise` / `cp_gumbel_noise`，因此原型重放采样**按构造对齐种子**。
+- Via a compose override (`workspace/compose.dump.yaml`), inject `ENGINE_DUMP_*` into the docker engine and mount `/dumps`, while **keeping the `engine.yaml` sampling config (do_sample=true, temperature=0.9, top_k=50, repetition_penalty=1.05)** — note: do not use the greedy defaults of `run_engine_dump.py`, otherwise the rollout does not reproduce.
+- Driving `halluprobe-0007` captures 1 prefill + 504 decode = 505 `.pt` files. The dump inputs include `gumbel_noise` / `cp_gumbel_noise`, so the prototype-replay sampling is **seed-aligned by construction**.
 
-### 与原型逐步对比（`workspace/scan_dump_divergence.py`，复活并修复
-`analyze_engine_dump.py`）
+### Stepwise Comparison Against the Prototype (`workspace/scan_dump_divergence.py`, revived and fixed `analyze_engine_dump.py`)
 
-把每步 dump 的输入喂入官方 PyTorch fused talker（`build_talker_unified_fused_module`），
-对比 `full_codec`：
+Feed each step's dump inputs into the official PyTorch fused talker (`build_talker_unified_fused_module`) and compare `full_codec`:
 
-- **首次分歧在 decode step 1，CP stage 7**（stage 0–6 完全一致）。
-- 引擎 CP 现在更贴近 **fp32** 原型而非 bf16（例：step3 与 fp32 匹配到 stage 11、
-  与 bf16 只到 stage 6；step4 fp32→stage 7、bf16→stage 5）——**说明 CP→fp32 确实
-  生效**。
-- 但 step 1 stage 7 处 **fp32 与 bf16 原型本身也互不一致**（1641 vs 57），即该
-  stage 是高熵近平局点。
+- **First divergence at decode step 1, CP stage 7** (stages 0–6 fully consistent).
+- The engine CP now hews closer to the **fp32** prototype than to the bf16 one (e.g. step3 matches fp32 up to stage 11 but bf16 only up to stage 6; step4 fp32→stage 7, bf16→stage 5) — **showing CP→fp32 does take effect**.
+- But at step 1 stage 7 the **fp32 and bf16 prototypes are themselves inconsistent with each other** (1641 vs 57), i.e. that stage is a high-entropy near-tie point.
 
-### 根因定位（`workspace/compare_step1_hidden.py`，含 hidden/logits 的 step1 dump）
+### Root-Cause Localization (`workspace/compare_step1_hidden.py`, with a step1 dump containing hidden/logits)
 
-| 对比 | 引擎 vs fp32 原型 | 引擎 vs bf16 原型 |
+| Comparison | Engine vs fp32 prototype | Engine vs bf16 prototype |
 |------|------|------|
-| talker `hidden` | cos=0.99990916，**max_abs=0.295** | cos=0.99989，max_abs=0.25 |
-| talker `logits` | cos=0.99997，max_abs=0.21 | cos=0.99997，max_abs=0.19 |
-| talker token0(stage0) | id=1995，top1−top2 margin=**3.625**（非平局，匹配） | 同左 |
-| `full_codec` 首分歧 | stage 7 | stage 7 |
+| talker `hidden` | cos=0.99990916, **max_abs=0.295** | cos=0.99989, max_abs=0.25 |
+| talker `logits` | cos=0.99997, max_abs=0.21 | cos=0.99997, max_abs=0.19 |
+| talker token0(stage0) | id=1995, top1−top2 margin=**3.625** (not a tie, matches) | same as left |
+| `full_codec` first divergence | stage 7 | stage 7 |
 
-结论链：
+Conclusion chain:
 
-1. **talker backbone（bf16 TRT）的 hidden 不是 bit-exact**：相对 fp32 原型
-   max_abs≈0.3（cos 0.9999）；相对 torch bf16 也有 max_abs≈0.25，说明 **TRT bf16
-   talker ≠ torch bf16 talker**（kernel/累加差异），引擎 hidden 自成一系，与两个
-   原型都不同。
-2. talker token0 本身鲁棒（margin 3.6）→ stage 0 一致。
-3. 该 ~0.3 的 hidden 扰动传入 CP；CP 虽已 fp32（孤立测试正确，见 #15），但其**输入
-   是被 bf16 talker 扰动过的 hidden**，叠加 CP 尾部 stage 7 本就近平局
-   （temp=0.9 高熵、fp32/bf16 原型在此都翻转），导致 **step 1 stage 7 argmax 翻转**。
-4. 单个翻转的子码级联：step 2 起 talker token0 也开始分歧，rollout 走入永不发 EOS
-   的区域 → 504 步 overflow → 40.32s 幻觉。
+1. **The talker backbone's (bf16 TRT) hidden is not bit-exact**: relative to the fp32 prototype, max_abs≈0.3 (cos 0.9999); relative to torch bf16 it also has max_abs≈0.25, showing that **TRT bf16 talker ≠ torch bf16 talker** (kernel/accumulation differences); the engine hidden is its own thing, different from both prototypes.
+2. The talker token0 itself is robust (margin 3.6) → stage 0 is consistent.
+3. That ~0.3 hidden perturbation feeds into CP; even though CP is already fp32 (correct in isolated testing, see #15), its **input is a hidden perturbed by the bf16 talker**, and stacked on the CP tail's already-near-tie stage 7 (temp=0.9 high entropy, both fp32/bf16 prototypes flip here), causes the **step 1 stage 7 argmax to flip**.
+4. A single flipped sub-code cascades: from step 2 the talker token0 also starts to diverge, and the rollout enters a region that never emits EOS → 504-step overflow → 40.32s hallucination.
 
-### 决定性对照：原型不会跑飞，只有 bf16 引擎跑飞（`workspace/prototype_rollout.py`）
+### Decisive Control: the prototype does not run away, only the bf16 engine does (`workspace/prototype_rollout.py`)
 
-用独立的 **fp32** PyTorch rollout 驱动官方 fused talker，**与引擎共享同一前缀状态与
-同一随机流**（每步 gumbel 取自引擎 dump，轨迹无关；轨迹相关的反馈
-input_embeds/token_counts/past_kv 用原型自身输出，文本嵌入
-`text_embed[k]=engine_input_embeds[k]−engine_codec_sum[k−1]` 从 dump 还原）。唯一变量
-是 decode 算术（fp32 原型 vs dump 里的 bf16 引擎）。
+Using a standalone **fp32** PyTorch rollout driving the official fused talker, **sharing the same prefix state and the same random stream as the engine** (each step's gumbel comes from the engine dump, trajectory-independent; the trajectory-dependent feedback input_embeds/token_counts/past_kv uses the prototype's own outputs, and the text embedding `text_embed[k]=engine_input_embeds[k]−engine_codec_sum[k−1]` is recovered from the dump). The only variable is the decode arithmetic (fp32 prototype vs the bf16 engine in the dump).
 
-结果：
+Results:
 
-- **原型（fp32）在 step 126 自然发 EOS**（≈正常 ~10s，落在健康样本 113–130 chunk 区间内）。
-- **引擎（bf16）从不发 EOS，跑到 504 步 cap = 40.32s 幻觉**。
-- token0 首次分歧在 step 2（与 step1 CP stage7 翻转级联一致）。
+- **The prototype (fp32) emits EOS naturally at step 126** (≈normal ~10s, within the healthy sample's 113–130 chunk range).
+- **The engine (bf16) never emits EOS, running to the 504-step cap = 40.32s hallucination.**
+- token0 first diverges at step 2 (consistent with the step1 CP stage7 flip cascade).
 
-即：**原型不跑飞**。两者起点与随机流完全一致，差别只在 bf16 decode 算术 → 结论是
-**这是引擎侧 bf16 精度问题放大成 runaway，而非上游模型不稳定**（至少对该 seed）。
-注意原型这里还沿用了引擎的 bf16 prefill KV 作为公共起点仍能正常收敛，说明问题在
-**bf16 decode 累积**，不在 prefill。
+That is: **the prototype does not run away**. The two have identical starting points and random streams, differing only in the bf16 decode arithmetic → the conclusion is **this is an engine-side bf16 precision issue amplified into a runaway, not upstream model instability** (at least for this seed). Note the prototype here even reuses the engine's bf16 prefill KV as the common starting point and still converges normally, showing that the problem is in **bf16 decode accumulation**, not prefill.
 
-### 排除 KV-cache 轮转/拷贝/裁剪 bug（`workspace/check_kv_rotation.py`）
+### Ruling Out KV-cache rotation/copy/trimming bugs (`workspace/check_kv_rotation.py`)
 
-仅用 dump 验证"每轮输入是否一致"（不需模型）。对每个 decode step k≥2 检查输入是否
-等于上一步输出该有的样子：
+Using only the dump to verify "whether each round's input is consistent" (no model needed). For each decode step k≥2, check whether the input equals what the previous step's output should have been:
 
-- `talker_past_kv[k][..., :L_{k-1}, :] == talker_past_kv[k-1]`（前缀保持）
-- `talker_past_kv[k][..., L_{k-1}:, :] == talker_new_kv[k-1]`（增量追加）
+- `talker_past_kv[k][..., :L_{k-1}, :] == talker_past_kv[k-1]` (prefix preservation)
+- `talker_past_kv[k][..., L_{k-1}:, :] == talker_new_kv[k-1]` (incremental append)
 - `token_counts[k] == updated_token_counts[k-1]`
-- `position_ids` 每步 +1
+- `position_ids` +1 each step
 
-结果（全 504 步，bf16 正确拷贝应 bit-exact）：
+Results (all 504 steps; a correct bf16 copy should be bit-exact):
 
-- step1 `past_kv == prefill new_kv`：max_abs=**0.0**
-- 全程 talker_past_kv 拷贝误差最坏：**0.0**；token_counts 反馈最坏：**0.0**；
-  不一致步数：**0**。
-- 第三个反馈输入 `input_embeds`(= 上步 codec_sum + 文本/pad 嵌入)：文本相消
-  `input_embeds[k]−codec_sum[k−1]` 在前 ~32 步随文本 token 变化（共 31 个文本 token，
-  与日志一致），约 step33 起稳定，pad 阶段(40..504)该 pad 嵌入**恒定**（最大漂移
-  0.0039 = bf16 噪声）。
+- step1 `past_kv == prefill new_kv`: max_abs=**0.0**
+- Worst-case talker_past_kv copy error throughout: **0.0**; worst-case token_counts feedback: **0.0**; number of inconsistent steps: **0**.
+- The third feedback input `input_embeds` (= previous step's codec_sum + text/pad embedding): with the text canceled out, `input_embeds[k]−codec_sum[k−1]` changes with the text token in the first ~32 steps (31 text tokens total, consistent with the log), stabilizes around step33, and in the pad stage (40..504) that pad embedding is **constant** (max drift 0.0039 = bf16 noise).
 
-→ **引擎 KV pool 的 scatter/gather/pingpong 轮转是无损的，每轮输入完全一致**。
-所以分歧不是"错误拷贝/错误裁剪/精度丢失"导致的输入污染，而是**每步 talker/CP 的
-bf16 算术**本身产出不同（再正确地前馈下去）。这也与决定性 rollout 自洽：给同样
-（正确轮转的）输入、只换 fp32 算术，就能正常终止。
+→ **The engine KV pool's scatter/gather/pingpong rotation is lossless, and each round's input is fully consistent.** So the divergence is not input contamination caused by "wrong copy / wrong trimming / precision loss", but rather the **per-step talker/CP bf16 arithmetic** itself producing different outputs (which are then correctly fed forward). This is also self-consistent with the deterministic rollout: given the same (correctly rotated) inputs and only switching to fp32 arithmetic, it terminates normally.
 
-注：此检查针对 **talker KV**（驱动 codec/EOS、即 runaway 的那条链）。c2w 缓存（带
-sliding window + pingpong）只影响 wav 合成、不回馈 talker，故与"无 EOS 跑飞"无关。
+Note: this check targets the **talker KV** (the chain that drives codec/EOS, i.e. the runaway one). The c2w cache (with sliding window + pingpong) only affects wav synthesis and does not feed back into the talker, so it is unrelated to the "no-EOS runaway".
 
-### 当前判断
+### Current Judgment
 
-- **CP→fp32 是必要但不充分**。残余分歧由 **bf16 talker backbone 的 hidden 误差**
-  从 CP 输入端进入，而非 CP 算术本身。用户"backbone 不应与原型分叉"的假设不成立：
-  bf16（且 TRT）backbone 确实与原型分叉（max_abs≈0.3）。
-- stage 7 是模型固有的近平局点（fp32/bf16 原型自身在此翻转），因此对任何微小扰动
-  都敏感——这是 bf16 放大的固有脆弱性，不是单纯的导出/算子 bug。
-- 决定性 rollout 表明 **fp32 decode 能正常终止而 bf16 decode 跑飞**，因此把 talker
-  decode 路径提到 fp32（或更高精度）预期可消除该幻觉。
-  **（下节实测推翻了这条预期——见"全 fp32 引擎实测"。）**
+- **CP→fp32 is necessary but not sufficient.** The residual divergence enters from the CP input side via the **bf16 talker backbone's hidden error**, not from the CP arithmetic itself. The user's assumption that "the backbone should not fork from the prototype" does not hold: the bf16 (and TRT) backbone does fork from the prototype (max_abs≈0.3).
+- Stage 7 is a model-intrinsic near-tie point (the fp32/bf16 prototypes themselves flip here), so it is sensitive to any tiny perturbation — this is the inherent fragility amplified by bf16, not simply an export/operator bug.
+- The deterministic rollout shows that **fp32 decode terminates normally while bf16 decode runs away**, so promoting the talker decode path to fp32 (or higher precision) is expected to eliminate this hallucination.
+  **(The measurements in the next section overturn this expectation — see "Full-fp32 Engine Measurement".)**
 
-### 全 fp32 引擎实测：精度不是根因，只是"洗牌"（构建并对比）
+### Full-fp32 Engine Measurement: precision is not the root cause, only a "shuffle" (built and compared)
 
-构建了一版**全 fp32** fused 引擎（`ENGINE_DTYPE=fp32`，backbone+cp+code2wav 均 fp32，
-trtexec 172s，引擎 7.0G，运行时 `I/O dtype consistency check passed: manifest=fp32`），
-在**同一组 40 个确定性 session**(`halluprobe-0001..0040`) 上与原 bf16(cp=fp32) 引擎对比：
+Built a **full-fp32** fused engine (`ENGINE_DTYPE=fp32`, backbone+cp+code2wav all fp32, trtexec 172s, engine 7.0G, runtime `I/O dtype consistency check passed: manifest=fp32`), and compared it against the original bf16(cp=fp32) engine on the **same set of 40 deterministic sessions** (`halluprobe-0001..0040`):
 
-| 引擎 | 幻觉 session | 比例 |
+| Engine | Hallucinating sessions | Ratio |
 |------|------|------|
 | bf16(cp=fp32) | 0007, 0008, 0027, 0031, 0037 | **5/40** |
-| 全 fp32 | 0002, 0006, 0008, 0010, 0029, 0033, 0038 | **7/40** |
-| 交集 | **仅 0008** | |
+| full fp32 | 0002, 0006, 0008, 0010, 0029, 0033, 0038 | **7/40** |
+| Intersection | **only 0008** | |
 
-- fp32 **修好了** 4 个(0007/0027/0031/0037)，但**新弄坏了** 6 个
-  (0002/0006/0010/0029/0033/0038)。
-- 两个集合几乎不相交（只有 0008 共有）；总比例没下降（5→7，n=40 下统计上无差别，
-  ~12–18%）。
-- 单独看 0007 会被误导：fp32 确实修好 0007（9.44s，与 rollout 预测的 ~126 步吻合），
-  但这是**该 seed 的偶然**，不是种群级修复。
+- fp32 **fixed** 4 (0007/0027/0031/0037) but **newly broke** 6 (0002/0006/0010/0029/0033/0038).
+- The two sets are almost disjoint (only 0008 in common); the overall ratio did not go down (5→7, statistically indistinguishable at n=40, ~12–18%).
+- Looking at 0007 alone is misleading: fp32 does fix 0007 (9.44s, matching the rollout-predicted ~126 steps), but this is **incidental to that seed**, not a population-level fix.
 
-**结论修正**：talker 提 fp32 **不能消除流式幻觉**，只是改变了"哪些 seed 跑飞"。
-幻觉的本质是**采样/模型层面的不稳定**——temperature=0.9 下，对该短文本约 12–18% 的
-随机种子会进入永不发 EOS 的轨迹、跑到 512 cap。任何微小扰动(bf16↔fp32、TRT tactic)
-只是把不同 seed 推进/推出"坏吸引盆"，不改变发生率。0008 在 bf16/fp32 下都跑飞，是
-与精度无关的固有不稳定（呼应发现 #1/#11：官方流式在部分情况本就不发 EOS）。
+**Corrected conclusion**: promoting the talker to fp32 **does not eliminate the streaming hallucination**, it only changes "which seeds run away". The essence of the hallucination is **sampling/model-level instability** — under temperature=0.9, for this short text about 12–18% of random seeds enter a trajectory that never emits EOS and run to the 512 cap. Any tiny perturbation (bf16↔fp32, TRT tactic) just pushes different seeds into/out of the "bad attractor basin"; it does not change the incidence rate. 0008 runs away under both bf16 and fp32, a precision-independent intrinsic instability (echoing findings #1/#11: official streaming inherently fails to emit EOS in some cases).
 
-**真正该做的缓解方向**（精度无关）：
+**The real mitigation directions to pursue** (precision-independent):
 
-1. EOS / 长度控制：对 token0 的 EOS 决策降温、或设最大音频步数后强制收尾（已有
-   overflow 强制 EOS，但听感差）。
-2. 采样策略：降低 talker token0 采样温度 / 调 top_k / 加更强 repetition 控制，压低
-   进入坏吸引盆的概率。
-3. 运行期检测-重采样：检测到 runaway（步数远超 EMA 预期）就换种子重跑该 segment。
-4. 与上游确认官方推荐的流式终止策略。
+1. EOS / length control: lower the temperature of token0's EOS decision, or force termination after a maximum audio step count (there is already an overflow-forced EOS, but it sounds bad).
+2. Sampling strategy: lower the talker token0 sampling temperature / tune top_k / add stronger repetition control to reduce the probability of entering the bad attractor basin.
+3. Runtime detection + resampling: on detecting a runaway (step count far exceeding the EMA expectation), switch the seed and re-run that segment.
+4. Confirm with upstream the officially recommended streaming termination strategy.
 
-CP→fp32 仍建议保留（发现 #15：CP bf16 在孤立测试本身数值不稳定），但要明确它**不是**
-幻觉的总解。
+CP→fp32 is still recommended to keep (finding #15: CP bf16 is itself numerically unstable in isolated testing), but it must be made clear that it is **not** the full solution to the hallucination.
 
-复现/对比脚本：`workspace/halluc_probe.py`（同一组确定性 seed 扫描）；构建命令
-`ENGINE_DTYPE=fp32 bash scripts/bash/build_engines.sh --variant custom-1.7b`。
+Reproduction/comparison script: `workspace/halluc_probe.py` (the same set of deterministic seeds is scanned); build command `ENGINE_DTYPE=fp32 bash scripts/bash/build_engines.sh --variant custom-1.7b`.
 
-### 决定性结论：原型本身也有同样的幻觉，是模型/采样参数问题（`workspace/proto_rate.py`）
+### Decisive Conclusion: the prototype itself has the same hallucination — it is a model / sampling-parameter problem (`workspace/proto_rate.py`)
 
-为区分"原型参数问题"还是"我们导图与原型不一致"，在**纯 fp32 PyTorch** 下跑官方权重
-fused talker 的自回归 rollout：每个 session 用引擎相同的种子
-（`_stable_sampling_seed(0, "halluprobe-NNNN", 0)`）自己生成 Gumbel 流
-（复刻 `_build_sampling_noise`），prefill 状态与文本/pad 嵌入 schedule 与种子无关、复用
-halluc_0007 dump，只有 Gumbel 随种子变。统计 504 步内是否自然发 EOS。
+To distinguish "a prototype parameter problem" from "our export map being inconsistent with the prototype", we ran the autoregressive rollout of the official-weights fused talker under **pure fp32 PyTorch**: each session uses the engine's same seed (`_stable_sampling_seed(0, "halluprobe-NNNN", 0)`) to generate its own Gumbel stream (replicating `_build_sampling_noise`); the prefill state and text/pad embedding schedule are seed-independent and reuse the halluc_0007 dump; only the Gumbel varies with the seed. We tally whether EOS is emitted naturally within 504 steps.
 
-三方在**同一组 40 个 seed** 上的幻觉率：
+The hallucination rates of the three implementations on the **same set of 40 seeds**:
 
-| 实现 | 幻觉 | 比例 | 幻觉 seed |
+| Implementation | Hallucinations | Ratio | Hallucinating seeds |
 |------|------|------|------|
-| bf16 引擎(cp=fp32) | 5/40 | 12.5% | 0007 0008 0027 0031 0037 |
-| 全 fp32 引擎 | 7/40 | 17.5% | 0002 0006 0008 0010 0029 0033 0038 |
-| **fp32 PyTorch 原型** | **4/40** | **10%** | **0013 0017 0030 0034** |
+| bf16 engine (cp=fp32) | 5/40 | 12.5% | 0007 0008 0027 0031 0037 |
+| full fp32 engine | 7/40 | 17.5% | 0002 0006 0008 0010 0029 0033 0038 |
+| **fp32 PyTorch prototype** | **4/40** | **10%** | **0013 0017 0030 0034** |
 
-- 三者比例统计上一致（10–18%，n=40 噪声内），但幻觉 seed 集合**几乎两两不相交**
-  （原型的 0013/0017/0030/0034 不在任何引擎集合里；引擎反复跑飞的 0008 在原型下
-  EOS@119 正常）。
-- 验证：原型对 0007 自然 EOS@115（与 fp32 引擎 118 步、dump-gumbel rollout 126 步
-  同量级；差异来自 prefill 那一次采样 draw 的偏移与 TRT/TF32 vs PyTorch 数值）。
+- The three ratios are statistically consistent (10–18%, within noise at n=40), but the hallucinating-seed sets are **almost pairwise disjoint** (the prototype's 0013/0017/0030/0034 are in none of the engine sets; the engine's repeatedly-runaway 0008 has a normal EOS@119 under the prototype).
+- Validation: the prototype emits EOS naturally at 0007 @115 (same order of magnitude as the fp32 engine's 118 steps and the dump-gumbel rollout's 126 steps; the difference comes from the offset of the single sampling draw at prefill and TRT/TF32 vs PyTorch numerics).
 
-**结论**：**原型本身就以 ~10–18% 的比例跑飞**——这正是用户假设里的"原型参数问题，
-之前只是没随机到原型的坏区域"。因此幻觉**不是导图/TRT 引入的不一致**，而是
-**temperature=0.9 + top_k=50 这套采样参数下模型固有的不稳定**：总有约 1/6 ~ 1/8 的
-随机种子落入"永不发 EOS"的吸引盆，bf16/fp32/TRT/PyTorch 只决定具体哪些 seed 落入，
-不改变发生率。这与发现 #1/#11（官方流式在部分情况本就不发 EOS）一致，并把它量化了。
+**Conclusion**: **The prototype itself runs away at a rate of ~10–18%** — exactly the "prototype parameter problem, we just hadn't randomly hit the prototype's bad region before" from the user's hypothesis. Therefore the hallucination is **not an inconsistency introduced by the export map / TRT**, but rather an **inherent instability of the model under this set of sampling parameters (temperature=0.9 + top_k=50)**: there are always about 1/6 ~ 1/8 of random seeds that fall into the "never-emit-EOS" attractor basin; bf16/fp32/TRT/PyTorch only decide which specific seeds fall in, not the incidence rate. This is consistent with findings #1/#11 (official streaming inherently fails to emit EOS in some cases), and quantifies it.
 
-→ 修复必须在**采样/终止策略**层面（见上节 1–4），换精度/查导图都无济于事。
+→ The fix must be at the **sampling/termination strategy** level (see sections 1–4 above); switching precision or auditing the export map is of no use.
 
-注：纯 fp32 原型 rollout 沿用引擎 bf16 prefill 作为公共起点、且 Gumbel 流相对引擎有
-一次 prefill draw 的偏移；这些不影响"原型幻觉率 ≈ 引擎幻觉率"这一比率级结论。
+Note: the pure-fp32 prototype rollout reuses the engine's bf16 prefill as the common starting point, and the Gumbel stream has a one-prefill-draw offset relative to the engine; these do not affect the ratio-level conclusion that "prototype hallucination rate ≈ engine hallucination rate".
 
-### 终极对照：用官方未改动代码跑"这个自训 checkpoint"，照样幻觉（`workspace/official_baseline.py`）
+### Ultimate Control: running "this self-trained checkpoint" with the official unmodified code still hallucinates (`workspace/official_baseline.py`)
 
-> **重要更正**：`workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice` 是软链到
-> `0601_trained_model`——**我们自己训练的
-> checkpoint**，不是官方发布权重。引擎、我方串接原型、以及下面这个"官方代码 baseline"
-> 用的全是这个自训权重。所以本节验证的是：**这个自训 checkpoint 经过最干净的路径
-> （官方未改动推理代码、fp32、无导出/TRT/我方脚本）是否仍幻觉**。官方发布权重未在此对比
-> （用户要求先聚焦这个 checkpoint）。
+> **Important correction**: `workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice` is a symlink to `0601_trained_model` — **our own trained checkpoint**, not the officially released weights. The engine, our concatenation prototype, and the "official-code baseline" below all use this self-trained checkpoint. So this section verifies: **does this self-trained checkpoint still hallucinate through the cleanest path (official unmodified inference code, fp32, no export/TRT/our scripts)?** The officially released weights are not compared here (per the user's request, focus on this checkpoint first).
 
-上节的"原型"是**我们脚本串起来的** fused module（官方子模块 + 我们的拓扑/unroll，
-即导出对象）。为区分"我们串脚本漏移植了策略"还是"这个 checkpoint 的权重本身有问题"，
-直接驱动**官方未改动**的高层 API
-`Qwen3TTSModel.generate_custom_voice`(→`Qwen3TTSForConditionalGeneration.generate`)：
-fp32、`non_streaming_mode=False`(流式，匹配我方管线)、`max_new_tokens=512`(与引擎
-512 cap 对齐)、speaker=`001`(= 我方 `serena` 因不在 spk_id_map 而回退到的默认音色，
-见 engine.yaml `default_speaker:"001"`)，40 个种子各 torch seed。
+The "prototype" of the previous section is a fused module **stitched together by our scripts** (official submodules + our topology/unroll, i.e. the export target). To distinguish "our stitching script failed to port some strategy" from "this checkpoint's weights are themselves problematic", we directly drive the **official unmodified** high-level API `Qwen3TTSModel.generate_custom_voice` (→`Qwen3TTSForConditionalGeneration.generate`): fp32, `non_streaming_mode=False` (streaming, matching our pipeline), `max_new_tokens=512` (aligned with the engine's 512 cap), speaker=`001` (= the default voice our `serena` falls back to because it is not in spk_id_map, see engine.yaml `default_speaker:"001"`), 40 seeds each a torch seed.
 
-官方采样默认值与我方引擎**完全一致**：do_sample=True, top_k=50, top_p=1.0,
-temperature=0.9, repetition_penalty=1.05, subtalker_dosample=True。eos_token_id=2150。
+The official sampling defaults are **exactly the same** as our engine: do_sample=True, top_k=50, top_p=1.0, temperature=0.9, repetition_penalty=1.05, subtalker_dosample=True. eos_token_id=2150.
 
-四方在同一组 40 seed 上的幻觉率（>18s 即 runaway）：
+The hallucination rates of the four implementations on the same set of 40 seeds (>18s = runaway):
 
-（四方都用同一个**自训 checkpoint** `0601_trained_model`，speaker=`001`）
+(All four use the same **self-trained checkpoint** `0601_trained_model`, speaker=`001`)
 
-| 实现 | 幻觉 | 比例 | 幻觉 seed |
+| Implementation | Hallucinations | Ratio | Hallucinating seeds |
 |------|------|------|------|
-| bf16 引擎(cp=fp32) | 5/40 | 12.5% | 0007 0008 0027 0031 0037 |
-| 全 fp32 引擎 | 7/40 | 17.5% | 0002 0006 0008 0010 0029 0033 0038 |
-| 我方 fp32 PyTorch 串接原型 | 4/40 | 10% | 0013 0017 0030 0034 |
-| **官方未改动代码 + 自训 ckpt(fp32)** | **6/40** | **15%** | **0003 0013 0014 0025 0026 0032** |
+| bf16 engine (cp=fp32) | 5/40 | 12.5% | 0007 0008 0027 0031 0037 |
+| full fp32 engine | 7/40 | 17.5% | 0002 0006 0008 0010 0029 0033 0038 |
+| our fp32 PyTorch concatenation prototype | 4/40 | 10% | 0013 0017 0030 0034 |
+| **official unmodified code + self-trained ckpt (fp32)** | **6/40** | **15%** | **0003 0013 0014 0025 0026 0032** |
 
-- **四方比例统计上一致（10–18%）**；具体坏 seed 集合因采样实现/精度不同而异，但
-  官方代码路径与我方串接原型**共享 0013**（两条 PyTorch fp32 路径都判 0013 跑飞），相互印证。
-- 官方代码路径 max 时长 40.88s、median 9.72s，与引擎现象完全同构。
+- **The four ratios are statistically consistent (10–18%)**; the specific bad-seed sets differ due to differing sampling implementations/precision, but the official code path and our concatenation prototype **share 0013** (both PyTorch fp32 paths judge 0013 to run away), mutually corroborating.
+- The official code path has a max duration of 40.88s and a median of 9.72s, isomorphic to the engine phenomenon.
 
-**结论（回答用户二分）**：**这个自训 checkpoint 经过官方未改动代码（fp32、无导出/TRT/
-我方脚本）照样以 ~15% 跑飞**。因此**不是**"我方漏移植了某段官方策略导致导图/引擎出错"——
-我方串接脚本、ONNX 导出、TRT 引擎都**忠实继承**了这个权重的固有行为。问题定位在
-**这个自训 checkpoint 的权重 + 官方推荐流式采样参数(temp=0.9/top_k=50/rep_penalty=1.05)**：
-约 1/6~1/8 的随机种子无法自然发 EOS。
+**Conclusion (answering the user's dichotomy)**: **This self-trained checkpoint runs away at ~15% even through the official unmodified code (fp32, no export/TRT/our scripts).** Therefore it is **not** "we failed to port some piece of official strategy, causing the export map/engine to be wrong" — our concatenation script, ONNX export, and TRT engine all **faithfully inherit** the intrinsic behavior of this weight. The problem is localized to **this self-trained checkpoint's weights + the officially recommended streaming sampling parameters (temp=0.9/top_k=50/rep_penalty=1.05)**: about 1/6~1/8 of random seeds cannot emit EOS naturally.
 
-**尚未回答**：是 Qwen3-TTS 本身就这样，还是**这次训练（0601）把权重训坏了**——需用
-**官方发布的 1.7B CustomVoice 权重**（`本地官方权重`，本地已有）
-跑同一测试对比。用户当前要求先聚焦这个 checkpoint，故暂未跑官方权重。
+**Still unanswered**: whether Qwen3-TTS is just like this, or **this training run (0601) trained the weights badly** — this needs to be compared by running the same test with the **officially released 1.7B CustomVoice weights** (`local official weights`, already available locally). The user currently requests to focus on this checkpoint first, so the official weights have not been run yet.
 
-**可行动方向**：换精度/查导图/逐行对官方代码都无效（已验证）；要么在**采样/终止策略**上
-缓解（EMA 提前收尾、token0 EOS 降温、runaway 检测重采样），要么如果对比发现是训练训坏的，
-**重训/换 checkpoint**。
+**Actionable directions**: switching precision / auditing the export map / line-by-line comparison against the official code are all ineffective (verified); either mitigate at the **sampling/termination strategy** level (EMA early termination, token0 EOS temperature reduction, runaway detection + resampling), or if the comparison finds it is a bad training run, **retrain/switch checkpoint**.
 
-脚本：`workspace/official_baseline.py`（官方仓库率）、`workspace/proto_rate.py`
-（我方串接原型率）、`workspace/halluc_probe.py`（引擎率）。
+Scripts: `workspace/official_baseline.py` (official-repo rate), `workspace/proto_rate.py` (our concatenation prototype rate), `workspace/halluc_probe.py` (engine rate).
 
-### 建议的下一步
+### Suggested Next Steps
 
-1. 把 talker backbone（至少 talker→CP 的 hidden / `codec_head` logits 路径）也提到
-   fp32，验证 step1 stage7 分歧是否消失（预期：与 fp32 原型逐步对齐）。
-2. 若无法全 fp32：评估降低 CP 尾部采样熵（该近平局点由 temp=0.9 触发）对幻觉率的
-   影响——但会改变模型行为。
-3. 仍需一次**纯 PyTorch rollout**（同文本同种子）确认原型自身在该 seed 上是否也跑飞，
-   以区分"引擎放大"与"上游不稳定"。逐步重放因 step≥2 喂的是引擎漂移后的状态，无法
-   单独回答此问题。
+1. Also promote the talker backbone (at least the talker→CP hidden / `codec_head` logits path) to fp32, and verify whether the step1 stage7 divergence disappears (expected: aligned stepwise with the fp32 prototype).
+2. If full fp32 is not possible: evaluate the effect of lowering the CP-tail sampling entropy (this near-tie point is triggered by temp=0.9) on the hallucination rate — but this will change the model behavior.
+3. Still need one **pure PyTorch rollout** (same text, same seed) to confirm whether the prototype itself also runs away on that seed, in order to distinguish "engine amplification" from "upstream instability". Stepwise replay cannot answer this alone, because from step≥2 it is fed the engine's already-drifted state.
 
-复现脚本（均在 `workspace/`，gitignored）：`halluc_probe.py`、`compose.dump.yaml`、
-`scan_dump_divergence.py`、`compare_step1_hidden.py`、`analyze_engine_dump.py`
-（从 git `ae77d68^` 复活并修复 import）。
+Reproduction scripts (all under `workspace/`, gitignored): `halluc_probe.py`, `compose.dump.yaml`, `scan_dump_divergence.py`, `compare_step1_hidden.py`, `analyze_engine_dump.py` (revived from git `ae77d68^` and fixed imports).

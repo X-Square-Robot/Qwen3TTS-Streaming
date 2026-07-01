@@ -1,392 +1,394 @@
-# Qwen3-TTS 引擎可观测性目标
+**English** | [中文](observability_goals.zh-CN.md)
 
-> 本文定义**计时/生命周期维度**的目标与字段语义（"要观测什么"）。
-> 其分层落地（四层模型 daily/debug/dump、控制面、debug 决策日志、dump 举证、升级排查链）见 [[observability_tiers]]；
-> 完整指标目录见 [[observability_metrics_catalog]]。
+# Qwen3-TTS Engine Observability Goals
 
-## 背景
+> This document defines the goals and field semantics along the **timing/lifecycle dimension** ("what to observe").
+> For its tiered rollout (the four-tier daily/debug/dump model, the control plane, debug decision logs, dump evidence, and the escalation troubleshooting chain), see [[observability_tiers]];
+> for the full metrics catalog, see [[observability_metrics_catalog]].
 
-近期的延迟排查暴露了当前独立引擎和远程 worker 架构中的一个顽疾：
-当端到端请求变慢时，我们通常需要结合多个日志源，加上手工对齐时间戳，
-才能还原出"到底发生了什么"。
+## Background
 
-典型场景包括：
+Recent latency investigations have exposed a chronic problem in the current standalone-engine and remote-worker architecture:
+when an end-to-end request slows down, we typically have to combine several log sources plus manually aligned timestamps
+to reconstruct "what actually happened."
 
-- 客户端文本很早就发出了，但引擎很晚才收到
-- 引擎 Session 创建很早，但第一个 `START_TOKENS` 很晚才到
-- 远程音频按时到达，但在本地被前缀裁剪延迟
-- TTFT 看起来很慢，但不同组件使用了不同的起始时间点
-- 多轮对话中，后续轮次的延迟来源完全无法区分
+Typical scenarios include:
 
-这导致系统难以运维、难以排查、难以在我们同时重构传输/会话协议时安全演进。
+- The client emits text early, but the engine receives it much later
+- The engine Session is created early, but the first `START_TOKENS` arrives much later
+- Remote audio arrives on time but is delayed locally by prefix trimming
+- TTFT looks slow, but different components use different start points
+- In multi-turn conversations, the latency source of later turns is completely indistinguishable
 
-本文档的目标是定义一套系统化的可观测性规范，使得：
+This makes the system hard to operate, hard to troubleshoot, and hard to evolve safely while we simultaneously refactor the transport/session protocol.
 
-1. **仅凭引擎侧日志**即可解释一次请求的完整过程
-2. **仅凭客户端收发的协议包**即可重建引擎的动作时间线
-3. **计时指标**使用显式的、稳定的语义，而非隐式推断
+The goal of this document is to define a systematic observability specification such that:
 
-本文档是产品和架构目标文档，不是实现补丁说明。
+1. **The engine-side logs alone** can explain the full course of a request
+2. **The protocol packets the client sends and receives alone** can reconstruct the engine's action timeline
+3. **Timing metrics** use explicit, stable semantics rather than implicit inference
 
----
-
-## 问题陈述
-
-当前可观测性存在以下弱点：
-
-### W1: 计时指标起始点不一致
-
-- 示例：引擎 `first_audio` 当前语义是 `session_created → first_audio_chunk_consumed`，
-  但多数人理解为 `first_text_arrived_at_engine → first_audio`
-- 不同组件对"首音频"的定义不同，但没有显式声明
-
-### W2: 延迟成分混合在一起
-
-- 一个数字混合了传输延迟、排队延迟、推理延迟、本地音频门控延迟
-- 无法区分"慢在推理"还是"慢在排队"还是"慢在前缀裁剪"
-
-### W3: 关键状态转换没有作为规范事件记录
-
-- Session 从 PENDING → PREFILL → DECODING 的转换时间点不可见
-- 文本从入队到出队的时间差不可见
-- 前缀缓存命中/缺失不可见
-
-### W4: 日志必须跨进程交叉比对才能还原真相
-
-- 引擎线程日志、前端接口日志、网关日志分散在不同位置
-- 没有统一的 request_id / session_id 贯穿所有日志
-
-### W5: 客户端协议元数据不足，无法离线重建时间线
-
-- 客户端发送了 `client_request_ts_ms` / `client_text_ts_ms` / `client_end_ts_ms`
-- 但服务端**没有回传**服务端生命周期时间戳
-- 客户端只能看到"音频什么时候到的"，看不到"引擎内部发生了什么"
-
-### W6: 前缀裁剪/VAD/本地门控影响感知 TTFT，但协议没有显式区分
-
-- VAD 策略已在协议中定义（prefix_trim / tail_guard / hybrid），但实现尚未落地
-- 一旦落地，`first_raw_audio` 和 `first_effective_audio` 之间的差距将成为重要的延迟来源
-- 目前没有任何机制让客户端知道"音频被裁剪了多少"
-
-### W7: 文本路径没有可观测性
-
-- 我们无法知道：文本什么时候到达引擎、什么时候被引擎线程取出、
-  文本是否因为进度保护被延迟、文本是否被合并
-
-### W8: 多 Segment / 多轮场景缺乏分段可观测性
-
-- 当前只有 Session 级别的 summary
-- 每个 Segment 的 prefill 时间、decode 步数、音频产出量不可见
-- 多轮对话中，后续轮次是命中前缀缓存还是全量 prefill 不可见
-
-### W9: 错误路径可观测性几乎为零
-
-- 超时、驱逐、PREFILL 失败等错误事件没有结构化记录
-- 客户端只收到一个 error 事件，无法区分错误发生在哪个阶段
+This document is a product and architecture goals document, not an implementation-patch note.
 
 ---
 
-## 核心设计目标
+## Problem Statement
 
-对于每一次合成请求，我们要实现两个完整且一致的可观测视图：
+The current observability has the following weaknesses:
 
-### 服务端可观测视图
+### W1: Timing metrics have inconsistent start points
 
-> 一个运维人员只需要 grep 一个 request_id / session_id，
-> 就能看到完整的生命周期，包含稳定的事件名称和计时分解。
+- Example: the engine's `first_audio` currently means `session_created → first_audio_chunk_consumed`,
+  but most people read it as `first_text_arrived_at_engine → first_audio`
+- Different components define "first audio" differently, but never state it explicitly
 
-### 客户端协议视图
+### W2: Latency components are mixed together
 
-> 一个客户端仅凭收发的协议包，就能计算出主要的延迟分段，
-> 并解释请求为什么慢。
+- A single number blends transport latency, queueing latency, inference latency, and local audio-gating latency
+- There is no way to tell whether the slowness is "in inference," "in queueing," or "in prefix trimming"
 
-两个视图必须使用相同的语义阶段来描述同一条时间线。
+### W3: Key state transitions are not recorded as canonical events
+
+- The transition times of a Session from PENDING → PREFILL → DECODING are invisible
+- The time gap between text being enqueued and dequeued is invisible
+- Prefix cache hits/misses are invisible
+
+### W4: Logs must be cross-correlated across processes to reconstruct the truth
+
+- Engine-thread logs, frontend-interface logs, and gateway logs are scattered in different places
+- There is no unified request_id / session_id threading through all logs
+
+### W5: Client protocol metadata is insufficient to reconstruct the timeline offline
+
+- The client sends `client_request_ts_ms` / `client_text_ts_ms` / `client_end_ts_ms`
+- But the server **does not return** the server-side lifecycle timestamps
+- The client can only see "when audio arrived," not "what happened inside the engine"
+
+### W6: Prefix trimming / VAD / local gating affect perceived TTFT, but the protocol does not distinguish them explicitly
+
+- VAD policies are already defined in the protocol (prefix_trim / tail_guard / hybrid), but the implementation has not landed yet
+- Once it lands, the gap between `first_raw_audio` and `first_effective_audio` will become an important latency source
+- There is currently no mechanism for the client to know "how much audio was trimmed"
+
+### W7: The text path has no observability
+
+- We cannot know: when text arrived at the engine, when it was pulled out by the engine thread,
+  whether the text was delayed by progress protection, or whether the text was coalesced
+
+### W8: Multi-segment / multi-turn scenarios lack per-segment observability
+
+- Currently there is only a Session-level summary
+- Each Segment's prefill time, decode steps, and audio output volume are invisible
+- In multi-turn conversations, whether later turns hit the prefix cache or did a full prefill is invisible
+
+### W9: Error-path observability is almost zero
+
+- Error events such as timeout, eviction, and PREFILL failure have no structured record
+- The client only receives a single error event and cannot tell which stage the error occurred in
 
 ---
 
-## 可观测性原则
+## Core Design Goals
 
-### 原则 1：每个计时指标必须有显式的语义起点和终点
+For every synthesis request, we want to achieve two complete and consistent observable views:
 
-我们不再使用未定义来源的 "ttft" 这样的非正式名称。
-每个指标必须定义：
+### Server-side observable view
 
-| 属性 | 含义 |
+> An operator only needs to grep a single request_id / session_id
+> to see the full lifecycle, complete with stable event names and a timing breakdown.
+
+### Client protocol view
+
+> A client, from the protocol packets it sends and receives alone, can compute the major latency segments
+> and explain why the request was slow.
+
+Both views must use the same semantic stages to describe the same timeline.
+
+---
+
+## Observability Principles
+
+### Principle 1: Every timing metric must have an explicit semantic start and end
+
+We no longer use informal names of undefined origin such as "ttft."
+Every metric must define:
+
+| Attribute | Meaning |
 |------|------|
-| 起始事件 | 时间计算的起点是什么事件 |
-| 终止事件 | 时间计算的终点是什么事件 |
-| 时钟域 | 单调钟（monotonic）还是挂钟（epoch） |
-| 强弱分类 | 强指标还是上下文指标 |
-| 原始/派生 | 是原始时间戳还是派生时长 |
+| Start event | Which event the time measurement starts from |
+| End event | Which event the time measurement ends at |
+| Clock domain | Monotonic clock or epoch (wall) clock |
+| Strong/weak class | Strong metric or contextual metric |
+| Raw/derived | A raw timestamp or a derived duration |
 
-示例：
+Example:
 
 ```
 server_session_create_to_first_raw_audio_ms
-  起始: session.created (monotonic)
-  终止: engine.audio.first_raw_chunk (monotonic)
-  时钟域: 服务端单调钟
-  分类: 强指标
-  类型: 派生
+  start: session.created (monotonic)
+  end:   engine.audio.first_raw_chunk (monotonic)
+  clock domain: server monotonic clock
+  class: strong metric
+  type: derived
 
 server_first_text_enqueue_to_first_raw_audio_ms
-  起始: text.first_enqueued (monotonic)
-  终止: engine.audio.first_raw_chunk (monotonic)
-  时钟域: 服务端单调钟
-  分类: 强指标
-  类型: 派生
+  start: text.first_enqueued (monotonic)
+  end:   engine.audio.first_raw_chunk (monotonic)
+  clock domain: server monotonic clock
+  class: strong metric
+  type: derived
 ```
 
-### 原则 2：强指标和上下文指标必须分离
+### Principle 2: Strong metrics and contextual metrics must be separated
 
-**强指标：**
+**Strong metrics:**
 
-- 完全在一个权威时钟域内生成
-- 适合告警和回归追踪
-- 示例：
-  - 引擎线程出队到首段原始音频
-  - 前端创建 Session 到首个音频块
-  - 客户端本地接收到本地渲染
+- Generated entirely within a single authoritative clock domain
+- Suitable for alerting and regression tracking
+- Examples:
+  - Engine thread dequeue to first raw audio segment
+  - Frontend Session creation to first audio chunk
+  - Client local receive to local render
 
-**上下文指标：**
+**Contextual metrics:**
 
-- 涉及多个时钟域或可选的客户端时间戳
-- 适用于诊断但不适合 SLO
-- 示例：
-  - 客户端请求发送到服务端请求接收
-  - VAD 模型结束时刻到客户端首音频接收
+- Span multiple clock domains or rely on optional client timestamps
+- Useful for diagnosis but unsuitable for SLOs
+- Examples:
+  - Client request send to server request receive
+  - VAD model end instant to client first-audio receive
 
-### 原则 3：原始事件和派生指标必须同时存在
+### Principle 3: Raw events and derived metrics must both exist
 
-我们不应该只记录已经计算好的时长。我们还需要原始阶段时间戳，因为：
+We should not only record already-computed durations. We also need the raw stage timestamps, because:
 
-- 下游系统可以重新派生指标
-- 计时契约变更不会破坏可回放性
-- 可疑的算术可以后续重新计算
+- Downstream systems can re-derive metrics
+- Changes to the timing contract do not break replayability
+- Suspicious arithmetic can be recomputed later
 
-### 原则 4："原始音频"和"有效音频"必须是不同的概念
+### Principle 4: "Raw audio" and "effective audio" must be distinct concepts
 
-当前困惑的主要来源是前缀裁剪/输出门控可能使"首个返回音频"不同于"首个远程接收音频"。
+The main source of current confusion is that prefix trimming / output gating can make "the first returned audio" differ from "the first remotely received audio."
 
-需要区分的概念：
+Concepts to distinguish:
 
-| 概念 | 含义 |
+| Concept | Meaning |
 |------|------|
-| 原始音频 (raw audio) | 引擎推理产出的、未经任何门控处理的音频帧/块 |
-| 有效音频 (effective audio) | 经前缀裁剪/VAD门控/输出策略后实际发送给客户端的音频帧/块 |
-| 发布音频 (published audio) | 写入引擎事件总线的音频 |
-| 渲染音频 (rendered audio) | 客户端实际播放的音频 |
+| Raw audio | Audio frames/chunks produced by engine inference, before any gating |
+| Effective audio | Audio frames/chunks actually sent to the client after prefix trimming / VAD gating / output policy |
+| Published audio | Audio written to the engine event bus |
+| Rendered audio | Audio the client actually plays |
 
-### 原则 5：文本路径可观测性必须与音频路径对等
+### Principle 5: Text-path observability must be on par with the audio path
 
-我们需要知道：
+We need to know:
 
-- Session 什么时候开始
-- 首段文本什么时候被网关/worker 接收
-- 首段文本什么时候进入引擎队列
-- 首段文本什么时候被引擎线程取出
-- 实际到达合成阶段的文本是什么
-- 文本是否因 batching/coalescing/进度保护 被延迟
+- When the Session started
+- When the first text segment was received by the gateway/worker
+- When the first text segment entered the engine queue
+- When the first text segment was pulled out by the engine thread
+- What text actually reached the synthesis stage
+- Whether the text was delayed by batching/coalescing/progress protection
 
-这必须在日志和协议元数据中都可见。
+This must be visible in both the logs and the protocol metadata.
 
-### 原则 6：错误路径必须有结构化的可观测性
+### Principle 6: The error path must have structured observability
 
-每个错误事件必须包含：
+Every error event must include:
 
-- 发生在哪个阶段
-- 错误类型和错误码
-- 此时的 Session 状态
-- 已完成的步骤数（已合成的 segment 数、已产出的音频步数等）
-- 超时类错误需要包含等待时长
-
----
-
-## 范围
-
-### 包含
-
-- 独立引擎（engine/）
-- 网关适配器（engine/gateway/）
-- 前端接口（engine/frontend/）
-- 输出管线（engine/interface/output.py）
-- 远程 Worker（workspace/qwen3_tts_remote.py）
-- 协议元数据（tts.proto / 协议层）
-- 客户端 SDK（client/）
-- 人类可读日志
-
-### 不包含（本阶段）
-
-- 分布式追踪基础设施（OpenTelemetry 等）
-- 外部指标后端（Prometheus 等）
-- UI 仪表盘
-- 全局时钟同步保证
-
-这些可以在语义稳定后再加。
+- Which stage it occurred in
+- The error type and error code
+- The Session state at that moment
+- The number of completed steps (segments synthesized, audio steps produced, etc.)
+- Timeout-type errors must include the wait duration
 
 ---
 
-## 生命周期模型
+## Scope
 
-我们标准化一个规范的请求生命周期。
+### In scope
 
-### 规范阶段定义
+- The standalone engine (engine/)
+- The gateway adapters (engine/gateway/)
+- The frontend interface (engine/frontend/)
+- The output pipeline (engine/interface/output.py)
+- The remote worker (workspace/qwen3_tts_remote.py)
+- Protocol metadata (tts.proto / the protocol layer)
+- The client SDK (client/)
+- Human-readable logs
+
+### Out of scope (this phase)
+
+- Distributed-tracing infrastructure (OpenTelemetry, etc.)
+- External metrics backends (Prometheus, etc.)
+- UI dashboards
+- Global clock-synchronization guarantees
+
+These can be added once the semantics are stable.
+
+---
+
+## Lifecycle Model
+
+We standardize a canonical request lifecycle.
+
+### Canonical stage definitions
 
 ```
  ┌─────────────────────────────────────────────────────────────────────┐
- │                        请求生命周期                                  │
+ │                        Request lifecycle                            │
  │                                                                     │
- │  1. request.accepted           网关接收到请求                        │
- │  2. session.config.validated   配置校验通过                          │
- │  3. session.created            Session 对象创建完成                   │
- │  4. session.registered         Session 注册到后端                     │
- │  5. text.first_received        首段文本到达网关/worker               │
- │  6. text.first_sent            首段文本发送向引擎                     │
- │  7. text.first_enqueued        首段文本入队到引擎 inbox              │
- │  8. text.first_dequeued        首段文本被引擎线程取出                 │
- │  9. engine.prefill.started     Prefill 开始                          │
- │ 10. engine.prefill.completed   Prefill 完成                          │
- │ 11. engine.decode.first_step   首个 decode 步骤启动                  │
- │ 12. engine.audio.first_raw     首段原始音频由引擎产出                 │
- │ 13. output.audio.first_effective 首段有效音频发布到输出流            │
- │ 14. session.completed          会话完成                              │
+ │  1. request.accepted           Gateway receives the request          │
+ │  2. session.config.validated   Config validation passed              │
+ │  3. session.created            Session object created                │
+ │  4. session.registered         Session registered to the backend     │
+ │  5. text.first_received        First text segment reaches gateway/worker │
+ │  6. text.first_sent            First text segment sent to the engine  │
+ │  7. text.first_enqueued        First text segment enqueued to engine inbox │
+ │  8. text.first_dequeued        First text segment pulled out by engine thread │
+ │  9. engine.prefill.started     Prefill starts                        │
+ │ 10. engine.prefill.completed   Prefill completes                     │
+ │ 11. engine.decode.first_step   First decode step starts              │
+ │ 12. engine.audio.first_raw     First raw audio produced by the engine │
+ │ 13. output.audio.first_effective First effective audio published to output stream │
+ │ 14. session.completed          Session completed                     │
  │                                                                     │
- │  ── 多 Segment 场景（每个 segment 重复 9-13）──                     │
+ │  ── Multi-segment case (repeat 9-13 per segment) ──                │
  │  9s. engine.segment.N.prefill.started                              │
  │ 10s. engine.segment.N.prefill.completed                            │
  │ 11s. engine.segment.N.decode.first_step                            │
  │ 12s. engine.segment.N.audio.first_raw                              │
  │ 13s. engine.segment.N.audio.first_effective                        │
  │                                                                     │
- │  ── 异常路径 ──                                                     │
- │ E1. session.timeout           会话超时                               │
- │ E2. session.evicted           会话被驱逐                             │
- │ E3. engine.prefill.failed     Prefill 失败                          │
- │ E4. session.cancelled         会话被取消                             │
- │ E5. session.error             通用错误                               │
+ │  ── Exceptional path ──                                            │
+ │ E1. session.timeout           Session timed out                     │
+ │ E2. session.evicted           Session evicted                       │
+ │ E3. engine.prefill.failed     Prefill failed                        │
+ │ E4. session.cancelled         Session cancelled                     │
+ │ E5. session.error             Generic error                         │
  └─────────────────────────────────────────────────────────────────────┘
 ```
 
-不是每个传输层都需要每个阶段，但所有阶段应有稳定的名称。
+Not every transport needs every stage, but all stages should have stable names.
 
 ---
 
-## 期望成果
+## Desired Outcomes
 
-### A. 日志应直接回答"发生了什么"
+### A. Logs should directly answer "what happened"
 
-给定一个 request_id / session_id，仅凭日志就能回答：
+Given a request_id / session_id, the logs alone should answer:
 
-| 问题 | 对应阶段 |
+| Question | Corresponding stages |
 |------|----------|
-| Session 创建花了多久？ | 1→3 |
-| 首段文本多久到达引擎？ | 5→8 |
-| 文本是否因排队/合并/进度保护被延迟？ | 7→8 间距 + 额外标记 |
-| Prefill 什么时候开始？ | 9 |
-| Decode step 0 什么时候开始？ | 11 |
-| 首段原始音频什么时候存在？ | 12 |
-| 首音频是否被前缀裁剪/VAD门控延迟？ | 12→13 间距 |
-| 实际合成了什么文本？ | text observability 字段 |
-| 请求是否使用了前缀缓存/全量 prefill/热启动？ | 9 的附带信息 |
-| 激活的协议版本和输出策略是什么？ | 2 的附带信息 |
-| 每个 Segment 各花了多久？ | 9s→13s 的分段计时 |
-| 请求为什么会失败？ | E1-E5 的结构化错误信息 |
+| How long did Session creation take? | 1→3 |
+| How long until the first text segment reached the engine? | 5→8 |
+| Was the text delayed by queueing/coalescing/progress protection? | The 7→8 gap + extra flags |
+| When did Prefill start? | 9 |
+| When did decode step 0 start? | 11 |
+| When did the first raw audio exist? | 12 |
+| Was the first audio delayed by prefix trimming / VAD gating? | The 12→13 gap |
+| What text was actually synthesized? | Text observability fields |
+| Did the request use the prefix cache / full prefill / warm start? | Ancillary info on 9 |
+| What protocol version and output policy were active? | Ancillary info on 2 |
+| How long did each Segment take? | Per-segment timing 9s→13s |
+| Why did the request fail? | Structured error info E1-E5 |
 
-### B. 客户端协议包应能回答"引擎做了什么"（无需服务端日志）
+### B. Client protocol packets should answer "what the engine did" (without server logs)
 
-仅凭客户端收发的包，客户端应能重建：
+From the packets the client sends and receives alone, the client should be able to reconstruct:
 
-| 信息 | 来源 |
+| Information | Source |
 |------|------|
-| 服务端何时接受了请求 | 协议元数据时间戳 |
-| 服务端何时接受了首段文本 | 协议元数据时间戳 |
-| 合成实际何时开始 | 协议元数据时间戳 |
-| 首段原始音频何时存在于服务端 | 协议元数据时间戳 |
-| 首段有效音频何时发送到传输层 | 协议元数据时间戳 |
-| 输出是否被前缀裁剪/尾部保护/混合策略门控 | 协议元数据标记 |
-| 请求何时完成 | 协议元数据时间戳 |
-| 每个 Segment 的音频量和文本量 | 协议元数据统计 |
-| 请求失败发生在哪个阶段 | 错误事件的阶段标记 |
+| When the server accepted the request | Protocol metadata timestamp |
+| When the server accepted the first text segment | Protocol metadata timestamp |
+| When synthesis actually started | Protocol metadata timestamp |
+| When the first raw audio existed on the server | Protocol metadata timestamp |
+| When the first effective audio was sent to the transport | Protocol metadata timestamp |
+| Whether the output was gated by prefix trim / tail guard / hybrid policy | Protocol metadata flags |
+| When the request completed | Protocol metadata timestamp |
+| The audio and text volume of each Segment | Protocol metadata stats |
+| Which stage a failed request failed in | Stage flag on the error event |
 
-### C. 指标应同时支持诊断和回归追踪
+### C. Metrics should support both diagnosis and regression tracking
 
-我们应该能够追踪：
+We should be able to track:
 
-- 协议层延迟
-- 纯引擎延迟
-- 纯传输延迟
-- 客户端可感知延迟
-- 门控引入的延迟
+- Protocol-layer latency
+- Pure engine latency
+- Pure transport latency
+- Client-perceivable latency
+- Gating-introduced latency
 
-而不需要每次排查 bug 时重新定义指标。
+without redefining metrics every time we debug an issue.
 
 ---
 
-## 规范可观测性表面
+## Canonical Observability Surface
 
-### 1. 规范请求事件日志
+### 1. Canonical request event log
 
-引入结构化的请求生命周期日志，使用稳定的事件名称。
+Introduce structured request-lifecycle logs that use stable event names.
 
-每条生命周期日志至少包含：
+Each lifecycle log entry contains at least:
 
-| 字段 | 说明 |
+| Field | Description |
 |------|------|
-| `session_id` | 会话唯一标识 |
-| `request_id` | 请求唯一标识（如有时） |
-| `turn_id` | 轮次标识（如有时） |
-| `segment_id` | 段标识（多段时） |
-| `phase` | 生命周期阶段名称 |
-| `monotonic_ts` | 单调钟时间戳 |
-| `epoch_ts` | 挂钟时间戳（安全时） |
-| 阶段关键字段 | 该阶段的特定信息 |
+| `session_id` | Unique session identifier |
+| `request_id` | Unique request identifier (when available) |
+| `turn_id` | Turn identifier (when available) |
+| `segment_id` | Segment identifier (when multi-segment) |
+| `phase` | Lifecycle stage name |
+| `monotonic_ts` | Monotonic-clock timestamp |
+| `epoch_ts` | Wall-clock timestamp (when safe) |
+| Stage-key fields | Info specific to that stage |
 
-日志格式应该是机器可解析的（推荐 JSON 或 key=value 结构化格式），且跨版本稳定。
+The log format should be machine-parseable (JSON or key=value structured format recommended) and stable across versions.
 
-#### 事件定义表
+#### Event definition table
 
-| 阶段名称 | 所属组件 | 关键附带字段 | 强/上下文 |
+| Stage name | Component | Key ancillary fields | Strong/contextual |
 |----------|----------|-------------|-----------|
-| `request.accepted` | 网关 | transport, client_request_ts | 上下文 |
-| `session.config.validated` | 前端接口 | input_mode, output_policy, vad_strategy, protocol_version | 强 |
-| `session.created` | 前端接口 | speaker_id, ref_audio_mode | 强 |
-| `session.registered` | 后端 | kv_pool_slot | 强 |
-| `text.first_received` | 网关 | text_preview, client_text_ts | 上下文 |
-| `text.first_sent` | 前端接口 | text_length, normalized_preview | 强 |
-| `text.first_enqueued` | 前端接口 | queue_depth | 强 |
-| `text.first_dequeued` | 引擎线程 | wait_ms, queue_depth_at_dequeue | 强 |
-| `engine.prefill.started` | 引擎线程 | segment_id, cache_hit, cache_tokens | 强 |
-| `engine.prefill.completed` | 引擎线程 | segment_id, prefill_tokens, duration_ms | 强 |
-| `engine.decode.first_step` | 引擎线程 | segment_id | 强 |
-| `engine.audio.first_raw` | 引擎线程 | segment_id, audio_shape | 强 |
-| `output.audio.first_effective` | 输出管线 | segment_id, trim_applied, trimmed_ms | 强 |
-| `session.completed` | 前端接口 | total_segments, total_audio_ms | 强 |
-| `session.timeout` | 引擎线程 | waited_ms, last_active_phase | 强 |
-| `session.evicted` | 引擎线程 | reason, active_steps | 强 |
-| `engine.prefill.failed` | 引擎线程 | segment_id, error_type, error_msg | 强 |
-| `session.cancelled` | 前端接口 | completed_segments | 强 |
-| `session.error` | 任意 | error_type, error_msg, current_phase | 强 |
+| `request.accepted` | Gateway | transport, client_request_ts | contextual |
+| `session.config.validated` | Frontend interface | input_mode, output_policy, vad_strategy, protocol_version | strong |
+| `session.created` | Frontend interface | speaker_id, ref_audio_mode | strong |
+| `session.registered` | Backend | kv_pool_slot | strong |
+| `text.first_received` | Gateway | text_preview, client_text_ts | contextual |
+| `text.first_sent` | Frontend interface | text_length, normalized_preview | strong |
+| `text.first_enqueued` | Frontend interface | queue_depth | strong |
+| `text.first_dequeued` | Engine thread | wait_ms, queue_depth_at_dequeue | strong |
+| `engine.prefill.started` | Engine thread | segment_id, cache_hit, cache_tokens | strong |
+| `engine.prefill.completed` | Engine thread | segment_id, prefill_tokens, duration_ms | strong |
+| `engine.decode.first_step` | Engine thread | segment_id | strong |
+| `engine.audio.first_raw` | Engine thread | segment_id, audio_shape | strong |
+| `output.audio.first_effective` | Output pipeline | segment_id, trim_applied, trimmed_ms | strong |
+| `session.completed` | Frontend interface | total_segments, total_audio_ms | strong |
+| `session.timeout` | Engine thread | waited_ms, last_active_phase | strong |
+| `session.evicted` | Engine thread | reason, active_steps | strong |
+| `engine.prefill.failed` | Engine thread | segment_id, error_type, error_msg | strong |
+| `session.cancelled` | Frontend interface | completed_segments | strong |
+| `session.error` | Any | error_type, error_msg, current_phase | strong |
 
-### 2. Session 汇总日志
+### 2. Session summary log
 
-在请求完成时，发出一条结构化汇总，聚合：
+On request completion, emit one structured summary that aggregates:
 
-| 类别 | 字段 |
+| Category | Fields |
 |------|------|
-| 文本统计 | total_text_chars, total_segments, text_coalesced, progress_protected |
-| 音频统计 | total_audio_chunks, total_audio_ms, total_audio_steps |
-| 缓存路径 | prefix_cache_hit, cache_tokens_reused, full_prefill_count |
-| VAD/裁剪路径 | vad_policy, prefix_trim_applied, prefix_trimmed_ms, first_raw_to_effective_ms |
-| 强指标 | session_create_to_first_raw_audio_ms, first_text_enqueue_to_first_raw_audio_ms, first_text_dequeue_to_first_raw_audio_ms, first_text_dequeue_to_first_effective_audio_ms, total_latency_ms |
-| 上下文指标 | client_request_to_server_first_audio_ms (需客户端时间戳) |
+| Text stats | total_text_chars, total_segments, text_coalesced, progress_protected |
+| Audio stats | total_audio_chunks, total_audio_ms, total_audio_steps |
+| Cache path | prefix_cache_hit, cache_tokens_reused, full_prefill_count |
+| VAD/trim path | vad_policy, prefix_trim_applied, prefix_trimmed_ms, first_raw_to_effective_ms |
+| Strong metrics | session_create_to_first_raw_audio_ms, first_text_enqueue_to_first_raw_audio_ms, first_text_dequeue_to_first_raw_audio_ms, first_text_dequeue_to_first_effective_audio_ms, total_latency_ms |
+| Contextual metrics | client_request_to_server_first_audio_ms (requires client timestamps) |
 
-此汇总应替代当前含糊的单字段汇总如：
+This summary should replace the current vague single-field summary such as:
 
 ```
 first_audio=231.6ms
 ```
 
-改为显式的多字段汇总：
+with an explicit multi-field summary:
 
 ```json
 {
@@ -405,11 +407,11 @@ first_audio=231.6ms
 }
 ```
 
-### 3. 客户端协议元数据
+### 3. Client protocol metadata
 
-#### 3.1 当前已有的元数据
+#### 3.1 Currently available metadata
 
-当前协议已暴露：
+The current protocol already exposes:
 
 - `protocol_version`
 - `timing_contract`
@@ -418,343 +420,343 @@ first_audio=231.6ms
 - `client_end_ts_ms`
 - `server_first_audio_epoch_ms`
 
-#### 3.2 需要新增的服务端生命周期时间戳
+#### 3.2 Server-side lifecycle timestamps to add
 
-在响应元数据中新增稳定的服务端生命周期标记：
+Add stable server-side lifecycle markers to the response metadata:
 
-| 字段名 | 类型 | 语义 | 强/上下文 |
+| Field name | Type | Semantics | Strong/contextual |
 |--------|------|------|-----------|
-| `server_request_received_epoch_ms` | int64 | 网关接收到请求的挂钟时间 | 上下文 |
-| `server_session_created_epoch_ms` | int64 | Session 创建完成的挂钟时间 | 强 |
-| `server_first_text_received_epoch_ms` | int64 | 首段文本到达网关的挂钟时间 | 上下文 |
-| `server_first_text_enqueued_epoch_ms` | int64 | 首段文本入队的挂钟时间 | 强 |
-| `server_first_text_dequeued_epoch_ms` | int64 | 首段文本被引擎取出的挂钟时间 | 强 |
-| `server_prefill_started_epoch_ms` | int64 | Prefill 开始的挂钟时间 | 强 |
-| `server_prefill_completed_epoch_ms` | int64 | Prefill 完成的挂钟时间 | 强 |
-| `server_first_raw_audio_epoch_ms` | int64 | 首段原始音频产出的挂钟时间 | 强 |
-| `server_first_effective_audio_epoch_ms` | int64 | 首段有效音频发出的挂钟时间 | 强 |
-| `server_done_epoch_ms` | int64 | 会话完成的挂钟时间 | 强 |
+| `server_request_received_epoch_ms` | int64 | Wall-clock time the gateway received the request | contextual |
+| `server_session_created_epoch_ms` | int64 | Wall-clock time Session creation completed | strong |
+| `server_first_text_received_epoch_ms` | int64 | Wall-clock time the first text segment reached the gateway | contextual |
+| `server_first_text_enqueued_epoch_ms` | int64 | Wall-clock time the first text segment was enqueued | strong |
+| `server_first_text_dequeued_epoch_ms` | int64 | Wall-clock time the first text segment was pulled out by the engine | strong |
+| `server_prefill_started_epoch_ms` | int64 | Wall-clock time Prefill started | strong |
+| `server_prefill_completed_epoch_ms` | int64 | Wall-clock time Prefill completed | strong |
+| `server_first_raw_audio_epoch_ms` | int64 | Wall-clock time the first raw audio was produced | strong |
+| `server_first_effective_audio_epoch_ms` | int64 | Wall-clock time the first effective audio was sent | strong |
+| `server_done_epoch_ms` | int64 | Wall-clock time the session completed | strong |
 
-#### 3.3 需要新增的派生时长字段
+#### 3.3 Derived-duration fields to add
 
-| 字段名 | 语义 | 计算 |
+| Field name | Semantics | Computation |
 |--------|------|------|
-| `server_session_create_to_first_raw_audio_ms` | Session创建到首段原始音频 | created → first_raw |
-| `server_session_create_to_first_effective_audio_ms` | Session创建到首段有效音频 | created → first_effective |
-| `server_first_text_enqueue_to_first_raw_audio_ms` | 文本入队到首段原始音频 | enqueued → first_raw |
-| `server_first_text_enqueue_to_first_effective_audio_ms` | 文本入队到首段有效音频 | enqueued → first_effective |
-| `server_first_text_dequeue_to_first_raw_audio_ms` | 文本出队到首段原始音频 | dequeued → first_raw |
-| `server_first_text_dequeue_to_first_effective_audio_ms` | 文本出队到首段有效音频 | dequeued → first_effective |
-| `server_first_raw_to_first_effective_audio_ms` | 原始音频到有效音频（门控延迟） | first_raw → first_effective |
-| `server_total_latency_ms` | 请求总延迟 | request_received → done |
+| `server_session_create_to_first_raw_audio_ms` | Session creation to first raw audio | created → first_raw |
+| `server_session_create_to_first_effective_audio_ms` | Session creation to first effective audio | created → first_effective |
+| `server_first_text_enqueue_to_first_raw_audio_ms` | Text enqueue to first raw audio | enqueued → first_raw |
+| `server_first_text_enqueue_to_first_effective_audio_ms` | Text enqueue to first effective audio | enqueued → first_effective |
+| `server_first_text_dequeue_to_first_raw_audio_ms` | Text dequeue to first raw audio | dequeued → first_raw |
+| `server_first_text_dequeue_to_first_effective_audio_ms` | Text dequeue to first effective audio | dequeued → first_effective |
+| `server_first_raw_to_first_effective_audio_ms` | Raw audio to effective audio (gating latency) | first_raw → first_effective |
+| `server_total_latency_ms` | Total request latency | request_received → done |
 
-#### 3.4 需要新增的策略/结果字段
+#### 3.4 Policy/result fields to add
 
-| 字段名 | 类型 | 语义 |
+| Field name | Type | Semantics |
 |--------|------|------|
-| `server_prefix_trim_applied` | bool | 是否应用了前缀裁剪 |
-| `server_prefix_trimmed_ms` | float | 前缀裁剪掉的毫秒数 |
-| `server_vad_policy` | string | VAD 策略名称 |
-| `server_output_gating_mode` | string | 输出门控模式 |
-| `server_first_audio_kind` | enum | `raw` / `effective` — 首音频类型 |
-| `server_cache_hit` | bool | 是否命中前缀缓存 |
-| `server_cache_tokens_reused` | int32 | 复用的 KV 缓存 token 数 |
+| `server_prefix_trim_applied` | bool | Whether prefix trimming was applied |
+| `server_prefix_trimmed_ms` | float | Milliseconds trimmed off the prefix |
+| `server_vad_policy` | string | VAD policy name |
+| `server_output_gating_mode` | string | Output gating mode |
+| `server_first_audio_kind` | enum | `raw` / `effective` — first-audio type |
+| `server_cache_hit` | bool | Whether the prefix cache was hit |
+| `server_cache_tokens_reused` | int32 | Number of reused KV-cache tokens |
 
-#### 3.5 Segment 级别元数据
+#### 3.5 Segment-level metadata
 
-每个 Segment 完成时（`segment_end` 事件），应携带：
+When each Segment completes (the `segment_end` event), it should carry:
 
-| 字段名 | 语义 |
+| Field name | Semantics |
 |--------|------|
-| `segment_id` | 段编号 |
-| `segment_text_preview` | 该段文本预览 |
-| `segment_prefill_ms` | 该段 prefill 耗时 |
-| `segment_decode_steps` | 该段 decode 步数 |
-| `segment_audio_ms` | 该段产出的音频时长 |
-| `segment_cache_hit` | 该段是否命中缓存 |
+| `segment_id` | Segment number |
+| `segment_text_preview` | Preview of this segment's text |
+| `segment_prefill_ms` | This segment's prefill time |
+| `segment_decode_steps` | This segment's decode steps |
+| `segment_audio_ms` | Audio duration produced by this segment |
+| `segment_cache_hit` | Whether this segment hit the cache |
 
-#### 3.6 错误事件元数据
+#### 3.6 Error event metadata
 
-错误事件应携带：
+Error events should carry:
 
-| 字段名 | 语义 |
+| Field name | Semantics |
 |--------|------|
-| `error_phase` | 错误发生的阶段 |
-| `error_type` | 错误类型（timeout / eviction / prefill_failed / cancelled / internal） |
-| `error_message` | 人类可读的错误信息 |
-| `segments_completed` | 已完成的段数 |
-| `audio_produced_ms` | 已产出的音频时长 |
+| `error_phase` | The stage the error occurred in |
+| `error_type` | Error type (timeout / eviction / prefill_failed / cancelled / internal) |
+| `error_message` | Human-readable error message |
+| `segments_completed` | Number of completed segments |
+| `audio_produced_ms` | Audio duration already produced |
 
-### 4. 文本可观测性字段
+### 4. Text observability fields
 
-我们需要暴露合成了什么文本以及它如何被转换的。
+We need to expose what text was synthesized and how it was transformed.
 
-| 字段 | 级别 | 语义 |
+| Field | Level | Semantics |
 |------|------|------|
-| `raw_first_text_preview` | Session | 原始首段文本预览 |
-| `normalized_first_text_preview` | Session | 标准化后首段文本预览 |
-| `final_synthesized_text` | Session | 最终合成的完整文本 |
-| `per_segment_text` | Segment | 每段文本 |
-| `text_coalesced` | Session | 文本是否被合并 |
-| `text_progress_protected` | Session | 文本是否被进度保护延迟 |
-| `text_input_mode` | Session | 输入模式（TOKEN/CLAUSE/LONG_SEGMENT/FULL_TEXT） |
+| `raw_first_text_preview` | Session | Raw first-segment text preview |
+| `normalized_first_text_preview` | Session | Normalized first-segment text preview |
+| `final_synthesized_text` | Session | The final complete synthesized text |
+| `per_segment_text` | Segment | Per-segment text |
+| `text_coalesced` | Session | Whether the text was coalesced |
+| `text_progress_protected` | Session | Whether the text was delayed by progress protection |
+| `text_input_mode` | Session | Input mode (TOKEN/CLAUSE/LONG_SEGMENT/FULL_TEXT) |
 
-对于隐私敏感的部署，这必须是可配置的：
+For privacy-sensitive deployments, this must be configurable:
 
-| 级别 | 行为 |
+| Level | Behavior |
 |------|------|
-| `disabled` | 不记录任何文本 |
-| `preview` | 仅记录前 N 个字符 |
-| `hashed` | 仅记录哈希 |
-| `full` | 记录完整文本 |
+| `disabled` | Record no text |
+| `preview` | Record only the first N characters |
+| `hashed` | Record only a hash |
+| `full` | Record the complete text |
 
-### 5. 音频门控可观测性
+### 5. Audio gating observability
 
-我们需要对输出整形（output shaping）的显式可观测性：
+We need explicit observability into output shaping:
 
-| 字段 | 语义 |
+| Field | Semantics |
 |------|------|
-| `prefix_trim_enabled` | 前缀裁剪是否启用 |
-| `prefix_trim_implementation` | 裁剪实现方式 |
-| `prefix_trim_dropped_samples` | 裁剪丢弃的采样数 |
-| `prefix_trimmed_ms` | 裁剪丢弃的毫秒数 |
-| `prefix_trim_trigger_sample` | 触发裁剪的采样位置 |
-| `first_raw_audio_arrival_time` | 首段原始音频到达时间 |
-| `first_effective_audio_publish_time` | 首段有效音频发布时间 |
+| `prefix_trim_enabled` | Whether prefix trimming is enabled |
+| `prefix_trim_implementation` | The trimming implementation |
+| `prefix_trim_dropped_samples` | Number of samples dropped by trimming |
+| `prefix_trimmed_ms` | Milliseconds dropped by trimming |
+| `prefix_trim_trigger_sample` | The sample position that triggered trimming |
+| `first_raw_audio_arrival_time` | First raw-audio arrival time |
+| `first_effective_audio_publish_time` | First effective-audio publish time |
 
-这非常关键，因为感知 TTFT 可能被门控延迟主导，即使推理很快。
+This is critical because perceived TTFT can be dominated by gating latency even when inference is fast.
 
 ---
 
-## 从近期事件中发现的具体缺口
+## Concrete Gaps Found from Recent Incidents
 
-### 缺口 1：引擎 `first_audio` 命名有误导性
+### Gap 1: The engine's `first_audio` name is misleading
 
-当前引擎汇总报告：
+The current engine summary reports:
 
 - `session created → first audio chunk consumed`
 
-但很多读者理解为：
+But many readers interpret it as:
 
 - `first text arrived at engine → first audio`
 
-这种歧义在 TTFT 分析中反复造成困惑。
+This ambiguity has repeatedly caused confusion in TTFT analysis.
 
-**修复**：使用 `session_create_to_first_raw_audio_ms` 和 `first_text_dequeue_to_first_raw_audio_ms` 替代笼统的 `first_audio`。
+**Fix**: Use `session_create_to_first_raw_audio_ms` and `first_text_dequeue_to_first_raw_audio_ms` instead of the blanket `first_audio`.
 
-### 缺口 2：首段文本路径在引擎内部不可见
+### Gap 2: The first text-segment path is invisible inside the engine
 
-我们可以推断：
+We can infer:
 
-- Session 创建时间
-- 后端 Prefill 时间
+- Session creation time
+- Backend prefill time
 
-但无法直接看到：
+But we cannot directly see:
 
-- 首段文本何时入队到后端
-- 首段文本何时被引擎线程取出
+- When the first text segment was enqueued to the backend
+- When the first text segment was pulled out by the engine thread
 
-这恰好是区分排队延迟和推理延迟所需的时间戳。
+These are exactly the timestamps needed to separate queueing latency from inference latency.
 
-**修复**：在 `EngineRequest` 入队和出队时记录时间戳。
+**Fix**: Record timestamps when the `EngineRequest` is enqueued and dequeued.
 
-### 缺口 3：客户端可见的首音频语义混合
+### Gap 3: The client-visible first-audio semantics are mixed
 
-当前 Worker 计时：
+The current worker timing:
 
-- 记录前缀裁剪后的首个有效音频
-- 但日志中把它当作"首个返回音频"
+- Records the first effective audio after prefix trimming
+- But treats it in the log as the "first returned audio"
 
-这隐藏了"远端引擎产出音频"和"本地 Worker 决定发送音频"的区别。
+This hides the distinction between "the remote engine produced audio" and "the local worker decided to send audio."
 
-**修复**：在日志和协议中分别记录 `first_raw_audio` 和 `first_effective_audio`。
+**Fix**: Record `first_raw_audio` and `first_effective_audio` separately in both the log and the protocol.
 
-### 缺口 4：协议元数据仍然太薄，无法离线重建
+### Gap 4: Protocol metadata is still too thin to reconstruct offline
 
-客户端目前无法仅从协议包重建完整时间线。
+The client currently cannot reconstruct the full timeline from the protocol packets alone.
 
-**修复**：按 3.2-3.6 节定义新增协议字段。
+**Fix**: Add the protocol fields defined in §3.2-3.6.
 
-### 缺口 5：文本内容和段映射不是一等请求事实
+### Gap 5: Text content and segment mapping are not first-class request facts
 
-我们经常需要知道：
+We often need to know:
 
-- 什么文本实际到达了 segment 0
-- 请求是否只有一个 segment
-- end 是否在首音频之前/之后到达
+- What text actually reached segment 0
+- Whether the request had only one segment
+- Whether the end arrived before/after the first audio
 
-这些不应该需要深度日志考古。
+These should not require deep log archaeology.
 
-**修复**：按第 4 节定义新增文本可观测性字段。
+**Fix**: Add the text observability fields defined in §4.
 
-### 缺口 6：错误路径没有结构化信息
+### Gap 6: The error path has no structured information
 
-超时、驱逐、Prefill 失败等只产生一条普通日志，客户端只收到一个 error 事件。
+Timeout, eviction, prefill failure, and the like produce only an ordinary log, and the client only receives a single error event.
 
-**修复**：按 3.6 节定义新增错误事件元数据。
+**Fix**: Add the error-event metadata defined in §3.6.
 
 ---
 
-## 与现有代码的映射
+## Mapping to Existing Code
 
-以下是当前代码中需要改造的关键位置：
+The following are the key locations in the current code that need reworking:
 
-| 组件 | 文件 | 当前状态 | 需要的改造 |
+| Component | File | Current state | Required rework |
 |------|------|----------|-----------|
-| Session 计时 | `engine/core/session.py` | 仅有 `created_at` + `first_audio_at` | 新增 `first_text_enqueued_at`, `first_text_dequeued_at`, `first_raw_audio_at`, `first_effective_audio_at` 等 |
-| 引擎请求 | `engine/core/types.py` | `EngineRequest` 无时间戳 | 新增 `enqueued_at`, `dequeued_at` 字段 |
-| 引擎循环 | `engine/backend/engine_loop.py` | 仅有 `_total_steps` 等全局计数 | 在每个 EngineRequest 处理时记录生命周期事件 |
-| 前端接口 | `engine/frontend/interface.py` | Session 创建和文本处理有基本日志 | 改为结构化日志 + 生命周期事件 |
-| 输出管线 | `engine/interface/output.py` | 仅日志记录 VAD 状态 | 区分 raw/effective 音频时间戳 |
-| gRPC 网关 | `engine/gateway/grpc_server.py` | Session 级日志 | 新增 `request.accepted` 事件，在响应 meta 中注入时间戳 |
-| WebSocket 网关 | `engine/gateway/websocket_server.py` | Session 级日志 | 同 gRPC |
-| Proto 定义 | `engine/gateway/tts.proto` | `TimingContext` 只有客户端时间戳 | 新增 `ServerTiming` 消息类型 |
-| 客户端 SDK | `client/src/qwen3tts/` | 不解析服务端时间戳 | 新增 `TimingReport` 解析和计算 |
+| Session timing | `engine/core/session.py` | Only `created_at` + `first_audio_at` | Add `first_text_enqueued_at`, `first_text_dequeued_at`, `first_raw_audio_at`, `first_effective_audio_at`, etc. |
+| Engine request | `engine/core/types.py` | `EngineRequest` has no timestamps | Add `enqueued_at`, `dequeued_at` fields |
+| Engine loop | `engine/backend/engine_loop.py` | Only global counters such as `_total_steps` | Record lifecycle events as each EngineRequest is processed |
+| Frontend interface | `engine/frontend/interface.py` | Basic logs for Session creation and text handling | Switch to structured logs + lifecycle events |
+| Output pipeline | `engine/interface/output.py` | Only logs VAD state | Distinguish raw/effective audio timestamps |
+| gRPC gateway | `engine/gateway/grpc_server.py` | Session-level logs | Add a `request.accepted` event and inject timestamps into response meta |
+| WebSocket gateway | `engine/gateway/websocket_server.py` | Session-level logs | Same as gRPC |
+| Proto definition | `engine/gateway/tts.proto` | `TimingContext` has only client timestamps | Add a `ServerTiming` message type |
+| Client SDK | `client/src/qwen3tts/` | Does not parse server timestamps | Add `TimingReport` parsing and computation |
 
 ---
 
-## 目标层级
+## Goal Hierarchy
 
-### 目标 0：指标卫生
+### Goal 0: Metric hygiene
 
-重命名含糊的指标并文档化精确语义。
+Rename vague metrics and document precise semantics.
 
-**成功标准：**
+**Success criteria:**
 
-- 每个暴露的指标都有文档化的起止定义
-- 旧的含糊名称被废弃或明确别名化
-- `first_audio` 不再作为独立指标使用
+- Every exposed metric has a documented start/end definition
+- Old vague names are deprecated or explicitly aliased
+- `first_audio` is no longer used as a standalone metric
 
-### 目标 1：引擎内部生命周期可见性
+### Goal 1: Engine-internal lifecycle visibility
 
-使服务端日志足以解释一次请求。
+Make the server logs sufficient to explain a request.
 
-**成功标准：**
+**Success criteria:**
 
-- 一个 request_id / session_id grep 显示完整生命周期阶段
-- 引擎排队延迟 vs 推理延迟可见
-- 汇总日志包含显式的阶段时长
-- 错误路径有结构化信息
+- A single request_id / session_id grep shows the full lifecycle stages
+- Engine queueing latency vs inference latency is visible
+- The summary log includes explicit stage durations
+- The error path has structured information
 
-### 目标 2：客户端可重建生命周期
+### Goal 2: Client can reconstruct the lifecycle
 
-使协议元数据足以进行仅包分析。
+Make the protocol metadata sufficient for packet-only analysis.
 
-**成功标准：**
+**Success criteria:**
 
-- 客户端可以从返回的元数据计算强服务端阶段
-- 原始音频 vs 有效音频区分可见
-- 协议暴露输出门控信息
-- 错误事件包含阶段信息
+- The client can compute the strong server stages from the returned metadata
+- The raw-audio vs effective-audio distinction is visible
+- The protocol exposes output-gating information
+- Error events include stage information
 
-### 目标 3：请求回放/调试友好性
+### Goal 3: Request replay/debugging friendliness
 
-允许后续回放和诊断而无需猜测语义。
+Allow later replay and diagnosis without guessing the semantics.
 
-**成功标准：**
+**Success criteria:**
 
-- 原始时间戳与派生时长并存
-- 每 Segment 文本/音频事实可记录或序列化
-- 客户端 SDK 提供 `TimingReport` 工具类
-
----
-
-## 非目标
-
-- 本阶段不需要全面采用 OpenTelemetry
-- 不需要保证客户端和服务端的全局时钟同步
-- 不需要暴露每个内部 tensor 或调度器细节
-- 不需要在语义稳定前打造精美的 UI
+- Raw timestamps coexist with derived durations
+- Per-Segment text/audio facts can be logged or serialized
+- The client SDK provides a `TimingReport` utility class
 
 ---
 
-## 建议的分阶段推行
+## Non-Goals
 
-### 第一阶段：语义清理
-
-- 定义规范生命周期阶段名称
-- 文档化指标语义
-- 重命名或替换含糊的汇总日志
-- **预期产出**：本文档作为契约，所有后续实现以此为参照
-
-### 第二阶段：引擎/服务端埋点
-
-- 在 `EngineRequest` 新增入队/出队时间戳
-- 在 `Session` 新增关键阶段时间戳
-- 在引擎循环中添加首段原始音频时间戳
-- 添加生命周期汇总日志
-- **预期产出**：一个 session_id grep 可见完整生命周期
-
-### 第三阶段：输出管线埋点
-
-- 在输出管线中区分 raw-audio 和 effective-audio 计时
-- 显式暴露前缀裁剪/门控效果
-- **预期产出**：门控延迟可量化
-
-### 第四阶段：协议丰富化
-
-- 在 `tts.proto` 新增 `ServerTiming` 消息
-- 在响应元数据中添加生命周期时间戳和派生指标
-- 向客户端暴露门控和段事实
-- **预期产出**：客户端可从协议包重建时间线
-
-### 第五阶段：客户端 SDK 和工具
-
-- 客户端 SDK 新增 `TimingReport` 工具类
-- 添加从日志重建生命周期的小型分析器
-- 添加仅包分析器用于协议元数据
-- **预期产出**：开箱即用的可观测性工具
+- Full OpenTelemetry adoption is not required this phase
+- Global clock synchronization between client and server is not guaranteed
+- Exposing every internal tensor or scheduler detail is not required
+- Building a polished UI before the semantics are stable is not required
 
 ---
 
-## 验收标准
+## Suggested Phased Rollout
 
-本工作在以下所有条件满足时应视为成功：
+### Phase 1: Semantic cleanup
 
-1. **一个慢请求可以从一条结构化的服务端汇总中解释清楚**，
-   无需手工跨文件对齐时间戳做减法。
+- Define canonical lifecycle stage names
+- Document metric semantics
+- Rename or replace vague summary logs
+- **Expected output**: This document as the contract, all subsequent implementation referencing it
 
-2. **一个客户端可以仅从协议包解释一次请求**，
-   包括延迟是来自文本路径、引擎路径还是输出门控。
+### Phase 2: Engine/server instrumentation
 
-3. **系统能区分以下延迟成分：**
+- Add enqueue/dequeue timestamps to `EngineRequest`
+- Add key stage timestamps to `Session`
+- Add the first raw-audio timestamp in the engine loop
+- Add the lifecycle summary log
+- **Expected output**: A single session_id grep reveals the full lifecycle
 
-| 延迟成分 | 计算方式 |
+### Phase 3: Output-pipeline instrumentation
+
+- Distinguish raw-audio and effective-audio timing in the output pipeline
+- Explicitly expose the prefix-trim/gating effect
+- **Expected output**: Gating latency becomes quantifiable
+
+### Phase 4: Protocol enrichment
+
+- Add a `ServerTiming` message to `tts.proto`
+- Add lifecycle timestamps and derived metrics to the response metadata
+- Expose gating and segment facts to the client
+- **Expected output**: The client can reconstruct the timeline from protocol packets
+
+### Phase 5: Client SDK and tooling
+
+- Add a `TimingReport` utility class to the client SDK
+- Add a small analyzer that reconstructs the lifecycle from logs
+- Add a packet-only analyzer for protocol metadata
+- **Expected output**: Out-of-the-box observability tools
+
+---
+
+## Acceptance Criteria
+
+This work should be considered successful when all of the following hold:
+
+1. **A slow request can be explained from a single structured server summary**,
+   without manually aligning timestamps across files and subtracting.
+
+2. **A client can explain a request from the protocol packets alone**,
+   including whether the latency came from the text path, the engine path, or output gating.
+
+3. **The system can distinguish the following latency components:**
+
+| Latency component | Computation |
 |----------|----------|
-| Session 创建延迟 | request.accepted → session.created |
-| 文本接入延迟 | text.first_received → text.first_enqueued |
-| 引擎排队延迟 | text.first_enqueued → text.first_dequeued |
-| 推理延迟 | text.first_dequeued → engine.audio.first_raw |
-| 门控延迟 | engine.audio.first_raw → output.audio.first_effective |
-| 传输延迟 | 客户端时间戳 - 服务端时间戳（上下文） |
+| Session creation latency | request.accepted → session.created |
+| Text ingress latency | text.first_received → text.first_enqueued |
+| Engine queueing latency | text.first_enqueued → text.first_dequeued |
+| Inference latency | text.first_dequeued → engine.audio.first_raw |
+| Gating latency | engine.audio.first_raw → output.audio.first_effective |
+| Transport latency | Client timestamp - server timestamp (contextual) |
 
-4. **计时字段名称足够稳定，可以作为协议契约的一部分。**
+4. **The timing field names are stable enough to be part of the protocol contract.**
 
-5. **错误事件包含足够的信息定位问题阶段和原因。**
+5. **Error events contain enough information to locate the problem stage and cause.**
 
 ---
 
-## 立即的下一步
+## Immediate Next Step
 
-下一步设计应该是将本文档转化为具体的字段矩阵：
+The next design step should be to turn this document into a concrete field matrix:
 
-| 阶段/事件名 | 所属组件 | 日志字段名 | 协议字段名 | 强/上下文 | 原始/派生 |
+| Stage/event name | Component | Log field name | Protocol field name | Strong/contextual | Raw/derived |
 |-------------|----------|-----------|-----------|----------|----------|
 
-该矩阵可以驱动引擎、网关和远程 Worker 的实现，而不会引入新一轮的含糊计时名称。
+This matrix can drive the implementation of the engine, gateway, and remote worker without introducing another round of vague timing names.
 
 ---
 
-## 附录：术语表
+## Appendix: Glossary
 
-| 术语 | 定义 |
+| Term | Definition |
 |------|------|
-| 强指标 (strong metric) | 完全在一个时钟域内生成的指标，适合 SLO 和告警 |
-| 上下文指标 (contextual metric) | 涉及多个时钟域的指标，适合诊断但不适合 SLO |
-| 原始音频 (raw audio) | 引擎推理产出的未经门控处理的音频 |
-| 有效音频 (effective audio) | 经前缀裁剪/VAD/输出策略处理后发送给客户端的音频 |
-| 门控延迟 (gating latency) | raw audio → effective audio 之间的延迟 |
-| 前缀裁剪 (prefix trim) | 移除音频开头无声/噪声采样的策略 |
-| 进度保护 (progress protection) | 当引擎正在处理前一段时，延迟新文本入队的机制 |
-| 单调钟 (monotonic clock) | 不受系统时间调整影响的时钟，适合测量时长 |
-| 挂钟 (epoch clock) | 系统挂钟时间，适合跨进程时间对齐 |
+| strong metric | A metric generated entirely within a single clock domain, suitable for SLOs and alerting |
+| contextual metric | A metric spanning multiple clock domains, suitable for diagnosis but not SLOs |
+| raw audio | Audio produced by engine inference, before gating |
+| effective audio | Audio sent to the client after prefix trimming / VAD / output policy |
+| gating latency | The latency between raw audio → effective audio |
+| prefix trim | The policy of removing silent/noisy samples at the start of audio |
+| progress protection | The mechanism that delays enqueueing new text while the engine is still processing the previous segment |
+| monotonic clock | A clock unaffected by system-time adjustments, suitable for measuring durations |
+| epoch clock | The system wall-clock time, suitable for cross-process time alignment |

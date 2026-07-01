@@ -1,75 +1,77 @@
-# 已知限制与风险
+**English** | [中文](known_limitations.zh-CN.md)
 
-本文档是当前开源预览版的风险说明。发布前请保持它和 README、WebUI、demo API 的口径一致。
+# Known Limitations and Risks
 
-## 版本定位
+This document is the risk statement for the current open-source preview release. Before release, keep it consistent with the README, WebUI, and demo API.
 
-当前项目是 **工程预览版 / research preview**，不是生产稳定版本。它主要展示 Qwen3-TTS 在 TensorRT、模型 fuse、token 级流式调度、prefix cache 和前端分词上的工程优化。
+## Release Positioning
 
-推荐 v0.1 稳定范围：
+The current project is an **engineering preview / research preview**, not a production-stable release. It primarily demonstrates Qwen3-TTS engineering optimizations in TensorRT, model fusion, token-level streaming scheduling, prefix cache, and frontend segmentation.
 
-- 模型：`custom-1.7b`
-- 任务：`custom_voice`
-- 部署：standalone engine / Triton TRT streaming
-- WebUI：性能展示、trace 回放、live TRT/engine 对照
+Recommended v0.1 stable scope:
 
-## 模型路径状态
+- Model: `custom-1.7b`
+- Task: `custom_voice`
+- Deployment: standalone engine / Triton TRT streaming
+- WebUI: performance showcase, trace replay, live TRT/engine comparison
 
-| 路径 | 状态 | 风险 |
+## Model Path Status
+
+| Path | Status | Risk |
 | --- | --- | --- |
-| `custom-1.7b` / `custom_voice` | v0.1 推荐路径 | 仍需继续压测流式稳定性、长文本、并发、不同说话人 |
-| `design-1.7b` / `voice_design` | 实验 | 部分代码路径存在，但没有充分端到端验证 |
-| `base` x-vector voice clone | 计划中 | ref audio preprocessing、speaker embedding 注入、端到端验证未完成 |
-| `icl` voice clone | 计划中 | ref audio/ref text/ref code 链路未完整打通 |
-| `0.6b` variants | 非 v0.1 主线 | 需要独立验证导出、profile、质量和速度 |
+| `custom-1.7b` / `custom_voice` | v0.1 recommended path | Still needs continued stress testing of streaming stability, long text, concurrency, and different speakers |
+| `design-1.7b` / `voice_design` | Experimental | Some code paths exist, but there is no thorough end-to-end validation |
+| `base` x-vector voice clone | Planned | ref audio preprocessing, speaker embedding injection, and end-to-end validation are not complete |
+| `icl` voice clone | Planned | The ref audio / ref text / ref code pipeline is not fully wired up |
+| `0.6b` variants | Not the v0.1 main line | Requires independent validation of export, profile, quality, and speed |
 
-## 流式稳定性
+## Streaming Stability
 
-当前流式模式仍可能出现：
+The current streaming mode may still exhibit:
 
-- 幻觉：生成用户没有输入的内容。
-- 重复：局部词、短语或音频片段重复。
-- 漏读：跳过部分输入文本。
-- 插入：在停顿或跨 segment 时插入额外字词。
-- 长文本退化：随着上下文和 KV 增长，稳定性下降。
-- 分段边界异常：标点、数字、英文、中英混排等文本可能触发不理想切分。
+- Hallucination: generating content the user did not input.
+- Repetition: local words, phrases, or audio segments repeating.
+- Dropped reading: skipping part of the input text.
+- Insertion: inserting extra words at pauses or across segments.
+- Long-text degradation: stability decreases as context and KV grow.
+- Segmentation boundary anomalies: text with punctuation, numbers, English, or mixed Chinese-English may trigger suboptimal splitting.
 
-这些问题意味着当前版本不适合直接用于有强一致性要求的生产播报、客服、医疗、金融、法律或内容安全场景。
+These issues mean the current release is not suitable for direct use in production broadcasting, customer service, medical, financial, legal, or content-safety scenarios that require strong consistency.
 
-## 性能数字限制
+## Performance Number Limitations
 
-`13ms TTFT` 不是通用承诺。它通常需要同时满足：
+`13ms TTFT` is not a universal guarantee. It usually requires all of the following to hold simultaneously:
 
-- engine 已 warm up。
-- prefix/cache 命中。
-- 单路请求或低竞争。
-- 固定硬件、固定 TensorRT profile、固定 dtype。
-- 本地或低网络开销链路。
+- The engine is already warmed up.
+- prefix/cache hit.
+- Single-stream request or low contention.
+- Fixed hardware, fixed TensorRT profile, fixed dtype.
+- Local or low-network-overhead link.
 
-`128-stream avg TTFT` 也必须带上完整测试条件，包括硬件、driver、NGC 镜像、engine profile、输入文本、cache 模式、采样参数、客户端测量方法和失败率。
+`128-stream avg TTFT` must also carry complete test conditions, including hardware, driver, NGC image, engine profile, input text, cache mode, sampling parameters, client measurement method, and failure rate.
 
-## WebUI 数据来源
+## WebUI Data Sources
 
-WebUI 有两种数据来源：
+The WebUI has two data sources:
 
-- fixture trace：离线 JSON 回放，适合展示 UI 和对齐指标字段，不代表实时服务。
-- live measurement：实时调用 standalone engine、Triton 或官方 PyTorch API。
+- fixture trace: offline JSON replay, suitable for showcasing the UI and aligning metric fields; it does not represent a live service.
+- live measurement: real-time calls to the standalone engine, Triton, or the official PyTorch API.
 
-只有结果里的 `source` 是 `live_triton`、`live_engine` 或 `live_official_pytorch` 时，才代表实时测量。默认 fixture 值在发布前需要用真实硬件重新采集。
+Only when the result's `source` is `live_triton`, `live_engine`, or `live_official_pytorch` does it represent a live measurement. Default fixture values need to be re-collected on real hardware before release.
 
-## 部署限制
+## Deployment Limitations
 
-- TensorRT engine 与 TensorRT runtime 版本强相关。更换 NGC 镜像、TensorRT 版本或 driver 后，建议重新构建 engine。
-- runtime 的 `max_batch`/`max_seq_len` 不能超过 manifest 中记录的 `engine_profile`，否则启动会直接失败。
-- `engine-docker` 普通镜像适合固定代码部署；开发期请用 `compose.sh --dev` 或 `compose.sh watch` 避免频繁重建镜像。
-- 当前容器没有覆盖 K8s、灰度发布、鉴权、限流、多租户隔离等生产运维能力。
+- The TensorRT engine is tightly coupled to the TensorRT runtime version. After switching the NGC image, TensorRT version, or driver, it is recommended to rebuild the engine.
+- The runtime `max_batch`/`max_seq_len` cannot exceed the `engine_profile` recorded in the manifest, otherwise startup fails immediately.
+- The regular `engine-docker` image is suitable for fixed-code deployment; during development, use `compose.sh --dev` or `compose.sh watch` to avoid frequently rebuilding the image.
+- The current containers do not cover production operations capabilities such as K8s, canary releases, authentication, rate limiting, or multi-tenant isolation.
 
-## 发布前必须保留的用户提示
+## User Notices That Must Be Kept Before Release
 
-README、WebUI 和 release note 中必须明确：
+The README, WebUI, and release notes must make clear:
 
-- 本项目是工程预览版。
-- v0.1 推荐路径是 `custom-1.7b`。
-- base/ICL/voice design 不应宣传为已稳定可用。
-- 流式 TTS 存在幻觉和长文本不稳定风险。
-- benchmark 数字需要附带完整条件，不能写成无条件性能承诺。
+- This project is an engineering preview.
+- The v0.1 recommended path is `custom-1.7b`.
+- base/ICL/voice design should not be advertised as stable and ready to use.
+- Streaming TTS carries risks of hallucination and long-text instability.
+- Benchmark numbers must be accompanied by complete conditions and must not be written as unconditional performance guarantees.

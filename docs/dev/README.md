@@ -1,38 +1,40 @@
-# 开发者文档
+**English** | [中文](README.zh-CN.md)
 
-> 面向贡献者、架构师和深度开发者
+# Developer Documentation
 
-## 架构
+> For contributors, architects, and deep-dive developers
 
-| 文档 | 说明 |
-|------|------|
-| [架构设计](architecture.md) | 完整架构文档 — 推理引擎、前后端、协议、KV Cache 全链路 |
-| [解码 FSM 设计](architecture/decode_fsm.md) | 解码阶段有限状态机设计 |
-| [引擎架构决策](architecture/engine_decisions.md) | 引擎核心设计决策和选择理由 |
-| [流式协议设计](architecture/streaming_protocol.md) | Standalone 协议重设计 — gRPC/WebSocket 流式 |
+## Architecture
 
-## 设计目标
+| Document | Description |
+|----------|-------------|
+| [Architecture Design](architecture.md) | Complete architecture document — inference engine, frontend/backend, protocol, full KV Cache chain |
+| [Decode FSM Design](architecture/decode_fsm.md) | Decode-phase finite state machine design |
+| [Engine Architecture Decisions](architecture/engine_decisions.md) | Core engine design decisions and rationale |
+| [Streaming Protocol Design](architecture/streaming_protocol.md) | Standalone protocol redesign — gRPC/WebSocket streaming |
 
-| 文档 | 说明 |
-|------|------|
-| [VAD 设计目标](design/vad_design_goals.md) | VAD（语音活动检测）设计目标与理由 |
-| [可观测性目标](design/observability_goals.md) | 可观测性和指标设计目标 |
-| [实时音频流](design/realtime_audio.md) | 实时音频流设计目标 |
+## Design Goals
 
-## 调查报告
+| Document | Description |
+|----------|-------------|
+| [VAD Design Goals](design/vad_design_goals.md) | VAD (Voice Activity Detection) design goals and rationale |
+| [Observability Goals](design/observability_goals.md) | Observability and metrics design goals |
+| [Real-Time Audio Streaming](design/realtime_audio.md) | Real-time audio streaming design goals |
 
-| 文档 | 说明 |
-|------|------|
-| [流式幻觉调查](investigation/streaming_hallucination.md) | 流式/采样幻觉问题的诊断与缓解 |
-| [Code2Wav 状态大小](investigation/code2wav_state_size.md) | Code2Wav 状态大小分析与内存权衡 |
+## Investigation Reports
 
-## 运维
+| Document | Description |
+|----------|-------------|
+| [Streaming Hallucination Investigation](investigation/streaming_hallucination.md) | Diagnosis and mitigation of streaming/sampling hallucination issues |
+| [Code2Wav State Size](investigation/code2wav_state_size.md) | Code2Wav state size analysis and memory trade-offs |
 
-| 文档 | 说明 |
-|------|------|
-| [跨机构建](operations/cross_host_build.md) | 跨机构建工作流 — 在远程机器上编译 TRT engine |
-| [E2E 测试总结](operations/e2e_test_summary.md) | E2E 测试入口与覆盖范围 |
-| [计时指标参考](operations/timing_metrics.md) | 计时指标定义与测量方法 |
-| [工具治理](operations/tooling_governance.md) | 工具治理 — 放置规则、命名约定、心智模型 |
+## Operations
 
-普通用户请看 [用户文档](../user/)。
+| Document | Description |
+|----------|-------------|
+| [Cross-Host Build](operations/cross_host_build.md) | Cross-host build workflow — compiling the TRT engine on a remote machine |
+| [E2E Test Summary](operations/e2e_test_summary.md) | E2E test entry points and coverage |
+| [Timing Metrics Reference](operations/timing_metrics.md) | Timing metric definitions and measurement methods |
+| [Tooling Governance](operations/tooling_governance.md) | Tooling governance — placement rules, naming conventions, mental model |
+
+For regular users, please see the [User Documentation](../user/).

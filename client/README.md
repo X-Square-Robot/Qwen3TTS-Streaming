@@ -1,3 +1,5 @@
+**English** | [中文](README.zh-CN.md)
+
 # Qwen3-TTS Python Client
 
 `qwen3-tts-client` is a lightweight Python SDK for talking to a Qwen3-TTS
