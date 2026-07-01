@@ -36,6 +36,7 @@ For detailed benchmark methodology, see [Benchmark Methodology](docs/user/benchm
 - **GPU**: an NVIDIA GPU, ≥16GB VRAM recommended (1.7B + KV pool + TensorRT runtime); a matching NVIDIA driver is required.
 - **CUDA / TensorRT**: provided via NVIDIA NGC containers (`nvcr.io/nvidia/tensorrt`, `nvcr.io/nvidia/tritonserver`); see `scripts/bash/ngc_matrix.conf` for the version matrix. **Pulling an NGC image constitutes acceptance of the NVIDIA EULA.**
 - **Docker**: used to orchestrate the engine/Triton containers (with the NVIDIA Container Toolkit to enable `--gpus`).
+- **Python environment**: Phase A manages the host Python environment via conda; if none is present, `setup_env.sh` downloads and installs [Miniforge](https://github.com/conda-forge/miniforge) (BSD-3-Clause) and creates the `qwen3-tts` conda environment. You may instead activate your own conda env or venv beforehand.
 - **Disk**: roughly 20–40GB for the model plus export/build artifacts.
 - **Model weights**: on first run, download from ModelScope / Hugging Face (see the flow below); this repository does not distribute weights.
 

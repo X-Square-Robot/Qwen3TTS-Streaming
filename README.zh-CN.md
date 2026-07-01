@@ -36,6 +36,7 @@ Qwen3TTS-Streaming 是一个**工程预览版**项目：把官方 Qwen3-TTS PyTo
 - **GPU**：NVIDIA GPU，建议 ≥16GB 显存（1.7B + KV pool + TensorRT 运行时）；需匹配的 NVIDIA 驱动。
 - **CUDA / TensorRT**：通过 NVIDIA NGC 容器提供（`nvcr.io/nvidia/tensorrt`、`nvcr.io/nvidia/tritonserver`）；版本矩阵见 `scripts/bash/ngc_matrix.conf`。**拉取 NGC 镜像即表示接受 NVIDIA EULA。**
 - **Docker**：用于引擎/Triton 容器编排（含 NVIDIA Container Toolkit 以启用 `--gpus`）。
+- **Python 环境**：Phase A 通过 conda 管理宿主机 Python 环境；若无可用环境，`setup_env.sh` 会下载安装 [Miniforge](https://github.com/conda-forge/miniforge)（BSD-3-Clause）并创建 `qwen3-tts` conda 环境。你也可以事先自行激活 conda 环境或 venv。
 - **磁盘**：模型 + 导出/编译产物约需 20–40GB。
 - **模型权重**：首次运行需从 ModelScope / Hugging Face 下载（见下方流程），本仓库不分发权重。
 

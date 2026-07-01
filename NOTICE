@@ -44,6 +44,14 @@ Third-party components
      opt-in and the ten-vad package is installed by the user, who is then
      responsible for complying with its license terms.
 
+6. Miniforge (environment installer, used by Phase A setup)
+   - https://github.com/conda-forge/miniforge
+   - License: BSD-3-Clause. Bundles conda and mamba; default channel conda-forge.
+   - NOT bundled with this repository. When no suitable Python environment is
+     present, scripts/bash/lib/venv.sh downloads and installs Miniforge3 from the
+     upstream releases to create the `qwen3-tts` conda environment. Packages
+     installed into that environment carry their own respective licenses.
+
 ------------------------------------------------------------------------------
 Reference audio
 ------------------------------------------------------------------------------
