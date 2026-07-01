@@ -1,6 +1,6 @@
 workspace/
 *__pycache__*
-*log*
+*.log
 *.bak
 .pytest_cache/
 .mypy_cache/
