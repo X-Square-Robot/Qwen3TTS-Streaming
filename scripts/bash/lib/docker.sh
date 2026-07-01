@@ -663,7 +663,7 @@ resolve_ngc_python_version() {
 # ---------------------------------------------------------------------------
 build_triton_deploy_image() {
     local ngc_tag="${1:-}"
-    local trt_python_version="${TRITON_TENSORRT_PIP_VERSION:-10.15.1.29}"
+    local trt_python_version="${TRITON_TENSORRT_PIP_VERSION:-}"
 
     if [ -z "$ngc_tag" ]; then
         ngc_tag=$(resolve_manifest_ngc_tag "${MODEL_REPO_DIR:-}" "${MODEL_VERSION:-${ENGINE_MODEL_VERSION:-1}}" 2>/dev/null || true)
@@ -671,6 +671,16 @@ build_triton_deploy_image() {
     if [ -z "$ngc_tag" ]; then
         ngc_tag=$(resolve_ngc_tag) \
             || { log_error "Cannot determine NGC tag"; return 1; }
+    fi
+
+    # The TensorRT Python version must match the NGC tag's TRT (and thus the
+    # engine plan built in Phase B) — resolve from the matrix instead of
+    # hardcoding, or a mismatched wheel is installed and the plan fails to load.
+    if [ -z "$trt_python_version" ]; then
+        trt_python_version=$(resolve_ngc_tag_tensorrt_version "$ngc_tag" 2>/dev/null || true)
+    fi
+    if [ -z "$trt_python_version" ]; then
+        trt_python_version="10.15.1.29"
     fi
 
     local base_image="${_NGC_TRITON_BASE}:${ngc_tag}${_NGC_PY3_SUFFIX}"

@@ -10,6 +10,12 @@ FROM ${BASE_IMAGE} AS triton-deps
 ARG TENSORRT_PYTHON_VERSION
 ARG PYTORCH_CUDA_TAG
 
+# torch/tokenizers/... resolve fine from the fast BFSU mirror.
+# tensorrt does NOT: its cu13 libs/bindings wheels live only on NVIDIA's index,
+# and the BFSU mirror lacks them, so pip falls back to a source stub that hangs
+# at build time. Install it separately from public PyPI + pypi.nvidia.com, using
+# the same CUDA-13 runtime-first, --no-deps recipe as scripts/bash/lib/pip.sh
+# (10.13.3.x metadata otherwise pulls a deprecated cuda-runtime source package).
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install \
     -i https://mirrors.bfsu.edu.cn/pypi/web/simple \
@@ -20,7 +26,21 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pyyaml \
     numpy \
     grpcio \
+    && pip install \
+    --index-url https://pypi.org/simple \
+    --extra-index-url https://pypi.nvidia.com \
+    --trusted-host pypi.org \
+    --trusted-host pypi.nvidia.com \
+    nvidia-cuda-runtime==13.0.96 \
+    && pip install --no-deps \
+    --index-url https://pypi.org/simple \
+    --extra-index-url https://pypi.nvidia.com \
+    --trusted-host pypi.org \
+    --trusted-host pypi.nvidia.com \
     "tensorrt==${TENSORRT_PYTHON_VERSION}" \
+    "tensorrt_cu13_bindings==${TENSORRT_PYTHON_VERSION}" \
+    "tensorrt_cu13_libs==${TENSORRT_PYTHON_VERSION}" \
+    "tensorrt-cu13==${TENSORRT_PYTHON_VERSION}" \
     && python3 -c "\
 import torch, tokenizers, tensorrt, yaml, grpc, numpy; \
 print(f'torch {torch.__version__}, CUDA {torch.version.cuda}'); \
