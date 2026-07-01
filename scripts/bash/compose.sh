@@ -245,6 +245,14 @@ _compose_apply_triton_ngc_defaults() {
             [[ -n "$torch_cuda_tag" ]] && export TRITON_PYTORCH_CUDA_TAG="$torch_cuda_tag"
         fi
     fi
+    # TensorRT Python version must match the NGC tag's TRT (and the Phase B plan);
+    # resolve from the matrix so Dockerfile.triton doesn't fall back to its default
+    # (which is the newest tag's version and mismatches an older base's plan).
+    if [[ -z "${TRITON_TENSORRT_PYTHON_VERSION:-}" ]]; then
+        local trt_ver
+        trt_ver=$(resolve_ngc_tag_tensorrt_version "$ngc_tag" 2>/dev/null || true)
+        [[ -n "$trt_ver" ]] && export TRITON_TENSORRT_PYTHON_VERSION="$trt_ver"
+    fi
 }
 
 resolve_compose_image_defaults() {

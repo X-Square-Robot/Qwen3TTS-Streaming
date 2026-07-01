@@ -541,6 +541,7 @@ PY
     find "$orch_model_dir" -mindepth 1 -maxdepth 1 \
         ! -name "model.py" \
         ! -name "engine" \
+        ! -name "qwen3tts_protocol" \
         ! -name "tokenizer" \
         ! -name "weights" \
         ! -name "runtime" \
@@ -807,12 +808,23 @@ build_triton_image() {
     local repo_root="$1"
     local image_tag="$2"
     local base_image="${3:-}"
-    local trt_python_version="${TRITON_TENSORRT_PIP_VERSION:-10.15.1.29}"
+    local trt_python_version="${TRITON_TENSORRT_PIP_VERSION:-}"
     local pytorch_cuda_tag="${TRITON_PYTORCH_CUDA_TAG:-${PYTORCH_CUDA_TAG:-cu130}}"
 
     if [ -z "$base_image" ]; then
         base_image=$(resolve_triton_deploy_image) \
             || { log_error "Cannot determine base image"; return 1; }
+    fi
+
+    # TensorRT Python version must match the NGC tag's TRT (and the Phase B plan);
+    # resolve from the matrix by the base image tag instead of hardcoding, or a
+    # mismatched wheel is baked in and the plan fails the fingerprint check.
+    if [ -z "$trt_python_version" ]; then
+        local _ngc_tag="${base_image##*:}"; _ngc_tag="${_ngc_tag%-py3}"
+        trt_python_version=$(resolve_ngc_tag_tensorrt_version "$_ngc_tag" 2>/dev/null || true)
+    fi
+    if [ -z "$trt_python_version" ]; then
+        trt_python_version="10.15.1.29"
     fi
 
     local model_repo="$repo_root/workspace/model_repository"
@@ -874,12 +886,26 @@ RUN python3 -m pip install --no-cache-dir \
     networkx \
     sympy \
     tokenizers \
-    "tensorrt==\${TENSORRT_PYTHON_VERSION}" \
     && python3 -m pip install --no-cache-dir \
     --timeout 120 \
     --retries 10 \
     --index-url https://download.pytorch.org/whl/\${PYTORCH_CUDA_TAG} \
-    torch
+    torch \
+    && python3 -m pip install --no-cache-dir \
+    --index-url https://pypi.org/simple \
+    --extra-index-url https://pypi.nvidia.com \
+    --trusted-host pypi.org \
+    --trusted-host pypi.nvidia.com \
+    nvidia-cuda-runtime==13.0.96 \
+    && python3 -m pip install --no-cache-dir --no-deps \
+    --index-url https://pypi.org/simple \
+    --extra-index-url https://pypi.nvidia.com \
+    --trusted-host pypi.org \
+    --trusted-host pypi.nvidia.com \
+    "tensorrt==\${TENSORRT_PYTHON_VERSION}" \
+    "tensorrt_cu13_bindings==\${TENSORRT_PYTHON_VERSION}" \
+    "tensorrt_cu13_libs==\${TENSORRT_PYTHON_VERSION}" \
+    "tensorrt-cu13==\${TENSORRT_PYTHON_VERSION}"
 
 COPY model_repository /models
 
