@@ -31,6 +31,19 @@ Third-party components
      React / Vite / lucide-react (MIT), TypeScript (Apache-2.0).
    - See each project for full license texts.
 
+5. TEN VAD (optional — only for the experimental "tenvad" VAD mode)
+   - https://github.com/TEN-framework/ten-vad
+   - License: Apache License 2.0 WITH ADDITIONAL CONDITIONS, Copyright TEN Team.
+     The additional conditions are NOT standard permissive terms: they include a
+     non-compete restriction (may not be deployed to compete with Agora's
+     offerings), single-applicant use (only for your own applications / direct
+     end users), and derivative-works inheritance of the same license. Review
+     the upstream LICENSE before enabling this mode. (ten-vad also bundles code
+     under BSD-2-Clause / BSD-3-Clause; see its NOTICES file.)
+   - OPTIONAL and NOT bundled: VAD is disabled by default; the "tenvad" mode is
+     opt-in and the ten-vad package is installed by the user, who is then
+     responsible for complying with its license terms.
+
 ------------------------------------------------------------------------------
 Reference audio
 ------------------------------------------------------------------------------

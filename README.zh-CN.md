@@ -306,6 +306,7 @@ Qwen3TTS-Streaming/
 - **上游 [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)**（`third_party/` 子模块）为 Apache 2.0，与 MIT 兼容。
 - **模型权重**由 Qwen/Alibaba 发布，许可证以其 [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [Hugging Face](https://huggingface.co/Qwen) 模型卡为准；本仓库不分发任何权重。
 - **TensorRT / Triton Inference Server**（NVIDIA NGC 镜像）为 NVIDIA 专有软件，本仓库不打包，使用即表示接受 NVIDIA EULA。
+- **[TEN VAD](https://github.com/TEN-framework/ten-vad)** 为**可选**依赖，仅实验性 `tenvad` VAD 模式使用（默认关闭，由用户自行安装、不打包）。其许可为 **Apache 2.0 + 附加条件**（非竞争、仅限自用），**非**标准宽松许可；启用该模式前请先阅读其条款。
 - `resources/speakers/` 下的参考音频为**合成音频**、说话人名为**虚构**，不对应任何真实个人。
 
 完整第三方归属见 [NOTICE](NOTICE)。

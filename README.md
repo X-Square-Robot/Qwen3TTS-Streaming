@@ -306,6 +306,7 @@ This project is a **v0.1 engineering preview**, and streaming quality is still b
 - **Upstream [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)** (the `third_party/` submodule) is Apache 2.0, which is compatible with MIT.
 - **Model weights** are released by Qwen/Alibaba; their license is governed by the respective [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [Hugging Face](https://huggingface.co/Qwen) model cards; this repository does not distribute any weights.
 - **TensorRT / Triton Inference Server** (NVIDIA NGC images) are NVIDIA proprietary software, not bundled in this repository; using them constitutes acceptance of the NVIDIA EULA.
+- **[TEN VAD](https://github.com/TEN-framework/ten-vad)** is an **optional** dependency, used only by the experimental `tenvad` VAD mode (disabled by default; installed by the user, not bundled). It is licensed under **Apache 2.0 with additional conditions** (non-compete, single-applicant use) — **not** a standard permissive license; review its terms before enabling that mode.
 - The reference audio under `resources/speakers/` is **synthetic audio** with **fictional** speaker names, corresponding to no real individuals.
 
 For full third-party attribution, see [NOTICE](NOTICE).
