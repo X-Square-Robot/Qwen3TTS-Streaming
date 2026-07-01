@@ -119,10 +119,11 @@ require_demo_python_dependencies() {
   "${PYTHON_BIN}" - <<'PY'
 import importlib.util
 import sys
-missing = [name for name in ("aiohttp", "numpy", "tritonclient") if importlib.util.find_spec(name) is None]
+missing = [name for name in ("aiohttp", "numpy", "tritonclient", "qwen3tts_protocol") if importlib.util.find_spec(name) is None]
 if missing:
     print("Missing demo_api Python dependencies: " + ", ".join(missing), file=sys.stderr)
     print("Install with: python -m pip install -r demo_api/requirements.txt", file=sys.stderr)
+    print("(qwen3tts_protocol ships under client/src; the launcher adds it to PYTHONPATH)", file=sys.stderr)
     raise SystemExit(1)
 PY
 }
@@ -138,6 +139,9 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 cd "${REPO_ROOT}"
+# demo_api imports the shared protocol layer qwen3tts_protocol, which lives under
+# client/src (not pip-installed in the conda env by default). Put it on the path.
+export PYTHONPATH="${REPO_ROOT}/client/src${PYTHONPATH:+:${PYTHONPATH}}"
 PYTHON_BIN="$(choose_python)"
 require_demo_python_dependencies
 
