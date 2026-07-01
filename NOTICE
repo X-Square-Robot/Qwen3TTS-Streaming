@@ -26,10 +26,18 @@ Third-party components
    - NOT bundled with this repository; pulled by the user at build/run time.
 
 4. Key open-source dependencies (permissive licenses)
-   - PyTorch (BSD-3-Clause), ONNX Runtime (MIT), gRPC (Apache-2.0),
-     protobuf (BSD-3-Clause), NumPy (BSD-3-Clause), PyYAML (MIT),
-     React / Vite / lucide-react (MIT), TypeScript (Apache-2.0).
-   - See each project for full license texts.
+   Python (engine / export / client):
+   - PyTorch (BSD-3-Clause), NumPy (BSD-3-Clause), PyYAML (MIT),
+     ONNX Runtime (MIT), ONNX (Apache-2.0), onnx-simplifier (Apache-2.0),
+     Transformers / Tokenizers / safetensors (Apache-2.0, Hugging Face),
+     gRPC / grpcio (Apache-2.0), protobuf (BSD-3-Clause),
+     aiohttp (Apache-2.0), requests (Apache-2.0),
+     tritonclient (BSD-3-Clause, NVIDIA), soundfile (BSD-3-Clause).
+   WebUI (Node / TypeScript):
+   - React / React-DOM (MIT), Vite / @vitejs/plugin-react (MIT),
+     lucide-react (ISC), TypeScript (Apache-2.0).
+   - See each project for full license texts. Test-only tooling (pytest,
+     pytest-asyncio) is not listed here.
 
 5. TEN VAD (optional — only for the experimental "tenvad" VAD mode)
    - https://github.com/TEN-framework/ten-vad
