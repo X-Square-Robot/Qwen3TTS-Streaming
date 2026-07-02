@@ -365,7 +365,7 @@ class EngineLoop:
             return
         self._last_health_emit = now
         kv_pool = self._executor.kv_pool
-        cache_stats = self._prefix_cache.stats()
+        cache_stats = self._prefix_cache.stats
         LifecycleLogger.emit(
             session_id="-",
             phase="engine.health",
