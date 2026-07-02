@@ -94,7 +94,10 @@ services:
       - tritonserver
       - --model-repository=/models
       - --strict-model-config=false
-      - --log-verbose=1
+      # Verbose logging is off by default: on a decoupled streaming model it logs
+      # 2 synchronous lines per audio-chunk response, adding real per-chunk latency.
+      # Set TRITON_LOG_VERBOSE=1 to re-enable for debugging.
+      - --log-verbose=${TRITON_LOG_VERBOSE:-0}
     ports:
       - "${TRITON_HTTP_PORT:-8000}:8000"
       - "${TRITON_GRPC_PORT:-8001}:8001"
