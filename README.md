@@ -1,22 +1,136 @@
 **English** | [中文](README.zh-CN.md)
 
+<div align="center">
+
 # Qwen3TTS-Streaming
 
 *Let's play text the way we play audio!*
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/actions/workflows/ci.yml/badge.svg)](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+[![Status](https://img.shields.io/badge/status-v0.1%20engineering%20preview-orange.svg)](#capability-status)
+[![GitHub stars](https://img.shields.io/github/stars/X-Square-Robot/Qwen3TTS-Streaming?style=social)](https://github.com/X-Square-Robot/Qwen3TTS-Streaming)
+
+<img src="docs/images/文本播放器.gif" width="720" alt="Text Player demo: streaming TTS playback synced to engine decode steps">
+
+*Text tokens go in, audio chunks come out — in real time. See why that matters in [Token-Level Streaming](#token-level-streaming), and the full demo set in [WebUI Demo](#webui-demo).*
+
+</div>
+
 ## Introduction
 
-Qwen3TTS-Streaming is an **engineering preview** project: it exports the official Qwen3-TTS PyTorch weights into an ONNX/TensorRT runtime and builds token-level streaming TTS around a Triton/standalone engine, together with model fusion, frontend segmentation, prefix cache, continuous batching, and a WebUI performance showcase. The project opens up a highly optimized, reproducible, and continuously verifiable engineering pipeline, inviting the community to polish it together into a reliable open-source inference system.
+Qwen3TTS-Streaming is an **engineering preview** project: it exports the official Qwen3-TTS PyTorch weights into an ONNX/TensorRT runtime and builds **token-level streaming TTS** around a Triton/standalone engine, together with model fusion, frontend segmentation, prefix cache, continuous batching, and a WebUI performance showcase. The project opens up a highly optimized, reproducible, and continuously verifiable engineering pipeline, inviting the community to polish it together into a reliable open-source inference system.
 
 > ⚠️ **Status: v0.1 engineering preview, not production-ready.** Streaming mode may still exhibit **hallucination, repetition, and dropped reading** (roughly 10–18% on the current checkpoint, rooted in the model and sampling; see [Known Limitations](docs/user/known_limitations.md)). **The currently recommended stable scope is the `custom-1.7b` / `custom_voice` path.** `design-1.7b`, `base-1.7b` / x-vector voice cloning, and `icl` voice cloning are experimental; the `0.6b` variants are not part of the v0.1 mainline. Do not use it directly for production content generation.
+
+## Features
+
+### Token-Level Streaming
+
+Most TTS pipelines wait for a full sentence — or the whole LLM response — before synthesis even starts. Qwen3TTS-Streaming synthesizes as text tokens arrive, so audio starts while the sentence is still being written:
+
+```text
+Traditional (sentence-level) TTS
+  LLM  "Hello, how are you today?"  ──(wait for the full sentence)──▶  TTS  ──▶  🔊
+                                                                             one long wait, then playback
+
+Qwen3TTS-Streaming (token-level)
+  LLM   "Hello" ─ "," ─ " how" ─ " are" ─ " you" ─ " today?" ──▶
+           │        │       │       │        │         │
+           ▼        ▼       ▼       ▼        ▼         ▼
+         chunk    chunk   chunk   chunk    chunk     chunk   ──▶  🔊
+                                                                    first chunk lands in as little as 13ms
+```
+
+**13ms** is faster than a single 60Hz screen refresh (16.7ms) and well under the ~100–400ms a human eye takes to blink — the first audio chunk is already playing before a wait would even register. At 128 concurrent streams the average is still ~180ms. Both numbers come with conditions attached; see [Performance Claims](#performance-claims) for exactly what they depend on.
+
+### A Scheduler Built for Autoregressive Streaming
+
+Triton's built-in `dynamic_batching` assumes stateless requests with a fixed sequence length — it has no concept of "this request is mid-decode, waiting on more text tokens, and holding live KV state." Token-level TTS needs exactly that: every session's KV grows unevenly, and decode must pause (`WAIT_TEXT`) without losing state whenever the upstream LLM stalls.
+
+So the engine drops Triton as the scheduler and runs its own **iteration-level continuous batching** underneath: padded KV alignment with masking, MLFQ-style priority (new sessions protect first-audio latency, long-running ones get demoted instead of starved), and a three-stage decode loop — `prefill → stream-while-waiting → flush` — that suspends and resumes per session. Triton is still a supported front door (the `tts_orchestrator` BLS model is a thin protocol adapter over the same engine); this scheduler is what runs underneath either way.
+
+See the [Engine Design Panorama](docs/dev/architecture/engine_overview.md) for the full constraint-to-design trace, including which trade-offs are hard model constraints and which are still open to improvement.
+
+### Compile Once, Deploy Anywhere
+
+TensorRT engines are pinned to a specific GPU/driver/TensorRT combination — a `.plan` built on one machine won't reliably run on another. Building directly on every target means shipping the full NGC toolchain (and a GPU) to each one, which production/edge/air-gapped hosts often don't have.
+
+Qwen3TTS-Streaming separates *where you build* from *where you deploy*:
+
+```bash
+bash scripts/bash/autorun.sh probe-target --out target_profile.json                              # 1. fingerprint the target machine
+bash scripts/bash/autorun.sh make-bundle  -m custom-1.7b --target-profile target_profile.json     # 2. build a matching engine bundle
+bash scripts/bash/autorun.sh import-artifact workspace/engine_artifact_bundle.tar.zst              # 3. import it on the target — no trtexec needed there
+
+# or fingerprint + build over SSH in one shot:
+bash scripts/bash/autorun.sh remote-build -m custom-1.7b --target-profile target_profile.json --remote-host user@host
+```
+
+See the [Deployment Guide](docs/user/deployment.md) for the full cross-machine build workflow.
+
+### One Engine, Not Four
+
+A single decode step in this pipeline touches four distinct stages: the talker backbone (prefill/decode), the Code Predictor, codec-embedding summation, and the code2wav vocoder. Exporting each as its own ONNX/TensorRT engine would mean four Python dispatches and four host↔device round-trips — every step, for the life of the stream.
+
+```text
+Without fusion — 4 engines per decode step
+  talker  ──▶  code predictor  ──▶  codec_sum  ──▶  code2wav  ──▶  🔊
+    4 Python dispatches, 4 host↔device round-trips, every single step
+
+Qwen3TTS-Streaming — 1 fused engine per decode step
+  talker + code predictor + codec_sum + code2wav  ──▶  🔊
+    1 ONNX graph, 1 TensorRT engine, 1 dispatch
+```
+
+This isn't TensorRT's automatic kernel fusion — TensorRT doesn't merge across model boundaries on its own. The project's own export code does the model surgery: `TalkerCode2WavFusedONNX` in [`export_09_talker_code2wav_fused.py`](scripts/export/export_09_talker_code2wav_fused.py) chains all four stages into one forward pass and exports them as a single graph, compiled into one `talker_code2wav_fused.engine`. A second fusion, [`export_04_speech_tokenizer_codec_fused.py`](scripts/export/export_04_speech_tokenizer_codec_fused.py), merges the speech tokenizer with codec-embedding summation for reference-audio paths.
+
+The whole path is in this repo, not the `third_party/` submodule — export code (`scripts/export/`), TensorRT profile/IO-format helpers (`scripts/python/trt_fused_*.py`), and tests (`tests/integration/test_trt_fused_io_formats.py`, `tests/unit/engine_core/test_executor_trt_engine.py`).
+
+## Highlights
+
+- ⚡ **Token-level streaming, not sentence-level** — first audio chunk in as little as 13ms, ~180ms avg at 128 concurrent streams
+- 🧩 **A scheduler built for autoregressive decode**, not Triton's stateless `dynamic_batching` — continuous batching + `WAIT_TEXT` pause/resume
+- 🌐 **Compile once, deploy anywhere** — fingerprint a target, build a matching bundle, import it with no GPU toolchain on-site
+- 🧵 **One TensorRT engine per decode step, not four** — talker + Code Predictor + codec-embedding sum + code2wav fused into a single exported graph, export-to-test code all in this repo
+- 🧠 **Prefix KV cache** — a 16-entry LRU skips prefill on repeat system prompts, saving 10–50ms (see [Engine Design Panorama](docs/dev/architecture/engine_overview.md))
+- 🧮 **Code predictor unrolled into one static TRT graph** — no per-step KV, higher GPU utilization than step-by-step decode (see [Engine Design Panorama](docs/dev/architecture/engine_overview.md))
+- 🖥️ **WebUI showcase** — Text Player, LLM PK, and Concurrency panels to see streaming behavior live
+
+The first four points above are unpacked in [Features](#features); the last two are covered in the [Engine Design Panorama](docs/dev/architecture/engine_overview.md).
+
+## Table of Contents
+
+- [Features](#features)
+  - [Token-Level Streaming](#token-level-streaming)
+  - [A Scheduler Built for Autoregressive Streaming](#a-scheduler-built-for-autoregressive-streaming)
+  - [Compile Once, Deploy Anywhere](#compile-once-deploy-anywhere)
+  - [One Engine, Not Four](#one-engine-not-four)
+- [Performance Claims](#performance-claims)
+- [Capability Status](#capability-status)
+- [Prerequisites](#prerequisites)
+- [Quick Start](#quick-start)
+- [Deployment Options](#deployment-options)
+- [Client SDK](#client-sdk)
+- [Testing and Acceptance](#testing-and-acceptance)
+- [WebUI Demo](#webui-demo)
+- [Streaming Protocol](#streaming-protocol)
+- [Project Structure](#project-structure)
+- [Documentation Navigation](#documentation-navigation)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Performance Claims
 
 The low-latency numbers mentioned in this project are conditional results, not general guarantees:
 
-- `13ms TTFT`: the lowest observed value, dependent on the specified hardware, a warm engine, prefix/cache hits, single-request load, and a local link.
+| Scenario | TTFT | Conditions |
+| --- | --- | --- |
+| Single request, warm engine | **13ms** (lowest observed) | specified hardware, warm engine, prefix/cache hits, single-request load, local link |
+| 128 concurrent streams (avg) | **180ms** | concurrency stress test — hardware, cache, input, profile, sampling params, and client-side measurement method all pinned |
+
 - Standalone `engine-grpc` TTFT is measured by default over a ready/reused gRPC channel and, like WebSocket, does not count the client connection setup cost toward first-packet latency; a cold/lazy channel adds roughly 10ms.
-- `180ms 128-stream avg TTFT`: a concurrency stress-test measure that requires specifying the hardware, cache, input, profile, sampling parameters, and client-side measurement method.
 - The WebUI only represents replayable real-time synthesized audio when the result source is marked `live_triton` or `live_engine_websocket` and carries an `audio` field.
 
 For detailed benchmark methodology, see [Benchmark Methodology](docs/user/benchmark_methodology.md).
@@ -25,11 +139,11 @@ For detailed benchmark methodology, see [Benchmark Methodology](docs/user/benchm
 
 | Path | Current status | Open-source scope |
 | --- | --- | --- |
-| `custom-1.7b` / `custom_voice` | Prioritized/stable | The v0.1 recommended path; the WebUI and demo showcase it by default |
-| `design-1.7b` / `voice_design` | Experimental | Code and export entry points can be kept, but must be marked as not fully validated |
-| `base-1.7b` / x-vector voice clone | Experimental | Standalone already wires up ref audio → speaker embedding; needs the base export artifacts and real end-to-end validation |
-| `icl` voice clone | Experimental | Standalone already wires up ref audio + ref text → ref codec/code injection; needs the TRT ref-audio engine and real end-to-end validation |
-| `0.6b` variants | Not part of the v0.1 mainline | Export/download entry points can be kept, but need separate validation before release |
+| `custom-1.7b` / `custom_voice` | 🟢 Prioritized/stable | The v0.1 recommended path; the WebUI and demo showcase it by default |
+| `design-1.7b` / `voice_design` | 🟡 Experimental | Code and export entry points can be kept, but must be marked as not fully validated |
+| `base-1.7b` / x-vector voice clone | 🟡 Experimental | Standalone already wires up ref audio → speaker embedding; needs the base export artifacts and real end-to-end validation |
+| `icl` voice clone | 🟡 Experimental | Standalone already wires up ref audio + ref text → ref codec/code injection; needs the TRT ref-audio engine and real end-to-end validation |
+| `0.6b` variants | ⚪ Not part of the v0.1 mainline | Export/download entry points can be kept, but need separate validation before release |
 
 ## Prerequisites
 
@@ -198,17 +312,13 @@ mamba run -n qwen3-tts python tools/validation/serving_endpoints.py \
 
 ## WebUI Demo
 
-The WebUI contains three panels: **Text Player** (plays text by engine decode step — text tokens in the first half, PAD steps shown after flush, and the slider seeks the actual WAV audio once synthesis completes), **LLM PK** (simulates an upstream LLM emitting tokens one by one, comparing streaming vs. non-streaming on the same timeline), and **Concurrency** (the TTFT distribution and throughput of multi-stream synthesis, requesting live Triton by default and saving the real audio).
+The WebUI contains three panels: **Text Player** (plays text by engine decode step — text tokens in the first half, PAD steps shown after flush, and the slider seeks the actual WAV audio once synthesis completes; see the hero GIF at the top of this README), **LLM PK** (simulates an upstream LLM emitting tokens one by one, comparing streaming vs. non-streaming on the same timeline), and **Concurrency** (the TTFT distribution and throughput of multi-stream synthesis, requesting live Triton by default and saving the real audio).
 
-**Text Player**
-
-![Text Player demo](docs/images/文本播放器.gif)
-
-**LLM PK**
+**LLM PK** — streaming vs. non-streaming, same timeline
 
 ![Streaming vs. non-streaming comparison demo](docs/images/流式非流式对比.gif)
 
-**Concurrency**
+**Concurrency** — multi-stream TTFT distribution and throughput
 
 ![Multi-stream synthesis demo](docs/images/多路合成.gif)
 

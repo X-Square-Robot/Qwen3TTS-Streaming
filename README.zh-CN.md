@@ -1,22 +1,136 @@
 [English](README.md) | **中文**
 
+<div align="center">
+
 # Qwen3TTS-Streaming
 
 *让我们像播放音频一样播放文本！*
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/actions/workflows/ci.yml/badge.svg)](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+[![Status](https://img.shields.io/badge/status-v0.1%20engineering%20preview-orange.svg)](#能力状态)
+[![GitHub stars](https://img.shields.io/github/stars/X-Square-Robot/Qwen3TTS-Streaming?style=social)](https://github.com/X-Square-Robot/Qwen3TTS-Streaming)
+
+<img src="docs/images/文本播放器.gif" width="720" alt="文本播放器演示：按 engine decode step 同步播放的流式 TTS">
+
+*文本 token 进去，音频 chunk 实时出来。为什么这很关键见 [Token 级流式](#token-级流式)，完整演示见 [WebUI Demo](#webui-demo)。*
+
+</div>
+
 ## 引言
 
-Qwen3TTS-Streaming 是一个**工程预览版**项目：把官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运行时，围绕 Triton/standalone engine 做 token 级流式 TTS、模型 fuse、前端分词、prefix cache、连续批处理和 WebUI 性能展示。项目开放一条已高度优化、可复现、可继续验证的工程链路，让社区一起打磨成可靠的开源推理系统。
+Qwen3TTS-Streaming 是一个**工程预览版**项目：把官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运行时，围绕 Triton/standalone engine 做**token 级流式 TTS**、模型 fuse、前端分词、prefix cache、连续批处理和 WebUI 性能展示。项目开放一条已高度优化、可复现、可继续验证的工程链路，让社区一起打磨成可靠的开源推理系统。
 
 > ⚠️ **状态：v0.1 工程预览，非生产就绪。** 流式模式仍可能出现**幻觉、重复、漏读**（当前 checkpoint 上约 10–18%，根因在模型+采样，见 [已知限制](docs/user/known_limitations.zh-CN.md)）。**当前建议稳定范围为 `custom-1.7b` / `custom_voice` 路径**；`design-1.7b`、`base-1.7b` / x-vector 语音克隆、`icl` 语音克隆处于实验状态；`0.6b` 变体未作为 v0.1 主线。请勿直接用于生产内容生成。
+
+## 特色
+
+### Token 级流式
+
+大多数 TTS 链路要等一整句话——甚至整段 LLM 回复——生成完才开始合成。Qwen3TTS-Streaming 在文本 token 到达的同时就开始合成，音频在句子还没写完时就已经开始播放：
+
+```text
+传统（句子级）TTS
+  LLM  "你好，今天过得怎么样？"  ──（等整句生成完）──▶  TTS  ──▶  🔊
+                                                              先长时间等待，再一次性播放
+
+Qwen3TTS-Streaming（token 级）
+  LLM   "你好" ─ "，" ─ "今天" ─ "过得" ─ "怎么样" ─ "？" ──▶
+           │       │      │        │        │        │
+           ▼       ▼      ▼        ▼        ▼        ▼
+         chunk   chunk  chunk    chunk    chunk    chunk   ──▶  🔊
+                                                                 首个 chunk 最快 13ms 到达
+```
+
+**13ms** 比一次 60Hz 屏幕刷新（16.7ms）还快，远低于人眼一次眨眼所需的约 100–400ms——第一个音频 chunk 播放时，你甚至还来不及感知到等待。128 路并发下均值仍为 ~180ms。这两个数字都带有前提条件，具体依赖见[性能声明](#性能声明)。
+
+### 为自回归流式定制的调度器
+
+Triton 内置的 `dynamic_batching` 假设请求无状态、序列长度固定——它没有"这个请求正在 decode 途中、还在等更多文本 token、并持有存活 KV 状态"这个概念。Token 级 TTS 恰恰需要这个：每个 session 的 KV 增长不均匀，decode 必须能在上游 LLM 卡顿时暂停（`WAIT_TEXT`）而不丢状态。
+
+所以 engine 层放弃了 Triton 作为调度器，自己跑一套**迭代级连续批处理**：padded KV 对齐 + mask、MLFQ 式优先级（新 session 保首包延迟，长跑 session 降级而非饿死），以及按 session 挂起/恢复的三阶段 decode 循环——`prefill → 边等边流 → flush`。Triton 仍然是受支持的服务入口（`tts_orchestrator` BLS 模型只是同一个 engine 上的一层薄协议适配）——不管走哪条路，底层跑的都是这套调度器。
+
+完整的"约束 → 设计"推导见[引擎设计全景总览](docs/dev/architecture/engine_overview.zh-CN.md)，里面标注了哪些取舍是模型硬约束、哪些还能继续优化。
+
+### 编译一次，到处部署
+
+TensorRT engine 和具体的 GPU/驱动/TensorRT 版本组合强绑定——一台机器编译出的 `.plan` 换台机器未必能跑。如果每台目标机都要直接编译，就意味着每台机器都得装完整 NGC 工具链（还得有 GPU），生产/边缘/内网机器往往不具备这个条件。
+
+Qwen3TTS-Streaming 把"在哪编译"和"在哪部署"拆开：
+
+```bash
+bash scripts/bash/autorun.sh probe-target --out target_profile.json                              # 1. 采集目标机指纹
+bash scripts/bash/autorun.sh make-bundle  -m custom-1.7b --target-profile target_profile.json     # 2. 编译匹配的产物包
+bash scripts/bash/autorun.sh import-artifact workspace/engine_artifact_bundle.tar.zst              # 3. 目标机导入即可，无需 trtexec
+
+# 或者一步通过 SSH 完成指纹采集 + 编译：
+bash scripts/bash/autorun.sh remote-build -m custom-1.7b --target-profile target_profile.json --remote-host user@host
+```
+
+完整跨机编译流程见[部署指南](docs/user/deployment.zh-CN.md)。
+
+### 一个引擎，而非四个
+
+这套链路的一个 decode step 要经过四个不同阶段：talker backbone（prefill/decode）、Code Predictor、codec-embedding 求和、code2wav vocoder。如果每个阶段各自导出成一个 ONNX/TensorRT engine，就意味着每一步都要 4 次 Python 调度 + 4 次 host↔device 往返——而且流式过程中的每一步都要这样。
+
+```text
+不融合 —— 每个 decode step 4 个 engine
+  talker  ──▶  code predictor  ──▶  codec_sum  ──▶  code2wav  ──▶  🔊
+    4 次 Python 调度、4 次 host↔device 往返，每一步都是
+
+Qwen3TTS-Streaming —— 每个 decode step 1 个融合 engine
+  talker + code predictor + codec_sum + code2wav  ──▶  🔊
+    1 张 ONNX 图、1 个 TensorRT engine、1 次调度
+```
+
+这不是 TensorRT 自带的算子融合——TRT 不会自己跨模型边界做合并。真正做"模型手术"的是项目自己的导出代码：[`export_09_talker_code2wav_fused.py`](scripts/export/export_09_talker_code2wav_fused.py) 里的 `TalkerCode2WavFusedONNX` 把四个阶段串成一次 forward，导出成一张图，编译成单个 `talker_code2wav_fused.engine`。另一处融合 [`export_04_speech_tokenizer_codec_fused.py`](scripts/export/export_04_speech_tokenizer_codec_fused.py) 把 speech tokenizer 和 codec-embedding 求和合并，用于参考音频路径。
+
+整条链路都在本仓库里，不在 `third_party/` 子模块中——导出代码（`scripts/export/`）、TensorRT profile/IO 格式辅助（`scripts/python/trt_fused_*.py`），以及测试（`tests/integration/test_trt_fused_io_formats.py`、`tests/unit/engine_core/test_executor_trt_engine.py`）。
+
+## 亮点
+
+- ⚡ **Token 级流式，而非句子级** —— 首个音频 chunk 最快 13ms 到达，128 路并发均值 ~180ms
+- 🧩 **为自回归 decode 定制的调度器**，而非 Triton 的无状态 `dynamic_batching` —— 连续批处理 + `WAIT_TEXT` 暂停/恢复
+- 🌐 **编译一次，到处部署** —— 采集目标机指纹、编译匹配产物包、目标机零 GPU 工具链导入
+- 🧵 **每个 decode step 一个 TensorRT engine，而非四个** —— talker + Code Predictor + codec-embedding 求和 + code2wav 融合进一张导出图，导图到测试全流程都在本仓库
+- 🧠 **Prefix KV cache** —— 16 条 LRU 缓存，命中即跳过 prefill，省 10–50ms（见[引擎设计全景总览](docs/dev/architecture/engine_overview.zh-CN.md)）
+- 🧮 **Code predictor 展开成单张静态 TRT 图** —— 无逐步 KV，比逐步解码有更高 GPU 利用率（见[引擎设计全景总览](docs/dev/architecture/engine_overview.zh-CN.md)）
+- 🖥️ **WebUI 展示** —— Text Player、LLM PK、Concurrency 三个面板，实时看流式效果
+
+前四点详见[特色](#特色)；后两点见[引擎设计全景总览](docs/dev/architecture/engine_overview.zh-CN.md)。
+
+## 目录
+
+- [特色](#特色)
+  - [Token 级流式](#token-级流式)
+  - [为自回归流式定制的调度器](#为自回归流式定制的调度器)
+  - [编译一次，到处部署](#编译一次到处部署)
+  - [一个引擎，而非四个](#一个引擎而非四个)
+- [性能声明](#性能声明)
+- [能力状态](#能力状态)
+- [前置要求](#前置要求)
+- [快速开始](#快速开始)
+- [部署方式](#部署方式)
+- [Client SDK](#client-sdk)
+- [测试与验收](#测试与验收)
+- [WebUI Demo](#webui-demo)
+- [流式协议](#流式协议)
+- [项目结构](#项目结构)
+- [文档导航](#文档导航)
+- [参与贡献](#参与贡献)
+- [许可证](#许可证)
 
 ## 性能声明
 
 项目里提到的低延迟数字是有条件结果，不是通用承诺：
 
-- `13ms TTFT`：最低观测值，依赖指定硬件、warm engine、prefix/cache 命中、单路请求和本地链路。
+| 场景 | TTFT | 前提条件 |
+| --- | --- | --- |
+| 单路请求，warm engine | **13ms**（最低观测值） | 指定硬件、warm engine、prefix/cache 命中、单路请求、本地链路 |
+| 128 路并发（均值） | **180ms** | 并发压测口径——硬件、cache、输入、profile、采样参数、客户端测量方式均已固定 |
+
 - standalone `engine-grpc` TTFT 默认按 ready/reused gRPC channel 统计，和 WebSocket 一样不把客户端建连成本计入首包延迟；cold/lazy channel 会额外增加约 10ms。
-- `180ms 128-stream avg TTFT`：并发压测口径，需明确硬件、cache、输入、profile、采样参数和客户端测量方式。
 - WebUI 只在结果 source 标记为 `live_triton` 或 `live_engine_websocket` 且带 `audio` 字段时代表可回放的实时合成音频。
 
 详细 benchmark 口径见 [Benchmark 方法](docs/user/benchmark_methodology.zh-CN.md)。
@@ -25,11 +139,11 @@ Qwen3TTS-Streaming 是一个**工程预览版**项目：把官方 Qwen3-TTS PyTo
 
 | 路径 | 当前状态 | 开源口径 |
 | --- | --- | --- |
-| `custom-1.7b` / `custom_voice` | 优先稳定 | v0.1 推荐路径，WebUI 和 demo 默认围绕它展示 |
-| `design-1.7b` / `voice_design` | 实验 | 可保留代码和导出入口，需标注未充分测通 |
-| `base-1.7b` / x-vector voice clone | 实验 | standalone 已接入 ref audio → speaker embedding；需 base 导出产物和真实端到端验证 |
-| `icl` voice clone | 实验 | standalone 已接入 ref audio + ref text → ref codec/code 注入；需 TRT ref-audio engine 和真实端到端验证 |
-| `0.6b` variants | 未作为 v0.1 主线 | 可保留导出/下载入口，发布前需单独验证 |
+| `custom-1.7b` / `custom_voice` | 🟢 优先稳定 | v0.1 推荐路径，WebUI 和 demo 默认围绕它展示 |
+| `design-1.7b` / `voice_design` | 🟡 实验 | 可保留代码和导出入口，需标注未充分测通 |
+| `base-1.7b` / x-vector voice clone | 🟡 实验 | standalone 已接入 ref audio → speaker embedding；需 base 导出产物和真实端到端验证 |
+| `icl` voice clone | 🟡 实验 | standalone 已接入 ref audio + ref text → ref codec/code 注入；需 TRT ref-audio engine 和真实端到端验证 |
+| `0.6b` variants | ⚪ 未作为 v0.1 主线 | 可保留导出/下载入口，发布前需单独验证 |
 
 ## 前置要求
 
