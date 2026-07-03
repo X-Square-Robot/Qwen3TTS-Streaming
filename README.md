@@ -130,6 +130,8 @@ The low-latency numbers mentioned in this project are conditional results, not g
 | Single request, warm engine | **13ms** (lowest observed) | specified hardware, warm engine, prefix/cache hits, single-request load, local link |
 | 128 concurrent streams (avg) | **180ms** | concurrency stress test — hardware, cache, input, profile, sampling params, and client-side measurement method all pinned |
 
+> ⚠️ **128 streams is the tested ceiling, not a safe production target.** At 128 concurrent streams the benchmarked GPU (RTX 5090) is already close to saturated: RTF (audio duration / wall-clock decode time) holds around 1 — each ~80ms audio frame costs about 80ms to decode, i.e. essentially no headroom above real-time. A load spike, scheduling jitter, or a heavier-than-usual request can push RTF below 1 and the stream falls behind. Size production concurrency with margin below 128 rather than running at it.
+
 - Standalone `engine-grpc` TTFT is measured by default over a ready/reused gRPC channel and, like WebSocket, does not count the client connection setup cost toward first-packet latency; a cold/lazy channel adds roughly 10ms.
 - The WebUI only represents replayable real-time synthesized audio when the result source is marked `live_triton` or `live_engine_websocket` and carries an `audio` field.
 
