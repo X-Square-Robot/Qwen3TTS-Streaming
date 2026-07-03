@@ -777,3 +777,36 @@ Scripts: `workspace/official_baseline.py` (official-repo rate), `workspace/proto
 3. Still need one **pure PyTorch rollout** (same text, same seed) to confirm whether the prototype itself also runs away on that seed, in order to distinguish "engine amplification" from "upstream instability". Stepwise replay cannot answer this alone, because from step≥2 it is fed the engine's already-drifted state.
 
 Reproduction scripts (all under `workspace/`, gitignored): `halluc_probe.py`, `compose.dump.yaml`, `scan_dump_divergence.py`, `compare_step1_hidden.py`, `analyze_engine_dump.py` (revived from git `ae77d68^` and fixed imports).
+
+## 2026-07-02: The 0701 Retrained Checkpoint Fixes It — Verified Through the Production bf16 Engine
+
+A researcher retrained the model (`/home/train/tts/qwen3-tts/trained/zehan/0701_trained_model`) and reported no hallucination. Verified with the same methodology on the same deterministic seeds.
+
+> **Important**: the `workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice` symlink now points to `0701_trained_model` (previously `0601_trained_model`, the broken one). Every `0601` rate in the tables above is that self-trained 0601 checkpoint.
+
+### Model-level check (official unmodified code, same 40 seeds)
+
+| checkpoint | dtype | hallucination | duration |
+|---|---|---|---|
+| 0601 (old) | fp32 | 6/40 | median 9.72s, max 40.88s |
+| 0701 (new) | fp32 | **0/40** | 9.52–10.48s, median 10.04s |
+| 0701 (new) | bf16 | **0/40** | 9.52–10.64s, median 10.00s |
+
+### Production path (bf16 TRT engine rebuilt from 0701)
+
+Full pipeline from the 0701 symlink: Phase A re-export (`export_all.py --variant custom-1.7b` — must run in the `qwen3-tts` env with `PYTHONPATH=third_party/Qwen3-TTS`; `export_models.sh` uses base `python3` and fails with "qwen_tts not found"), Phase B build (`build_engines.sh --variant custom-1.7b`, default `--bf16 --layerPrecisions=/talker_fused/cp/*:fp32` = backbone bf16 + cp fp32 + code2wav bf16, 196s, 4.1G), then `compose.sh prepare` + `up` + `docker restart` (the container only reloads `model.plan` on restart — `up` alone sees no spec change).
+
+| engine (deployed path) | hallucination | duration |
+|---|---|---|
+| 0601 bf16 engine | 5/40 | max 40.32s |
+| **0701 bf16 engine** | **0/100** | 9.44–10.72s, median 10.04s |
+
+### Conclusion
+
+Three levels agree — the 0701 retraining eliminates the runaway, and the fix survives bf16 quantization all the way to the deployed bf16 TRT engine. On the exact seeds that drove 0601 to run away, 0701 never does; the duration distribution is tight (~10s, max 10.7s, far from the ~40s / 512-step cap), so it is a real EOS-margin fix, not luck. `0/100` → 95% CI upper bound ~3.6%, well below 0601's ~15%.
+
+This confirms the earlier localization: the streaming hallucination was caused by the **0601 training run producing unhealthy weights**, not by Qwen3-TTS itself, our export map, or the TRT engine — all of which faithfully reproduced the checkpoint. Retraining (0701) fixes it.
+
+**Deployment state**: the currently deployed engine is now the **0701 bf16 build** (no longer 0601); the 0601 engine artifacts were overwritten by this rebuild.
+
+Scripts: `workspace/official_baseline.py` (parametrized by `QWEN_MODEL_DIR` / `QWEN_DTYPE` / `QWEN_N`), `workspace/halluc_probe.py` (engine probe, `--n`).

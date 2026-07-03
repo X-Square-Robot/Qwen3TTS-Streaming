@@ -872,3 +872,36 @@ temperature=0.9, repetition_penalty=1.05, subtalker_dosample=True。eos_token_id
 复现脚本（均在 `workspace/`，gitignored）：`halluc_probe.py`、`compose.dump.yaml`、
 `scan_dump_divergence.py`、`compare_step1_hidden.py`、`analyze_engine_dump.py`
 （从 git `ae77d68^` 复活并修复 import）。
+
+## 2026-07-02：0701 重训 checkpoint 修好了——已在生产 bf16 引擎上验证
+
+研究员重训了模型（`/home/train/tts/qwen3-tts/trained/zehan/0701_trained_model`），结论是没有幻觉了。用同一套方法、同一组确定性种子复核。
+
+> **重要**：`workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice` 软链现已指向 `0701_trained_model`（此前是 `0601_trained_model`，即坏的那版）。上文所有 `0601` 的数据都是这个自训 0601 checkpoint。
+
+### 模型级复核（官方未改动代码，同一组 40 seed）
+
+| checkpoint | 精度 | 幻觉 | 时长 |
+|---|---|---|---|
+| 0601（旧） | fp32 | 6/40 | median 9.72s，max 40.88s |
+| 0701（新） | fp32 | **0/40** | 9.52–10.48s，median 10.04s |
+| 0701（新） | bf16 | **0/40** | 9.52–10.64s，median 10.00s |
+
+### 生产路径（从 0701 重建的 bf16 TRT 引擎）
+
+从 0701 软链完整走一遍：Phase A 重导出（`export_all.py --variant custom-1.7b`——必须在 `qwen3-tts` env、`PYTHONPATH=third_party/Qwen3-TTS` 下跑；`export_models.sh` 用 base `python3` 会报 "qwen_tts not found"），Phase B 构建（`build_engines.sh --variant custom-1.7b`，默认 `--bf16 --layerPrecisions=/talker_fused/cp/*:fp32` = backbone bf16 + cp fp32 + code2wav bf16，196s，4.1G），然后 `compose.sh prepare` + `up` + `docker restart`（容器只有 restart 才会重载 `model.plan`，`up` 因 spec 未变不重建）。
+
+| 引擎（真实部署路径） | 幻觉 | 时长 |
+|---|---|---|
+| 0601 bf16 引擎 | 5/40 | max 40.32s |
+| **0701 bf16 引擎** | **0/100** | 9.44–10.72s，median 10.04s |
+
+### 结论
+
+三个层次一致：0701 重训消除了 runaway，且修复贯穿 bf16 量化一直到部署的 bf16 TRT 引擎。在把 0601 打到跑飞的那批完全相同的种子上，0701 一个都不飞；时长分布极紧（~10s，最长 10.7s，离 ~40s / 512 步 cap 差得远），是 EOS 裕量真的稳了，不是运气。`0/100` → 95% 置信上界约 3.6%，远低于 0601 的 ~15%。
+
+这印证了之前的定位：流式幻觉是 **0601 那版训练把权重训坏了**，不是 Qwen3-TTS 本身、也不是我们的导图或 TRT 引擎（它们都忠实复现了 checkpoint 的行为）。重训（0701）即修。
+
+**部署状态**：当前部署的引擎已是 **0701 bf16 版本**（不再是 0601）；0601 的引擎产物已被本次重建覆盖。
+
+脚本：`workspace/official_baseline.py`（由 `QWEN_MODEL_DIR` / `QWEN_DTYPE` / `QWEN_N` 参数化）、`workspace/halluc_probe.py`（引擎探测，`--n`）。
