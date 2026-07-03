@@ -44,67 +44,78 @@ class EngineGrpcAdapter:
         self.timeout = timeout
         self.metadata = metadata
         self.headers = headers or {}
+        self._channel_lock = threading.Lock()
+        self._grpc = None
+        self._grpc_channel = None
 
     def _channel(self):
-        grpc = _require_grpc()
-        channel = grpc.insecure_channel(self.endpoint)
-        grpc.channel_ready_future(channel).result(timeout=self.timeout)
-        return grpc, channel
+        # Reused across calls/sessions: a gRPC channel already multiplexes many
+        # streams over one HTTP/2 connection, so tearing it down after every
+        # session paid a fresh TCP+HTTP/2 handshake for no reason.
+        with self._channel_lock:
+            if self._grpc_channel is None:
+                grpc = _require_grpc()
+                channel = grpc.insecure_channel(self.endpoint)
+                grpc.channel_ready_future(channel).result(timeout=self.timeout)
+                self._grpc = grpc
+                self._grpc_channel = channel
+            return self._grpc, self._grpc_channel
+
+    def close(self) -> None:
+        with self._channel_lock:
+            if self._grpc_channel is not None:
+                self._grpc_channel.close()
+                self._grpc_channel = None
+                self._grpc = None
 
     def get_capabilities(self) -> Capabilities:
         grpc, channel = self._channel()
-        try:
-            stub = tts_pb2_grpc.TTSServiceStub(channel)
-            response = stub.GetCapabilities(
-                tts_pb2.GetCapabilitiesRequest(), timeout=self.timeout
-            )
-            return capabilities_from_payload(_capabilities_message_to_dict(response))
-        finally:
-            channel.close()
+        stub = tts_pb2_grpc.TTSServiceStub(channel)
+        response = stub.GetCapabilities(
+            tts_pb2.GetCapabilitiesRequest(), timeout=self.timeout
+        )
+        return capabilities_from_payload(_capabilities_message_to_dict(response))
 
     def synthesize_bytes(self, text: str, *, request) -> BytesResult:
         grpc, channel = self._channel()
         session_id = request.session_id or ""
-        try:
-            stub = tts_pb2_grpc.TTSServiceStub(channel)
-            rpc_request = tts_pb2.SynthesizeOnceRequest(
-                session_id=session_id,
-                text=text,
-                config=_session_config_to_proto(request),
-            )
-            audio_parts: list[bytes] = []
-            audio_format = request.config.audio
-            events: list[StreamEvent] = []
-            warnings: list[str] = []
-            for response in stub.SynthesizeOnce(rpc_request, timeout=self.timeout):
-                which = response.WhichOneof("response")
-                if which == "audio":
-                    audio_parts.append(bytes(response.audio.pcm_data))
-                    audio_format = AudioFormat(
-                        encoding=_audio_encoding_from_proto(response.audio.encoding),
-                        sample_rate=int(
-                            response.audio.sample_rate or audio_format.sample_rate
-                        ),
-                        channels=int(response.audio.channels or audio_format.channels),
-                    )
-                elif which == "event":
-                    event = decode_stream_event(_stream_event_to_dict(response.event))
-                    events.append(event)
-                    if event.type == "warning" and event.message:
-                        warnings.append(event.message)
-                    if event.type in {"done", "error"}:
-                        break
-            return build_bytes_result(
-                audio_bytes=b"".join(audio_parts),
-                audio_format=audio_format,
-                session_id=session_id,
-                transport=self.transport_name,
-                events=events,
-                warnings=warnings,
-                details={},
-            )
-        finally:
-            channel.close()
+        stub = tts_pb2_grpc.TTSServiceStub(channel)
+        rpc_request = tts_pb2.SynthesizeOnceRequest(
+            session_id=session_id,
+            text=text,
+            config=_session_config_to_proto(request),
+        )
+        audio_parts: list[bytes] = []
+        audio_format = request.config.audio
+        events: list[StreamEvent] = []
+        warnings: list[str] = []
+        for response in stub.SynthesizeOnce(rpc_request, timeout=self.timeout):
+            which = response.WhichOneof("response")
+            if which == "audio":
+                audio_parts.append(bytes(response.audio.pcm_data))
+                audio_format = AudioFormat(
+                    encoding=_audio_encoding_from_proto(response.audio.encoding),
+                    sample_rate=int(
+                        response.audio.sample_rate or audio_format.sample_rate
+                    ),
+                    channels=int(response.audio.channels or audio_format.channels),
+                )
+            elif which == "event":
+                event = decode_stream_event(_stream_event_to_dict(response.event))
+                events.append(event)
+                if event.type == "warning" and event.message:
+                    warnings.append(event.message)
+                if event.type in {"done", "error"}:
+                    break
+        return build_bytes_result(
+            audio_bytes=b"".join(audio_parts),
+            audio_format=audio_format,
+            session_id=session_id,
+            transport=self.transport_name,
+            events=events,
+            warnings=warnings,
+            details={},
+        )
 
     def open_stream(self, start_request: SessionStartRequest):
         grpc, channel = self._channel()
@@ -187,8 +198,6 @@ class EngineGrpcStreamSession(BaseStreamSession):
             self._put_message(
                 StreamEvent(type="error", session_id=self.session_id, message=str(exc))
             )
-        finally:
-            self._channel.close()
 
     def send_text(
         self,

@@ -111,6 +111,19 @@ class TTSClient:
             )
         return self._adapter.open_stream(start_request)
 
+    def close(self) -> None:
+        """Release any transport resources held by the adapter (e.g. a shared
+        gRPC channel kept warm across sessions)."""
+        close = getattr(self._adapter, "close", None)
+        if close is not None:
+            close()
+
+    def __enter__(self) -> "TTSClient":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
 
 def _build_adapter(
     transport: str,

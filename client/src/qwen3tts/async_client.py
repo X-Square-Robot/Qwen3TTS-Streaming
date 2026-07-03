@@ -35,3 +35,12 @@ class AsyncTTSClient:
     async def aopen_stream(self, start_request):
         sync_session = await asyncio.to_thread(self._sync.open_stream, start_request)
         return AsyncStreamSession(sync_session)
+
+    async def aclose(self) -> None:
+        await asyncio.to_thread(self._sync.close)
+
+    async def __aenter__(self) -> "AsyncTTSClient":
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.aclose()
