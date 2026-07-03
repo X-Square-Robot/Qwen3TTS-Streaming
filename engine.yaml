@@ -24,6 +24,9 @@ server:
   max_sessions: 128
   request_timeout_sec: 120.0
   warmup_rounds: 3               # dummy inferences at startup to warm TRT cache
+  prewarm_speakers: []           # speakers to prewarm prefix KV cache at startup
+                                 # (e.g. [Serena]); first real request per speaker
+                                 # then hits cache (~20ms TTFT vs ~50ms cold). []=off
 
 scheduler:
   max_batch_size: 128

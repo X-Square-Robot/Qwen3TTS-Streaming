@@ -398,6 +398,52 @@ class TTSEngine:
             "enabled" if pc.enabled else "disabled",
         )
 
+        await self._prime_prefix_cache()
+
+    async def _prime_prefix_cache(self) -> None:
+        """Prewarm the prefix KV cache for configured speakers.
+
+        The executor warmup warms TRT/CUDA compute but not the prefix cache,
+        which is keyed by (task_type, language, speaker, ...) and populated on
+        the first real prefill.  For each configured speaker we run one real
+        (output-discarded) synthesis so its prefix is cached and the first real
+        request hits it (cold ~50ms TTFT -> warm ~20ms).  Requires prefix cache
+        enabled and a running engine loop (called at the end of ``start``).
+        """
+        speakers = self._cfg.server.prewarm_speakers
+        if not speakers or not self._cfg.prefix_cache.enabled:
+            return
+
+        timeout = self._cfg.server.request_timeout_sec
+        for speaker in speakers:
+            speaker = str(speaker).strip()
+            if not speaker:
+                continue
+            session_id = f"__prewarm__{speaker}"
+            done = asyncio.Event()
+
+            async def _on_audio(_sid: str, _data: bytes) -> None:
+                return  # discard warmup audio
+
+            async def _on_done(_sid: str, _metrics: dict, _done=done) -> None:
+                _done.set()
+
+            try:
+                await self.start_session(
+                    session_id,
+                    config=SessionConfig(task_type="custom_voice", speaker=speaker),
+                    on_audio=_on_audio,
+                    on_done=_on_done,
+                )
+                await self.push_text_input(session_id, "你好")
+                await self.mark_input_complete(session_id)
+                await asyncio.wait_for(done.wait(), timeout=timeout)
+                logger.info("Prefix cache prewarmed for speaker %r", speaker)
+            except Exception as exc:  # noqa: BLE001 — prewarm must never block startup
+                logger.warning(
+                    "Prefix cache prewarm failed for speaker %r: %s", speaker, exc
+                )
+
     async def stop(self) -> None:
         if self._relay_task:
             self._relay_task.cancel()

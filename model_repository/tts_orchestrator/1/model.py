@@ -309,6 +309,14 @@ class TritonPythonModel:
                 os.environ.get("PREFIX_KV_CACHE_MAX_ENTRIES", "16"),
             )
         )
+        # Speakers to prewarm the prefix KV cache for at startup (comma-separated).
+        # Empty = off. Must be valid speaker ids or they fall back to a default.
+        _prewarm = os.environ.get("ENGINE_PREWARM_SPEAKERS") or _param_string(
+            params, "prewarm_speakers", ""
+        )
+        cfg.server.prewarm_speakers = [
+            s.strip() for s in _prewarm.split(",") if s.strip()
+        ]
         cfg.sampling.do_sample = _parse_bool(
             _param_string(
                 params,

@@ -126,6 +126,10 @@ class ServerConfig:
     max_sessions: int = 128
     request_timeout_sec: float = 120.0
     warmup_rounds: int = 3
+    # Speakers to prewarm the prefix KV cache for at startup: for each, run one
+    # real (discarded) synthesis so the speaker/config prefix is cached and the
+    # first real request hits it (~50ms cold TTFT -> ~20ms warm). Empty = off.
+    prewarm_speakers: list[str] = field(default_factory=list)
 
 
 @dataclass
