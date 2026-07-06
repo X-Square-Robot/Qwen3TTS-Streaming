@@ -66,7 +66,6 @@ python tools/validation/prefill_compare.py --mode cp-parity           # CP sampl
 |------|---------|
 | `gen_audio.py` | Generate WAV samples via Triton TTS |
 | `serving_endpoints.py` | Full serving acceptance + TTFT benchmark |
-| `suggest_engine_profile.py` | Suggest TensorRT/runtime profile limits |
 | `pad_tolerance_experiment.py` | Pad token insertion study |
 | `vad_verification.py` | VAD verification |
 | `trt_direct.py` | Direct TRT engine decode-to-WAV |

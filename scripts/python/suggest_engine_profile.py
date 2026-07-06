@@ -79,11 +79,19 @@ def _discover_variants(exported_dir: Path) -> list[str]:
 
 
 def _coarse_profile(memory_mib: int) -> tuple[int, int, int]:
-    if memory_mib >= 76000:
+    # Calibrated against the flagship custom-1.7b bf16 fused engine:
+    # fixed (engine + weights) ~5 GiB, ~160 MiB per concurrent lane
+    # (KV/state pools + TRT lane overhead), ~2 GiB CUDA context reserve,
+    # 0.9 usable fraction: needed(batch) ~= (5120 + batch*160)/0.9 + 2048.
+    # Empirical anchor: at max_batch=32 the engine process holds ~9.9 GiB
+    # on a 32 GiB RTX 5090 (matches the model within ~2%).  Keep in sync
+    # with suggest_build_profile_from_memory in
+    # scripts/bash/lib/build_pipeline.sh.
+    if memory_mib >= 30000:
         return (128, 128, 512)
-    if memory_mib >= 45000:
+    if memory_mib >= 19000:
         return (64, 128, 512)
-    if memory_mib >= 29000:
+    if memory_mib >= 13500:
         return (32, 128, 512)
     return (16, 96, 384)
 
@@ -276,10 +284,17 @@ def suggest_profile(
 
     fixed_mib = max(float(e["fixed_mib"]) for e in estimates)
     per_lane_peak_mib = max(float(e["per_lane_peak_mib"]) for e in estimates)
+    # CUDA context + cuDNN handles + allocator fragmentation.  Per-lane TRT
+    # activation overhead is already counted in per_lane_peak (40 MiB/lane),
+    # so this must not double-count it: the old max(8192, 15%) default did,
+    # and squeezed a 32 GiB card (raw capacity ~140 lanes) down a full tier.
+    # Empirical anchor: fixed + 32*per_lane predicts the observed ~9.9 GiB
+    # engine process on an RTX 5090 within ~2%, leaving context/fragmentation
+    # as the only unmodeled remainder (~1-2 GiB).
     runtime_reserve_mib = float(
         os.environ.get(
             "QWEN3_PROFILE_RUNTIME_RESERVE_MIB",
-            str(max(8192.0, memory_mib * 0.15)),
+            str(max(2048.0, memory_mib * 0.05)),
         )
     )
     usable_fraction = float(os.environ.get("QWEN3_PROFILE_USABLE_FRACTION", "0.90"))

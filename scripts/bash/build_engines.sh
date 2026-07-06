@@ -163,19 +163,10 @@ _resolve_build_gpu_device() {
 }
 
 _suggest_build_profile_for_memory() {
-    local mem_mb="${1:-0}"
-    # nvidia-smi reports usable MiB, not marketing GB.  Some 48 GB class
-    # cards report around 46,000 MiB, so keep tier cutoffs below the nominal
-    # decimal values used in docs.
-    if [ "$mem_mb" -ge 76000 ]; then
-        echo "128 128 512"
-    elif [ "$mem_mb" -ge 45000 ]; then
-        echo "64 128 512"
-    elif [ "$mem_mb" -ge 29000 ]; then
-        echo "32 128 512"
-    else
-        echo "16 96 384"
-    fi
+    # Single source of truth for the coarse tiers lives in
+    # lib/build_pipeline.sh (sourced via tools.sh); this wrapper only
+    # survives for call-site compatibility.
+    suggest_build_profile_from_memory "$@"
 }
 
 _resolve_build_profile_defaults() {

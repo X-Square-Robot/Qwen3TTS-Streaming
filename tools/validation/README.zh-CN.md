@@ -66,7 +66,6 @@ python tools/validation/prefill_compare.py --mode cp-parity           # CP sampl
 |------|---------|
 | `gen_audio.py` | 通过 Triton TTS 生成 WAV 样本 |
 | `serving_endpoints.py` | 完整 serving 验收 + TTFT 基准 |
-| `suggest_engine_profile.py` | 建议 TensorRT/运行时 profile 上限 |
 | `pad_tolerance_experiment.py` | Pad token 插入研究 |
 | `vad_verification.py` | VAD 验证 |
 | `trt_direct.py` | 直接 TRT 引擎解码到 WAV |

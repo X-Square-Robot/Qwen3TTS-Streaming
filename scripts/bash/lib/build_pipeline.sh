@@ -50,14 +50,20 @@ source "${_LIB_DIR}/trtexec_runner.sh"
 # ---------------------------------------------------------------------------
 suggest_build_profile_from_memory() {
     local mem_mb="${1:-0}"
-    # nvidia-smi reports usable MiB, not marketing GB.  Some 48 GB class
-    # cards report around 46,000 MiB, so keep tier cutoffs below the nominal
-    # decimal values used in docs.
-    if [ "$mem_mb" -ge 76000 ]; then
+    # Calibrated against the flagship custom-1.7b bf16 fused engine:
+    #   fixed (engine + weights) ~5 GiB, ~160 MiB per concurrent lane
+    #   (KV/state pools + TRT lane overhead), ~2 GiB CUDA context /
+    #   fragmentation reserve, 0.9 usable fraction.
+    #   needed(batch) ~= (5120 + batch*160)/0.9 + 2048 MiB
+    # Empirical anchor: at max_batch=32 the engine process holds ~9.9 GiB
+    # on a 32 GiB RTX 5090 (matches the model within ~2%).
+    # nvidia-smi reports usable MiB, not marketing GB (a "32 GB" card
+    # reports ~32,607 MiB), so cutoffs sit below nominal decimal values.
+    if [ "$mem_mb" -ge 30000 ]; then
         echo "128 128 512"
-    elif [ "$mem_mb" -ge 45000 ]; then
+    elif [ "$mem_mb" -ge 19000 ]; then
         echo "64 128 512"
-    elif [ "$mem_mb" -ge 29000 ]; then
+    elif [ "$mem_mb" -ge 13500 ]; then
         echo "32 128 512"
     else
         echo "16 96 384"
@@ -90,6 +96,9 @@ suggest_build_profile_from_exports() {
             --max-seq-len "$max_seq" \
             2>/dev/null && return 0
     fi
+    # Loud fallback: a silently-broken helper path once pinned every build to
+    # the coarse tier table (the helper had moved and [ -f ] just fell through).
+    log_warn "export-aware profile sizing unavailable (helper=$helper); falling back to coarse memory tiers"
     suggest_build_profile_from_memory "$mem_mb"
 }
 
