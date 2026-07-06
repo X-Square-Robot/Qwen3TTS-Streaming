@@ -116,6 +116,13 @@ def fused_layer_precisions(manifest: Dict[str, Any]) -> str:
     for key in ("cp", "code2wav"):
         if precs[key] != backbone:
             parts.append(f"{_SUBMODULE_WILDCARDS[key]}:{precs[key]}")
+    if parts and precs["cp"] == backbone:
+        # A mixed build enables extra global precision flags (e.g. --fp16 for
+        # code2wav), which would otherwise let unpinned talker/cp layers float
+        # to the faster precision and silently change sampling numerics.  When
+        # cp shares the backbone precision, one catch-all wildcard pins them
+        # both without overlapping the cp pin (not expressible otherwise).
+        parts.append(f"/talker_fused/*:{backbone}")
     return ",".join(parts)
 
 
