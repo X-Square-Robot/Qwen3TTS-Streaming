@@ -905,3 +905,18 @@ temperature=0.9, repetition_penalty=1.05, subtalker_dosample=True。eos_token_id
 **部署状态**：当前部署的引擎已是 **0701 bf16 版本**（不再是 0601）；0601 的引擎产物已被本次重建覆盖。
 
 脚本：`workspace/official_baseline.py`（由 `QWEN_MODEL_DIR` / `QWEN_DTYPE` / `QWEN_N` 参数化）、`workspace/halluc_probe.py`（引擎探测，`--n`）。
+
+## 2026-07-06：cp=bf16 在 0701 上验证通过——fp32 CP 约束解除
+
+cp=fp32 这个缓解措施（Finding #15 时代引入）在 0701 重训之后从未被重新验证过：上面所有 0701 的验证跑的都是混合精度引擎（backbone bf16 + **cp fp32** + code2wav bf16）。既然幻觉根因已确认是 0601 权重——精度只是洗牌哪些种子跑飞——那剩下的问题就是：CP 的 bf16 数值噪声（孤立测试中仍是事实：孤立 CP bf16 TRT vs ORT 随机输入 7/10 不匹配，Finding #15）在健康权重上到底会不会转化为幻觉。
+
+单变量实验：把融合引擎重编为**全 bf16**（`--cp-precision bf16`，batch profile 维持 32 不变），部署到生产路径，跑完全相同的确定性探测：
+
+| 引擎（0701 权重） | 幻觉 | 时长 |
+|---|---|---|
+| bf16 + cp **fp32**（上文基线） | 0/100 | 9.44–10.72s，median 10.04s |
+| **全 bf16（cp=bf16）** | **0/100** | 9.28–10.88s，median 10.08s |
+
+随后按 batch=128 重编的全 bf16 引擎抽查同样干净（0/40）。两组分布在统计上无法区分；CP bf16 的近平局 argmax 翻转在健康权重上被证实不会级联成 runaway——与之前"精度只是重新洗牌坏种子"的发现一致，而 0701 在这个探测集上没有坏种子。
+
+**影响**：`build_engines.sh` 不再把 `CP_PRECISION` 默认为 fp32（现在跟随 `ENGINE_DTYPE`）；fp32 CP 有真实的解码延迟代价（fp32 下 CP 占 kernel 时间 ~45%）。`CP_PRECISION=fp32` 保留,用于数值对齐调试或复现历史混合精度构建。

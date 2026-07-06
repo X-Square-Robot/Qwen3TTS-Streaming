@@ -810,3 +810,18 @@ This confirms the earlier localization: the streaming hallucination was caused b
 **Deployment state**: the currently deployed engine is now the **0701 bf16 build** (no longer 0601); the 0601 engine artifacts were overwritten by this rebuild.
 
 Scripts: `workspace/official_baseline.py` (parametrized by `QWEN_MODEL_DIR` / `QWEN_DTYPE` / `QWEN_N`), `workspace/halluc_probe.py` (engine probe, `--n`).
+
+## 2026-07-06: cp=bf16 validated on 0701 — the fp32 CP constraint is lifted
+
+The cp=fp32 mitigation (Finding #15 era) had never been re-tested after the 0701 retrain: all 0701 validations above ran on the mixed-precision engine (backbone bf16 + **cp fp32** + code2wav bf16). Since the hallucination root cause turned out to be the 0601 weights — with precision merely shuffling which seeds went bad — the question was whether CP's bf16 numerical noise (still a real fact in isolation: standalone CP bf16 TRT vs ORT mismatched 7/10 random trials, Finding #15) translates into hallucination on healthy weights at all.
+
+Single-variable test: rebuilt the fused engine as **full bf16** (`--cp-precision bf16`, batch profile unchanged at 32), deployed on the production path, and ran the identical deterministic probe:
+
+| engine (0701 weights) | hallucination | duration |
+|---|---|---|
+| bf16 + cp **fp32** (baseline above) | 0/100 | 9.44–10.72s, median 10.04s |
+| **full bf16 (cp=bf16)** | **0/100** | 9.28–10.88s, median 10.08s |
+
+A follow-up full-bf16 build at batch=128 also probed clean (0/40). The distributions are statistically indistinguishable; CP bf16's near-tie argmax flips demonstrably do not cascade into runaway on healthy weights — consistent with the earlier finding that precision only reshuffles bad seeds, and 0701 has none on this probe set.
+
+**Consequence**: `build_engines.sh` no longer defaults `CP_PRECISION` to fp32 (it now follows `ENGINE_DTYPE`); fp32 CP cost real decode latency (~45% of kernel time was CP under fp32). `CP_PRECISION=fp32` remains available for numerical-parity debugging or reproducing the historical mixed-precision build.

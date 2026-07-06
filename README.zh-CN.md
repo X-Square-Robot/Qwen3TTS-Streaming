@@ -130,7 +130,7 @@ Qwen3TTS-Streaming —— 每个 decode step 1 个融合 engine
 | 单路请求，warm engine | **13ms**（最低观测值） | 指定硬件、warm engine、prefix/cache 命中、单路请求、本地链路 |
 | 128 路并发（均值） | **180ms** | 并发压测口径——硬件、cache、输入、profile、采样参数、客户端测量方式均已固定 |
 
-> ⚠️ **128 路并发是压测出来的天花板，不是生产安全值。** 128 路并发下，压测用的 GPU（RTX 5090）已经接近打满：RTF（音频时长 / 实际解码耗时）只能维持在 1 左右——每帧约 80ms 的音频，解码也要耗时约 80ms，基本没有超过实时的余量。一旦遇到负载抖动、调度抖动，或者请求稍微重一点，RTF 就可能跌破 1，导致合成跟不上播放。生产环境的并发规划要在 128 之下留足 buffer，不要顶格跑。
+> ⚠️ **128 路并发是压测出来的天花板，不是生产安全值。** 经 2026-07-06 的 decode 优化（CP 展开图内 KV + CUDA graph decode 回放）后，压测 GPU（RTX 5090，全 bf16 引擎）在 128 路并发下每 ~80ms 音频帧的解码耗时约 70ms——RTF（音频时长 / 实际解码耗时）≈ 1.14，即约 14% 的实时余量（此前 RTF ≈ 1 无余量）。这点余量能吸收正常抖动，但持续的负载尖峰或偏重的请求仍可能把它吃掉。生产环境的并发规划仍应在 128 之下留足 buffer，不要顶格跑；96 路时 RTF ≈ 1.47，余量更充足。
 
 - standalone `engine-grpc` TTFT 默认按 ready/reused gRPC channel 统计，和 WebSocket 一样不把客户端建连成本计入首包延迟；cold/lazy channel 会额外增加约 10ms。
 - WebUI 只在结果 source 标记为 `live_triton` 或 `live_engine_websocket` 且带 `audio` 字段时代表可回放的实时合成音频。

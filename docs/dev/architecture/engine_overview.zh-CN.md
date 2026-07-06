@@ -18,7 +18,7 @@
 | **C1** | 模型**自回归**，每段**固定 KV 预算**（512 step/slot 硬上限） | 硬件/模型，不可消除 |
 | **C2** | 文本**异步到达**（接上游 LLM token 流），decode 必须能"等文本"（WAIT_TEXT） | 业务语义，不可消除 |
 | **C3** | 前端**只能控文本 token**，音频 step 是下游产物，只能用 EMA 估（~3 step/中文字） | 三阶段架构所致，不可消除 |
-| **C4** | 模型**不可靠吐 EOS**——某些 seed/采样组合永不收尾 → 跑满 512 → 幻觉（~10–18%） | 模型+采样，**非实现 bug** |
+| **C4** | 模型**可能不可靠吐 EOS**——频率**依赖 checkpoint**,且本项目不发布权重,所以这是引擎必须永久防御的常驻约束。已观测范围:内部 0601 权重在 ~10–18% 种子上永不收尾 → 跑满 512 → 幻觉;其重训版（0701）在同一组确定性种子上 0/100（cp=fp32 与全 bf16 引擎均验证）。512 步上限、VAD 裁剪、runaway 处理就是为用户自带的任意 checkpoint 准备的 | 模型 checkpoint+采样，**非实现 bug** |
 
 > 一句话：这台引擎是**在一个会溢出、会不收尾、只能间接控制、还要边等文本边干活的自回归模型上做实时流式 TTS**。复杂度几乎全部来自硬扛这四点。
 
@@ -46,17 +46,18 @@
 - **缺陷**：长短请求混批 padding 浪费（~10%）；无抢占。
 - **可避免**：能但代价高——需换 TRT-LLM PyTorch backend，评估为**中期路线非现在**（[[trt_llm_runtime_route_report]]）。
 
-### 1.4 Code Predictor 展开、无 KV
-- **是什么**：CP 15 步展开成单个静态 TRT 图，每步从头重算。`architecture.md §5`。
-- **为什么**：CP 的 KV 省下来仅占 ~3% 延迟，但展开成 GEMM 比 GEMV 的 GPU 利用率高。
-- **缺陷**：**FP16 坏掉**（stage argmax 敏感），只能 fp32/bf16；图大编译慢。
-- **可避免**：FP16 不可用是数值本质。
+### 1.4 Code Predictor 展开、图内 KV（2026-07-06 前为无 KV）
+- **是什么**：CP 15 个 stage 展开成单个静态 TRT 图。2026-07-06 起每个 stage 只前向 1 个新 token，K/V 在展开子图内静态 concat——每个 stage 的 KV 长度都是编译期常量，图仍全静态、引擎 I/O 不变。此前每 stage 对增长序列从头重算（135 次 token-forward vs 16 次）。`architecture.md §5`。
+- **当年无 KV 的理由（已反转）**："省 CP 的 KV 只值 ~3% 延迟，且 GEMM 利用率高于 GEMV"——小 batch 下都成立。batch 128 下每 stage 的 matmul 本来就是 M=128 的 GEMM，9 倍重算 FLOPs 涨成了 ~100ms decode step 里的 ~34ms。KV 改造后 CP 降到 ~10ms（c128 step 119.8→96.3ms，RTF 1.50→1.20）；fp32 下与重算路径 10/10 token 全等，halluprobe 0/100。
+- **缺陷**：**CP 的 FP16 坏掉**（stage argmax 敏感），只能 fp32/bf16；图大编译慢。
+- **可避免**：CP FP16 不可用是数值本质。
 
-### 1.5 混合精度 bf16/fp32/bf16
-- **是什么**：backbone=bf16、CP=fp32、code2wav=bf16。
-- **为什么**：CP bf16 下 stage2 近似平局被舍入翻转 → 级联幻觉（Finding #15）。
-- **缺陷（关键认知）**：**精度不是幻觉根因**（Finding #17-18）——各精度同种子都 ~10-18%，全 fp32 反而 17.5% 更糟。CP→fp32 是数值必要、非幻觉充分解，只是"换一批坏种子"。
-- **可避免**：CP fp32 必须留；别指望它治幻觉。
+### 1.5 混合精度 bf16/fp32/bf16（历史方案；0701 起全 bf16）
+- **曾是什么**：backbone=bf16、CP=fp32、code2wav=bf16，是排查 0601 时代幻觉时的配置。
+- **当时为什么**：CP bf16 下 stage 近似平局被舍入翻转（Finding #15：孤立 CP bf16 TRT vs ORT 随机输入 7/10 不匹配，fp32 则 0/10）——被怀疑级联成幻觉。
+- **关键认知（至今成立）**：**精度从来不是幻觉根因**（Finding #17-18）——0601 权重下各精度同种子都 ~10-18%，全 fp32 反而 17.5% 更糟，精度只是"换一批坏种子"。真正根因是 0601 checkpoint 训坏了,0701 重训修复（同种子 0/100）。
+- **现状（2026-07-06）**：0701 权重下,**全 bf16 引擎（cp=bf16）在同一组确定性种子上同样 0/100**——CP bf16 的数值噪声（Finding #15 作为数值事实仍成立）在健康权重上被证实不会转化为幻觉。CP fp32 不再必要,且它有真实的性能代价（fp32 下 CP 占 kernel 时间 ~45%）。
+- **code2wav fp16（可选，默认关）**：TRT 10.13 在 sm120 上没有 tensor-core 的 bf16 conv kernel（fp16 conv 快 2.5-3.4×），bf16 下 c2w 声码器占 b128 decode step ~35ms，fp16 下 ~9ms。`CODE2WAV_PRECISION=fp16 PRECISION_CONSTRAINTS=prefer` 只把 `/code2wav/*` 钉成 fp16（emitter 同时把 `/talker_fused/*` 兜底钉回 bf16，防止全局 `--fp16` 让 talker/CP kernel 漂移改变采样数值口径）。c2w 不回流 talker；已过 halluprobe 0/100 + 音频电平/频谱检查。与 CP 不同，c2w 的 fp16 数值上没问题。
 - 详见 [[mixed_precision_plan]]、`streaming_hallucination.md`。
 
 ### 1.6 Prefix KV cache
@@ -64,6 +65,17 @@
 - **为什么**：custom_voice 类请求 system prompt 相同，省 10-50ms。
 - **缺陷**：仅精确 token 匹配；⚠️**子 agent 推断（未复核）**：miss 时可能跑两遍 TRT、多 token suffix 命中收益不均。
 - **可避免**：exact-match 限制可用前缀树改进，属可优化项。
+
+### 1.7 CUDA graph decode 回放（2026-07-06 起）
+- **是什么**：按 (batch 桶, past_len 桶·64 步进) 的形状签名各捕获一个 CUDA graph，每个 fused decode step 回放。`executor.py GraphedFusedDecode`；等价性验证工具：`tools/validation/graph_decode_parity.py`。
+- **为什么**：fused decode 每步要发射 ~2700 个 kernel；batch 128 下 CPU 发射时间（~33ms）≈ GPU 计算时间，且自回归依赖使步间无法流水。回放把每步发射成本压到 ~0.005ms。实测（全 bf16 b128）：c128 decode step 95.7→70.3ms（RTF 1.20→**0.88**，128 路实时达标），c96 54.3ms，c64 38.9ms；显存 +3.5GiB。
+- **承重细节**（每条都是实证逼出来的）：
+  - **独立 execution context 绑定 decode-only optimization profile**（profile 1，`build_engines.sh` 默认发射）。prefill 共享 context 会污染 replay（2026-07-02 实证：音频漂移 max_abs≈0.26）；而第二个满 profile context 要 7.1GiB，32GiB 卡付不起——decode-only profile 的 scratch 只要 1.2GiB。
+  - **持久 flat staging** 按桶 view（地址固定且 contiguous）；KV 池直接 gather 进 staging（`gather_talker_kv_into`），graph 路径不再产生数 GiB 级的瞬时批 KV 张量。
+  - 桶内 padding 由 `attention_bias` 按各 slot 真实长度掩码；`codec_sum`/`full_codec` 必须在 compute stream 上 clone（default stream 的 clone 会与异步 replay 竞态）。
+  - **跨 profile 数值**：profile 1 的 kernel 是独立编译，near-tie 采样漂移与任何一次重编译同类。graph vs 同 profile eager 逐位一致（b2/b64/b128）；真实数据行为由 halluprobe 把关（0/100，时长分布不变）。
+- **兜底**：`ENGINE_CUDA_GRAPH_DECODE=0` 关闭；staging OOM 沿 512→384→256→128 阶梯降档；超档步与任何回放异常回退 eager（3 次失败自动禁用）。
+- **缺陷**：staging + decode profile scratch 约 3.5GiB；新桶首次命中付 ~200ms 捕获成本；eager 兜底路径仍有瞬时批 KV gather（c128 + past>~380 的既有 OOM 风险，见 §5）。
 
 ---
 
@@ -125,13 +137,14 @@ VAD 输出门控（裁前导/尾部幻觉静音）、等时音频流（补静音
 | Reorder 无超时 | 加超时 | 待办 |
 | 协议泄漏（c2w/timing accumulator/双 VAD/无版本） | 协议卫生收敛 | 待办 |
 | EMA clamp 饱和、overflow α 猛拽全局 | 区分离群/系统漂移、放开 clamp | 待办 |
+| eager decode 的瞬时批 KV gather 每步分配 B×L×H×past×D（c128×past512 高达 7.5GiB → 空闲 ≤5.6GiB 时 past>~380 即 OOM；graph staging 常驻后更紧）。先于 graph 改动即存在；graph 路径已改为 gather 进常驻 staging | 常驻共享 gather arena，或超长时按长度上限拆子批 | 待办 |
 
 ---
 
 ## 6. 一句话总结
 
-> 这台引擎**该硬扛的地方扛得对**（自建 runtime、三阶段 WAIT_TEXT、padded batching、CP fp32、prefix cache）；痛点集中在两处**可消除的意外复杂度**：(a) 文本切分层的双路径分叉 + EMA 估计盲区，(b) 协议层的抽象泄漏。清理这两处即是当前工作主线。
+> 这台引擎**该硬扛的地方扛得对**（自建 runtime、三阶段 WAIT_TEXT、padded batching、prefix cache、CUDA graph decode）；痛点集中在两处**可消除的意外复杂度**：(a) 文本切分层的双路径分叉 + EMA 估计盲区，(b) 协议层的抽象泄漏。清理这两处即是当前工作主线。
 
 ## 7. 可信度备注
 
-架构主干（C1–C4、三阶段、padded batching、CP无KV、混合精度、幻觉根因、双路径、协议泄漏）多来源交叉印证，**有把握**。标⚠️"子 agent 推断未复核"的少数项（prefix cache 双 TRT pass、engine_loop 若干竞态、FULL_TEXT 无上限 OOM）落地前建议各花十分钟实证。
+架构主干（C1–C4、三阶段、padded batching、CP 展开图内 KV、混合精度、幻觉根因、双路径、协议泄漏）多来源交叉印证，**有把握**。标⚠️"子 agent 推断未复核"的少数项（prefix cache 双 TRT pass、engine_loop 若干竞态、FULL_TEXT 无上限 OOM）落地前建议各花十分钟实证。

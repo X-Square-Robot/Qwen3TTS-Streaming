@@ -18,7 +18,7 @@ Every design in the whole engine is a downstream product of these four constrain
 | **C1** | The model is **autoregressive**, with a **fixed KV budget per segment** (a hard cap of 512 steps/slot) | Hardware/model, cannot be eliminated |
 | **C2** | Text **arrives asynchronously** (fed from an upstream LLM token stream); decode must be able to "wait for text" (WAIT_TEXT) | Business semantics, cannot be eliminated |
 | **C3** | The frontend **can only control text tokens**; audio steps are a downstream product and can only be estimated with an EMA (~3 steps per Chinese character) | Caused by the three-stage architecture, cannot be eliminated |
-| **C4** | The model **does not reliably emit EOS** — certain seed/sampling combinations never finish → run out the full 512 → hallucinate (~10–18%) | Model + sampling, **not an implementation bug** |
+| **C4** | The model **may not reliably emit EOS** — how often is **checkpoint-dependent**, and the project ships no weights, so this stays a standing constraint the engine must always defend against. Observed range: one internal checkpoint (0601) never finished on ~10–18% of seeds → ran out the full 512 → hallucinated; its retrain (0701) measures 0/100 on the same deterministic seeds (both cp=fp32 and full-bf16 engines). The 512-step cap, VAD gating, and runaway handling exist for whatever checkpoint a user brings | Model checkpoint + sampling, **not an implementation bug** |
 
 > In one sentence: this engine does **real-time streaming TTS on an autoregressive model that will overflow, may never finish, can only be controlled indirectly, and must work while waiting for text**. Nearly all of the complexity comes from bearing these four points head-on.
 
@@ -46,17 +46,18 @@ Every design in the whole engine is a downstream product of these four constrain
 - **Flaw**: Mixing long and short requests in a batch wastes padding (~10%); no preemption.
 - **Avoidable**: Possible but costly — it would require switching to the TRT-LLM PyTorch backend, assessed as a **mid-term route, not now** ([[trt_llm_runtime_route_report]]).
 
-### 1.4 Code Predictor Unrolled, No KV
-- **What it is**: The CP's 15 steps are unrolled into a single static TRT graph, recomputing from scratch each step. `architecture.md §5`.
-- **Why**: Saving the CP's KV only accounts for ~3% of latency, but unrolling into a GEMM has higher GPU utilization than a GEMV.
-- **Flaw**: **FP16 is broken** (the stage argmax is sensitive), so only fp32/bf16 work; the large graph compiles slowly.
-- **Avoidable**: The unavailability of FP16 is numerically intrinsic.
+### 1.4 Code Predictor Unrolled, With In-Graph KV (no-KV until 2026-07-06)
+- **What it is**: The CP's 15 stages are unrolled into a single static TRT graph. Since 2026-07-06, each stage forwards only its 1 new token against K/V statically concatenated inside the unrolled graph — every stage's KV length is a compile-time constant, so the graph stays fully static and engine I/O is unchanged. Previously each stage recomputed the growing sequence from scratch (135 token-forwards vs 16). `architecture.md §5`.
+- **Why the original no-KV choice (now inverted)**: "Saving the CP's KV is only ~3% of latency, and a GEMM beats a GEMV on utilization" — both true at small batch. At batch 128 the per-stage matmul is an M=128 GEMM either way, and the 9× recompute FLOPs had grown to ~34ms of a ~100ms decode step. The KV rework cut CP GPU time to ~10ms (c128 decode step 119.8→96.3ms, RTF 1.50→1.20); verified 10/10 token-identical vs recompute in fp32 and halluprobe 0/100.
+- **Flaw**: **FP16 is broken for the CP** (the stage argmax is sensitive), so only fp32/bf16 work; the large graph compiles slowly.
+- **Avoidable**: The unavailability of CP FP16 is numerically intrinsic.
 
-### 1.5 Mixed Precision bf16/fp32/bf16
-- **What it is**: backbone=bf16, CP=fp32, code2wav=bf16.
-- **Why**: Under CP bf16, stage2's near-ties get flipped by rounding → cascading hallucination (Finding #15).
-- **Flaw (key insight)**: **Precision is not the root cause of hallucination** (Findings #17-18) — every precision at the same seed gives ~10-18%, and full fp32 is actually worse at 17.5%. CP→fp32 is a numerical necessity, not a sufficient fix for hallucination; it merely "swaps in a different batch of bad seeds."
-- **Avoidable**: CP fp32 must stay; do not expect it to cure hallucination.
+### 1.5 Mixed Precision bf16/fp32/bf16 (historical; full bf16 since 0701)
+- **What it was**: backbone=bf16, CP=fp32, code2wav=bf16, adopted while hunting the 0601-era hallucination.
+- **Why at the time**: Under CP bf16, stage near-ties get flipped by rounding (Finding #15: standalone CP bf16 TRT vs ORT mismatched 7/10 random trials; fp32 matched 0/10) — suspected of cascading into hallucination.
+- **Key insight (still true)**: **Precision was never the root cause of hallucination** (Findings #17-18) — every precision on the 0601 weights gave ~10-18%, full fp32 was actually worse (17.5%); precision only "swapped in a different batch of bad seeds." The real root cause was the damaged 0601 checkpoint; the 0701 retrain fixed it (0/100 on the same seeds).
+- **Current state (2026-07-06)**: With 0701 weights, a **full-bf16 engine (cp=bf16) also measures 0/100** on the same deterministic seed set — the CP bf16 numerical noise (Finding #15 is still a numerical fact) demonstrably does not translate into hallucination on healthy weights. CP fp32 is therefore no longer required; it costs real decode latency (the CP was ~45% of kernel time under fp32).
+- **code2wav fp16 (optional, off by default)**: TRT 10.13 on sm120 has no tensor-core bf16 conv kernels (fp16 convs are 2.5-3.4× faster), so the c2w vocoder costs ~35ms of a b128 decode step under bf16 vs ~9ms under fp16. `CODE2WAV_PRECISION=fp16 PRECISION_CONSTRAINTS=prefer` pins only `/code2wav/*` to fp16 (the emitter also pins `/talker_fused/*` back to bf16 so the global `--fp16` flag cannot let talker/CP kernels float and shift sampling numerics). c2w does not feed back into the talker; validated via halluprobe 0/100 + audio level/spectrum checks. Unlike the CP, c2w fp16 is numerically fine.
 - See [[mixed_precision_plan]] and `streaming_hallucination.md` for details.
 
 ### 1.6 Prefix KV Cache
@@ -64,6 +65,17 @@ Every design in the whole engine is a downstream product of these four constrain
 - **Why**: custom_voice-type requests share the same system prompt, saving 10-50ms.
 - **Flaw**: Exact token match only; ⚠️**sub-agent inference (not reviewed)**: on a miss it may run TRT twice, and a multi-token suffix hit yields uneven benefit.
 - **Avoidable**: The exact-match limitation can be improved with a prefix tree; it's an optimizable item.
+
+### 1.7 CUDA-Graph Decode Replay (since 2026-07-06)
+- **What it is**: One CUDA graph captured per (batch bucket, past-len bucket in steps of 64) shape signature, replayed for each fused decode step. `executor.py GraphedFusedDecode`; parity harness: `tools/validation/graph_decode_parity.py`.
+- **Why**: The fused decode enqueues ~2700 kernels per step; at batch 128 the CPU enqueue time (~33ms) matches GPU compute, and autoregression prevents cross-step pipelining. Replay collapses the per-step launch cost to ~0.005ms. Measured (all-bf16 b128): c128 decode step 95.7→70.3ms (RTF 1.20→**0.88**, 128-way real-time), c96 54.3ms, c64 38.9ms; +3.5GiB GPU memory.
+- **Load-bearing details** (each one was empirically forced):
+  - **Dedicated execution context bound to a decode-only optimization profile** (profile 1, emitted by `build_engines.sh` by default). Prefill sharing the context corrupts replays (2026-07-02 finding: audio drift max_abs≈0.26); a second full-profile context costs 7.1GiB which a 32GiB card cannot pay — the decode-only profile's scratch is 1.2GiB.
+  - **Persistent flat staging buffers** viewed per-bucket (stable addresses, contiguous); the KV pool gathers straight into staging (`gather_talker_kv_into`), removing the multi-GiB transient batch-KV tensor on the graph path.
+  - Bucket padding is masked via `attention_bias` per slot's real length; `codec_sum`/`full_codec` are cloned on the compute stream (a default-stream clone races the async replay).
+  - **Cross-profile numerics**: profile 1's kernels are an independent compilation — same class of near-tie sampling shifts as any engine rebuild. Graph-vs-same-profile-eager is bitwise identical (b2/b64/b128); real-data behavior gated by halluprobe (0/100, duration distribution unchanged).
+- **Fallbacks**: `ENGINE_CUDA_GRAPH_DECODE=0` disables; staging OOM steps down a 512→384→256→128 ladder; out-of-bucket steps and any replay exception fall back to the eager path (auto-disable after 3 failures).
+- **Flaw**: staging + decode-profile scratch cost ~3.5GiB; first hit on a new bucket pays a ~200ms capture; the eager fallback path still allocates its transient batch-KV gather (pre-existing OOM risk at c128 + past>~380, see §5).
 
 ---
 
@@ -125,13 +137,14 @@ VAD output gating (trimming leading/trailing hallucinated silence), isochronous 
 | Reorder has no timeout | Add a timeout | To do |
 | Protocol leaks (c2w/timing accumulator/dual VAD/no versioning) | Protocol hygiene consolidation | To do |
 | EMA clamp saturation, overflow α yanks the global | Distinguish outlier / systematic drift, loosen the clamp | To do |
+| Eager decode's transient batch-KV gather allocates B×L×H×past×D per step (up to 7.5GiB at c128×past512 → OOM past ~380 with ≤5.6GiB free; worse with graph staging resident). Pre-existing; the graph path already gathers into persistent staging | Persistent shared gather arena, or sub-batch splitting beyond a length cap | To do |
 
 ---
 
 ## 6. One-Sentence Summary
 
-> This engine **bears the right things head-on** (custom runtime, three-stage WAIT_TEXT, padded batching, CP fp32, prefix cache); the pain points are concentrated in two areas of **eliminable accidental complexity**: (a) the dual-path fork of the text segmentation layer + the EMA estimation blind spot, and (b) the abstraction leaks of the protocol layer. Cleaning up these two is the current main line of work.
+> This engine **bears the right things head-on** (custom runtime, three-stage WAIT_TEXT, padded batching, prefix cache, CUDA-graph decode); the pain points are concentrated in two areas of **eliminable accidental complexity**: (a) the dual-path fork of the text segmentation layer + the EMA estimation blind spot, and (b) the abstraction leaks of the protocol layer. Cleaning up these two is the current main line of work.
 
 ## 7. Confidence Note
 
-The architectural backbone (C1–C4, three stages, padded batching, CP without KV, mixed precision, hallucination root cause, dual path, protocol leaks) is cross-verified from multiple sources and is **held with confidence**. For the few items marked ⚠️ "sub-agent inference, not reviewed" (the prefix cache dual TRT pass, several engine_loop race conditions, FULL_TEXT unbounded OOM), it is recommended to spend ten minutes empirically confirming each before acting on them.
+The architectural backbone (C1–C4, three stages, padded batching, CP unroll with in-graph KV, mixed precision, hallucination root cause, dual path, protocol leaks) is cross-verified from multiple sources and is **held with confidence**. For the few items marked ⚠️ "sub-agent inference, not reviewed" (the prefix cache dual TRT pass, several engine_loop race conditions, FULL_TEXT unbounded OOM), it is recommended to spend ten minutes empirically confirming each before acting on them.

@@ -6,7 +6,9 @@
 > Status: Landed, but **the implementation differs from this draft** — the final version was implemented in the bash lifecycle rather than the Python CLI approach described below.
 > Scope: Per-submodule mixed precision control for the single `talker_code2wav_fused` TensorRT engine
 >
-> **Actual usage**: `bash scripts/bash/build_engines.sh --variant custom-1.7b --cp-precision fp32` (defaults to bf16).
+> **2026-07-06 update — the cp=fp32 motivation is obsolete**: the hallucination that motivated this plan was root-caused to the damaged 0601 checkpoint, not CP precision (see `../investigation/streaming_hallucination.md`). On the 0701 retrain, a full-bf16 engine (cp=bf16) measures 0/100 on the same deterministic probe set as the cp=fp32 baseline, so `CP_PRECISION` now defaults to follow `ENGINE_DTYPE` (bf16). The per-submodule precision *mechanism* built by this plan remains in place and useful (`--cp-precision fp32` for numerical-parity debugging).
+>
+> **Actual usage**: `bash scripts/bash/build_engines.sh --variant custom-1.7b --cp-precision fp32` (defaults to follow `ENGINE_DTYPE`).
 > The precision is written into the manifest and translated by `scripts/python/trt_fused_io_formats.py --emit layer-precisions` into trtexec
 > `--layerPrecisions` wildcards. The original Python CLI design is preserved below as a historical record (the `qwen3tts_*` modules it references have been removed).
 

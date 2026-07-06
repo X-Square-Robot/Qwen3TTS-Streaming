@@ -27,6 +27,7 @@
 |----------|-------------|
 | [Streaming Hallucination Investigation](investigation/streaming_hallucination.md) | Diagnosis and mitigation of streaming/sampling hallucination issues |
 | [Code2Wav State Size](investigation/code2wav_state_size.md) | Code2Wav state size analysis and memory trade-offs |
+| [Serving Performance Benchmark](investigation/serving_performance_benchmark.md) | Connection/queue/inference latency breakdown across protocols and concurrency, with raw data |
 
 ## Operations
 

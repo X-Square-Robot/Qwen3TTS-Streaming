@@ -27,6 +27,7 @@
 |------|------|
 | [流式幻觉调查](investigation/streaming_hallucination.zh-CN.md) | 流式/采样幻觉问题的诊断与缓解 |
 | [Code2Wav 状态大小](investigation/code2wav_state_size.zh-CN.md) | Code2Wav 状态大小分析与内存权衡 |
+| [服务性能压测](investigation/serving_performance_benchmark.zh-CN.md) | 连接/排队/推理耗时拆解,跨协议与并发对比,含原始数据 |
 
 ## 运维
 

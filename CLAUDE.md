@@ -127,6 +127,7 @@ python -m engine.server --config engine.yaml
 ## 重要约束
 
 - `custom-1.7b` / `custom_voice` 是 v0.1 推荐路径，其他变体为实验状态
-- 流式模式仍可能出现幻觉/重复/漏读，不用于生产
+- 流式模式仍可能出现幻觉/重复/漏读，生产使用需自行评估。幻觉强依赖 checkpoint 且本项目不发布权重（内部 0601 权重 ~10-18% 种子跑飞、0701 重训后 0/100，方法论见 streaming_hallucination.md）——用户权重必须自行验证
+- CP 精度默认跟随 ENGINE_DTYPE（bf16）；`CP_PRECISION=fp32` 仅用于复现历史混合精度构建或数值对齐调试
 - `workspace/` 是运行时产物目录，不提交到 git
 - `third_party/Qwen3-TTS/` 是 git 子模块，不要修改其中的代码
