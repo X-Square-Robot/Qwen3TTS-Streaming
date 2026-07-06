@@ -338,7 +338,7 @@ async def _run_pk(
 
             if is_final and event_type == "error":
                 raise LlmPkError(str(payload.get("message") or "Triton error"))
-            if is_final and event_type == "end":
+            if is_final and event_type == "done":
                 events.append(
                     TraceEvent(
                         run_id=run_id,
@@ -386,7 +386,7 @@ async def _run_pk(
             )
             send_action("text_complete")
             await consume_until(
-                lambda item: item.get("event_type") == "end" and item.get("is_final"),
+                lambda item: item.get("event_type") == "done" and item.get("is_final"),
             )
         else:
             for index, (_token_id, fragment) in enumerate(tokens):
@@ -425,7 +425,7 @@ async def _run_pk(
                 )
             )
             await consume_until(
-                lambda item: item.get("event_type") == "end" and item.get("is_final"),
+                lambda item: item.get("event_type") == "done" and item.get("is_final"),
             )
     except LlmPkError:
         raise

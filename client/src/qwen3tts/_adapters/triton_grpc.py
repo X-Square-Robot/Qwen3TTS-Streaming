@@ -284,7 +284,7 @@ class TritonGrpcStreamSession(BaseStreamSession):
             elif event_type:
                 self._put_message(
                     StreamEvent(
-                        type=event_type if event_type != "end" else "done",
+                        type=event_type,
                         session_id=str(
                             payload.get("session_id", self.session_id)
                             or self.session_id
@@ -298,7 +298,7 @@ class TritonGrpcStreamSession(BaseStreamSession):
                         },
                     )
                 )
-            if is_final or event_type in {"end", "error"}:
+            if is_final or event_type in {"done", "error"}:
                 done.set()
 
         client.start_stream(callback=callback)

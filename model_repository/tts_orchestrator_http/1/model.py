@@ -152,7 +152,7 @@ class TritonPythonModel:
         warnings: list[str] = []
         events: list[str] = []
         audio_format: dict[str, Any] = {}
-        final_event_type = "end"
+        final_event_type = "done"
         final_event: dict[str, Any] = {}
 
         for response in responses:
@@ -180,7 +180,7 @@ class TritonPythonModel:
                 message = str(payload_obj.get("message") or "").strip()
                 if message:
                     warnings.append(message)
-            elif event_type in ("end", "error"):
+            elif event_type in ("done", "error"):
                 final_event_type = event_type
                 final_event = payload_obj
 
@@ -199,7 +199,7 @@ class TritonPythonModel:
             final_meta["warnings"] = warnings
         if events:
             final_meta["events"] = events
-        final_meta.setdefault("type", "end")
+        final_meta.setdefault("type", "done")
         final_meta["audio_chunk_encoding"] = "base64"
 
         return pb_utils.InferenceResponse(
@@ -211,7 +211,7 @@ class TritonPythonModel:
                         dtype=object,
                     ),
                 ),
-                pb_utils.Tensor("event_type", np.array(["end"], dtype=object)),
+                pb_utils.Tensor("event_type", np.array(["done"], dtype=object)),
                 pb_utils.Tensor(
                     "event_json",
                     np.array(

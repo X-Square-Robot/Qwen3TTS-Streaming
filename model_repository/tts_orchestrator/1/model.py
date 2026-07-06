@@ -58,6 +58,7 @@ from engine.config import (
     load_model_manifest,
     resolve_model_package_paths,
 )
+from engine.core.timing import ServerTimingAccumulator
 from engine.core.types import (
     AudioConfig,
     AudioEncoding,
@@ -65,6 +66,7 @@ from engine.core.types import (
     InputMode,
     SessionConfig,
 )
+from engine.interface import OutputPipeline, SessionStartRequest
 from engine.runtime.fingerprint import (
     FingerprintCheckError,
     enforce_engine_fingerprint,
@@ -637,6 +639,22 @@ class TritonPythonModel:
 
         config = self._session_config_from_request(req, streaming=streaming)
 
+        # Server-side timing accumulator, mirroring engine/gateway/grpc_server.py
+        # and engine/gateway/websocket_server.py's _create_session. Without this,
+        # queue_wait/prefill/cache_hit/total_latency are silently never computed
+        # for Triton sessions -- the engine-core code (dispatcher.py,
+        # engine_loop.py) only populates the accumulator when one is present on
+        # config.timing.extra, and Triton never attached one.
+        timing_acc = ServerTimingAccumulator()
+        timing_acc.request_received_epoch_ms = int(round(time.time() * 1000.0))
+        timing_acc.session_created_epoch_ms = timing_acc.request_received_epoch_ms
+        config.timing.extra["_server_timing_accumulator"] = timing_acc
+        pipeline = OutputPipeline(
+            SessionStartRequest(session_id=session_id, config=config),
+            request_received_monotonic=time.monotonic(),
+            timing_accumulator=timing_acc,
+        )
+
         async def on_audio(_sid: str, data: bytes) -> None:
             nonlocal first_audio_sent
             meta = None
@@ -685,29 +703,26 @@ class TritonPythonModel:
             with self._sessions_lock:
                 self._active_sessions.discard(_sid)
             error = metrics.get("error") if isinstance(metrics, dict) else None
+            # pipeline.done_meta() merges in the ServerTimingAccumulator data
+            # (queue_wait/prefill/cache_hit/total_latency) and already excludes
+            # the "error" key itself, matching build_done_event()'s behavior
+            # in engine/gateway/grpc_server.py and websocket_server.py.
+            done_meta = pipeline.done_meta(metrics)
             if error:
                 self._send_event(
                     response_sender,
                     event_type="error",
                     session_id=_sid,
                     message=str(error),
-                    meta={
-                        str(k): str(v)
-                        for k, v in (metrics or {}).items()
-                        if k != "error"
-                    }
-                    if isinstance(metrics, dict)
-                    else {},
+                    meta=done_meta,
                     is_final=True,
                 )
                 return
             self._send_event(
                 response_sender,
-                event_type="end",
+                event_type="done",
                 session_id=_sid,
-                meta={str(k): str(v) for k, v in (metrics or {}).items()}
-                if isinstance(metrics, dict)
-                else {},
+                meta=done_meta,
                 is_final=True,
             )
 

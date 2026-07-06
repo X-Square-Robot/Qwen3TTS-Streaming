@@ -243,7 +243,7 @@ def test_llm_pk_streaming_init_uses_token_mode(monkeypatch):
                     ),
                     None,
                 )
-                self.callback(_Result("end", {"meta": {}}, is_final=True), None)
+                self.callback(_Result("done", {"meta": {}}, is_final=True), None)
 
     class _GrpcModule:
         InferInput = _InferInput

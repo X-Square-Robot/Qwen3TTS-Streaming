@@ -155,7 +155,7 @@ def test_infer_stream_sequence_accumulates_audio_across_requests():
                     None,
                 )
             elif action == "text_complete":
-                self.callback(_Result("end", {"meta": {}}, is_final=True), None)
+                self.callback(_Result("done", {"meta": {}}, is_final=True), None)
 
     class _GrpcModule:
         InferInput = _InferInput
