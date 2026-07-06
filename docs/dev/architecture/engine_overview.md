@@ -137,7 +137,7 @@ VAD output gating (trimming leading/trailing hallucinated silence), isochronous 
 | Reorder has no timeout | Add a timeout | To do |
 | Protocol leaks (c2w/timing accumulator/dual VAD/no versioning) | Protocol hygiene consolidation | To do |
 | EMA clamp saturation, overflow α yanks the global | Distinguish outlier / systematic drift, loosen the clamp | To do |
-| Eager decode's transient batch-KV gather allocates B×L×H×past×D per step (up to 7.5GiB at c128×past512 → OOM past ~380 with ≤5.6GiB free; worse with graph staging resident). Pre-existing; the graph path already gathers into persistent staging | Persistent shared gather arena, or sub-batch splitting beyond a length cap | To do |
+| Eager decode's transient batch-KV gather allocated B×L×H×past×D per step (up to 7.5GiB at c128×past512 → OOM under low headroom) | Persistent shared gather arena (reuses graph staging when graphs are on; lazily allocated otherwise; latched fallback to transient on OOM) | **Fixed 2026-07-06** — verified: b128×past500 eager step OK with 4.2GiB free |
 
 ---
 

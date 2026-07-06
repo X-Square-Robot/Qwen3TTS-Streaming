@@ -137,7 +137,7 @@ VAD 输出门控（裁前导/尾部幻觉静音）、等时音频流（补静音
 | Reorder 无超时 | 加超时 | 待办 |
 | 协议泄漏（c2w/timing accumulator/双 VAD/无版本） | 协议卫生收敛 | 待办 |
 | EMA clamp 饱和、overflow α 猛拽全局 | 区分离群/系统漂移、放开 clamp | 待办 |
-| eager decode 的瞬时批 KV gather 每步分配 B×L×H×past×D（c128×past512 高达 7.5GiB → 空闲 ≤5.6GiB 时 past>~380 即 OOM；graph staging 常驻后更紧）。先于 graph 改动即存在；graph 路径已改为 gather 进常驻 staging | 常驻共享 gather arena，或超长时按长度上限拆子批 | 待办 |
+| eager decode 的瞬时批 KV gather 每步分配 B×L×H×past×D（c128×past512 高达 7.5GiB → 低余量时 OOM） | 常驻共享 gather arena（graph 开启时复用其 staging；否则懒分配；OOM 闩锁降级回瞬时路径） | **2026-07-06 已修**——实证：空闲 4.2GiB 下 b128×past500 eager 步正常 |
 
 ---
 
