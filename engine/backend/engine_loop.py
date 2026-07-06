@@ -400,8 +400,12 @@ class EngineLoop:
                 group = self._groups.get(req.session_id)
                 if group is not None and group.first_text_dequeued_at is None:
                     group.first_text_dequeued_at = now
-                    # Write to ServerTimingAccumulator if available
-                    acc = self._get_timing_accumulator(req)
+                    # Write to ServerTimingAccumulator if available. `req` here
+                    # is the bare START_TOKENS request, which never carries
+                    # session_config (see Dispatcher.dispatch_segment_actions),
+                    # so the accumulator must be resolved via the session
+                    # group's original NEW_SESSION request instead.
+                    acc = self._get_group_timing_accumulator(group)
                     if acc is not None:
                         acc.first_text_dequeued_monotonic = now
                     LifecycleLogger.emit(
@@ -866,9 +870,14 @@ class EngineLoop:
         else:
             prefill_duration_ms = 0.0
 
-        # Determine cache hit status
+        # Determine cache hit status. slot.prefill_source is only ever assigned
+        # "full_prefill" or "prefix_cache_prefix_only" (see
+        # _apply_prefix_cache_hit -> _prime_decode_after_prefix_prefill); the
+        # literal "prefix_cache_hit" was never assigned anywhere, so this check
+        # always evaluated to False and silently clobbered the correct
+        # best.cache_hit = True set by the cache-hit branch above.
         cache_hit = (
-            slot.prefill_source == "prefix_cache_hit"
+            slot.prefill_source == "prefix_cache_prefix_only"
             if hasattr(slot, "prefill_source")
             else False
         )
