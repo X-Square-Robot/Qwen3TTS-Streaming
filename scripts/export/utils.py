@@ -908,16 +908,21 @@ def export_onnx(
 
 
 class CodePredictorUnrolled(nn.Module):
-    """All Code Predictor stages fully unrolled into a single forward pass (no KV Cache).
+    """All Code Predictor stages unrolled into a single forward pass, with KV cache.
 
     Used by export_04 (fused context), export_05 (fused decode), and
     export_code_predictor (standalone CP export). Shared here so the dependency is explicit.
 
+    Stage 0 prefills the 2-token prefix ([past_hidden, embed_0]); each later stage
+    forwards only its 1 new codec embedding and attends to the K/V accumulated by
+    earlier stages. Because the stage loop is unrolled at trace time, every
+    per-stage K/V concat has a compile-time-constant length — the graph stays
+    fully static and the KV tensors never cross the graph boundary.
+
     Each of the (num_code_groups-1) stages:
-      1. Appends the new codec embedding to the sequence
-      2. Projects through small_to_mtp_projection
-      3. Full prefill through 5-layer Transformer
-      4. Takes last hidden → lm_head[stage] → argmax → next token
+      1. Embeds + projects the new codec token (prefix projected once at stage 0)
+      2. Forwards the new token through the 5-layer Transformer against cached K/V
+      3. Takes last hidden → lm_head[stage] → argmax/gumbel → next token
 
     See architecture.md §5.4 for design rationale.
     """
@@ -971,9 +976,10 @@ class CodePredictorUnrolled(nn.Module):
         self,
         attn_module: nn.Module,
         hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-    ) -> torch.Tensor:
+        past_key_value: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         batch, seq_len = hidden_states.shape[:2]
         hidden_shape = (batch, seq_len, -1, attn_module.head_dim)
 
@@ -991,6 +997,11 @@ class CodePredictorUnrolled(nn.Module):
         query_states, key_states = self._apply_rotary_pos_emb(
             query_states, key_states, cos, sin
         )
+
+        if past_key_value is not None:
+            key_states = torch.cat([past_key_value[0], key_states], dim=2)
+            value_states = torch.cat([past_key_value[1], value_states], dim=2)
+        present_key_value = (key_states, value_states)
 
         key_states = self._repeat_kv(key_states, attn_module.num_key_value_groups)
         value_states = self._repeat_kv(value_states, attn_module.num_key_value_groups)
@@ -1010,22 +1021,24 @@ class CodePredictorUnrolled(nn.Module):
         attn_output = attn_output.transpose(1, 2).reshape(
             batch, seq_len, attn_module.o_proj.in_features
         )
-        return attn_module.o_proj(attn_output)
+        return attn_module.o_proj(attn_output), present_key_value
 
     def _run_layer(
         self,
         layer: nn.Module,
         hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-    ) -> torch.Tensor:
+        past_key_value: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         residual = hidden_states
         hidden_states = layer.input_layernorm(hidden_states)
-        hidden_states = self._run_attention(
+        hidden_states, present_key_value = self._run_attention(
             layer.self_attn,
             hidden_states,
             attention_mask,
             position_embeddings,
+            past_key_value,
         )
         hidden_states = residual + hidden_states
 
@@ -1033,31 +1046,55 @@ class CodePredictorUnrolled(nn.Module):
         hidden_states = layer.post_attention_layernorm(hidden_states)
         hidden_states = layer.mlp(hidden_states)
         hidden_states = residual + hidden_states
-        return hidden_states
+        return hidden_states, present_key_value
 
-    def _transformer_forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _transformer_forward(
+        self,
+        x: torch.Tensor,
+        past_key_values: Optional[list[tuple[torch.Tensor, torch.Tensor]]] = None,
+        past_len: int = 0,
+    ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
+        """Forward `x` (the new tokens) against per-layer cached K/V.
+
+        `past_len` is a trace-time constant (the unrolled stage index), so the
+        exported graph keeps static shapes for every stage.
+        """
         B, S, D = x.shape
         device = x.device
 
-        position_ids = torch.arange(S, device=device).unsqueeze(0).expand(B, -1)
+        position_ids = (
+            torch.arange(past_len, past_len + S, device=device)
+            .unsqueeze(0)
+            .expand(B, -1)
+        )
         position_embeddings = self.rotary_emb(x, position_ids)
 
-        row_idx = torch.arange(S, device=device, dtype=torch.long).reshape(S, 1)
-        col_idx = torch.arange(S, device=device, dtype=torch.long).reshape(1, S)
-        neg_val = -1.0e4
-        causal_mask = (col_idx > row_idx).to(dtype=x.dtype) * neg_val
-        causal_mask = causal_mask.reshape(1, 1, S, S)
+        causal_mask = None
+        if S > 1:
+            # Only the stage-0 prefix (past_len == 0) has more than one query;
+            # a single query attends to the whole cache and needs no mask.
+            row_idx = torch.arange(S, device=device, dtype=torch.long).reshape(S, 1)
+            col_idx = torch.arange(
+                past_len + S, device=device, dtype=torch.long
+            ).reshape(1, past_len + S)
+            neg_val = -1.0e4
+            causal_mask = (col_idx > row_idx + past_len).to(dtype=x.dtype) * neg_val
+            causal_mask = causal_mask.reshape(1, 1, S, past_len + S)
 
         hidden = x
-        for layer in self.transformer_layers:
-            hidden = self._run_layer(
+        present_key_values: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for layer_idx, layer in enumerate(self.transformer_layers):
+            past = past_key_values[layer_idx] if past_key_values is not None else None
+            hidden, present = self._run_layer(
                 layer,
                 hidden,
                 causal_mask,
                 position_embeddings,
+                past,
             )
+            present_key_values.append(present)
 
-        return self.norm(hidden)
+        return self.norm(hidden), present_key_values
 
     def _select_token(
         self,
@@ -1093,11 +1130,17 @@ class CodePredictorUnrolled(nn.Module):
             codec_tokens:  [B, num_stages] - predicted codec tokens for codebooks 1..num_code_groups-1
         """
         embed_0 = self.talker_codec_embedding(codec_token_0).unsqueeze(1)
-        sequence = self.projection(torch.cat([past_hidden, embed_0], dim=1))
+        prefix = self.projection(torch.cat([past_hidden, embed_0], dim=1))
 
         output_tokens = []
+        new_tokens = prefix  # stage 0 prefills the 2-token prefix
+        past_key_values: Optional[list[tuple[torch.Tensor, torch.Tensor]]] = None
+        past_len = 0
         for stage in range(self.num_stages):
-            hidden = self._transformer_forward(sequence)
+            hidden, past_key_values = self._transformer_forward(
+                new_tokens, past_key_values, past_len
+            )
+            past_len += new_tokens.shape[1]
             logits = self.lm_heads[stage](hidden[:, -1:, :])
             stage_noise = None
             if cp_gumbel_noise is not None:
@@ -1110,9 +1153,8 @@ class CodePredictorUnrolled(nn.Module):
             output_tokens.append(token)
 
             if stage < self.num_stages - 1:
-                next_embed = self.projection(
+                new_tokens = self.projection(
                     self.codec_embeddings[stage](token).unsqueeze(1)
                 )
-                sequence = torch.cat([sequence, next_embed], dim=1)
 
         return torch.stack(output_tokens, dim=1)
