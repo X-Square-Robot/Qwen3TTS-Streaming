@@ -136,6 +136,61 @@ def compute_fused_profiles(
     return ",".join(parts_min), ",".join(parts_opt), ",".join(parts_max)
 
 
+def compute_fused_decode_profiles(
+    H,
+    KV,
+    HD,
+    NL,
+    Bmax,
+    max_seq="512",
+    n_c2w=8,
+    n_cp=CP_NUM_STAGES,
+):
+    """Return (min, opt, max) shape strings for the decode-only profile.
+
+    Emitted as optimization profile 1 of the fused engine.  Sequence length is
+    pinned to 1, so the profile's activation scratch is a fraction of profile
+    0's (1.2 vs 7.6 GiB on the 128x512 1.7b build) — cheap enough for the
+    CUDA-graph decode path to afford a dedicated execution context.  opt is
+    the high-concurrency steady state (full batch, mid KV, warm c2w window).
+    """
+    nl = int(NL)
+    n_c2w = int(n_c2w)
+    n_cp = int(n_cp)
+    V = VOCAB_SIZE
+    K = LOGITS_TOPK
+    talker_kv_dim1 = nl * 2
+    c2w_kv_dim1 = n_c2w * 2
+    c2w_warm = C2W_SLIDING_WINDOW - 1
+
+    def parts(batch, s_past, c2w_kv_len):
+        return ",".join(
+            [
+                f"input_embeds:{batch}x1x{H}",
+                f"position_ids:{batch}x3x1x1",
+                f"attention_bias:{batch}x1x1x{int(s_past) + 1}",
+                f"token_counts:{batch}x{V}",
+                f"gumbel_noise:{batch}x{K}",
+                f"cp_gumbel_noise:{batch}x{n_cp}x{K}",
+                f"temperature:{batch}x1",
+                f"penalty:{batch}x1",
+                f"cache_position:{batch}x1",
+                f"c2w_attention_bias:{batch}x1x1x{int(c2w_kv_len) + 1}",
+                f"talker_past_kv:{batch}x{talker_kv_dim1}x{KV}x{s_past}x{HD}",
+                f"c2w_past_kv:{batch}x{c2w_kv_dim1}x{C2W_KV_HEADS}x{c2w_kv_len}x{C2W_HEAD_DIM}",
+            ]
+            + [
+                f"c2w_{name}:{batch}x{spec_min[2:]}"
+                for name, spec_min, _, _ in c2w_conv_transconv_specs(str(batch))
+            ]
+        )
+
+    smin = parts(1, 0, 1)
+    sopt = parts(Bmax, 128, c2w_warm)
+    smax = parts(Bmax, max_seq, c2w_warm)
+    return smin, sopt, smax
+
+
 def main():
     if len(sys.argv) < 6:
         print(
@@ -156,6 +211,14 @@ def main():
     print(smin)
     print(sopt)
     print(smax)
+    # Lines 4-6: decode-only profile (profile 1).  Callers that only read the
+    # first three lines are unaffected.
+    dmin, dopt, dmax = compute_fused_decode_profiles(
+        H, KV, HD, NL, Bmax, max_seq, n_c2w, n_cp
+    )
+    print(dmin)
+    print(dopt)
+    print(dmax)
 
 
 if __name__ == "__main__":

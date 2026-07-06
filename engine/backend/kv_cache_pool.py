@@ -419,6 +419,26 @@ class KVCachePool:
         ids = torch.tensor(slot_ids, device=self._device, dtype=torch.long)
         return self._talker_kv_pool[ids, :, :, :max_past_len, :].contiguous()
 
+    def gather_talker_kv_into(
+        self,
+        slot_ids: list[int],
+        out: torch.Tensor,
+    ) -> None:
+        """Gather talker KV for a batch directly into ``out``'s leading rows.
+
+        ``out`` is [B_out, L*2, H, past_out, D] with B_out >= len(slot_ids)
+        and past_out <= pool capacity.  Used by the CUDA-graph decode path to
+        fill its persistent staging buffer without the transient tensor that
+        ``gather_talker_kv`` allocates (up to several GiB at large batch).
+        """
+        if self._talker_kv_pool is None:
+            raise RuntimeError("Pool not pre-allocated")
+        past = int(out.shape[3])
+        for i, slot_id in enumerate(slot_ids):
+            out[i].copy_(
+                self._talker_kv_pool[slot_id, :, :, :past, :], non_blocking=True
+            )
+
     def scatter_talker_kv(
         self,
         slot_ids: list[int],

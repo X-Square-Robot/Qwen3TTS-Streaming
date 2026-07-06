@@ -56,11 +56,17 @@ MAX_SEQ_LEN="${MAX_SEQ_LEN:-}"
 ENGINE_DTYPE="${ENGINE_DTYPE:-bfloat16}"
 TRITON_IO_FLOAT_DTYPE="${TRITON_IO_FLOAT_DTYPE:-}"
 # Per-submodule compute precision for the fused engine (empty = follow ENGINE_DTYPE).
-# Code Predictor defaults to fp32: bf16 there causes near-tie argmax flips in the
-# CP tail (logit margins < the 0.125 bf16 ULP), the confirmed cause of streaming
-# hallucination. Override with `CP_PRECISION=bf16` only if you accept that risk.
+# History: CP once defaulted to fp32 while hunting the 0601-checkpoint-era
+# streaming hallucination (bf16 flips near-tie argmax in the CP tail; see
+# streaming_hallucination.md Finding #15). That hallucination turned out to be
+# the damaged 0601 weights, not precision: with the 0701 retrain, a full-bf16
+# engine (cp=bf16) measures 0/100 hallucinations on the same deterministic
+# seed set as the cp=fp32 baseline (2026-07-06), and cp=fp32 costs real decode
+# latency (CP was ~45% of kernel time under fp32). CP now follows ENGINE_DTYPE;
+# set CP_PRECISION=fp32 to reproduce the historical mixed-precision build or to
+# debug numerical parity against ORT/PyTorch.
 BACKBONE_PRECISION="${BACKBONE_PRECISION:-}"
-CP_PRECISION="${CP_PRECISION:-fp32}"
+CP_PRECISION="${CP_PRECISION:-}"
 CODE2WAV_PRECISION="${CODE2WAV_PRECISION:-}"
 # Exported so the make-bundle manifest writer (a python heredoc subprocess) can
 # persist these into build_manifest.json for the cross-host build to honor.
@@ -386,10 +392,17 @@ build_talker_code2wav_fused_trt() {
         n_c2w=$(python3 -c "import json; d=json.load(open('$variant_dir/triton_manifest.json')); print(int(d['code2wav_fused']['num_code2wav_hidden_layers']))")
         n_cp=$(python3 -c "import json; d=json.load(open('$variant_dir/triton_manifest.json')); print(int(d.get('architecture', {}).get('cp_num_stages', 15)))")
     fi
-    local fused_min fused_opt fused_max
-    fused_min=$(python3 "$profile_py" "$H" "$KV_HEADS" "$HEAD_DIM" "$NUM_LAYERS" "$MAX_BATCH_SIZE" "$MAX_INPUT_LEN" "$MAX_SEQ_LEN" "$n_c2w" "$n_cp" | sed -n '1p')
-    fused_opt=$(python3 "$profile_py" "$H" "$KV_HEADS" "$HEAD_DIM" "$NUM_LAYERS" "$MAX_BATCH_SIZE" "$MAX_INPUT_LEN" "$MAX_SEQ_LEN" "$n_c2w" "$n_cp" | sed -n '2p')
-    fused_max=$(python3 "$profile_py" "$H" "$KV_HEADS" "$HEAD_DIM" "$NUM_LAYERS" "$MAX_BATCH_SIZE" "$MAX_INPUT_LEN" "$MAX_SEQ_LEN" "$n_c2w" "$n_cp" | sed -n '3p')
+    local fused_min fused_opt fused_max fused_dec_min fused_dec_opt fused_dec_max
+    local profile_out
+    profile_out=$(python3 "$profile_py" "$H" "$KV_HEADS" "$HEAD_DIM" "$NUM_LAYERS" "$MAX_BATCH_SIZE" "$MAX_INPUT_LEN" "$MAX_SEQ_LEN" "$n_c2w" "$n_cp")
+    fused_min=$(sed -n '1p' <<<"$profile_out")
+    fused_opt=$(sed -n '2p' <<<"$profile_out")
+    fused_max=$(sed -n '3p' <<<"$profile_out")
+    # Profile 1 (decode-only, seq=1): small activation scratch so the runtime
+    # CUDA-graph decode path can afford a dedicated execution context.
+    fused_dec_min=$(sed -n '4p' <<<"$profile_out")
+    fused_dec_opt=$(sed -n '5p' <<<"$profile_out")
+    fused_dec_max=$(sed -n '6p' <<<"$profile_out")
 
     log_step "Building talker_code2wav_fused.engine: $variant"
     if $DRY_RUN; then
@@ -410,8 +423,13 @@ build_talker_code2wav_fused_trt() {
         local layer_prec
         layer_prec=$(python3 "$fused_io_py" "$mf" --emit layer-precisions)
         if [ -n "$layer_prec" ]; then
-            mixed_args=(--precisionConstraints=obey --layerPrecisions="$layer_prec")
-            log_info "  mixed precision: global=[$prec_flag] layerPrecisions=$layer_prec"
+            # obey (default): hard-fail if a pinned layer has no conforming kernel —
+            # right for numerical-repro pins (e.g. cp=fp32). prefer: allow per-layer
+            # fallback — right for speed pins (e.g. code2wav=fp16, whose Pad/Slice
+            # glue has no fp16 Myelin implementation and must stay bf16).
+            local prec_constraints="${PRECISION_CONSTRAINTS:-obey}"
+            mixed_args=(--precisionConstraints="$prec_constraints" --layerPrecisions="$layer_prec")
+            log_info "  mixed precision: global=[$prec_flag] constraints=$prec_constraints layerPrecisions=$layer_prec"
         fi
         log_info "  triton_manifest: engine_dtype + triton_io_float_dtype drive trtexec precision and I/O formats"
     else
@@ -422,6 +440,23 @@ build_talker_code2wav_fused_trt() {
         fi
         prec_flag=$(_trtexec_precision_flags)
     fi
+    # Profile 0: prefill + decode (as before).  Profile 1: decode-only —
+    # the runtime CUDA-graph path binds its dedicated execution context to
+    # it because its activation scratch is ~6x smaller than profile 0's.
+    local -a profile_args=(
+        --profile=0
+        --minShapes="$fused_min"
+        --optShapes="$fused_opt"
+        --maxShapes="$fused_max"
+    )
+    if [ -n "$fused_dec_min" ]; then
+        profile_args+=(
+            --profile=1
+            --minShapes="$fused_dec_min"
+            --optShapes="$fused_dec_opt"
+            --maxShapes="$fused_dec_max"
+        )
+    fi
     if [ -n "$fused_io_in" ] && [ -n "$fused_io_out" ]; then
         if ! _trtexec_run "$variant_dir" talker_code2wav_fused.onnx talker_code2wav_fused.engine -- \
             $prec_flag \
@@ -429,9 +464,7 @@ build_talker_code2wav_fused_trt() {
             --inputIOFormats="$fused_io_in" \
             --outputIOFormats="$fused_io_out" \
             --memPoolSize=workspace:8192 \
-            --minShapes="$fused_min" \
-            --optShapes="$fused_opt" \
-            --maxShapes="$fused_max"; then
+            "${profile_args[@]}"; then
             log_error "trtexec talker_code2wav_fused failed for $variant"
             return 1
         fi
@@ -440,9 +473,7 @@ build_talker_code2wav_fused_trt() {
             $prec_flag \
             "${mixed_args[@]}" \
             --memPoolSize=workspace:8192 \
-            --minShapes="$fused_min" \
-            --optShapes="$fused_opt" \
-            --maxShapes="$fused_max"; then
+            "${profile_args[@]}"; then
             log_error "trtexec talker_code2wav_fused failed for $variant"
             return 1
         fi

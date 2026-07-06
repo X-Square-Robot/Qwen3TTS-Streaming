@@ -20,7 +20,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
+import os
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -508,6 +511,279 @@ class StepOutput:
 
 
 # ---------------------------------------------------------------------------
+# CUDA-graph decode
+# ---------------------------------------------------------------------------
+
+
+class GraphedFusedDecode:
+    """CUDA-graph replay path for fused decode steps.
+
+    The fused decode enqueues ~2700 kernels per step; at batch 128 the CPU
+    enqueue time (~33ms) matches the GPU compute time, and because decode is
+    autoregressive the enqueue of step N+1 cannot overlap step N.  Replaying
+    a captured graph reduces the per-step CPU cost to a single launch.
+
+    One graph is captured per (batch_bucket, past_bucket) shape signature:
+    - batch is bucketed to a small fixed ladder, padding rows are computed
+      but discarded (their staging content is stale-but-finite, and every
+      op in the fused graph is independent across the batch dim);
+    - talker past_len is bucketed to PAST_BUCKET_STEP multiples; the KV pool
+      gather runs at the bucket length and ``attention_bias`` masks each
+      slot's real tail, so stale KV columns never enter the softmax;
+    - the c2w window is small, so its past length is fixed at the sliding
+      window max and masked the same way (no extra signature dimension).
+
+    Graph replay requires stable device addresses, so all engine I/O is
+    bound to persistent staging buffers.  Each staging buffer is one flat
+    max-size allocation; every bucket views its first ``numel`` elements at
+    the bucket shape, which keeps all bucket views contiguous while sharing
+    storage.  Inputs are built by the normal eager path and copied in
+    (~1-2ms at batch 128, dominated by the KV gather that the eager path
+    performs anyway).
+
+    Two hard-won constraints from the 2026-07-02 attempt:
+    - The graph MUST own a dedicated TRT execution context.  Prefill shares
+      the executor's context; running it between replays overwrites the
+      context's scratch memory and silently corrupts replay output (audio
+      drift max_abs≈0.26).  A private context isolates the workspace at the
+      cost of ``engine.device_memory_size`` (~2GB).
+    - TRT initializes lazy per-shape resources on the first enqueues, so
+      each bucket is enqueued twice as warmup before capture.
+    """
+
+    PAST_BUCKET_STEP = 64
+    _BATCH_LADDER = (1, 2, 4, 8, 16, 32, 48, 64, 96)
+
+    def __init__(
+        self,
+        trt_engine: TRTEngine,
+        device: torch.device,
+        compute_stream: torch.cuda.Stream,
+        max_shapes: Dict[str, tuple],
+        max_batch: int,
+        max_past: int,
+        max_entries: int = 12,
+        profile_idx: int = 0,
+    ) -> None:
+        self._device = device
+        self._stream = compute_stream
+        self._max_entries = max_entries
+        self._max_batch = max_batch
+        self._max_past = max_past
+        self._batch_buckets = sorted(
+            {b for b in self._BATCH_LADDER if b < max_batch} | {max_batch}
+        )
+        self._max_shapes = {name: tuple(shape) for name, shape in max_shapes.items()}
+
+        engine = trt_engine._engine
+        self._scratch: Optional[torch.Tensor] = None
+        if profile_idx > 0:
+            # Bind the dedicated context to the decode-only optimization
+            # profile: its scratch is a fraction of the full profile's (the
+            # full profile sizes scratch for prefill seq lengths — 7.1 GiB on
+            # the 128×512 1.7b engine, which cannot be paid twice on a 32 GiB
+            # card).  USER-managed memory keeps the allocation observable.
+            scratch_bytes = int(
+                engine.get_device_memory_size_for_profile_v2(profile_idx)
+            )
+            self._scratch = torch.empty(
+                scratch_bytes, dtype=torch.uint8, device=device
+            )
+            self._context = engine.create_execution_context_without_device_memory()
+            if self._context is None:
+                raise RuntimeError(
+                    "Could not create TRT execution context for CUDA-graph decode"
+                )
+            if not self._context.set_optimization_profile_async(
+                profile_idx, compute_stream.cuda_stream
+            ):
+                raise RuntimeError(
+                    f"Could not select optimization profile {profile_idx} for "
+                    "CUDA-graph decode"
+                )
+            compute_stream.synchronize()
+            try:
+                self._context.set_device_memory(
+                    self._scratch.data_ptr(), scratch_bytes
+                )
+            except TypeError:  # older binding: property setter, size implicit
+                self._context.device_memory = self._scratch.data_ptr()
+            logger.info(
+                "CUDA-graph decode context on profile %d (scratch %.2f GiB)",
+                profile_idx,
+                scratch_bytes / (1024**3),
+            )
+        else:
+            self._context = engine.create_execution_context()
+            if self._context is None:
+                raise RuntimeError(
+                    "Could not create dedicated TRT execution context for "
+                    "CUDA-graph decode (likely GPU OOM)"
+                )
+
+        in_names, out_names = trt_engine.get_io_names()
+        missing = sorted(set(in_names) - set(self._max_shapes))
+        if missing:
+            raise RuntimeError(f"CUDA-graph staging missing input shapes: {missing}")
+        self._out_names = out_names
+
+        self._in_flat: Dict[str, torch.Tensor] = {}
+        for name in in_names:
+            shape = self._max_shapes[name]
+            dtype = trt_engine.get_tensor_dtype(name) or torch.float32
+            self._in_flat[name] = torch.zeros(
+                math.prod(shape), dtype=dtype, device=device
+            )
+            self._context.set_input_shape(name, shape)
+        unresolved = self._context.infer_shapes()
+        if unresolved:
+            raise RuntimeError(
+                f"CUDA-graph staging: unresolved shapes at decode max: {unresolved}"
+            )
+        self._out_flat: Dict[str, torch.Tensor] = {}
+        for name in out_names:
+            shape = tuple(int(d) for d in self._context.get_tensor_shape(name))
+            dtype = trt_engine.get_tensor_dtype(name) or torch.float32
+            self._out_flat[name] = torch.zeros(
+                math.prod(shape), dtype=dtype, device=device
+            )
+
+        # key -> {"graph", "in": views, "out": views}; LRU-capped because each
+        # instantiated graph holds parameters for every captured kernel.
+        self._graphs: "OrderedDict[tuple, Dict[str, Any]]" = OrderedDict()
+
+        staging_mb = sum(
+            t.numel() * t.element_size() for t in self._in_flat.values()
+        ) + sum(t.numel() * t.element_size() for t in self._out_flat.values())
+        logger.info(
+            "CUDA-graph decode ready: staging=%.0f MiB, batch buckets=%s, "
+            "past step=%d (max %d), max graphs=%d",
+            staging_mb / (1024**2),
+            self._batch_buckets,
+            self.PAST_BUCKET_STEP,
+            max_past,
+            max_entries,
+        )
+
+    def bucket(self, batch: int, max_past_len: int) -> Optional[tuple[int, int]]:
+        """Return the (batch, past) bucket key, or None if out of range."""
+        if batch > self._max_batch:
+            return None
+        b = next(x for x in self._batch_buckets if x >= batch)
+        p = ((max(max_past_len, 1) + self.PAST_BUCKET_STEP - 1)
+             // self.PAST_BUCKET_STEP) * self.PAST_BUCKET_STEP
+        if p > self._max_past:
+            return None
+        return (b, p)
+
+    def _bucket_shape(self, name: str, b: int, p: int) -> tuple[int, ...]:
+        shape = list(self._max_shapes[name])
+        shape[0] = b
+        if name == "talker_past_kv":
+            shape[3] = p
+        elif name == "attention_bias":
+            shape[3] = p + FUSED_CHUNK_T
+        return tuple(shape)
+
+    def _capture(self, key: tuple[int, int]) -> Dict[str, Any]:
+        b, p = key
+        ctx = self._context
+        in_views: Dict[str, torch.Tensor] = {}
+        for name, flat in self._in_flat.items():
+            shape = self._bucket_shape(name, b, p)
+            view = flat[: math.prod(shape)].view(shape)
+            ctx.set_input_shape(name, shape)
+            ctx.set_tensor_address(name, view.data_ptr())
+            in_views[name] = view
+        unresolved = ctx.infer_shapes()
+        if unresolved:
+            raise RuntimeError(
+                f"CUDA-graph capture: unresolved shapes {list(unresolved)} for {key}"
+            )
+        out_views: Dict[str, torch.Tensor] = {}
+        for name in self._out_names:
+            shape = tuple(int(d) for d in ctx.get_tensor_shape(name))
+            if any(d < 0 for d in shape):
+                raise RuntimeError(
+                    f"CUDA-graph capture: unresolved output '{name}' for {key}"
+                )
+            flat = self._out_flat[name]
+            numel = math.prod(shape)
+            if numel > flat.numel():
+                raise RuntimeError(
+                    f"CUDA-graph staging undersized for output '{name}' at {key}"
+                )
+            view = flat[:numel].view(shape)
+            ctx.set_tensor_address(name, view.data_ptr())
+            out_views[name] = view
+
+        with torch.cuda.stream(self._stream):
+            for _ in range(2):
+                if not ctx.execute_async_v3(self._stream.cuda_stream):
+                    raise RuntimeError("TRT enqueue failed during CUDA-graph warmup")
+        self._stream.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=self._stream):
+            if not ctx.execute_async_v3(self._stream.cuda_stream):
+                raise RuntimeError("TRT enqueue failed during CUDA-graph capture")
+
+        entry = {"graph": graph, "in": in_views, "out": out_views}
+        self._graphs[key] = entry
+        if len(self._graphs) > self._max_entries:
+            evicted_key, _ = self._graphs.popitem(last=False)
+            logger.info("CUDA-graph LRU evicted bucket %s", evicted_key)
+        logger.info("CUDA-graph captured for bucket %s", key)
+        return entry
+
+    def entry(self, key: tuple[int, int]) -> Dict[str, Any]:
+        """Return the bucket's graph entry, capturing it on first use."""
+        entry = self._graphs.get(key)
+        if entry is None:
+            entry = self._capture(key)
+        else:
+            self._graphs.move_to_end(key)
+        return entry
+
+    def run(
+        self,
+        key: tuple[int, int],
+        inputs: Dict[str, torch.Tensor],
+        batch: int,
+    ) -> Dict[str, torch.Tensor]:
+        """Copy ``inputs`` into staging, replay the bucket's graph, and return
+        views of the first ``batch`` output rows.
+
+        Callers must fully consume (copy/scatter/cpu) the returned views
+        before the next ``run`` call overwrites the staging buffers; the
+        engine loop's process-then-launch ordering guarantees this.
+        """
+        entry = self.entry(key)
+
+        for name, tensor in inputs.items():
+            view = entry["in"].get(name)
+            if view is None:
+                continue
+            if tensor.data_ptr() == view.data_ptr():
+                continue  # caller already filled the staging view in place
+            if tuple(tensor.shape) == tuple(view.shape):
+                view.copy_(tensor, non_blocking=True)
+            else:
+                if tuple(tensor.shape[1:]) != tuple(view.shape[1:]):
+                    raise RuntimeError(
+                        f"CUDA-graph input '{name}' shape {tuple(tensor.shape)} "
+                        f"does not fit bucket view {tuple(view.shape)}"
+                    )
+                view[: tensor.shape[0]].copy_(tensor, non_blocking=True)
+
+        _wait_stream_for_current(self._stream, self._device)
+        with torch.cuda.stream(self._stream):
+            entry["graph"].replay()
+
+        return {name: view[:batch] for name, view in entry["out"].items()}
+
+
+# ---------------------------------------------------------------------------
 # Executor
 # ---------------------------------------------------------------------------
 
@@ -551,6 +827,15 @@ class Executor:
         self._embedding_weights = None
         self._kv_pool: Optional[KVCachePool] = None
         self._codec_eos_id: int = 2150
+
+        # CUDA-graph decode (see GraphedFusedDecode).  ENGINE_CUDA_GRAPH_DECODE=0
+        # disables it; init failures (e.g. staging OOM) and repeated per-step
+        # failures fall back to the eager path automatically.
+        self._graph_decode_enabled = os.environ.get(
+            "ENGINE_CUDA_GRAPH_DECODE", "1"
+        ).strip().lower() not in ("0", "false", "off")
+        self._graph_decode: Optional[GraphedFusedDecode] = None
+        self._graph_decode_failures = 0
 
         self._c2w_conv_input_names: list[str] = []
         self._c2w_conv_output_names: list[str] = []
@@ -633,11 +918,106 @@ class Executor:
             config=self._config,
             device=self._device,
         )
+        self._init_graph_decode()
         logger.info(
-            "Executor loaded (engine=%s, effective_max_seq=%d)",
+            "Executor loaded (engine=%s, effective_max_seq=%d, cuda_graph=%s)",
             "TRT" if self._fused_engine else "stub",
             self._max_seq_len,
+            "on" if self._graph_decode is not None else "off",
         )
+
+    def _graph_decode_max_shapes(self, max_past: int) -> Dict[str, tuple]:
+        """Decode-time maximum shape per fused-engine input (seq is always 1).
+
+        Sizes the CUDA-graph staging buffers; must mirror what
+        ``_build_fused_inputs`` produces for a decode step.
+        """
+        cfg = self._config
+        B = self._max_batch
+        c2w_max_past = cfg.c2w_sliding_window - FUSED_CHUNK_T
+        shapes: Dict[str, tuple] = {
+            "input_embeds": (B, FUSED_CHUNK_T, cfg.hidden_size),
+            "position_ids": (B, 3, FUSED_CHUNK_T, 1),
+            "attention_bias": (B, 1, FUSED_CHUNK_T, max_past + FUSED_CHUNK_T),
+            "token_counts": (B, cfg.codec_vocab_size),
+            "gumbel_noise": (B, cfg.logits_topk),
+            "cp_gumbel_noise": (B, cfg.cp_num_stages, cfg.logits_topk),
+            "temperature": (B, 1),
+            "penalty": (B, 1),
+            "cache_position": (B, FUSED_CHUNK_T),
+            "talker_past_kv": (
+                B, cfg.num_layers * 2, cfg.kv_heads, max_past, cfg.head_dim
+            ),
+            "c2w_past_kv": (
+                B, cfg.n_c2w_layers * 2, cfg.c2w_kv_heads, c2w_max_past,
+                cfg.c2w_head_dim,
+            ),
+            "c2w_attention_bias": (
+                B, 1, FUSED_CHUNK_T, c2w_max_past + FUSED_CHUNK_T
+            ),
+        }
+        for idx, name in enumerate(self._c2w_conv_input_names):
+            shape = list(self._c2w_conv_shapes[idx])
+            shape[0] = B
+            shapes[name] = tuple(shape)
+        for idx, name in enumerate(self._c2w_transconv_input_names):
+            shape = list(self._c2w_transconv_shapes[idx])
+            shape[0] = B
+            shapes[name] = tuple(shape)
+        return shapes
+
+    def _init_graph_decode(self) -> None:
+        if not self._graph_decode_enabled or self._fused_engine is None:
+            return
+        if self._kv_pool is None or not self._kv_pool._preallocate:
+            logger.warning("CUDA-graph decode requires the pre-allocated KV pool; off")
+            return
+        max_past_cap = min(
+            self._config.max_seq_len,
+            int(os.environ.get("ENGINE_CUDA_GRAPH_MAX_PAST", self._config.max_seq_len)),
+        )
+        # The KV staging buffer is max_batch × num_layers*2 × kv_heads ×
+        # max_past × head_dim (7.5 GiB at 128×512 for the 1.7b) — try the
+        # requested cap first and step down on OOM.  Steps beyond the cap
+        # fall back to the eager path per step.
+        # Prefer a decode-only optimization profile when the engine has one
+        # (build_engines.sh emits it as profile 1): the dedicated context then
+        # only pays decode-sized scratch instead of the full profile's.
+        profile_idx = 0
+        num_profiles = int(
+            getattr(self._fused_engine._engine, "num_optimization_profiles", 1)
+        )
+        if num_profiles > 1:
+            profile_idx = 1
+        ladder = [p for p in (max_past_cap, 384, 256, 128) if p <= max_past_cap]
+        for max_past in dict.fromkeys(ladder):
+            try:
+                self._graph_decode = GraphedFusedDecode(
+                    self._fused_engine,
+                    self._device,
+                    self._compute_stream,
+                    self._graph_decode_max_shapes(max_past),
+                    max_batch=self._max_batch,
+                    max_past=max_past,
+                    max_entries=int(
+                        os.environ.get("ENGINE_CUDA_GRAPH_MAX_ENTRIES", "16")
+                    ),
+                    profile_idx=profile_idx,
+                )
+                return
+            except torch.cuda.OutOfMemoryError:
+                self._graph_decode = None
+                torch.cuda.empty_cache()
+                logger.warning(
+                    "CUDA-graph staging OOM at max_past=%d; trying smaller", max_past
+                )
+            except Exception:
+                self._graph_decode = None
+                logger.exception(
+                    "CUDA-graph decode init failed; falling back to eager decode"
+                )
+                return
+        logger.warning("CUDA-graph decode disabled: staging OOM at every ladder step")
 
     def set_embedding_weights(self, weights) -> None:
         self._embedding_weights = weights
@@ -1256,6 +1636,27 @@ class Executor:
         if max_past_len == 0:
             max_past_len = 1
 
+        if self._graph_decode is not None:
+            key = self._graph_decode.bucket(len(slots), max_past_len)
+            if key is not None:
+                try:
+                    return self._launch_decode_step_graphed(
+                        slots,
+                        slot_ids,
+                        input_embeds,
+                        original_past_lens,
+                        key,
+                    )
+                except Exception:
+                    self._graph_decode_failures += 1
+                    logger.exception(
+                        "CUDA-graph decode failed (%d/3); falling back to eager",
+                        self._graph_decode_failures,
+                    )
+                    if self._graph_decode_failures >= 3:
+                        logger.error("Disabling CUDA-graph decode after 3 failures")
+                        self._graph_decode = None
+
         if self._kv_pool is not None and self._kv_pool._preallocate:
             batched_talker_kv = self._kv_pool.gather_talker_kv(
                 slot_ids,
@@ -1328,6 +1729,95 @@ class Executor:
             _c2w_transconv_output_names=self._c2w_transconv_output_names,
             _codec_eos_id=self._codec_eos_id,
             _used_pingpong=output_overrides is not None,
+            _inputs=input_snapshot,
+            _dump_meta=dump_meta,
+            _debug_dumper=self._debug_dumper if self._debug_dumper.enabled else None,
+        )
+
+    def _launch_decode_step_graphed(
+        self,
+        slots: List[SlotKVState],
+        slot_ids: List[int],
+        input_embeds: torch.Tensor,
+        original_past_lens: List[int],
+        key: tuple[int, int],
+    ) -> GPUFuture:
+        """Decode step via CUDA-graph replay (see GraphedFusedDecode).
+
+        Differences from the eager path:
+        - the KV pool gather runs at the bucketed past length; the extra
+          columns hold stale-but-finite pool bytes that ``attention_bias``
+          masks per slot;
+        - the c2w KV is padded to the sliding-window max so it does not
+          enter the shape signature;
+        - ping-pong output overrides are impossible (graph output addresses
+          are fixed), so the engine loop always takes its copy path;
+        - outputs that outlive one step (``codec_sum`` feeds next_embed and
+          pad tracking) are cloned out of the staging buffers.
+        """
+        _, past_bucket = key
+
+        # Gather the pool KV straight into the bucket's staging view: no
+        # transient batch-KV tensor (up to several GiB at large batch), and
+        # run() skips the copy because input and staging share the pointer.
+        entry = self._graph_decode.entry(key)
+        kv_view = entry["in"]["talker_past_kv"]
+        self._kv_pool.gather_talker_kv_into(slot_ids, kv_view)
+        past_seq_lens = torch.tensor(
+            original_past_lens,
+            device=self._device,
+            dtype=torch.long,
+        )
+
+        inputs = self._build_fused_inputs(
+            input_embeds=input_embeds,
+            slots=slots,
+            batched_talker_kv=kv_view,
+            past_seq_lens=past_seq_lens,
+            use_dummy_kv=False,
+            c2w_past_len_override=self._config.c2w_sliding_window - FUSED_CHUNK_T,
+        )
+
+        input_snapshot = {}
+        if self._debug_dumper.enabled and self._debug_dumper.should_dump(
+            s.session_id or "" for s in slots
+        ):
+            input_snapshot = self._debug_dumper.capture(inputs, root_name="inputs")
+
+        raw = dict(self._graph_decode.run(key, inputs, len(slots)))
+        # codec_sum rows are stored on slots (last_codec_sum / next_embed) and
+        # read after the next replay has overwritten the staging buffers, so
+        # clone them out.  The clones MUST be enqueued on the compute stream:
+        # replay is async on it, and a default-stream clone would race it and
+        # read pre-replay staging bytes.
+        with torch.cuda.stream(self._compute_stream):
+            if raw.get("codec_sum") is not None:
+                raw["codec_sum"] = raw["codec_sum"].clone()
+            if raw.get("full_codec") is not None:
+                raw["full_codec"] = raw["full_codec"].clone()
+
+        dump_meta = self._build_dump_metadata(
+            stage="decode",
+            slots=slots,
+            seq=1,
+            use_dummy_kv=False,
+            original_past_lens=original_past_lens,
+            padded_talker_past_len=past_bucket,
+            output_overrides=None,
+        )
+
+        return GPUFuture(
+            _compute_stream=self._compute_stream,
+            _raw=raw,
+            _slots=slots,
+            _input_refs=inputs,
+            _original_past_lens=original_past_lens,
+            _padded_past_len=past_bucket,
+            _seq=1,
+            _c2w_conv_output_names=self._c2w_conv_output_names,
+            _c2w_transconv_output_names=self._c2w_transconv_output_names,
+            _codec_eos_id=self._codec_eos_id,
+            _used_pingpong=False,
             _inputs=input_snapshot,
             _dump_meta=dump_meta,
             _debug_dumper=self._debug_dumper if self._debug_dumper.enabled else None,
@@ -1423,10 +1913,16 @@ class Executor:
         past_seq_lens: Optional[torch.Tensor],
         use_dummy_kv: bool,
         sampling_mode: str = "default",
+        c2w_past_len_override: Optional[int] = None,
     ) -> Dict[str, torch.Tensor]:
         """Build the full input dict for the fused TRT engine.
 
         Uses packed KV format: single tensor per cache type.
+
+        ``c2w_past_len_override`` forces the padded c2w KV length (the
+        CUDA-graph path fixes it at the sliding-window max so the c2w length
+        does not become a graph shape signature; padding is masked via
+        ``c2w_attention_bias``).
         """
         cfg = self._config
         batch = int(input_embeds.shape[0])
@@ -1600,6 +2096,8 @@ class Executor:
             else:
                 per_slot_c2w_lens.append(0)
         c2w_past_len = max(per_slot_c2w_lens) if per_slot_c2w_lens else 0
+        if c2w_past_len_override is not None:
+            c2w_past_len = max(c2w_past_len, int(c2w_past_len_override))
         if c2w_past_len < 1:
             c2w_past_len = 1
 
@@ -1622,7 +2120,7 @@ class Executor:
         c2w_d1 = cfg.n_c2w_layers * 2
         c2w_d2 = cfg.c2w_kv_heads
         c2w_head = cfg.c2w_head_dim
-        if batch == 1:
+        if batch == 1 and c2w_past_len_override is None:
             s = slots[0]
             if s.c2w_kv is not None:
                 kv = s.c2w_kv
