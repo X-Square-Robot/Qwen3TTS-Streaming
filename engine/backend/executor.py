@@ -836,6 +836,14 @@ class Executor:
         ).strip().lower() not in ("0", "false", "off")
         self._graph_decode: Optional[GraphedFusedDecode] = None
         self._graph_decode_failures = 0
+        # Shared persistent gather arena for batched talker KV (flat, viewed
+        # per step).  Replaces the per-step transient gather tensor that peaks
+        # at B×L*2×H×past×D (7.5 GiB at 128×512) and OOMs under low headroom.
+        # Points at the CUDA-graph staging when graphs are on (the two paths
+        # run serially on one thread, so sharing is safe); lazily allocated
+        # when graphs are off; None -> legacy transient gather.
+        self._talker_gather_flat: Optional[torch.Tensor] = None
+        self._talker_gather_flat_failed = False
 
         self._c2w_conv_input_names: list[str] = []
         self._c2w_conv_output_names: list[str] = []
@@ -1003,6 +1011,12 @@ class Executor:
                         os.environ.get("ENGINE_CUDA_GRAPH_MAX_ENTRIES", "16")
                     ),
                     profile_idx=profile_idx,
+                )
+                # The eager path shares the graph's KV staging as its gather
+                # arena (serial use on the engine thread; the graph re-fills
+                # it from the pool every step, so no state survives in it).
+                self._talker_gather_flat = self._graph_decode._in_flat.get(
+                    "talker_past_kv"
                 )
                 return
             except torch.cuda.OutOfMemoryError:
@@ -1655,10 +1669,15 @@ class Executor:
                     )
                     if self._graph_decode_failures >= 3:
                         logger.error("Disabling CUDA-graph decode after 3 failures")
+                        # Drop the graphs, dedicated context and most staging
+                        # (~2GiB); the talker-KV staging survives as the eager
+                        # path's gather arena via self._talker_gather_flat, so
+                        # the degraded mode keeps its OOM protection.
                         self._graph_decode = None
+                        torch.cuda.empty_cache()
 
         if self._kv_pool is not None and self._kv_pool._preallocate:
-            batched_talker_kv = self._kv_pool.gather_talker_kv(
+            batched_talker_kv = self._gather_batched_talker_kv(
                 slot_ids,
                 max_past_len,
             )
@@ -1733,6 +1752,80 @@ class Executor:
             _dump_meta=dump_meta,
             _debug_dumper=self._debug_dumper if self._debug_dumper.enabled else None,
         )
+
+    def _ensure_talker_gather_flat(self) -> Optional[torch.Tensor]:
+        """Return the persistent KV gather arena, allocating it if needed.
+
+        With graphs on this is the graph staging (set at init).  With graphs
+        off it is allocated once at decode max size; on OOM the failure is
+        latched and the caller falls back to the legacy transient gather.
+        """
+        if self._talker_gather_flat is not None or self._talker_gather_flat_failed:
+            return self._talker_gather_flat
+        cfg = self._config
+        numel = (
+            self._max_batch
+            * cfg.num_layers
+            * 2
+            * cfg.kv_heads
+            * cfg.max_seq_len
+            * cfg.head_dim
+        )
+        try:
+            self._talker_gather_flat = torch.zeros(
+                numel, dtype=cfg.dtype, device=self._device
+            )
+            logger.info(
+                "Allocated persistent KV gather arena (%.2f GiB)",
+                numel * self._talker_gather_flat.element_size() / (1024**3),
+            )
+        except torch.cuda.OutOfMemoryError:
+            self._talker_gather_flat_failed = True
+            torch.cuda.empty_cache()
+            logger.warning(
+                "KV gather arena allocation OOM; falling back to per-step "
+                "transient gather (may OOM at large batch x past)"
+            )
+        return self._talker_gather_flat
+
+    def _gather_batched_talker_kv(
+        self,
+        slot_ids: List[int],
+        max_past_len: int,
+    ) -> torch.Tensor:
+        """Gather batched talker KV, preferring the persistent arena.
+
+        The arena removes the transient B×L*2×H×past×D allocation (7.5 GiB at
+        128×512).  Content and downstream numerics are identical either way —
+        only the destination buffer differs.
+        """
+        cfg = self._config
+        shape = (
+            len(slot_ids),
+            cfg.num_layers * 2,
+            cfg.kv_heads,
+            max_past_len,
+            cfg.head_dim,
+        )
+        flat = self._ensure_talker_gather_flat()
+        numel = math.prod(shape)
+        if flat is not None and numel <= flat.numel():
+            view = flat[:numel].view(shape)
+            self._kv_pool.gather_talker_kv_into(slot_ids, view)
+            return view
+        try:
+            return self._kv_pool.gather_talker_kv(slot_ids, max_past_len)
+        except torch.cuda.OutOfMemoryError:
+            # Fragmentation is the common cause; reclaim and retry once
+            # before letting the step fail.
+            torch.cuda.empty_cache()
+            logger.warning(
+                "Transient KV gather OOM at batch=%d past=%d; retrying after "
+                "empty_cache",
+                len(slot_ids),
+                max_past_len,
+            )
+            return self._kv_pool.gather_talker_kv(slot_ids, max_past_len)
 
     def _launch_decode_step_graphed(
         self,
