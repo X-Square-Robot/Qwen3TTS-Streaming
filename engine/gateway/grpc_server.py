@@ -137,9 +137,35 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                 )
 
         first_effective_logged = False
+        vad_enabled = vad_processor.config.enabled
 
         async def on_audio(sid, data):
             nonlocal first_effective_logged
+            if not vad_enabled:
+                # Fast path: skip the float32→int16→float32 round-trip that
+                # the VAD detour forces on every chunk.  Besides the per-chunk
+                # loop cost (~2.5k chunks/s at 128 streams), the round-trip
+                # silently quantized f32-encoded sessions to 15-bit fidelity.
+                if not data:
+                    return
+                if not first_effective_logged:
+                    first_effective_logged = True
+                    LifecycleLogger.emit(
+                        session_id=session_id,
+                        phase="output.audio.first_effective",
+                        request_id=config.timing.request_id or None,
+                        session_level=config.observability_level,
+                    )
+                frame = pipeline.convert_audio_chunk(data)
+                await audio_queue.put(
+                    (
+                        "audio",
+                        _make_audio_response(
+                            frame.pcm_bytes, frame.audio, meta=frame.meta
+                        ),
+                    )
+                )
+                return
             # Apply VAD filtering before output pipeline
             raw = np.frombuffer(data, dtype=np.float32)
             if raw.size == 0:

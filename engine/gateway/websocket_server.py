@@ -320,7 +320,19 @@ class WebSocketGateway:
         vad_config = _build_vad_config(config)
         vad_processor = create_vad_processor(vad_config, sample_rate=ENGINE_SAMPLE_RATE)
 
+        vad_enabled = vad_processor.config.enabled
+
         async def on_audio(sid: str, data: bytes) -> None:
+            if not vad_enabled:
+                # Fast path: skip the float32→int16→float32 round-trip (per-
+                # chunk loop cost + silent 15-bit quantization of f32 output).
+                if not data:
+                    return
+                frame = pipeline.convert_audio_chunk(data)
+                await outbound_queue.put(
+                    _make_audio_frame(frame.pcm_bytes, frame.audio, meta=frame.meta)
+                )
+                return
             # Apply VAD filtering before output pipeline
             raw = np.frombuffer(data, dtype=np.float32)
             if raw.size == 0:
