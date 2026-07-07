@@ -39,7 +39,7 @@ Public benchmarks must record:
 
 ## The Single-Stream TTFT Convention
 
-Single-stream TTFT can only be described as a measured distribution under specific conditions, not as default performance or a stable guarantee. The current measured reference (2026-07-06, RTX 5090, all-bf16 `custom-1.7b`, batch=128 profile) is a **server TTFT of 14.9 ± 0.2ms (min 14.5, p99 15.3, n=50)** — see the [serving performance benchmark](../dev/investigation/serving_performance_benchmark.md) for the full breakdown and raw data. The historical "13ms" figure was the lowest observed value on an older engine build and should no longer be quoted. Any such number requires all of the following to hold simultaneously:
+Single-stream TTFT can only be described as a measured distribution under specific conditions, not as default performance or a stable guarantee. The current measured reference (2026-07-07, RTX 5090, all-bf16 `custom-1.7b`, batch=128 profile) is a **server TTFT of 14.9 ± 0.3ms (min 14.5, p99 15.7, n=50)** — see the [serving performance benchmark](../dev/investigation/serving_performance_benchmark.md) for the full breakdown and raw data. The historical "13ms" figure was the lowest observed value on an older engine build and should no longer be quoted. Any such number requires all of the following to hold simultaneously:
 
 - Cache hit.
 - The engine is already warm.
@@ -51,7 +51,7 @@ Single-stream TTFT can only be described as a measured distribution under specif
 Recommended public wording:
 
 ```text
-Under the specified hardware, a warm engine, a cache hit, a single-stream request, and the custom-1.7b profile, the measured server TTFT is 14.9 ± 0.2ms (min 14.5ms, n=50).
+Under the specified hardware, a warm engine, a cache hit, a single-stream request, and the custom-1.7b profile, the measured server TTFT is 14.9 ± 0.3ms (min 14.5ms, n=50).
 ```
 
 Discouraged wording:

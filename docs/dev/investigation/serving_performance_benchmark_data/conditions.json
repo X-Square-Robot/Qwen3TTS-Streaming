@@ -1,13 +1,13 @@
 {
-  "date_utc": "2026-07-06",
+  "date_utc": "2026-07-07",
   "hardware": {
     "gpu": "NVIDIA GeForce RTX 5090",
     "gpu_memory_mib": 32607,
     "driver_version": "580.126.20"
   },
   "software": {
-    "engine_image": "qwen3-engine:25.10 (rebuilt 2026-07-06 with the optimization commits below)",
-    "triton_image": "qwen3tts-streaming:25.10",
+    "engine_image": "qwen3-engine:25.10 (rebuilt 2026-07-07 with the optimization commits below)",
+    "triton_image": "qwen3tts-streaming:25.10 (Triton dataset from 2026-07-06, see dataset_provenance)",
     "tensorrt_version": "10.13.3.9",
     "ngc_tag": "25.10",
     "engine_optimizations_included": [
@@ -15,8 +15,19 @@
       "c9c63c2 perf(engine): CUDA-graph decode replay (eliminates ~2700 kernel launches/step of CPU cost)",
       "dd647be fix(engine): batch KV gather arena-ized (removes up-to-7.5GiB transient allocation per eager decode step)",
       "a41f35d fix(engine): queue_wait/cache_hit metric wiring",
-      "d5741b6 fix(triton): ServerTimingAccumulator wiring + end->done terminal event unification"
+      "d5741b6 fix(triton): ServerTimingAccumulator wiring + end->done terminal event unification",
+      "b80cf45 perf(engine): batched burst admission + Phase-1 per-slot tax elimination (c2w state arenas)",
+      "2a9578b perf(engine,gateway): c2w KV sliding window pooled per slot + serving hot-path slimming (async logging, orjson, gRPC chunk coalescing, uvloop)",
+      "a8e7274 perf(gateway): VAD-disabled sessions bypass the per-chunk int16 round-trip (also removes a hidden 15-bit quantization for pcm_f32)"
     ]
+  },
+  "dataset_provenance": {
+    "engine_rows": "collected 2026-07-07 on the engine build above (includes b80cf45/2a9578b/a8e7274); trials engine-01..03",
+    "triton_rows": "retained from the 2026-07-06 dataset (engine core WITHOUT b80cf45/2a9578b/a8e7274); trials triton-01..03. The Triton BLS path wraps the same engine core, so the engine-side commits would improve it too -- its rows OVERSTATE current Triton latency and are kept only as the last measured reference.",
+    "note": "raw_requests.csv = one representative engine trial (engine-01, 2026-07-07) + one representative Triton trial (triton-01, 2026-07-06)"
+  },
+  "metric_semantics_change": {
+    "prefill_ms": "As of b80cf45 (batched burst admission), prefill_started/prefill_completed bracket the whole batched admission pass (slot allocation + batched prefix-cache restore + batched suffix embed for every session admitted in that pass), not one session's own suffix compute. Under burst load prefill_ms therefore reads as tens of ms per session (engine rows) even though per-session GPU work is unchanged; at concurrency 1 the pass contains a single session and the value is comparable to the old semantics (~1ms). Triton rows predate the change and use the old per-session semantics. prefill_ms values are NOT comparable across the two datasets at load."
   },
   "model": {
     "variant": "custom-1.7b",
@@ -27,7 +38,7 @@
     "code2wav_precision": "bf16",
     "engine_dtype": "bf16",
     "triton_io_float_dtype": "bf16",
-    "note": "Full-bf16 engine. cp=bf16 validated hallucination-free on the internal 0701 checkpoint (0/100 deterministic probe; see docs/dev/investigation/streaming_hallucination.md). The engine was re-probed 0/100 after the CP-KV/CUDA-graph optimizations."
+    "note": "Full-bf16 engine. cp=bf16 validated hallucination-free on the internal 0701 checkpoint (0/100 deterministic probe; see docs/dev/investigation/streaming_hallucination.md). Re-probed 0/100 on 2026-07-07 immediately before this dataset was collected (runs=100, duration min 9.04s / median 10.08s / max 10.72s)."
   },
   "engine_profile": {
     "max_batch_size": 128,
@@ -56,30 +67,40 @@
   "tooling": {
     "harness": "tools/validation/perf_matrix_sdk.py (built on the qwen3tts client SDK)",
     "orchestration": "tools/validation/run_perf_matrix.sh",
-    "summarizer": "tools/validation/summarize_perf_matrix.py"
+    "summarizer": "tools/validation/summarize_perf_matrix.py (per trial), pooled across trials with identical aggregation logic"
   },
   "trial_design": {
     "engine_trials": 3,
     "triton_trials": 3,
-    "concurrency_levels": [1, 16, 32, 64, 128],
+    "engine_concurrency_levels": [1, 8, 16, 32, 64, 128],
+    "triton_concurrency_levels": [1, 16, 32, 64, 128],
     "measured_rounds_per_level": 20,
     "warmup_rounds_per_level": 3,
     "connection_modes": ["reuse", "cold"],
     "connection_mode_measured_rounds": 50,
     "connection_mode_warmup_rounds": 5,
-    "total_requests": 50877,
-    "failures": 0
+    "total_requests": 51981,
+    "engine_requests": 35022,
+    "triton_requests": 16959,
+    "failures": 0,
+    "aggregation_note": "summary CSVs pool every recorded row of a group, including the phase=warmup rounds (same aggregation as the 2026-07-06 dataset, so cross-dataset deltas are apples-to-apples); warmup rows shift level-1 averages by well under 1 ms and high-concurrency averages by ~1%. Filter raw_requests.csv on phase=measure to exclude them."
   },
   "supplementary_measurements": {
     "server_ttft_single_stream_warm_ms": {
-      "basis": "server_session_create_to_first_raw_audio_ms from the done-event meta (same basis as the historical '13ms' claim)",
+      "basis": "server_session_create_to_first_raw_audio_ms from the done-event meta (same basis as the historical '13ms' claim), re-measured 2026-07-07 on this engine build",
       "n": 50,
       "min": 14.46,
-      "p50": 14.86,
-      "avg": 14.86,
-      "stdev": 0.21,
-      "p99": 15.28,
-      "max": 15.31
+      "p50": 14.84,
+      "avg": 14.92,
+      "stdev": 0.26,
+      "p99": 15.65,
+      "max": 15.65
+    },
+    "burst_ramp_decomposition": {
+      "tool": "workspace/ttft_ramp_decompose.py, 128 concurrent sessions, shared gRPC channel, warm engine",
+      "runs": 2,
+      "client_ttft_avg_ms": [285.8, 287.9],
+      "note": "per-stage table in the report's 'Where burst TTFT goes' section"
     }
   }
 }

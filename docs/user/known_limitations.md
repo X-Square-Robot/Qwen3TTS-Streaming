@@ -40,7 +40,7 @@ These issues mean the current release is not suitable for direct use in producti
 
 ## Performance Number Limitations
 
-The single-stream TTFT figure (measured server TTFT 14.9 ± 0.2ms; see [benchmark methodology](benchmark_methodology.md)) is not a universal guarantee. It usually requires all of the following to hold simultaneously:
+The single-stream TTFT figure (measured server TTFT 14.9 ± 0.3ms; see [benchmark methodology](benchmark_methodology.md)) is not a universal guarantee. It usually requires all of the following to hold simultaneously:
 
 - The engine is already warmed up.
 - prefix/cache hit.

@@ -43,7 +43,7 @@ Qwen3TTS-Streaming (token-level)
                                                                     first chunk lands in ~15ms
 ```
 
-**14.9 ± 0.2ms** server TTFT (n=50, min 14.5ms) is faster than a single 60Hz screen refresh (16.7ms) and well under the ~100–400ms a human eye takes to blink — the first audio chunk is already playing before a wait would even register. Under a 128-stream simultaneous burst the client-side average is 266–334ms depending on transport. Both numbers come with conditions attached; see [Performance Claims](#performance-claims) for exactly what they depend on.
+**14.9 ± 0.3ms** server TTFT (n=50, min 14.5ms) is faster than a single 60Hz screen refresh (16.7ms) and well under the ~100–400ms a human eye takes to blink — the first audio chunk is already playing before a wait would even register. Under a 128-stream simultaneous burst the client-side average is 256–275ms depending on transport. Both numbers come with conditions attached; see [Performance Claims](#performance-claims) for exactly what they depend on.
 
 ### A Scheduler Built for Autoregressive Streaming
 
@@ -90,7 +90,7 @@ The whole path is in this repo, not the `third_party/` submodule — export code
 
 ## Highlights
 
-- ⚡ **Token-level streaming, not sentence-level** — first audio chunk in ~15ms (server TTFT 14.9 ± 0.2ms), 266–334ms avg under a 128-stream burst
+- ⚡ **Token-level streaming, not sentence-level** — first audio chunk in ~15ms (server TTFT 14.9 ± 0.3ms), 256–275ms avg under a 128-stream burst
 - 🧩 **A scheduler built for autoregressive decode**, not Triton's stateless `dynamic_batching` — continuous batching + `WAIT_TEXT` pause/resume
 - 🌐 **Compile once, deploy anywhere** — fingerprint a target, build a matching bundle, import it with no GPU toolchain on-site
 - 🧵 **One TensorRT engine per decode step, not four** — talker + Code Predictor + codec-embedding sum + code2wav fused into a single exported graph, export-to-test code all in this repo
@@ -127,12 +127,12 @@ The low-latency numbers mentioned in this project are conditional results, not g
 
 | Scenario | TTFT | Conditions |
 | --- | --- | --- |
-| Single request, warm engine | **14.9 ± 0.2ms** server-side (min 14.5, p99 15.3, n=50); 16.0 ± 0.3ms client-side over a reused local gRPC channel | RTX 5090, warm engine, prefix-cache hit, single-request load, local link, all-bf16 `custom-1.7b`, batch=128 profile |
-| 128 concurrent streams (simultaneous burst, avg) | **266–334ms** by transport (engine-websocket 266 / triton-grpc 309 / engine-grpc 334; p99 389–672ms) | same stack, single service per run, all 128 admitted and decoded in one batch; burst arrival is the worst case — staggered arrivals see lower TTFT |
+| Single request, warm engine | **14.9 ± 0.3ms** server-side (min 14.5, p99 15.7, n=50); ~16.2ms p50 client-side over a reused local gRPC channel | RTX 5090, warm engine, prefix-cache hit, single-request load, local link, all-bf16 `custom-1.7b`, batch=128 profile |
+| 128 concurrent streams (simultaneous burst, avg) | **256–275ms** by transport (engine-websocket 256 / engine-grpc 275; p99 373–474ms). Triton path not re-benchmarked after the 2026-07-07 engine optimizations (last measured 309 avg on the older engine core) | same stack, single service per run, all 128 admitted and decoded in one batch; burst arrival is the worst case — staggered arrivals see lower TTFT |
 
-> ⚠️ **128 streams is the tested ceiling, not a safe production target.** After the 2026-07-06 decode optimizations (CP in-graph KV + CUDA-graph decode replay + arena-ized KV gather), the benchmarked GPU (RTX 5090, all-bf16 engine, batch=128 profile) sustains 128 concurrent streams at a decode step of 67.5ms per 80ms audio frame — RTF (audio duration / wall-clock decode time) ≈ 1.19, i.e. ~19% headroom above real-time (pre-optimization this was 119.8ms/frame, RTF ≈ 0.67 — below real-time). That margin absorbs normal jitter, but a sustained load spike or heavier-than-usual requests can still eat it. Size production concurrency with margin below 128 rather than running at it; at 64 streams the decode step is 36.8ms (RTF ≈ 2.2) with ample margin. Full breakdown and raw data: [serving performance benchmark](docs/dev/investigation/serving_performance_benchmark.md).
+> ⚠️ **128 streams is the tested ceiling, not a safe production target.** After two decode-optimization rounds (2026-07-06: CP in-graph KV + CUDA-graph decode replay + arena-ized KV gather; 2026-07-07: batched burst admission + per-slot state pooling + serving hot-path slimming), the benchmarked GPU (RTX 5090, all-bf16 engine, batch=128 profile) sustains 128 concurrent streams at a decode step of 47.4ms per 80ms audio frame — RTF (audio duration / wall-clock decode time) ≈ 1.69, i.e. ~41% headroom above real-time (pre-optimization this was 119.8ms/frame, RTF ≈ 0.67 — below real-time). That margin absorbs normal jitter, but a sustained load spike or heavier-than-usual requests can still eat it. Size production concurrency with margin below 128 rather than running at it; at 64 streams the decode step is 27.1ms (RTF ≈ 3.0) with ample margin. Full breakdown and raw data: [serving performance benchmark](docs/dev/investigation/serving_performance_benchmark.md).
 
-- Standalone `engine-grpc` TTFT is measured by default over a ready/reused gRPC channel and, like WebSocket, does not count the client connection setup cost toward first-packet latency; a cold/lazy channel adds roughly 10ms.
+- Standalone `engine-grpc` TTFT is measured by default over a ready/reused gRPC channel and, like WebSocket, does not count the client connection setup cost toward first-packet latency; a cold/lazy channel adds roughly 13ms.
 - The WebUI only represents replayable real-time synthesized audio when the result source is marked `live_triton` or `live_engine_websocket` and carries an `audio` field.
 
 For detailed benchmark methodology, see [Benchmark Methodology](docs/user/benchmark_methodology.md).

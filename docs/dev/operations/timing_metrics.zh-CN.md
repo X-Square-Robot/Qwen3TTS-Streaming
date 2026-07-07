@@ -21,6 +21,12 @@
 | 8 | `text.first_dequeued` | Engine thread | 首个文本被引擎线程出队 |
 | 9 | `engine.prefill.started` | Engine thread | Prefill 开始 |
 | 10 | `engine.prefill.completed` | Engine thread | Prefill 完成 |
+
+> **批量准入语义(自 `b80cf45` 起):** 当 session 经批量突发准入路径接纳时,
+> `engine.prefill.started`/`completed` 括起的是**整个批量准入 pass**(slot 分配 +
+> 批量 prefix-cache 恢复 + 该 pass 内所有 session 的批量后缀 embed),而非该 session
+> 自己的后缀计算。因此 `engine_prefill_ms` 会随同批准入的 session 数增长(128 突发下
+> 为几十 ms);单流负载下一个 pass 只含一个 session,数值与旧语义一致。
 | 11 | `engine.decode.first_step` | Engine thread | 首个 decode 步骤开始 |
 | 12 | `engine.audio.first_raw` | Engine thread | 首个原始音频产生 |
 | 13 | `output.audio.first_effective` | Output pipeline | 首个有效音频发布 |

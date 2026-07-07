@@ -21,6 +21,13 @@ together with their precise semantic definitions.
 | 8 | `text.first_dequeued` | Engine thread | The first text is dequeued by the engine thread |
 | 9 | `engine.prefill.started` | Engine thread | Prefill starts |
 | 10 | `engine.prefill.completed` | Engine thread | Prefill completes |
+
+> **Batched-admission semantics (since `b80cf45`):** when a session is admitted through the
+> batched burst-admission path, `engine.prefill.started`/`completed` bracket the **whole batched
+> admission pass** (slot allocation + batched prefix-cache restore + batched suffix embed for
+> every session in that pass), not the session's own suffix compute. `engine_prefill_ms`
+> therefore grows with the number of sessions admitted together (tens of ms under a 128-burst);
+> at single-stream load the pass contains one session and the value matches the old semantics.
 | 11 | `engine.decode.first_step` | Engine thread | The first decode step starts |
 | 12 | `engine.audio.first_raw` | Engine thread | The first raw audio is produced |
 | 13 | `output.audio.first_effective` | Output pipeline | The first effective audio is published |
