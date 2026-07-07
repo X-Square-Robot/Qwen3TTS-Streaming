@@ -175,6 +175,49 @@ class SynthesisResult:
         return self.total_samples / self.sample_rate if self.total_samples > 0 else 0.0
 
     @property
+    def queue_wait_ms(self) -> float | None:
+        """Server-side engine queue wait: text.first_enqueued -> text.first_dequeued.
+
+        Sourced from the `done` event meta (ServerTimingAccumulator.to_meta_dict),
+        which is already sent over the wire by every transport -- no server
+        change needed, just client-side extraction.
+        """
+        return _parse_float(_done_meta(self).get("server_engine_queue_wait_ms"))
+
+    @property
+    def prefill_ms(self) -> float | None:
+        """Server-side prefill duration: engine.prefill.started -> .completed."""
+        return _parse_float(_done_meta(self).get("server_engine_prefill_ms"))
+
+    @property
+    def server_total_latency_ms(self) -> float | None:
+        return _parse_float(_done_meta(self).get("server_total_latency_ms"))
+
+    @property
+    def cache_hit(self) -> bool | None:
+        raw = _done_meta(self).get("server_cache_hit")
+        if raw is None:
+            return None
+        return raw == "true"
+
+    @property
+    def batch_size_seen(self) -> int | None:
+        raw = _segment_end_meta(self).get("batch_size_seen")
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            return None
+
+    @property
+    def batched(self) -> bool | None:
+        raw = _segment_end_meta(self).get("batched")
+        if raw is None:
+            return None
+        return raw == "true" or raw == "True"
+
+    @property
     def rtf(self) -> float:
         if self.duration_sec <= 0 or self.total_ms <= 0:
             return 0.0
@@ -227,8 +270,13 @@ class SynthesisResult:
             if self.decode_step_p95_ms is not None
             else "N/A"
         )
+        queue_wait = (
+            f"{self.queue_wait_ms:.0f}ms" if self.queue_wait_ms is not None else "N/A"
+        )
+        prefill = f"{self.prefill_ms:.0f}ms" if self.prefill_ms is not None else "N/A"
         return (
             f"first_chunk={fc} ttft={ttft} start_to_first_audio={start_to_first} "
+            f"queue_wait={queue_wait} prefill={prefill} "
             f"decode_step_mean={step_mean} p50={step_p50} p95={step_p95} "
             f"total={self.total_ms:.0f}ms chunks={self.num_chunks} "
             f"audio={self.duration_sec:.2f}s rtf={self.rtf:.2f}"
@@ -257,6 +305,12 @@ class CaseResult:
                 "first_chunk_ms": self.synthesis.first_chunk_ms,
                 "ttft_ms": self.synthesis.ttft_ms,
                 "start_to_first_audio_ms": self.synthesis.start_to_first_audio_ms,
+                "queue_wait_ms": self.synthesis.queue_wait_ms,
+                "prefill_ms": self.synthesis.prefill_ms,
+                "server_total_latency_ms": self.synthesis.server_total_latency_ms,
+                "cache_hit": self.synthesis.cache_hit,
+                "batch_size_seen": self.synthesis.batch_size_seen,
+                "batched": self.synthesis.batched,
                 "decode_step_mean_ms": self.synthesis.decode_step_mean_ms,
                 "decode_step_p50_ms": self.synthesis.decode_step_p50_ms,
                 "decode_step_p95_ms": self.synthesis.decode_step_p95_ms,
@@ -416,6 +470,7 @@ def _summarize_values(values: list[float]) -> dict[str, Any]:
         "p50_ms": _percentile(values, 0.50),
         "p90_ms": _percentile(values, 0.90),
         "p95_ms": _percentile(values, 0.95),
+        "p99_ms": _percentile(values, 0.99),
         "max_ms": max(values),
         "range_ms": max(values) - min(values),
     }
@@ -508,6 +563,35 @@ def _capture_event_meta(result: SynthesisResult, event_type: str, meta: Any) -> 
     )
     if event_type == "prefill_done":
         result.details["prefill_done"] = meta_dict
+    elif event_type == "done":
+        result.details["done"] = meta_dict
+    elif event_type == "segment_end":
+        # Overwrites on each segment; for the single-segment texts used by the
+        # perf benchmark sweep this ends up being the (only) segment's data.
+        result.details["segment_end"] = meta_dict
+
+
+def _parse_float(raw: str | None) -> float | None:
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def _done_meta(result: SynthesisResult) -> dict[str, str]:
+    meta = result.details.get("done", {}) or {}
+    if not isinstance(meta, dict):
+        return {}
+    return meta
+
+
+def _segment_end_meta(result: SynthesisResult) -> dict[str, str]:
+    meta = result.details.get("segment_end", {}) or {}
+    if not isinstance(meta, dict):
+        return {}
+    return meta
 
 
 def _make_engine_request_spec(
@@ -1522,13 +1606,18 @@ class TritonGrpcTransport:
         }
 
     def synthesize(
-        self, spec: RequestSpec, text: str, timeout: float
+        self,
+        spec: RequestSpec,
+        text: str,
+        timeout: float,
+        *,
+        session_id: str | None = None,
     ) -> SynthesisResult:
         import threading
         import tritonclient.grpc as grpcclient
 
-        synth = SynthesisResult(self.name, uuid.uuid4().hex[:12], text)
-        request = _build_triton_request(spec, text=text)
+        synth = SynthesisResult(self.name, session_id or uuid.uuid4().hex[:12], text)
+        request = _build_triton_request(spec, text=text, session_id=session_id)
         req_json = json.dumps(request, ensure_ascii=False)
 
         client = grpcclient.InferenceServerClient(url=self.endpoint)
@@ -1593,8 +1682,11 @@ class TritonGrpcTransport:
                 synth.warnings.append(str(payload.get("message")))
             elif et == "error":
                 synth.error = str(payload.get("message") or "triton grpc error")
+                _capture_event_meta(synth, "done", payload.get("meta", {}))
                 done.set()
                 return
+            elif et in ("prefill_done", "segment_end", "done"):
+                _capture_event_meta(synth, et, payload.get("meta", {}))
             if is_final is not None and is_final.size and bool(is_final.flatten()[0]):
                 done.set()
 
@@ -1778,11 +1870,15 @@ class TritonHttpTransport:
         return None
 
 
-def _build_triton_request(spec: RequestSpec, *, text: str) -> dict[str, Any]:
+def _build_triton_request(
+    spec: RequestSpec, *, text: str, session_id: str | None = None
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "text": text,
         "language": spec.language,
     }
+    if session_id:
+        payload["session_id"] = session_id
     if spec.task_type:
         payload["task_type"] = spec.task_type
     if spec.speaker:
@@ -1948,6 +2044,20 @@ def _make_concurrent_round_sample(
     lane_totals = [
         float(result.total_ms) for result in successful if result.total_ms > 0
     ]
+    lane_queue_waits = [
+        result.queue_wait_ms for result in successful if result.queue_wait_ms is not None
+    ]
+    lane_prefills = [
+        result.prefill_ms for result in successful if result.prefill_ms is not None
+    ]
+    batch_sizes = [
+        result.batch_size_seen
+        for result in successful
+        if result.batch_size_seen is not None
+    ]
+    cache_hits = [
+        result.cache_hit for result in successful if result.cache_hit is not None
+    ]
     total_audio_sec = sum(result.duration_sec for result in successful)
     throughput = total_audio_sec / (wall_ms / 1000.0) if wall_ms > 0 else 0.0
 
@@ -1971,6 +2081,14 @@ def _make_concurrent_round_sample(
         "throughput_realtime": throughput,
         "lane_ttft": _summarize_values(lane_ttfts),
         "lane_total": _summarize_values(lane_totals),
+        "lane_queue_wait": _summarize_values(lane_queue_waits),
+        "lane_prefill": _summarize_values(lane_prefills),
+        "batch_size_seen": {
+            "min": min(batch_sizes) if batch_sizes else None,
+            "mean": statistics.mean(batch_sizes) if batch_sizes else None,
+            "max": max(batch_sizes) if batch_sizes else None,
+        },
+        "cache_hit_rate": (sum(cache_hits) / len(cache_hits)) if cache_hits else None,
     }
     if lane_ttfts:
         sample.ttft_ms = _percentile(lane_ttfts, 0.50)
@@ -1981,14 +2099,45 @@ def _make_concurrent_round_sample(
     return sample
 
 
+def _lane_raw_record(lane: SynthesisResult) -> dict[str, Any]:
+    """One flat record per request -- this is the raw data unit that ends up
+    in raw_requests.csv (see summarize_perf_matrix.py)."""
+    return {
+        "session_id": lane.session_id,
+        "ok": lane.error is None,
+        "error": lane.error,
+        "ttft_ms": lane.ttft_ms,
+        "queue_wait_ms": lane.queue_wait_ms,
+        "prefill_ms": lane.prefill_ms,
+        "decode_step_mean_ms": lane.decode_step_mean_ms,
+        "decode_step_p50_ms": lane.decode_step_p50_ms,
+        "decode_step_p95_ms": lane.decode_step_p95_ms,
+        "total_ms": lane.total_ms,
+        "server_total_latency_ms": lane.server_total_latency_ms,
+        "cache_hit": lane.cache_hit,
+        "batch_size_seen": lane.batch_size_seen,
+        "batched": lane.batched,
+        "duration_sec": lane.duration_sec,
+        "rtf": lane.rtf,
+    }
+
+
 def _concurrent_round_detail(
     sample: SynthesisResult,
     lanes: list[SynthesisResult],
 ) -> dict[str, Any]:
+    level = sample.details.get("level")
+    phase = sample.details.get("phase")
+    run_idx = sample.details.get("run")
+    lane_records = []
+    for lane_idx, lane in enumerate(lanes):
+        record = _lane_raw_record(lane)
+        record.update({"level": level, "phase": phase, "run": run_idx, "lane": lane_idx})
+        lane_records.append(record)
     return {
         "summary": sample.to_summary(),
         "details": dict(sample.details),
-        "lanes": [lane.to_summary() for lane in lanes],
+        "lanes": lane_records,
     }
 
 
