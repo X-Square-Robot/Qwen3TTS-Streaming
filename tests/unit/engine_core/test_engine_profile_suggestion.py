@@ -5,7 +5,9 @@ from pathlib import Path
 REPO_ROOT = (
     Path(__file__).resolve().parents[3]
 )  # tests/unit/engine_core/<file> -> repo root
-HELPER_PATH = REPO_ROOT / "tools" / "validation" / "suggest_engine_profile.py"
+# 3758ad7 moved the helper back to scripts/python (build_pipeline.sh looks
+# for it there); keep this path in sync or these tests break at import.
+HELPER_PATH = REPO_ROOT / "scripts" / "python" / "suggest_engine_profile.py"
 
 
 def _load_helper():
@@ -58,7 +60,9 @@ def test_profile_suggestion_falls_back_without_manifest(tmp_path):
     )
 
     assert result["source"] == "coarse-fallback"
-    assert result["max_batch_size"] == 64
+    # 3758ad7 recalibrated the coarse tiers (>=30000 MiB -> 128); 46 GiB
+    # now lands in the top tier instead of the old conservative 64.
+    assert result["max_batch_size"] == 128
 
 
 def test_profile_suggestion_handles_batch_cap_below_min_tier(tmp_path, monkeypatch):

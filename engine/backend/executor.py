@@ -1835,10 +1835,19 @@ class Executor:
         to synchronize and get results.
         """
 
-        input_embeds = torch.cat(
-            [s.next_embed.to(self._config.dtype) for s in slots],
-            dim=0,
-        )
+        # Cast once after the cat when dtypes are homogeneous (the decode
+        # path keeps next_embed in float32): one elementwise kernel instead
+        # of one per slot, bitwise-identical values.
+        first_dtype = slots[0].next_embed.dtype
+        if all(s.next_embed.dtype == first_dtype for s in slots):
+            input_embeds = torch.cat([s.next_embed for s in slots], dim=0).to(
+                self._config.dtype
+            )
+        else:
+            input_embeds = torch.cat(
+                [s.next_embed.to(self._config.dtype) for s in slots],
+                dim=0,
+            )
 
         original_past_lens = [s.past_len for s in slots]
 
@@ -2175,27 +2184,37 @@ class Executor:
         gumbel_rows: list[torch.Tensor] = []
         cp_gumbel_rows: list[torch.Tensor] = []
 
+        # rand MUST stay one call per slot per generator — each lane owns a
+        # deterministic RNG stream keyed by session_id, and merging draws
+        # would change every lane's random sequence (hallucination-seed
+        # re-roll).  clamp/log are elementwise, so they run once on the
+        # concatenated batch: identical per-element results, ~6 kernels
+        # instead of ~6 per slot.
         for slot in slots:
             gen = self._slot_sampling_generator(slot)
-            gumbel_u = torch.rand(
-                1,
-                cfg.logits_topk,
-                device=self._device,
-                dtype=torch.float32,
-                generator=gen,
-            ).clamp(1e-8, 1.0)
-            cp_gumbel_u = torch.rand(
-                1,
-                cfg.cp_num_stages,
-                cfg.logits_topk,
-                device=self._device,
-                dtype=torch.float32,
-                generator=gen,
-            ).clamp(1e-8, 1.0)
-            gumbel_rows.append(-torch.log(-torch.log(gumbel_u)))
-            cp_gumbel_rows.append(-torch.log(-torch.log(cp_gumbel_u)))
+            gumbel_rows.append(
+                torch.rand(
+                    1,
+                    cfg.logits_topk,
+                    device=self._device,
+                    dtype=torch.float32,
+                    generator=gen,
+                )
+            )
+            cp_gumbel_rows.append(
+                torch.rand(
+                    1,
+                    cfg.cp_num_stages,
+                    cfg.logits_topk,
+                    device=self._device,
+                    dtype=torch.float32,
+                    generator=gen,
+                )
+            )
 
-        return torch.cat(gumbel_rows, dim=0), torch.cat(cp_gumbel_rows, dim=0)
+        gumbel_u = torch.cat(gumbel_rows, dim=0).clamp(1e-8, 1.0)
+        cp_gumbel_u = torch.cat(cp_gumbel_rows, dim=0).clamp(1e-8, 1.0)
+        return -torch.log(-torch.log(gumbel_u)), -torch.log(-torch.log(cp_gumbel_u))
 
     # ------------------------------------------------------------------
     # Input / output name builders
@@ -2246,29 +2265,46 @@ class Executor:
                 cfg.dtype,
             )
 
-        position_ids = torch.stack(
-            [
-                torch.arange(
-                    s.past_len, s.past_len + seq, device=self._device, dtype=torch.int64
-                )
-                .unsqueeze(0)
-                .expand(3, seq)
-                for s in slots
-            ],
-            dim=0,
-        ).unsqueeze(-1)
-
-        cache_position = torch.stack(
-            [
-                torch.full(
-                    (FUSED_CHUNK_T,),
-                    s.frame_idx,
+        if seq == 1:
+            # Decode fast path: one H2D of the past_len vector instead of one
+            # arange kernel per slot (values are exact integers — bitwise
+            # identical to the general path below).
+            position_ids = (
+                torch.tensor(
+                    [s.past_len for s in slots],
                     device=self._device,
-                    dtype=torch.float32,
+                    dtype=torch.int64,
                 )
-                for s in slots
-            ],
-            dim=0,
+                .view(batch, 1, 1)
+                .expand(batch, 3, seq)
+                .unsqueeze(-1)
+            )
+        else:
+            position_ids = torch.stack(
+                [
+                    torch.arange(
+                        s.past_len,
+                        s.past_len + seq,
+                        device=self._device,
+                        dtype=torch.int64,
+                    )
+                    .unsqueeze(0)
+                    .expand(3, seq)
+                    for s in slots
+                ],
+                dim=0,
+            ).unsqueeze(-1)
+
+        # One H2D of the frame indices instead of one full+stack per slot
+        # (frame_idx < 2^24, exact in float32 — bitwise identical).
+        cache_position = (
+            torch.tensor(
+                [float(s.frame_idx) for s in slots],
+                device=self._device,
+                dtype=torch.float32,
+            )
+            .view(batch, 1)
+            .expand(batch, FUSED_CHUNK_T)
         )
 
         tc = torch.cat(
