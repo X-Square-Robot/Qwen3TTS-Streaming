@@ -952,11 +952,62 @@ class PrefillBuilder:
                         device=device,
                         dtype=torch.bfloat16,
                     )
-        trailing = [
-            trailing_text[:, i : i + 1, :].clone()
-            for i in range(trailing_text.shape[1])
-        ]
+        # Views into one storage: trailing tensors are read-only downstream,
+        # and one clone kernel per text token dominated cache-hit admission
+        # CPU cost during bursts.
+        trailing = list(trailing_text.split(1, dim=1))
         return self._move_tensor(request_prefill_embeds), self._move_trailing(trailing)
+
+    def build_suffix_batch(
+        self,
+        token_lists: list[list[int]],
+        include_eos_flags: list[bool],
+    ) -> list[tuple[torch.Tensor, list[torch.Tensor]]]:
+        """Batched build_suffix_from_ids for burst admission.
+
+        Bitwise-equivalent to calling build_suffix_from_ids per session (see
+        the shape note below); trailing tensors are read-only views, so the
+        per-token clone kernels of the historical path are still avoided.
+
+        Args:
+            token_lists: raw text token IDs per session (each non-empty).
+            include_eos_flags: whether to append tts_eos_embed per session.
+
+        Returns:
+            One (request_prefill_embeds [1,1,H], trailing list[[1,1,H]])
+            tuple per session, matching build_suffix_from_ids.
+        """
+        w = self.w
+        device = w.device
+
+        # NOTE: text_embed includes a projection matmul, and GEMM reduction
+        # order varies with input shape.  A single flat [1, sum(T)] lookup
+        # produces last-bit bf16 differences vs the serial path's per-session
+        # [1,1] + [1,T-1] calls — enough to flip marginal sampling seeds into
+        # hallucination (see streaming_hallucination.md).  So the embed calls
+        # here keep bitwise-identical shapes to build_suffix_from_ids; the
+        # batching wins come from view-splitting (no per-token clones) plus
+        # the caller's batched KV restore / zero-state allocation.
+        results: list[tuple[torch.Tensor, list[torch.Tensor]]] = []
+        with torch.no_grad():
+            for ids, include_eos in zip(token_lists, include_eos_flags):
+                ids_tensor = torch.tensor([ids], device=device, dtype=torch.int64)
+                first_embed = w.text_embed(ids_tensor[:, :1])
+                request_embeds = first_embed + self._codec_bos_embed
+                if ids_tensor.shape[1] > 1:
+                    mid = w.text_embed(ids_tensor[:, 1:])
+                    trailing = list(mid.split(1, dim=1))
+                else:
+                    trailing = []
+                if include_eos:
+                    trailing.append(w.tts_eos_embed)
+                results.append(
+                    (
+                        self._move_tensor(request_embeds),
+                        self._move_trailing(trailing),
+                    )
+                )
+        return results
 
     def _normalize_prompt_token_ids(
         self,

@@ -79,6 +79,15 @@ class PrefixKVCache:
             ),
         }
 
+    def contains(self, key: Optional[str]) -> bool:
+        """Stat-free membership probe (no hit/miss counters, no LRU touch).
+
+        Used by the engine loop to test whether a pending segment can be
+        admitted from cache alone, before committing to the admission path
+        that calls ``get()`` for real.
+        """
+        return key is not None and key in self._cache
+
     def get(self, key: Optional[str]) -> Optional[PrefixCacheEntry]:
         """Look up a cached prefix.  Returns None on miss."""
         if key is None:

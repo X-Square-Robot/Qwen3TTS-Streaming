@@ -469,6 +469,7 @@ class _StubPrefillBuilder:
         self._plan = plan
         self._suffix = suffix
         self._cache_key = cache_key
+        self._hidden_size = hidden_size
         self.w = SimpleNamespace(
             tts_pad_embed=torch.zeros(1, 1, hidden_size, dtype=torch.bfloat16),
         )
@@ -485,6 +486,15 @@ class _StubPrefillBuilder:
         if self._suffix is None:
             raise AssertionError("build_suffix_from_ids should not be called")
         return self._suffix
+
+    def build_suffix_batch(self, token_lists, include_eos_flags):
+        self.batch_calls = getattr(self, "batch_calls", 0) + 1
+        results = []
+        for i in range(len(token_lists)):
+            req = torch.full((1, 1, self._hidden_size), float(i + 1))
+            trailing = [torch.full((1, 1, self._hidden_size), float(100 + i))]
+            results.append((req, trailing))
+        return results
 
 
 class _StubExecutorForPrefill:
@@ -506,6 +516,17 @@ class _StubExecutorForPrefill:
 
     def make_zero_transconv_states(self):
         return [torch.zeros(1, 1, 1)]
+
+    def make_zero_states_batch(self, count):
+        return [
+            (
+                self.make_zero_conv_states(),
+                self.make_zero_transconv_states(),
+                self.make_zero_conv_states(),
+                self.make_zero_transconv_states(),
+            )
+            for _ in range(count)
+        ]
 
     def prefill(self, slot, embeds):
         self.prefill_inputs.append(embeds.clone())

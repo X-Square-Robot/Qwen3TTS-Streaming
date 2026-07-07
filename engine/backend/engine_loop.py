@@ -115,6 +115,9 @@ class EngineSegment:
         "cache_hit",
         "cache_tokens_reused",
         "max_decode_batch",
+        "prefix_probe_key",
+        "prefix_probe_task_type",
+        "prefix_probe_done",
     )
 
     def __init__(
@@ -145,6 +148,12 @@ class EngineSegment:
         # Largest decode batch this segment was ever co-scheduled in (continuous
         # batching observability — answers "拼没拼 batch"). 0 until first decode.
         self.max_decode_batch: int = 0
+        # Memoized prefix-cache key + task type for batch-admission probing.
+        # Both are immutable per segment; cache membership is re-checked on
+        # every probe (entries can be LRU-evicted between iterations).
+        self.prefix_probe_key: Optional[str] = None
+        self.prefix_probe_task_type: Optional[TaskType] = None
+        self.prefix_probe_done: bool = False
 
 
 class EngineSessionGroup:
@@ -231,6 +240,11 @@ class EngineLoop:
 
         self._groups: Dict[str, EngineSessionGroup] = {}
         self._seg_by_slot: Dict[int, EngineSegment] = {}
+        # When set (during _process_step_output), _send_result appends
+        # (queue, result) here instead of scheduling one loop callback per
+        # result; the whole step's results are flushed with a single
+        # call_soon_threadsafe (1 wakeup instead of one per slot per step).
+        self._result_batch: Optional[list] = None
 
         self._mlfq = MLFQScheduler(mlfq_config or MLFQConfig())
         self._prefix_cache = PrefixKVCache(
@@ -249,6 +263,12 @@ class EngineLoop:
         self._total_timeouts: int = 0
         self._total_evictions: int = 0
         self._last_health_emit: float = 0.0
+        # Per-iteration phase timing, aggregated and logged every few seconds
+        # (loop-tax observability: where does the iteration wall time go).
+        self._phase_acc = {k: 0.0 for k in ("p1", "p2", "p3", "p4", "p5")}
+        self._phase_iters: int = 0
+        self._phase_width_sum: int = 0
+        self._phase_last_log: float = 0.0
         # L2 batch_compose(decode): only emit when the decode batch size changes.
         self._last_decode_batch: int = 0
 
@@ -298,6 +318,7 @@ class EngineLoop:
         prev_output: Optional[StepOutput] = None
 
         while self._running:
+            t0 = time.monotonic()
             # --- Phase 1: Process previous step output (MUST run before
             # building next inputs to satisfy autoregressive dependency) ---
             if prev_output is not None:
@@ -308,6 +329,7 @@ class EngineLoop:
             # are immediately available for prefill/decode in this
             # iteration, instead of waiting until the next one. ---
             self._drain_inbox()
+            t1 = time.monotonic()
 
             # --- Phase 2: Prefill pending sessions FIRST.
             # Prefill and decode share one TRT execution context, so they
@@ -318,18 +340,24 @@ class EngineLoop:
             except Exception:
                 logger.exception("Prefill failed unexpectedly")
                 self._cleanup_failed_prefills()
+            t2 = time.monotonic()
 
             # --- Phase 3: Launch decode for active slots. ---
             active_slots = self._get_active_slots_mlfq()
             gpu_future = None
             if active_slots:
                 gpu_future = self._executor.launch_decode_step(active_slots)
+            t3 = time.monotonic()
 
-            # --- Phase 4: While decode runs, do CPU housekeeping ---
+            # --- Phase 4: While decode runs, do CPU housekeeping.
+            # Draining here is what makes batch admission "natural": requests
+            # arriving during a decode step accumulate as pending segments and
+            # are admitted together at the next step boundary (Phase 2). ---
             self._drain_inbox()
             self._try_evict_idle_slots()
             self._try_timeout_sessions()
             self._maybe_emit_health()
+            t4 = time.monotonic()
 
             # --- Phase 5: Wait for GPU, store output for next iteration ---
             if gpu_future is not None:
@@ -339,6 +367,59 @@ class EngineLoop:
             else:
                 if not self._has_work():
                     time.sleep(0.001)
+            self._note_iteration_timing(
+                t0, t1, t2, t3, t4, time.monotonic(), len(active_slots)
+            )
+
+    def _note_iteration_timing(
+        self,
+        t0: float,
+        t1: float,
+        t2: float,
+        t3: float,
+        t4: float,
+        t5: float,
+        width: int,
+    ) -> None:
+        """Aggregate per-iteration phase durations; log one line every ~2s.
+
+        Answers "where does iteration wall time go at width W": p1 = process
+        prev output + drain, p2 = admission, p3 = launch, p4 = housekeeping,
+        p5 = GPU wait.  Idle iterations (width 0, nothing pending) are
+        skipped so the averages describe loaded behavior.
+        """
+        if width == 0:
+            return
+        acc = self._phase_acc
+        acc["p1"] += t1 - t0
+        acc["p2"] += t2 - t1
+        acc["p3"] += t3 - t2
+        acc["p4"] += t4 - t3
+        acc["p5"] += t5 - t4
+        self._phase_iters += 1
+        self._phase_width_sum += width
+        now = t5
+        if now - self._phase_last_log < 2.0:
+            return
+        n = self._phase_iters
+        logger.info(
+            "Loop timing over %d iters (avg width %.1f): "
+            "p1_process=%.1fms p2_admit=%.1fms p3_launch=%.1fms "
+            "p4_housekeep=%.1fms p5_gpu_wait=%.1fms iter=%.1fms",
+            n,
+            self._phase_width_sum / n,
+            acc["p1"] / n * 1000.0,
+            acc["p2"] / n * 1000.0,
+            acc["p3"] / n * 1000.0,
+            acc["p4"] / n * 1000.0,
+            acc["p5"] / n * 1000.0,
+            sum(acc.values()) / n * 1000.0,
+        )
+        self._phase_last_log = now
+        for k in acc:
+            acc[k] = 0.0
+        self._phase_iters = 0
+        self._phase_width_sum = 0
 
     # ------------------------------------------------------------------
     # Inbox
@@ -594,20 +675,273 @@ class EngineLoop:
     # ------------------------------------------------------------------
 
     def _try_prefill_pending(self) -> None:
-        """Prefill ALL pending segments, not just one.
+        """Admit ALL pending segments at the step boundary, not just one.
 
-        Back-to-back prefills eliminate decode-step overhead between
-        consecutive new sessions, reducing first-chunk latency when
-        multiple requests arrive concurrently.  Capped at max_batch_size
-        to bound latency for existing decoding sessions.
+        Runs right after the previous decode step's output was processed
+        (finished slots released) and before the next step launches, so
+        requests that accumulated during the in-flight step join the next
+        decode batch together:
+
+          1. batch admission for prefix-cache hits — one flat embedding
+             lookup + one broadcast KV restore per cache entry, no TRT;
+          2. serial TRT prefill for the remainder (cache misses / ICL),
+             which must not overlap decode (shared TRT context).
         """
+        batched = self._admit_cache_hit_batch()
         count = 0
         while count < self._max_batch:
             if not self._try_prefill_one():
                 break
             count += 1
-        if count > 1:
-            logger.info("Prefilled %d segments in one pass", count)
+        if batched + count > 1:
+            logger.info(
+                "Prefilled %d segments in one pass (%d batched cache-hit)",
+                batched + count,
+                batched,
+            )
+
+    def _prefix_cache_admittable(
+        self,
+        group: EngineSessionGroup,
+        seg: EngineSegment,
+    ) -> bool:
+        """True if this pending segment can be admitted from the prefix KV
+        cache alone (no TRT prefill call).
+
+        Invalid task_type or uncacheable configs return False and fall
+        through to the serial prefill pass, which owns error reporting.
+        """
+        if self._prefill_builder is None:
+            return False
+        if not seg.prefix_probe_done:
+            seg.prefix_probe_done = True
+            req_cfg = group.request.session_config
+            task_type_str = (
+                req_cfg.task_type
+                if req_cfg is not None
+                else (group.request.task_type or "custom_voice")
+            )
+            try:
+                task_type = parse_task_type(
+                    task_type_str,
+                    x_vector_only=(
+                        req_cfg.x_vector_only if req_cfg is not None else False
+                    ),
+                )
+            except ValueError:
+                return False
+            if task_type == TaskType.VOICE_CLONE_ICL:
+                return False
+            seg.prefix_probe_task_type = task_type
+            seg.prefix_probe_key = self._prefill_builder.compute_cache_key(
+                task_type,
+                req_cfg.language if req_cfg is not None else "auto",
+                req_cfg.speaker
+                if req_cfg is not None
+                else group.request.speaker_key,
+                req_cfg.instruct if req_cfg is not None else None,
+                (
+                    list(req_cfg.instruct_spec.token_ids)
+                    if req_cfg is not None and req_cfg.instruct_spec is not None
+                    else None
+                ),
+                spk_embedding=(
+                    req_cfg.spk_embedding if req_cfg is not None else None
+                ),
+            )
+        return self._prefix_cache.contains(seg.prefix_probe_key)
+
+    def _admit_cache_hit_batch(self) -> int:
+        """Batch-admit all pending prefix-cache-hit segments in one pass.
+
+        Burst TTFT was dominated by per-session admission cost serialized
+        against ever-wider decode steps (~1.4ms × N sessions).  Cache-hit
+        admission needs no TRT call, so the per-session GPU work is
+        vectorized across the whole batch:
+
+          - one flat text-embedding lookup for all sessions' suffix tokens;
+          - one broadcast KV-pool restore per distinct cache entry;
+          - one zero-fill per C2W state shape (row views per slot).
+
+        Admission is capped by free KV slots (= max_batch − occupied), per
+        the continuous-batching invariant.  Returns the number admitted.
+        """
+        kv_pool = self._executor.kv_pool
+        if kv_pool is None or self._prefill_builder is None:
+            return 0
+        # Test doubles may predate the batch-admission API — fall back to the
+        # serial pass entirely.
+        if not hasattr(self._prefill_builder, "build_suffix_batch") or not hasattr(
+            self._executor, "make_zero_states_batch"
+        ):
+            return 0
+        budget = min(kv_pool.free_count, self._max_batch)
+        if budget <= 0:
+            return 0
+
+        # -- Collect pending segments in global priority order --
+        candidates: list[tuple[EngineSegment, EngineSessionGroup]] = []
+        for group in self._groups.values():
+            if group.active_slot_count >= self._max_slots_per_session:
+                continue
+            for seg in group.segments.values():
+                if seg.state != "pending_prefill":
+                    continue
+                if not seg.pending_token_ids:
+                    continue
+                candidates.append((seg, group))
+        if not candidates:
+            return 0
+        candidates.sort(key=lambda pair: pair[0].priority.value)
+
+        # Walk in priority order: cache hits are picked for the batch; cache
+        # misses also consume budget so a slot stays free for the serial TRT
+        # pass — batch admission must not starve higher-priority misses.
+        picked: list[tuple[EngineSegment, EngineSessionGroup]] = []
+        picked_per_group: Dict[str, int] = {}
+        for seg, group in candidates:
+            if budget <= 0:
+                break
+            in_batch = picked_per_group.get(group.session_id, 0)
+            if group.active_slot_count + in_batch >= self._max_slots_per_session:
+                continue
+            if not self._prefix_cache_admittable(group, seg):
+                budget -= 1
+                continue
+            budget -= 1
+            picked_per_group[group.session_id] = in_batch + 1
+            picked.append((seg, group))
+        if not picked:
+            return 0
+
+        # -- Allocate slots (cheap metadata + async row zero) --
+        batch_start = time.monotonic()
+        t_collect = batch_start
+        admitted: list[tuple[EngineSegment, EngineSessionGroup]] = []
+        for seg, group in picked:
+            slot = kv_pool.allocate(_seg_key(seg.session_id, seg.segment_idx))
+            if slot is None:
+                break
+            seg.slot = slot
+            slot.segment_idx = int(seg.segment_idx)
+            self._seg_by_slot[slot.slot_id] = seg
+            self._mlfq.on_segment_created(seg.mlfq_meta)
+            seg.prefill_started_at = batch_start
+            admitted.append((seg, group))
+        if not admitted:
+            return 0
+        t_alloc = time.monotonic()
+
+        # -- Batched suffix embeds: one flat lookup for every session --
+        suffixes = self._prefill_builder.build_suffix_batch(
+            [seg.pending_token_ids for seg, _ in admitted],
+            [seg.input_complete for seg, _ in admitted],
+        )
+        t_suffix = time.monotonic()
+
+        # -- Batched zero C2W states + token counts (row views per slot) --
+        # Prefer persistent slot-indexed arenas (zeroed in place, no alloc);
+        # fall back to fresh batch allocations when arenas are unavailable.
+        take_rows = getattr(self._executor, "take_zeroed_state_rows", None)
+        zero_states = (
+            take_rows([seg.slot.slot_id for seg, _ in admitted])
+            if take_rows is not None
+            else None
+        )
+        arena_backed = zero_states is not None
+        if zero_states is None:
+            zero_states = self._executor.make_zero_states_batch(len(admitted))
+        token_counts_rows = torch.zeros(
+            len(admitted),
+            self._executor._config.codec_vocab_size,
+            device=self._embed_device,
+            dtype=torch.int64,
+        ).split(1, dim=0)
+        t_zeros = time.monotonic()
+
+        # -- Broadcast KV restore, one pool write per distinct cache entry --
+        by_entry: Dict[str, list[int]] = {}
+        entries: Dict[str, object] = {}
+        for i, (seg, group) in enumerate(admitted):
+            entry = self._prefix_cache.get(seg.prefix_probe_key)
+            if entry is None:
+                # Should not happen (no puts since the probe); fall back to
+                # the serial pass for this segment.
+                self._seg_by_slot.pop(seg.slot.slot_id, None)
+                kv_pool.release(seg.slot.slot_id)
+                seg.slot = None
+                continue
+            entries[seg.prefix_probe_key] = entry
+            by_entry.setdefault(seg.prefix_probe_key, []).append(i)
+
+        use_pool = (
+            getattr(kv_pool, "_preallocate", False)
+            and getattr(kv_pool, "_talker_kv_pool", None) is not None
+        )
+        for key, idxs in by_entry.items():
+            entry = entries[key]
+            if use_pool:
+                kv_pool.restore_prefix_batch(
+                    [admitted[i][0].slot.slot_id for i in idxs],
+                    entry.talker_kv,
+                    entry.prefix_len,
+                )
+            else:
+                for i in idxs:
+                    admitted[i][0].slot.talker_kv = entry.talker_kv.clone()
+            for i in idxs:
+                admitted[i][0].slot.past_len = entry.prefix_len
+        t_restore = time.monotonic()
+
+        # -- Per-slot assembly + completion (CPU bookkeeping only) --
+        completed = 0
+        prime_ms = 0.0
+        complete_ms = 0.0
+        for i, (seg, group) in enumerate(admitted):
+            if seg.slot is None:
+                continue
+            entry = entries[seg.prefix_probe_key]
+            request_embeds, trailing = suffixes[i]
+            t0 = time.monotonic()
+            self._prime_decode_after_prefix_prefill(
+                seg.slot,
+                request_embeds,
+                trailing,
+                source="prefix_cache_prefix_only",
+                zero_states=zero_states[i],
+                token_counts=token_counts_rows[i],
+            )
+            if arena_backed:
+                seg.slot.c2w_arena_backed = True
+                seg.slot.c2w_write_in_a = False
+            seg.cache_hit = True
+            seg.cache_tokens_reused = entry.prefix_len
+            seg.eos_trailing_added = seg.input_complete
+            prefill_metrics = self._prefill_metrics(
+                seg.prefix_probe_task_type,
+                group.request.session_config,
+            )
+            t1 = time.monotonic()
+            self._complete_prefill(group, seg, seg.slot, prefill_metrics, None, False)
+            complete_ms += (time.monotonic() - t1) * 1000.0
+            prime_ms += (t1 - t0) * 1000.0
+            completed += 1
+        if completed:
+            logger.info(
+                "Batch-admitted %d cache-hit segments (%d distinct prefixes, "
+                "%.1fms total: alloc=%.1f suffix=%.1f zeros=%.1f restore=%.1f "
+                "prime=%.1f complete=%.1f)",
+                completed,
+                len(by_entry),
+                (time.monotonic() - batch_start) * 1000.0,
+                (t_alloc - t_collect) * 1000.0,
+                (t_suffix - t_alloc) * 1000.0,
+                (t_zeros - t_suffix) * 1000.0,
+                (t_restore - t_zeros) * 1000.0,
+                prime_ms,
+                complete_ms,
+            )
+        return completed
 
     def _try_prefill_one(self) -> bool:
         """Run prefill for the highest-priority pending segment.
@@ -858,15 +1192,45 @@ class EngineLoop:
                 ),
             )
 
-        best.state = "active"
-        best.decode_start_frame = slot.frame_idx
+        # Serial admissions (cold TRT prefill, ICL, serial cache hit) produce
+        # freestanding C2W state tensors; move them into the slot's arena
+        # rows so the post-step scatter stays batched for every active slot.
+        adopt = getattr(self._executor, "adopt_c2w_states", None)
+        if adopt is not None:
+            adopt(slot)
+
+        self._complete_prefill(
+            best_group,
+            best,
+            slot,
+            prefill_metrics,
+            prefill_audio,
+            prefill_eos,
+        )
+        return True
+
+    def _complete_prefill(
+        self,
+        group: EngineSessionGroup,
+        seg: EngineSegment,
+        slot: SlotKVState,
+        prefill_metrics: dict,
+        prefill_audio: Optional[bytes],
+        prefill_eos: bool,
+    ) -> None:
+        """Shared admission tail: activate the segment and emit observability.
+
+        Used by both the serial prefill path and batch cache-hit admission.
+        """
+        seg.state = "active"
+        seg.decode_start_frame = slot.frame_idx
         self._total_prefills += 1
 
         # -- Prefill timing observability --
         prefill_end = time.monotonic()
-        best.prefill_completed_at = prefill_end
-        if best.prefill_started_at is not None:
-            prefill_duration_ms = (prefill_end - best.prefill_started_at) * 1000.0
+        seg.prefill_completed_at = prefill_end
+        if seg.prefill_started_at is not None:
+            prefill_duration_ms = (prefill_end - seg.prefill_started_at) * 1000.0
         else:
             prefill_duration_ms = 0.0
 
@@ -875,51 +1239,51 @@ class EngineLoop:
         # _apply_prefix_cache_hit -> _prime_decode_after_prefix_prefill); the
         # literal "prefix_cache_hit" was never assigned anywhere, so this check
         # always evaluated to False and silently clobbered the correct
-        # best.cache_hit = True set by the cache-hit branch above.
+        # seg.cache_hit = True set by the cache-hit paths.
         cache_hit = (
             slot.prefill_source == "prefix_cache_prefix_only"
             if hasattr(slot, "prefill_source")
             else False
         )
-        best.cache_hit = cache_hit
+        seg.cache_hit = cache_hit
 
         # Write to ServerTimingAccumulator if available
-        acc = self._get_group_timing_accumulator(best_group)
+        acc = self._get_group_timing_accumulator(group)
         if acc is not None:
             if (
                 acc.prefill_started_monotonic is None
-                and best.prefill_started_at is not None
+                and seg.prefill_started_at is not None
             ):
-                acc.prefill_started_monotonic = best.prefill_started_at
+                acc.prefill_started_monotonic = seg.prefill_started_at
             acc.prefill_completed_monotonic = prefill_end
             acc.cache_hit = cache_hit
-            acc.cache_tokens_reused = best.cache_tokens_reused
+            acc.cache_tokens_reused = seg.cache_tokens_reused
 
         # Emit prefill completed lifecycle event
         LifecycleLogger.emit(
-            session_id=best.session_id,
+            session_id=seg.session_id,
             phase="engine.prefill.completed",
-            segment_idx=best.segment_idx,
+            segment_idx=seg.segment_idx,
             request_id=(
-                best_group.request.session_config.timing.request_id
-                if best_group.request.session_config
+                group.request.session_config.timing.request_id
+                if group.request.session_config
                 else None
             )
             or None,
             monotonic_ts=prefill_end,
             prefill_duration_ms=round(prefill_duration_ms, 3),
             cache_hit=cache_hit,
-            cache_tokens_reused=best.cache_tokens_reused,
+            cache_tokens_reused=seg.cache_tokens_reused,
         )
 
         # L2 prefill_detail: why this prefill looked the way it did.
-        session_level = self._session_obs_level(best_group)
+        session_level = self._session_obs_level(group)
         if obs.is_enabled(obs.ObsLevel.DEBUG, session_level):
-            sc = best_group.request.session_config
+            sc = group.request.session_config
             LifecycleLogger.emit(
-                session_id=best.session_id,
+                session_id=seg.session_id,
                 phase="prefill_detail",
-                segment_idx=best.segment_idx,
+                segment_idx=seg.segment_idx,
                 min_level=obs.ObsLevel.DEBUG,
                 session_level=session_level,
                 prefill_source=str(getattr(slot, "prefill_source", "") or ""),
@@ -932,15 +1296,15 @@ class EngineLoop:
             )
 
         # Add timing to prefill_metrics
-        if best.prefill_started_at is not None:
-            prefill_metrics["prefill_started_at"] = str(best.prefill_started_at)
+        if seg.prefill_started_at is not None:
+            prefill_metrics["prefill_started_at"] = str(seg.prefill_started_at)
         prefill_metrics["prefill_completed_at"] = str(prefill_end)
         prefill_metrics["prefill_duration_ms"] = f"{prefill_duration_ms:.3f}"
         prefill_metrics["cache_hit"] = "true" if cache_hit else "false"
-        if best.cache_tokens_reused > 0:
-            prefill_metrics["cache_tokens_reused"] = str(best.cache_tokens_reused)
-        if best.dequeued_at is not None:
-            prefill_metrics["first_text_dequeued_at"] = str(best.dequeued_at)
+        if seg.cache_tokens_reused > 0:
+            prefill_metrics["cache_tokens_reused"] = str(seg.cache_tokens_reused)
+        if seg.dequeued_at is not None:
+            prefill_metrics["first_text_dequeued_at"] = str(seg.dequeued_at)
         if any(
             key in prefill_metrics
             for key in (
@@ -955,48 +1319,47 @@ class EngineLoop:
         ):
             logger.info(
                 "Prefill metadata: session=%s segment=%d %s",
-                best.session_id,
-                best.segment_idx,
+                seg.session_id,
+                seg.segment_idx,
                 " ".join(
                     f"{key}={value}" for key, value in sorted(prefill_metrics.items())
                 ),
             )
         self._send_result(
-            best_group,
+            group,
             EngineResult(
                 type=ResultType.PREFILL_DONE,
-                session_id=best.session_id,
-                segment_idx=best.segment_idx,
+                session_id=seg.session_id,
+                segment_idx=seg.segment_idx,
                 metrics=prefill_metrics,
             ),
         )
 
         if prefill_audio and len(prefill_audio) > 0:
             self._send_result(
-                best_group,
+                group,
                 EngineResult(
                     type=ResultType.AUDIO_CHUNK,
-                    session_id=best.session_id,
-                    segment_idx=best.segment_idx,
+                    session_id=seg.session_id,
+                    segment_idx=seg.segment_idx,
                     audio_bytes=prefill_audio,
                 ),
             )
         if prefill_eos:
-            self._handle_segment_eos(best_group, best)
-            return True
+            self._handle_segment_eos(group, seg)
+            return
         logger.debug(
             "Prefill done: %s seg=%d prio=%s (slot=%d, past_len=%d, "
             "trailing=%d, input_complete=%s, tokens=%d)",
-            best.session_id,
-            best.segment_idx,
-            best.priority.name,
+            seg.session_id,
+            seg.segment_idx,
+            seg.priority.name,
             slot.slot_id,
             slot.past_len,
             len(slot.trailing),
-            best.input_complete,
-            len(best.pending_token_ids),
+            seg.input_complete,
+            len(seg.pending_token_ids),
         )
-        return True
 
     # ------------------------------------------------------------------
     # Prefix cache helpers
@@ -1097,25 +1460,44 @@ class EngineLoop:
         trailing: list,
         *,
         source: str,
+        zero_states: Optional[tuple] = None,
+        token_counts: Optional[torch.Tensor] = None,
     ) -> None:
-        """Prepare slot so decode step0 consumes the first text token."""
+        """Prepare slot so decode step0 consumes the first text token.
+
+        ``zero_states``/``token_counts`` let batch admission inject
+        pre-allocated per-slot rows (one zero-fill kernel per state shape
+        for the whole batch) instead of allocating per slot here.
+        """
         slot.prefill_source = source
         slot.frame_idx = 0
         slot.pad_start_frame = -1
         slot.pad_consecutive_silence = 0
 
         slot.c2w_kv = None
-        slot.c2w_conv_states = self._executor.make_zero_conv_states()
-        slot.c2w_transconv_states = self._executor.make_zero_transconv_states()
-        slot.init_pingpong_buffers()
+        if zero_states is not None:
+            conv, transconv, conv_write, transconv_write = zero_states
+            slot.c2w_conv_states = conv
+            slot.c2w_transconv_states = transconv
+            slot.init_pingpong_buffers(
+                conv_write=conv_write,
+                transconv_write=transconv_write,
+            )
+        else:
+            slot.c2w_conv_states = self._executor.make_zero_conv_states()
+            slot.c2w_transconv_states = self._executor.make_zero_transconv_states()
+            slot.init_pingpong_buffers()
 
-        cfg = self._executor._config
-        slot.token_counts = torch.zeros(
-            1,
-            cfg.codec_vocab_size,
-            device=self._embed_device,
-            dtype=torch.int64,
-        )
+        if token_counts is not None:
+            slot.token_counts = token_counts
+        else:
+            cfg = self._executor._config
+            slot.token_counts = torch.zeros(
+                1,
+                cfg.codec_vocab_size,
+                device=self._embed_device,
+                dtype=torch.int64,
+            )
         slot.next_embed = self._coerce_embed_tensor(
             request_prefill_embeds,
             dtype=torch.float32,
@@ -1276,6 +1658,17 @@ class EngineLoop:
     # ------------------------------------------------------------------
 
     def _process_step_output(self, output: StepOutput) -> None:
+        self._result_batch = []
+        try:
+            self._process_step_output_inner(output)
+        finally:
+            batch, self._result_batch = self._result_batch, None
+            if batch:
+                self._async_loop.call_soon_threadsafe(
+                    self._deliver_result_batch, batch
+                )
+
+    def _process_step_output_inner(self, output: StepOutput) -> None:
         kv_pool = self._executor.kv_pool
         use_pool = kv_pool is not None and kv_pool._preallocate
 
@@ -1289,6 +1682,14 @@ class EngineLoop:
             )
 
         batch_size = len(output.slots)
+        # One batch-level clone of the token-count staging output, sliced into
+        # per-slot row views (1 kernel instead of one small clone per slot).
+        # The clone is required: the staging tensor is rewritten next step.
+        updated_tc_rows = (
+            output.updated_tc.clone().split(1, dim=0)
+            if output.updated_tc is not None
+            else None
+        )
         # L2 batch_compose(decode): emit only when the batch size changes, to
         # show continuous-batching composition over time without per-step flood.
         if batch_size != self._last_decode_batch and obs.is_enabled(obs.ObsLevel.DEBUG):
@@ -1309,6 +1710,9 @@ class EngineLoop:
                 members=members,
             )
         self._last_decode_batch = batch_size
+        # Arena-backed slots whose C2W state writes are deferred to one
+        # batched indexed copy per state after this loop.
+        arena_scatter: list[tuple[SlotKVState, int]] = []
         for i, slot in enumerate(output.slots):
             seg = self._seg_by_slot.get(slot.slot_id)
             if seg is None:
@@ -1359,26 +1763,31 @@ class EngineLoop:
             if output.used_pingpong and slot.pingpong_ready:
                 # batch=1 zero-copy: TRT wrote directly to write bufs
                 slot.flip_c2w_buffers()
+            elif (
+                slot.pingpong_ready
+                and slot.c2w_arena_backed
+                and output.batch_c2w_conv is not None
+            ):
+                # batch>1 arena-backed: deferred to one indexed copy per
+                # state for the whole batch (see flush after this loop).
+                arena_scatter.append((slot, i))
             elif slot.pingpong_ready:
-                # batch>1 pre-allocated copy: scatter into write bufs
-                slot.copy_c2w_and_flip(
-                    output.split_c2w_conv[i],
-                    output.split_c2w_transconv[i],
-                )
+                # batch>1 legacy per-slot copy into write bufs
+                conv_rows, transconv_rows = self._c2w_output_rows(output, i)
+                slot.copy_c2w_and_flip(conv_rows, transconv_rows)
             else:
                 # Fallback: clone (first step or non-pingpong slot)
-                if output.split_c2w_conv[i]:
+                conv_rows, transconv_rows = self._c2w_output_rows(output, i)
+                if conv_rows:
                     slot.c2w_conv_states = [
-                        t.clone() for t in output.split_c2w_conv[i] if t is not None
+                        t.clone() for t in conv_rows if t is not None
                     ]
-                if output.split_c2w_transconv[i]:
+                if transconv_rows:
                     slot.c2w_transconv_states = [
-                        t.clone()
-                        for t in output.split_c2w_transconv[i]
-                        if t is not None
+                        t.clone() for t in transconv_rows if t is not None
                     ]
-            if output.updated_tc is not None:
-                slot.token_counts = output.updated_tc[i : i + 1].clone()
+            if updated_tc_rows is not None:
+                slot.token_counts = updated_tc_rows[i]
             slot.past_len += 1
             slot.frame_idx += 1
             slot.touch()
@@ -1525,6 +1934,50 @@ class EngineLoop:
                             metrics=audio_metrics,
                         ),
                     )
+
+        if arena_scatter:
+            # Slots released mid-loop (EOS/silence abort) are dropped: their
+            # rows are stale until the next admission re-zeroes them.
+            live = [
+                (slot, pos)
+                for slot, pos in arena_scatter
+                if slot.c2w_arena_backed and not slot.is_free
+            ]
+            if live:
+                self._executor.scatter_c2w_states_batch(
+                    [slot for slot, _ in live],
+                    [pos for _, pos in live],
+                    output.batch_c2w_conv,
+                    output.batch_c2w_transconv,
+                )
+                for slot, _ in live:
+                    slot.flip_c2w_buffers()
+
+    @staticmethod
+    def _c2w_output_rows(
+        output: StepOutput,
+        i: int,
+    ) -> tuple[list, list]:
+        """Per-slot row views of the step's C2W state outputs.
+
+        Prefers the batch-level tensors; falls back to the pre-split lists
+        (test-constructed StepOutputs).
+        """
+        if output.batch_c2w_conv is not None:
+            conv = [
+                t[i : i + 1] if t is not None else None
+                for t in output.batch_c2w_conv
+            ]
+            transconv = [
+                t[i : i + 1] if t is not None else None
+                for t in (output.batch_c2w_transconv or [])
+            ]
+            return conv, transconv
+        conv = output.split_c2w_conv[i] if output.split_c2w_conv else []
+        transconv = (
+            output.split_c2w_transconv[i] if output.split_c2w_transconv else []
+        )
+        return conv, transconv
 
     @staticmethod
     def _dynamic_silence_limit(remaining_kv: int) -> int:
@@ -1802,7 +2255,16 @@ class EngineLoop:
         if group.result_queue is None:
             return
         q = group.result_queue
+        if self._result_batch is not None:
+            self._result_batch.append((q, result))
+            return
         self._async_loop.call_soon_threadsafe(q.put_nowait, result)
+
+    @staticmethod
+    def _deliver_result_batch(items: list) -> None:
+        """Runs on the asyncio loop: fan a step's results out in order."""
+        for q, result in items:
+            q.put_nowait(result)
 
     # ------------------------------------------------------------------
     # Helpers

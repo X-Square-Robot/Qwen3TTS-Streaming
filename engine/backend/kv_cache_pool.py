@@ -97,6 +97,12 @@ class SlotKVState:
     # Ping-pong write buffers (swapped with read buffers each step)
     _c2w_conv_write: Optional[list[torch.Tensor]] = None
     _c2w_transconv_write: Optional[list[torch.Tensor]] = None
+    # True when conv/transconv buffers are row views of the executor's
+    # slot-indexed state arenas (enables batched post-step scatter).
+    c2w_arena_backed: bool = False
+    # Arena parity: True when the write side currently points at arena A.
+    # Toggled by flip_c2w_buffers; meaningless when not arena-backed.
+    c2w_write_in_a: bool = False
 
     # Decode tracking
     next_embed: Optional[torch.Tensor] = None
@@ -131,14 +137,24 @@ class SlotKVState:
         """True when double buffers are allocated and ping-pong is usable."""
         return self._c2w_conv_write is not None
 
-    def init_pingpong_buffers(self) -> None:
+    def init_pingpong_buffers(
+        self,
+        conv_write: Optional[list[torch.Tensor]] = None,
+        transconv_write: Optional[list[torch.Tensor]] = None,
+    ) -> None:
         """Allocate the write-side buffers matching current read-side shapes.
 
         Called once after prefill populates the initial c2w states.
+        Batch admission passes pre-allocated buffers (contiguous row views
+        of one batch-level allocation) to avoid per-slot clone kernels.
         """
-        if self.c2w_conv_states:
+        if conv_write is not None:
+            self._c2w_conv_write = conv_write
+        elif self.c2w_conv_states:
             self._c2w_conv_write = [t.clone() for t in self.c2w_conv_states]
-        if self.c2w_transconv_states:
+        if transconv_write is not None:
+            self._c2w_transconv_write = transconv_write
+        elif self.c2w_transconv_states:
             self._c2w_transconv_write = [t.clone() for t in self.c2w_transconv_states]
 
     def flip_c2w_buffers(self) -> None:
@@ -151,6 +167,7 @@ class SlotKVState:
             self._c2w_transconv_write,
             self.c2w_transconv_states,
         )
+        self.c2w_write_in_a = not self.c2w_write_in_a
 
     def copy_c2w_and_flip(
         self,
@@ -295,6 +312,8 @@ class KVCachePool:
         slot.c2w_transconv_states = None
         slot._c2w_conv_write = None
         slot._c2w_transconv_write = None
+        slot.c2w_arena_backed = False
+        slot.c2w_write_in_a = False
         slot.last_active_time = time.monotonic()
         if self._preallocate and self._talker_kv_pool is not None:
             self._talker_kv_pool[slot_id].zero_()
@@ -330,6 +349,8 @@ class KVCachePool:
         slot.c2w_transconv_states = None
         slot._c2w_conv_write = None
         slot._c2w_transconv_write = None
+        slot.c2w_arena_backed = False
+        slot.c2w_write_in_a = False
         self._free_slots.append(slot_id)
         logger.debug("Released slot %d (free: %d)", slot_id, len(self._free_slots))
 
@@ -389,6 +410,26 @@ class KVCachePool:
         if self._talker_kv_pool is None:
             raise RuntimeError("Pool not pre-allocated")
         self._talker_kv_pool[slot_id, :, :, :seq_len, :] = kv[0, :, :, :seq_len, :]
+
+    def restore_prefix_batch(
+        self,
+        slot_ids: list[int],
+        talker_kv: torch.Tensor,
+        prefix_len: int,
+    ) -> None:
+        """Broadcast one cached prefix KV into many slots with a single write.
+
+        Args:
+            slot_ids: target slots (all sharing the same prefix cache entry)
+            talker_kv: [1, L*2, H, >=prefix_len, D] cached prefix KV
+            prefix_len: number of prefix tokens to copy
+        """
+        if self._talker_kv_pool is None:
+            raise RuntimeError("Pool not pre-allocated")
+        ids = torch.tensor(slot_ids, device=self._device, dtype=torch.long)
+        self._talker_kv_pool[ids, :, :, :prefix_len, :] = talker_kv[
+            0, :, :, :prefix_len, :
+        ]
 
     def scatter_prefill_c2w_kv(
         self,

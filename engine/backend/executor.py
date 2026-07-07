@@ -427,23 +427,12 @@ class GPUFuture:
         full_codec = raw.get("full_codec")
         updated_tc = raw.get("updated_token_counts")
 
-        split_c2w_conv = []
-        split_c2w_transconv = []
+        # Batch-level state tensors; the engine loop slices rows on demand
+        # (legacy slots) or scatters them into the slot-indexed arenas in one
+        # indexed copy per state.  Pre-splitting per slot created ~5k tensor
+        # views per step at width 128.
         conv_tensors = [raw.get(n) for n in self._c2w_conv_output_names]
         transconv_tensors = [raw.get(n) for n in self._c2w_transconv_output_names]
-        for row_idx in range(batch_size):
-            split_c2w_conv.append(
-                [
-                    t[row_idx : row_idx + 1] if t is not None else None
-                    for t in conv_tensors
-                ]
-            )
-            split_c2w_transconv.append(
-                [
-                    t[row_idx : row_idx + 1] if t is not None else None
-                    for t in transconv_tensors
-                ]
-            )
 
         codec_eos_id = self._codec_eos_id
         eos_flags = []
@@ -473,8 +462,8 @@ class GPUFuture:
             batch_c2w_kv=raw.get("c2w_new_kv"),
             original_past_lens=self._original_past_lens,
             padded_past_len=self._padded_past_len,
-            split_c2w_conv=split_c2w_conv,
-            split_c2w_transconv=split_c2w_transconv,
+            batch_c2w_conv=conv_tensors,
+            batch_c2w_transconv=transconv_tensors,
             codec_sum=codec_sum,
             updated_tc=updated_tc,
             used_pingpong=self._used_pingpong,
@@ -505,6 +494,10 @@ class StepOutput:
     split_c2w_transconv: List[List[Optional[torch.Tensor]]] = field(
         default_factory=list
     )
+    # Batch-level per-state output tensors ([B, ...] each); preferred over
+    # the per-slot split lists, which remain for test-constructed outputs.
+    batch_c2w_conv: Optional[List[Optional[torch.Tensor]]] = None
+    batch_c2w_transconv: Optional[List[Optional[torch.Tensor]]] = None
     codec_sum: Optional[torch.Tensor] = None
     updated_tc: Optional[torch.Tensor] = None
     used_pingpong: bool = False
@@ -926,6 +919,7 @@ class Executor:
             config=self._config,
             device=self._device,
         )
+        self._init_c2w_state_arenas()
         self._init_graph_decode()
         logger.info(
             "Executor loaded (engine=%s, effective_max_seq=%d, cuda_graph=%s)",
@@ -1236,6 +1230,185 @@ class Executor:
             torch.zeros(shape, device=self._device, dtype=self._config.dtype)
             for shape in self._c2w_transconv_shapes
         ]
+
+    def make_zero_states_batch(
+        self,
+        count: int,
+    ) -> list[
+        tuple[
+            list[torch.Tensor],
+            list[torch.Tensor],
+            list[torch.Tensor],
+            list[torch.Tensor],
+        ]
+    ]:
+        """Zero C2W states + ping-pong write buffers for ``count`` slots at once.
+
+        One zero-fill kernel per state shape (instead of per slot); each slot
+        receives contiguous [1, ...] row views of the batch allocation, which
+        are valid TRT output bindings (distinct data_ptr, contiguous).
+
+        Returns one (conv, transconv, conv_write, transconv_write) tuple per
+        slot, matching make_zero_conv/transconv_states + init_pingpong_buffers.
+        """
+
+        def _rows(shapes: list[tuple[int, ...]]) -> list[list[torch.Tensor]]:
+            per_slot: list[list[torch.Tensor]] = [[] for _ in range(count)]
+            for shape in shapes:
+                batch = torch.zeros(
+                    (count,) + tuple(shape[1:]),
+                    device=self._device,
+                    dtype=self._config.dtype,
+                )
+                for i, row in enumerate(batch.split(1, dim=0)):
+                    per_slot[i].append(row)
+            return per_slot
+
+        conv = _rows(self._c2w_conv_shapes)
+        transconv = _rows(self._c2w_transconv_shapes)
+        conv_write = _rows(self._c2w_conv_shapes)
+        transconv_write = _rows(self._c2w_transconv_shapes)
+        return [
+            (conv[i], transconv[i], conv_write[i], transconv_write[i])
+            for i in range(count)
+        ]
+
+    # ------------------------------------------------------------------
+    # C2W state arenas (slot-indexed, persistent)
+    # ------------------------------------------------------------------
+
+    def _init_c2w_state_arenas(self) -> None:
+        """Allocate persistent slot-indexed C2W state arenas (A/B ping-pong).
+
+        Each conv/transconv state gets two [max_slots, ...] tensors; a slot's
+        buffers are contiguous row views (valid TRT bindings).  This replaces
+        per-admission allocations (variable-size cudaMalloc churn) and lets
+        the post-step scatter run as one indexed copy per state instead of
+        one small copy per slot per state (~2700 kernel enqueues/step at
+        width 128).
+        """
+        self._c2w_arena_a: Optional[list[torch.Tensor]] = None
+        self._c2w_arena_b: Optional[list[torch.Tensor]] = None
+        shapes = list(getattr(self, "_c2w_conv_shapes", [])) + list(
+            getattr(self, "_c2w_transconv_shapes", [])
+        )
+        if not shapes:
+            return
+
+        def _alloc() -> list[torch.Tensor]:
+            return [
+                torch.zeros(
+                    (self._max_batch,) + tuple(shape[1:]),
+                    device=self._device,
+                    dtype=self._config.dtype,
+                )
+                for shape in shapes
+            ]
+
+        self._c2w_arena_a = _alloc()
+        self._c2w_arena_b = _alloc()
+        total_bytes = sum(t.numel() * t.element_size() for t in self._c2w_arena_a) * 2
+        logger.info(
+            "C2W state arenas: %d states x %d slots x 2 buffers (%.1f MB)",
+            len(shapes),
+            self._max_batch,
+            total_bytes / 1e6,
+        )
+
+    @property
+    def has_c2w_arenas(self) -> bool:
+        return getattr(self, "_c2w_arena_a", None) is not None
+
+    def _arena_row_views(
+        self,
+        arena: list[torch.Tensor],
+        slot_id: int,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        n_conv = len(self._c2w_conv_shapes)
+        rows = [t[slot_id : slot_id + 1] for t in arena]
+        return rows[:n_conv], rows[n_conv:]
+
+    def take_zeroed_state_rows(
+        self,
+        slot_ids: list[int],
+    ) -> Optional[
+        list[
+            tuple[
+                list[torch.Tensor],
+                list[torch.Tensor],
+                list[torch.Tensor],
+                list[torch.Tensor],
+            ]
+        ]
+    ]:
+        """Zero the arena rows for ``slot_ids`` and hand out per-slot views.
+
+        Read side starts in arena A, write side in arena B (callers must set
+        slot.c2w_arena_backed=True and c2w_write_in_a=False after wiring).
+        Returns None when arenas are unavailable (stub mode).
+        """
+        if not self.has_c2w_arenas:
+            return None
+        ids = torch.tensor(slot_ids, device=self._device, dtype=torch.long)
+        for t in self._c2w_arena_a:
+            t[ids] = 0
+        results = []
+        for slot_id in slot_ids:
+            conv_a, transconv_a = self._arena_row_views(self._c2w_arena_a, slot_id)
+            conv_b, transconv_b = self._arena_row_views(self._c2w_arena_b, slot_id)
+            results.append((conv_a, transconv_a, conv_b, transconv_b))
+        return results
+
+    def adopt_c2w_states(self, slot: SlotKVState) -> None:
+        """Move a slot's freestanding C2W states into its arena rows.
+
+        Called once after a TRT prefill (cold miss / ICL) so every active
+        slot is arena-backed and the post-step scatter can stay batched.
+        """
+        if not self.has_c2w_arenas or slot.c2w_conv_states is None:
+            return
+        if slot.c2w_arena_backed:
+            return
+        conv_a, transconv_a = self._arena_row_views(self._c2w_arena_a, slot.slot_id)
+        conv_b, transconv_b = self._arena_row_views(self._c2w_arena_b, slot.slot_id)
+        for dst, src in zip(conv_a, slot.c2w_conv_states):
+            dst.copy_(src)
+        for dst, src in zip(transconv_a, slot.c2w_transconv_states or []):
+            dst.copy_(src)
+        slot.c2w_conv_states = conv_a
+        slot.c2w_transconv_states = transconv_a
+        slot._c2w_conv_write = conv_b
+        slot._c2w_transconv_write = transconv_b
+        slot.c2w_arena_backed = True
+        slot.c2w_write_in_a = False
+
+    def scatter_c2w_states_batch(
+        self,
+        slots: List[SlotKVState],
+        positions: List[int],
+        batch_conv: list[torch.Tensor],
+        batch_transconv: list[torch.Tensor],
+    ) -> None:
+        """Scatter a step's C2W state outputs into arena write rows, batched.
+
+        ``slots`` must all be arena-backed; ``positions`` are their row
+        indices in the step output batch.  Slots are grouped by write parity
+        (arena A vs B) so each state needs at most two indexed copies.
+        """
+        groups: dict[bool, tuple[list[int], list[int]]] = {}
+        for slot, pos in zip(slots, positions):
+            ids, rows = groups.setdefault(slot.c2w_write_in_a, ([], []))
+            ids.append(slot.slot_id)
+            rows.append(pos)
+        n_conv = len(self._c2w_conv_shapes)
+        for write_in_a, (ids, rows) in groups.items():
+            arena = self._c2w_arena_a if write_in_a else self._c2w_arena_b
+            ids_t = torch.tensor(ids, device=self._device, dtype=torch.long)
+            rows_t = torch.tensor(rows, device=self._device, dtype=torch.long)
+            for j, out in enumerate(batch_conv):
+                arena[j][ids_t] = out[rows_t]
+            for j, out in enumerate(batch_transconv):
+                arena[n_conv + j][ids_t] = out[rows_t]
 
     def apply_c2w_warm_state(
         self,
