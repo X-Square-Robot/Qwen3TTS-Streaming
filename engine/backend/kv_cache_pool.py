@@ -87,8 +87,13 @@ class SlotKVState:
     talker_kv: Optional[torch.Tensor] = None
     past_len: int = 0
 
-    # Code2Wav KV: [1, n_c2w*2, c2w_kv_heads, cur_len, c2w_head_dim]
+    # Code2Wav KV: [1, n_c2w*2, c2w_kv_heads, cur_len, c2w_head_dim].
+    # In pooled mode (c2w_pooled=True) this stays None: the KV lives
+    # right-aligned in the pool's _c2w_kv_pool row and c2w_len tracks the
+    # valid column count.
     c2w_kv: Optional[torch.Tensor] = None
+    c2w_len: int = 0
+    c2w_pooled: bool = False
     # Conv/transconv states: heterogeneous shapes, kept as lists
     c2w_conv_states: Optional[list[torch.Tensor]] = None
     c2w_transconv_states: Optional[list[torch.Tensor]] = None
@@ -314,6 +319,8 @@ class KVCachePool:
         slot._c2w_transconv_write = None
         slot.c2w_arena_backed = False
         slot.c2w_write_in_a = False
+        slot.c2w_len = 0
+        slot.c2w_pooled = False
         slot.last_active_time = time.monotonic()
         if self._preallocate and self._talker_kv_pool is not None:
             self._talker_kv_pool[slot_id].zero_()
@@ -351,6 +358,8 @@ class KVCachePool:
         slot._c2w_transconv_write = None
         slot.c2w_arena_backed = False
         slot.c2w_write_in_a = False
+        slot.c2w_len = 0
+        slot.c2w_pooled = False
         self._free_slots.append(slot_id)
         logger.debug("Released slot %d (free: %d)", slot_id, len(self._free_slots))
 
@@ -430,6 +439,52 @@ class KVCachePool:
         self._talker_kv_pool[ids, :, :, :prefix_len, :] = talker_kv[
             0, :, :, :prefix_len, :
         ]
+
+    def write_c2w_right_aligned(self, slot_id: int, kv: torch.Tensor) -> int:
+        """Store a prefill's C2W KV right-aligned in the slot's pool row.
+
+        Right alignment means "last N columns hold the newest N frames", so
+        the decode-time gather (last max_len columns across the batch) is
+        bitwise identical to the historical per-slot left-pad + cat layout.
+        Returns the stored length (clamped to the attention window).
+        """
+        if self._c2w_kv_pool is None:
+            raise RuntimeError("Pool not pre-allocated")
+        pool = self._c2w_kv_pool
+        width = int(pool.shape[3])
+        # Same clamp as the legacy input-build trim (window - chunk).
+        cap = width - 1
+        s_len = min(int(kv.shape[3]), cap)
+        row = pool[slot_id]
+        row.zero_()
+        if s_len > 0:
+            row[:, :, width - s_len :, :] = kv[0, :, :, -s_len:, :]
+        return s_len
+
+    def append_c2w_frames(
+        self,
+        slot_ids: list[int],
+        new_frames: torch.Tensor,
+    ) -> None:
+        """Sliding-window append for many slots in 3 batched kernels.
+
+        Shifts each row one column left and writes the step's new frame at
+        the last column.  Rows stay right-aligned; columns left of the valid
+        window only ever receive zeros from the shift.
+
+        Args:
+            slot_ids: target slot rows.
+            new_frames: [len(slot_ids), L*2, H, 1, D] new KV frames, ordered
+                like slot_ids.
+        """
+        if self._c2w_kv_pool is None:
+            raise RuntimeError("Pool not pre-allocated")
+        pool = self._c2w_kv_pool
+        ids = torch.tensor(slot_ids, device=self._device, dtype=torch.long)
+        # pool[ids] gathers a copy, so the shifted write does not alias.
+        shifted = pool[ids][:, :, :, 1:, :]
+        pool[ids, :, :, :-1, :] = shifted
+        pool[ids, :, :, -1:, :] = new_frames
 
     def scatter_prefill_c2w_kv(
         self,

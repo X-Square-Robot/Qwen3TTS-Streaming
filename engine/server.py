@@ -1196,11 +1196,39 @@ class TTSEngine:
 # ---------------------------------------------------------------------------
 
 
+def _install_async_logging() -> None:
+    """Route all logging through a queue to a dedicated writer thread.
+
+    Lifecycle events are JSON log lines written synchronously to stdout
+    (docker json-file driver) from the hot threads — the engine loop and the
+    gateway asyncio loop.  Under a 128-session burst that stdout write + GIL
+    contention measurably stretches both.  stdlib QueueHandler/QueueListener
+    makes hot-thread logging enqueue-only; formatting and I/O happen on the
+    listener thread.
+    """
+    import atexit
+    import queue as _queue
+    from logging.handlers import QueueHandler, QueueListener
+
+    root = logging.getLogger()
+    handlers = root.handlers[:]
+    if not handlers or any(isinstance(h, QueueHandler) for h in handlers):
+        return
+    log_queue: _queue.SimpleQueue = _queue.SimpleQueue()
+    for h in handlers:
+        root.removeHandler(h)
+    root.addHandler(QueueHandler(log_queue))
+    listener = QueueListener(log_queue, *handlers, respect_handler_level=True)
+    listener.start()
+    atexit.register(listener.stop)
+
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    _install_async_logging()
 
     parser = argparse.ArgumentParser(description="TTS Engine Server")
     parser.add_argument(
@@ -1385,7 +1413,17 @@ def main():
                 logger.warning("Health server shutdown: %s", e)
         await engine.stop()
 
-    asyncio.run(run())
+    # uvloop cuts event-loop overhead 2-4x vs stock asyncio.  The gateway's
+    # session dispatch and audio fan-out share this loop (and the GIL) with
+    # the engine thread, so loop efficiency directly affects burst TTFT.
+    try:
+        import uvloop
+    except ImportError:
+        logger.info("uvloop not available; using stock asyncio event loop")
+        asyncio.run(run())
+    else:
+        logger.info("Using uvloop event loop")
+        uvloop.run(run())
 
 
 async def _run_health_server(

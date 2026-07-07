@@ -1475,6 +1475,13 @@ class EngineLoop:
         slot.pad_consecutive_silence = 0
 
         slot.c2w_kv = None
+        slot.c2w_len = 0
+        kv_pool = self._executor.kv_pool
+        slot.c2w_pooled = bool(
+            kv_pool is not None
+            and getattr(kv_pool, "_preallocate", False)
+            and getattr(kv_pool, "_c2w_kv_pool", None) is not None
+        )
         if zero_states is not None:
             conv, transconv, conv_write, transconv_write = zero_states
             slot.c2w_conv_states = conv
@@ -1713,6 +1720,9 @@ class EngineLoop:
         # Arena-backed slots whose C2W state writes are deferred to one
         # batched indexed copy per state after this loop.
         arena_scatter: list[tuple[SlotKVState, int]] = []
+        # Pooled slots whose C2W KV append is deferred to one batched
+        # sliding-window shift+write after this loop.
+        c2w_append: list[tuple[SlotKVState, int]] = []
         for i, slot in enumerate(output.slots):
             seg = self._seg_by_slot.get(slot.slot_id)
             if seg is None:
@@ -1738,18 +1748,23 @@ class EngineLoop:
                 continue
 
             if output.batch_c2w_kv is not None:
-                kv = output.batch_c2w_kv[i : i + 1]
-                c2w_max_past = self._executor._config.c2w_sliding_window - 1
-                if slot.c2w_kv is None:
-                    slot.c2w_kv = kv.clone()
+                if slot.c2w_pooled:
+                    # Deferred: one batched sliding-window append for all
+                    # pooled slots after this loop.
+                    c2w_append.append((slot, i))
                 else:
-                    slot.c2w_kv = torch.cat([slot.c2w_kv, kv], dim=3)
-                    if slot.c2w_kv.shape[3] > c2w_max_past:
-                        slot.c2w_kv = slot.c2w_kv[
-                            :, :, :, -c2w_max_past:, :
-                        ].contiguous()
+                    kv = output.batch_c2w_kv[i : i + 1]
+                    c2w_max_past = self._executor._config.c2w_sliding_window - 1
+                    if slot.c2w_kv is None:
+                        slot.c2w_kv = kv.clone()
                     else:
-                        slot.c2w_kv = slot.c2w_kv.contiguous()
+                        slot.c2w_kv = torch.cat([slot.c2w_kv, kv], dim=3)
+                        if slot.c2w_kv.shape[3] > c2w_max_past:
+                            slot.c2w_kv = slot.c2w_kv[
+                                :, :, :, -c2w_max_past:, :
+                            ].contiguous()
+                        else:
+                            slot.c2w_kv = slot.c2w_kv.contiguous()
             if not use_pool:
                 if output.batch_talker_kv is not None:
                     kv = output.batch_talker_kv[i : i + 1]
@@ -1953,6 +1968,27 @@ class EngineLoop:
                 for slot, _ in live:
                     slot.flip_c2w_buffers()
 
+        if c2w_append:
+            live = [
+                (slot, pos)
+                for slot, pos in c2w_append
+                if slot.c2w_pooled and not slot.is_free
+            ]
+            if live:
+                kv_pool.append_c2w_frames(
+                    [slot.slot_id for slot, _ in live],
+                    output.batch_c2w_kv[
+                        torch.tensor(
+                            [pos for _, pos in live],
+                            device=output.batch_c2w_kv.device,
+                            dtype=torch.long,
+                        )
+                    ],
+                )
+                c2w_cap = self._executor._config.c2w_sliding_window - 1
+                for slot, _ in live:
+                    slot.c2w_len = min(slot.c2w_len + 1, c2w_cap)
+
     @staticmethod
     def _c2w_output_rows(
         output: StepOutput,
@@ -2047,7 +2083,7 @@ class EngineLoop:
                 "c2w_kv_len": (
                     int(sl.c2w_kv.shape[3])
                     if getattr(sl, "c2w_kv", None) is not None
-                    else 0
+                    else int(getattr(sl, "c2w_len", 0))
                 ),
             }
         text_tokens = seg.text_tokens_consumed

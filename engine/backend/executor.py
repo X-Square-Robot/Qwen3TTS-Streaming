@@ -1548,9 +1548,19 @@ class Executor:
                     c2w_kv,
                     self._config.c2w_sliding_window - FUSED_CHUNK_T,
                 )
-            if self._kv_pool._preallocate:
-                self._kv_pool.scatter_c2w_kv([slot.slot_id], c2w_kv)
-            slot.c2w_kv = c2w_kv
+            if (
+                self._kv_pool._preallocate
+                and self._kv_pool._c2w_kv_pool is not None
+            ):
+                # Pooled mode: KV lives right-aligned in the pool row; the
+                # slot only tracks its valid length.
+                slot.c2w_len = self._kv_pool.write_c2w_right_aligned(
+                    slot.slot_id, c2w_kv
+                )
+                slot.c2w_pooled = True
+                slot.c2w_kv = None
+            else:
+                slot.c2w_kv = c2w_kv
         slot.c2w_conv_states = [raw[n].clone() for n in self._c2w_conv_output_names]
         slot.c2w_transconv_states = [
             raw[n].clone() for n in self._c2w_transconv_output_names
@@ -1756,9 +1766,19 @@ class Executor:
                     c2w_kv,
                     self._config.c2w_sliding_window - FUSED_CHUNK_T,
                 )
-            if self._kv_pool._preallocate:
-                self._kv_pool.scatter_c2w_kv([slot.slot_id], c2w_kv)
-            slot.c2w_kv = c2w_kv
+            if (
+                self._kv_pool._preallocate
+                and self._kv_pool._c2w_kv_pool is not None
+            ):
+                # Pooled mode: KV lives right-aligned in the pool row; the
+                # slot only tracks its valid length.
+                slot.c2w_len = self._kv_pool.write_c2w_right_aligned(
+                    slot.slot_id, c2w_kv
+                )
+                slot.c2w_pooled = True
+                slot.c2w_kv = None
+            else:
+                slot.c2w_kv = c2w_kv
         slot.c2w_conv_states = [raw[n].clone() for n in self._c2w_conv_output_names]
         slot.c2w_transconv_states = [
             raw[n].clone() for n in self._c2w_transconv_output_names
@@ -2357,7 +2377,9 @@ class Executor:
 
         per_slot_c2w_lens = []
         for s in slots:
-            if s.c2w_kv is not None:
+            if s.c2w_pooled:
+                per_slot_c2w_lens.append(min(int(s.c2w_len), c2w_max_past))
+            elif s.c2w_kv is not None:
                 per_slot_c2w_lens.append(min(int(s.c2w_kv.shape[3]), c2w_max_past))
             else:
                 per_slot_c2w_lens.append(0)
@@ -2386,7 +2408,32 @@ class Executor:
         c2w_d1 = cfg.n_c2w_layers * 2
         c2w_d2 = cfg.c2w_kv_heads
         c2w_head = cfg.c2w_head_dim
-        if batch == 1 and c2w_past_len_override is None:
+        pooled_c2w = (
+            self._kv_pool is not None
+            and getattr(self._kv_pool, "_c2w_kv_pool", None) is not None
+            and all(s.c2w_pooled for s in slots)
+        )
+        if pooled_c2w:
+            # Rows are right-aligned, so "last c2w_past_len columns" is
+            # bitwise identical to the legacy left-pad + cat layout — one
+            # gather replaces the per-slot slice/pad/cat below.
+            pool = self._kv_pool._c2w_kv_pool
+            width = int(pool.shape[3])
+            if batch == 1:
+                sid = slots[0].slot_id
+                d["c2w_past_kv"] = pool[
+                    sid : sid + 1, :, :, width - c2w_past_len :, :
+                ].contiguous()
+            else:
+                ids = torch.tensor(
+                    [s.slot_id for s in slots],
+                    device=self._device,
+                    dtype=torch.long,
+                )
+                d["c2w_past_kv"] = pool[
+                    ids, :, :, width - c2w_past_len :, :
+                ].contiguous()
+        elif batch == 1 and c2w_past_len_override is None:
             s = slots[0]
             if s.c2w_kv is not None:
                 kv = s.c2w_kv

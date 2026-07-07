@@ -236,9 +236,16 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
         return session_id
 
     async def _drain_available_audio(self, audio_queue: asyncio.Queue):
-        while not audio_queue.empty():
-            msg_type_q, payload = audio_queue.get_nowait()
+        pending: tuple | None = None
+        while pending is not None or not audio_queue.empty():
+            if pending is not None:
+                msg_type_q, payload = pending
+                pending = None
+            else:
+                msg_type_q, payload = audio_queue.get_nowait()
             response = _queue_message_to_response(msg_type_q, payload)
+            if response is not None and msg_type_q == "audio":
+                response, pending = _coalesce_queued_audio(response, audio_queue)
             if response is not None:
                 yield response
             if msg_type_q == "event" and _is_done_response(response):
@@ -251,16 +258,23 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
         *,
         timeout: float = 300.0,
     ):
+        pending: tuple | None = None
         while True:
-            try:
-                msg_type_q, payload = await asyncio.wait_for(
-                    audio_queue.get(),
-                    timeout=timeout,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("gRPC session %s: audio wait timeout", session_id)
-                break
+            if pending is not None:
+                msg_type_q, payload = pending
+                pending = None
+            else:
+                try:
+                    msg_type_q, payload = await asyncio.wait_for(
+                        audio_queue.get(),
+                        timeout=timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("gRPC session %s: audio wait timeout", session_id)
+                    break
             response = _queue_message_to_response(msg_type_q, payload)
+            if response is not None and msg_type_q == "audio":
+                response, pending = _coalesce_queued_audio(response, audio_queue)
             if response is not None:
                 yield response
             if msg_type_q == "event" and _is_done_response(response):
@@ -356,11 +370,20 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                 if audio_task in done:
                     msg_type_q, payload = audio_task.result()
                     audio_task = None
-                    response = _queue_message_to_response(msg_type_q, payload)
-                    if response is not None:
-                        yield response
-                        if _is_done_response(response):
-                            return
+                    while True:
+                        response = _queue_message_to_response(msg_type_q, payload)
+                        leftover = None
+                        if response is not None and msg_type_q == "audio":
+                            response, leftover = _coalesce_queued_audio(
+                                response, audio_queue
+                            )
+                        if response is not None:
+                            yield response
+                            if _is_done_response(response):
+                                return
+                        if leftover is None:
+                            break
+                        msg_type_q, payload = leftover
 
                 if request_task in done:
                     kind, payload = request_task.result()
@@ -609,6 +632,59 @@ def _queue_message_to_response(
     if msg_type_q == "event":
         return payload
     return None
+
+
+def _coalesce_queued_audio(
+    response: tts_pb2.SynthesizeResponse,
+    audio_queue: asyncio.Queue,
+) -> tuple[tts_pb2.SynthesizeResponse, tuple | None]:
+    """Merge audio chunks already backlogged in the queue into ``response``.
+
+    Under a wide burst the sender loop is the per-message bottleneck
+    (~2.5k messages/s of protobuf build + stream write on the shared event
+    loop).  Merging only what is ALREADY queued adds zero latency — the
+    backlog exists precisely when the loop is overloaded — and leaves the
+    first chunk (and any chunk carrying meta, e.g. first-chunk timing)
+    intact as a merge HEAD only, so diagnostics survive.  PCM bytes are
+    concatenated unchanged.
+
+    Returns (possibly-merged response, leftover queue message or None).
+    The leftover is the first non-mergeable message popped during merging
+    and MUST be processed by the caller before waiting on the queue again.
+    """
+    if response.WhichOneof("response") != "audio":
+        return response, None
+    head = response.audio
+    parts: list[bytes] | None = None
+    leftover: tuple | None = None
+    while not audio_queue.empty():
+        msg_type_q, payload = audio_queue.get_nowait()
+        if (
+            msg_type_q == "audio"
+            and payload.WhichOneof("response") == "audio"
+            and not payload.audio.meta
+            and payload.audio.sample_rate == head.sample_rate
+            and payload.audio.encoding == head.encoding
+            and payload.audio.channels == head.channels
+        ):
+            if parts is None:
+                parts = [head.pcm_data]
+            parts.append(payload.audio.pcm_data)
+            continue
+        leftover = (msg_type_q, payload)
+        break
+    if parts is None:
+        return response, leftover
+    merged = tts_pb2.SynthesizeResponse(
+        audio=tts_pb2.AudioChunk(
+            pcm_data=b"".join(parts),
+            sample_rate=head.sample_rate,
+            encoding=head.encoding,
+            channels=head.channels,
+            meta=head.meta,
+        )
+    )
+    return merged, leftover
 
 
 def _is_done_response(response: tts_pb2.SynthesizeResponse) -> bool:

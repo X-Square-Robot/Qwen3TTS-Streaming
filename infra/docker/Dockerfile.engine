@@ -32,6 +32,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     aiohttp \
     grpcio \
     grpcio-tools \
+    uvloop \
+    orjson \
     && pip install \
     --timeout 120 \
     --retries 10 \

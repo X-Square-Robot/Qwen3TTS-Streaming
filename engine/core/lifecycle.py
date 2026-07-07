@@ -24,6 +24,20 @@ from typing import Any
 
 from .observability import ObsLevel, is_enabled
 
+try:
+    # Rust JSON serializer, ~5-10x faster than stdlib for these small dicts.
+    # Lifecycle events serialize on hot threads (engine loop / gateway loop),
+    # so serialization cost is burst-TTFT relevant.
+    import orjson
+
+    def _dumps(event: dict) -> str:
+        return orjson.dumps(event, default=str).decode()
+except ImportError:  # pragma: no cover - orjson ships in the runtime image
+
+    def _dumps(event: dict) -> str:
+        return json.dumps(event, ensure_ascii=False, default=str)
+
+
 logger = logging.getLogger("engine.lifecycle")
 
 
@@ -88,4 +102,4 @@ class LifecycleLogger:
         if kwargs:
             event.update(kwargs)
 
-        logger.info(json.dumps(event, ensure_ascii=False, default=str))
+        logger.info(_dumps(event))
