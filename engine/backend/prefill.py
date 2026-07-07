@@ -954,8 +954,15 @@ class PrefillBuilder:
                     )
         # Views into one storage: trailing tensors are read-only downstream,
         # and one clone kernel per text token dominated cache-hit admission
-        # CPU cost during bursts.
-        trailing = list(trailing_text.split(1, dim=1))
+        # cost during bursts.  The explicit empty-guard matters: splitting a
+        # size-0 dim returns a 1-tuple containing an EMPTY tensor, and a
+        # ghost [1,0,H] trailing entry later broadcasts next_embed to zero
+        # width and crashes the decode launch (T==1 + include_eos=False,
+        # i.e. a streaming session whose first text chunk is one token).
+        if trailing_text.shape[1] > 0:
+            trailing = list(trailing_text.split(1, dim=1))
+        else:
+            trailing = []
         return self._move_tensor(request_prefill_embeds), self._move_trailing(trailing)
 
     def build_suffix_batch(

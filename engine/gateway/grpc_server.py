@@ -660,6 +660,17 @@ def _queue_message_to_response(
     return None
 
 
+# Meta keys every chunk carries (OutputPipeline.convert_audio_chunk stamps
+# chunk_index + timing_contract on all of them).  A chunk whose meta is a
+# subset of these carries no per-chunk diagnostics worth preserving and may
+# be absorbed into a merge; anything extra (first_audio_chunk, first-chunk
+# timing fields) blocks absorption so diagnostics survive as message heads.
+_MERGEABLE_META_KEYS = frozenset({"chunk_index", "timing_contract"})
+# Stop merging before the message approaches gRPC's default 4 MiB client
+# receive limit (a slow reader can backlog an entire session's audio).
+_COALESCE_MAX_BYTES = 256 * 1024
+
+
 def _coalesce_queued_audio(
     response: tts_pb2.SynthesizeResponse,
     audio_queue: asyncio.Queue,
@@ -669,10 +680,9 @@ def _coalesce_queued_audio(
     Under a wide burst the sender loop is the per-message bottleneck
     (~2.5k messages/s of protobuf build + stream write on the shared event
     loop).  Merging only what is ALREADY queued adds zero latency — the
-    backlog exists precisely when the loop is overloaded — and leaves the
-    first chunk (and any chunk carrying meta, e.g. first-chunk timing)
-    intact as a merge HEAD only, so diagnostics survive.  PCM bytes are
-    concatenated unchanged.
+    backlog exists precisely when the loop is overloaded.  The head keeps
+    its meta (e.g. first-chunk timing); absorbed chunks carry only the
+    standard per-chunk keys.  PCM bytes are concatenated unchanged.
 
     Returns (possibly-merged response, leftover queue message or None).
     The leftover is the first non-mergeable message popped during merging
@@ -683,12 +693,13 @@ def _coalesce_queued_audio(
     head = response.audio
     parts: list[bytes] | None = None
     leftover: tuple | None = None
-    while not audio_queue.empty():
+    total_bytes = len(head.pcm_data)
+    while total_bytes < _COALESCE_MAX_BYTES and not audio_queue.empty():
         msg_type_q, payload = audio_queue.get_nowait()
         if (
             msg_type_q == "audio"
             and payload.WhichOneof("response") == "audio"
-            and not payload.audio.meta
+            and set(payload.audio.meta) <= _MERGEABLE_META_KEYS
             and payload.audio.sample_rate == head.sample_rate
             and payload.audio.encoding == head.encoding
             and payload.audio.channels == head.channels
@@ -696,6 +707,7 @@ def _coalesce_queued_audio(
             if parts is None:
                 parts = [head.pcm_data]
             parts.append(payload.audio.pcm_data)
+            total_bytes += len(payload.audio.pcm_data)
             continue
         leftover = (msg_type_q, payload)
         break

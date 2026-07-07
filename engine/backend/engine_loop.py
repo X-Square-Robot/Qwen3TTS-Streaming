@@ -352,7 +352,15 @@ class EngineLoop:
             # --- Phase 4: While decode runs, do CPU housekeeping.
             # Draining here is what makes batch admission "natural": requests
             # arriving during a decode step accumulate as pending segments and
-            # are admitted together at the next step boundary (Phase 2). ---
+            # are admitted together at the next step boundary (Phase 2).
+            # Admission itself must NOT run here even for cache hits: measured
+            # twice (2026-07-07), mid-flight admission is ~4x slower per
+            # session than at the boundary — legacy-default-stream implicit
+            # sync stalls its H2D copies behind the running step, and on a
+            # dedicated side stream the caching allocator cannot reuse
+            # default-stream blocks and falls back to device-synchronizing
+            # cudaMalloc.  At the boundary the GPU is idle and the allocator
+            # hits its cache (~16-30ms per full wave post log-diet). ---
             self._drain_inbox()
             self._try_evict_idle_slots()
             self._try_timeout_sessions()
@@ -814,6 +822,14 @@ class EngineLoop:
         if not picked:
             return 0
 
+        return self._admit_picked(kv_pool, picked)
+
+    def _admit_picked(
+        self,
+        kv_pool,
+        picked: list[tuple[EngineSegment, EngineSessionGroup]],
+    ) -> int:
+        """Allocate, restore, and activate the picked cache-hit segments."""
         # -- Allocate slots (cheap metadata + async row zero) --
         batch_start = time.monotonic()
         t_collect = batch_start
@@ -2298,9 +2314,21 @@ class EngineLoop:
 
     @staticmethod
     def _deliver_result_batch(items: list) -> None:
-        """Runs on the asyncio loop: fan a step's results out in order."""
+        """Runs on the asyncio loop: fan a step's results out in order.
+
+        Per-item isolation matters: session result queues are bounded, and
+        one clogged session's QueueFull must only drop its own item — not
+        abort delivery for every other session in the same step batch.
+        """
         for q, result in items:
-            q.put_nowait(result)
+            try:
+                q.put_nowait(result)
+            except asyncio.QueueFull:
+                logger.warning(
+                    "Result queue full, dropping %s for session %s",
+                    getattr(result, "type", "?"),
+                    getattr(result, "session_id", "?"),
+                )
 
     # ------------------------------------------------------------------
     # Helpers

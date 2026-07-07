@@ -1568,15 +1568,22 @@ class Executor:
         slot.init_pingpong_buffers()
 
         slot.frame_idx = int(slot.frame_idx) + FUSED_CHUNK_T
-        slot.token_counts = raw.get(
-            "updated_token_counts",
-            torch.zeros(
+        # TRT output staging is reused across infer calls on the shared
+        # context (same name+shape rebinds the same buffer), so slot state
+        # must own copies — otherwise the NEXT serial prefill in the same
+        # admission pass clobbers this session's repetition-penalty counts
+        # and first decode input.
+        updated_tc = raw.get("updated_token_counts")
+        slot.token_counts = (
+            updated_tc.clone()
+            if updated_tc is not None
+            else torch.zeros(
                 1, self._config.codec_vocab_size, device=self._device, dtype=torch.int64
-            ),
+            )
         )
         codec_sum = raw.get("codec_sum")
         if codec_sum is not None:
-            slot.next_embed = codec_sum
+            slot.next_embed = codec_sum.clone()
             slot.last_codec_sum = None
 
         wav = raw.get("wav")
@@ -1786,18 +1793,21 @@ class Executor:
         slot.init_pingpong_buffers()
 
         slot.frame_idx = int(slot.frame_idx) + FUSED_CHUNK_T
-        slot.token_counts = raw.get(
-            "updated_token_counts",
-            torch.zeros(
+        # Same staging-reuse hazard as prefill(): own copies, not views.
+        updated_tc = raw.get("updated_token_counts")
+        slot.token_counts = (
+            updated_tc.clone()
+            if updated_tc is not None
+            else torch.zeros(
                 1,
                 self._config.codec_vocab_size,
                 device=self._device,
                 dtype=torch.int64,
-            ),
+            )
         )
         codec_sum = raw.get("codec_sum")
         if codec_sum is not None:
-            slot.next_embed = codec_sum
+            slot.next_embed = codec_sum.clone()
             slot.last_codec_sum = None
 
         wav = raw.get("wav")

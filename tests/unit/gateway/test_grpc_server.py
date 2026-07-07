@@ -516,3 +516,89 @@ def test_streaming_audio_response_includes_timing_meta():
     assert done_response.event.meta["client_request_ts_ms"] == "1710000000000"
     assert done_response.event.meta["client_text_ts_ms"] == "1710000000100"
     assert done_response.event.meta["client_end_ts_ms"] == "1710000000200"
+
+
+# ---------------------------------------------------------------------------
+# Audio chunk coalescing
+# ---------------------------------------------------------------------------
+
+from engine.gateway.grpc_server import (  # noqa: E402
+    _COALESCE_MAX_BYTES,
+    _coalesce_queued_audio,
+)
+
+
+def _audio_response(pcm: bytes, meta: dict[str, str] | None = None):
+    return tts_pb2.SynthesizeResponse(
+        audio=tts_pb2.AudioChunk(
+            pcm_data=pcm,
+            sample_rate=24000,
+            encoding=tts_pb2.AUDIO_ENCODING_PCM_F32,
+            channels=1,
+            meta=meta if meta is not None else {},
+        )
+    )
+
+
+def _std_meta(idx: int) -> dict[str, str]:
+    # Every pipeline chunk carries these two keys (convert_audio_chunk).
+    return {"chunk_index": str(idx), "timing_contract": "v1"}
+
+
+def test_coalesce_merges_backlogged_standard_chunks():
+    q: asyncio.Queue = asyncio.Queue()
+    head = _audio_response(b"AA", meta={**_std_meta(0), "first_audio_chunk": "true"})
+    q.put_nowait(("audio", _audio_response(b"BB", meta=_std_meta(1))))
+    q.put_nowait(("audio", _audio_response(b"CC", meta=_std_meta(2))))
+
+    merged, leftover = _coalesce_queued_audio(head, q)
+
+    assert merged.audio.pcm_data == b"AABBCC"
+    # Head meta (first-chunk timing marker) survives the merge.
+    assert merged.audio.meta["first_audio_chunk"] == "true"
+    assert leftover is None
+    assert q.empty()
+
+
+def test_coalesce_stops_at_event_and_returns_it_as_leftover():
+    q: asyncio.Queue = asyncio.Queue()
+    head = _audio_response(b"AA", meta=_std_meta(0))
+    q.put_nowait(("audio", _audio_response(b"BB", meta=_std_meta(1))))
+    done_evt = tts_pb2.SynthesizeResponse(
+        event=tts_pb2.StreamEvent(type="done", session_id="s1")
+    )
+    q.put_nowait(("event", done_evt))
+
+    merged, leftover = _coalesce_queued_audio(head, q)
+
+    assert merged.audio.pcm_data == b"AABB"
+    assert leftover == ("event", done_evt)
+
+
+def test_coalesce_does_not_absorb_chunk_with_diagnostic_meta():
+    q: asyncio.Queue = asyncio.Queue()
+    head = _audio_response(b"AA", meta=_std_meta(0))
+    special = _audio_response(
+        b"BB", meta={**_std_meta(1), "first_audio_chunk": "true"}
+    )
+    q.put_nowait(("audio", special))
+
+    merged, leftover = _coalesce_queued_audio(head, q)
+
+    assert merged.audio.pcm_data == b"AA"
+    assert leftover == ("audio", special)
+
+
+def test_coalesce_respects_byte_cap():
+    q: asyncio.Queue = asyncio.Queue()
+    big = b"x" * (_COALESCE_MAX_BYTES // 2)
+    head = _audio_response(big, meta=_std_meta(0))
+    q.put_nowait(("audio", _audio_response(big, meta=_std_meta(1))))
+    q.put_nowait(("audio", _audio_response(big, meta=_std_meta(2))))
+
+    merged, leftover = _coalesce_queued_audio(head, q)
+
+    # First absorption crosses the cap; the third chunk must stay queued.
+    assert merged.audio.pcm_data == big + big
+    assert leftover is None
+    assert q.qsize() == 1

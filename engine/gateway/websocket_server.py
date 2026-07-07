@@ -134,9 +134,18 @@ class WebSocketGateway:
                 if outbound_task in done:
                     frame = outbound_task.result()
                     outbound_task = None
-                    await _send_frame(ws, frame)
-                    if _is_terminal_frame(frame):
-                        return ws
+                    while True:
+                        leftover = None
+                        if frame.get("type") == "audio":
+                            frame, leftover = _coalesce_queued_audio_frames(
+                                frame, outbound_queue
+                            )
+                        await _send_frame(ws, frame)
+                        if _is_terminal_frame(frame):
+                            return ws
+                        if leftover is None:
+                            break
+                        frame = leftover
 
                 if request_task in done:
                     kind, payload = request_task.result()
@@ -425,6 +434,52 @@ class WebSocketGateway:
     async def _drain_available_messages(self, outbound_queue: asyncio.Queue):
         while not outbound_queue.empty():
             yield outbound_queue.get_nowait()
+
+
+def _coalesce_queued_audio_frames(
+    frame: dict[str, Any],
+    outbound_queue: asyncio.Queue,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """WebSocket twin of grpc_server._coalesce_queued_audio.
+
+    Merges backlogged audio frames (zero added latency: only what is
+    already queued), preserving the head's meta and stopping at any frame
+    carrying non-standard meta, a non-audio frame, or the byte cap.
+    Returns (possibly-merged frame, leftover frame or None); the leftover
+    MUST be processed by the caller before waiting on the queue again.
+    """
+    from .grpc_server import _COALESCE_MAX_BYTES, _MERGEABLE_META_KEYS
+
+    if frame.get("type") != "audio":
+        return frame, None
+    head = frame["audio"]
+    parts: list[bytes] | None = None
+    leftover: dict[str, Any] | None = None
+    total_bytes = len(head["pcm_data"])
+    while total_bytes < _COALESCE_MAX_BYTES and not outbound_queue.empty():
+        nxt = outbound_queue.get_nowait()
+        audio = nxt.get("audio") if nxt.get("type") == "audio" else None
+        if (
+            audio is not None
+            and set(audio.get("meta") or ()) <= _MERGEABLE_META_KEYS
+            and audio["sample_rate"] == head["sample_rate"]
+            and audio["encoding"] == head["encoding"]
+            and audio["channels"] == head["channels"]
+        ):
+            if parts is None:
+                parts = [head["pcm_data"]]
+            parts.append(audio["pcm_data"])
+            total_bytes += len(audio["pcm_data"])
+            continue
+        leftover = nxt
+        break
+    if parts is None:
+        return frame, leftover
+    merged_audio = dict(head)
+    merged_audio["pcm_data"] = b"".join(parts)
+    merged = dict(frame)
+    merged["audio"] = merged_audio
+    return merged, leftover
 
 
 def _make_audio_frame(
