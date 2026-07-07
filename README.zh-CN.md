@@ -40,10 +40,10 @@ Qwen3TTS-Streaming（token 级）
            │       │      │        │        │        │
            ▼       ▼      ▼        ▼        ▼        ▼
          chunk   chunk  chunk    chunk    chunk    chunk   ──▶  🔊
-                                                                 首个 chunk 最快 13ms 到达
+                                                                 首个 chunk ~15ms 到达
 ```
 
-**13ms** 比一次 60Hz 屏幕刷新（16.7ms）还快，远低于人眼一次眨眼所需的约 100–400ms——第一个音频 chunk 播放时，你甚至还来不及感知到等待。128 路并发下均值仍为 ~180ms。这两个数字都带有前提条件，具体依赖见[性能声明](#性能声明)。
+服务端 TTFT **14.9 ± 0.2ms**（n=50，最低 14.5ms），比一次 60Hz 屏幕刷新（16.7ms）还快，远低于人眼一次眨眼所需的约 100–400ms——第一个音频 chunk 播放时，你甚至还来不及感知到等待。128 路同时突发时客户端均值为 266–334ms（随传输方式而异）。这两个数字都带有前提条件，具体依赖见[性能声明](#性能声明)。
 
 ### 为自回归流式定制的调度器
 
@@ -90,7 +90,7 @@ Qwen3TTS-Streaming —— 每个 decode step 1 个融合 engine
 
 ## 亮点
 
-- ⚡ **Token 级流式，而非句子级** —— 首个音频 chunk 最快 13ms 到达，128 路并发均值 ~180ms
+- ⚡ **Token 级流式，而非句子级** —— 首个音频 chunk ~15ms 到达（服务端 TTFT 14.9 ± 0.2ms），128 路突发均值 266–334ms
 - 🧩 **为自回归 decode 定制的调度器**，而非 Triton 的无状态 `dynamic_batching` —— 连续批处理 + `WAIT_TEXT` 暂停/恢复
 - 🌐 **编译一次，到处部署** —— 采集目标机指纹、编译匹配产物包、目标机零 GPU 工具链导入
 - 🧵 **每个 decode step 一个 TensorRT engine，而非四个** —— talker + Code Predictor + codec-embedding 求和 + code2wav 融合进一张导出图，导图到测试全流程都在本仓库
@@ -127,10 +127,10 @@ Qwen3TTS-Streaming —— 每个 decode step 1 个融合 engine
 
 | 场景 | TTFT | 前提条件 |
 | --- | --- | --- |
-| 单路请求，warm engine | **13ms**（最低观测值） | 指定硬件、warm engine、prefix/cache 命中、单路请求、本地链路 |
-| 128 路并发（均值） | **180ms** | 并发压测口径——硬件、cache、输入、profile、采样参数、客户端测量方式均已固定 |
+| 单路请求，warm engine | 服务端 **14.9 ± 0.2ms**（min 14.5，p99 15.3，n=50）；本地复用 gRPC channel 的客户端侧 16.0 ± 0.3ms | RTX 5090、warm engine、prefix-cache 命中、单路请求、本地链路、全 bf16 `custom-1.7b`、batch=128 profile |
+| 128 路并发（同时突发，均值） | **266–334ms** 随传输方式而异（engine-websocket 266 / triton-grpc 309 / engine-grpc 334;p99 389–672ms） | 同一套栈、单服务隔离运行、128 路全部接纳并同批解码;突发到达是最坏情况——错峰到达时 TTFT 更低 |
 
-> ⚠️ **128 路并发是压测出来的天花板，不是生产安全值。** 经 2026-07-06 的 decode 优化（CP 展开图内 KV + CUDA graph decode 回放）后，压测 GPU（RTX 5090，全 bf16 引擎）在 128 路并发下每 ~80ms 音频帧的解码耗时约 70ms——RTF（音频时长 / 实际解码耗时）≈ 1.14，即约 14% 的实时余量（此前 RTF ≈ 1 无余量）。这点余量能吸收正常抖动，但持续的负载尖峰或偏重的请求仍可能把它吃掉。生产环境的并发规划仍应在 128 之下留足 buffer，不要顶格跑；96 路时 RTF ≈ 1.47，余量更充足。
+> ⚠️ **128 路并发是压测出来的天花板，不是生产安全值。** 经 2026-07-06 的 decode 优化（CP 展开图内 KV + CUDA graph decode 回放 + KV gather arena 化）后，压测 GPU（RTX 5090，全 bf16 引擎，batch=128 profile）在 128 路并发下每 80ms 音频帧的解码耗时 67.5ms——RTF（音频时长 / 实际解码耗时）≈ 1.19，即约 19% 的实时余量（优化前为 119.8ms/帧，RTF ≈ 0.67,低于实时）。这点余量能吸收正常抖动，但持续的负载尖峰或偏重的请求仍可能把它吃掉。生产环境的并发规划仍应在 128 之下留足 buffer，不要顶格跑；64 路时解码耗时 36.8ms（RTF ≈ 2.2），余量充足。完整拆解与原始数据见[服务性能压测报告](docs/dev/investigation/serving_performance_benchmark.zh-CN.md)。
 
 - standalone `engine-grpc` TTFT 默认按 ready/reused gRPC channel 统计，和 WebSocket 一样不把客户端建连成本计入首包延迟；cold/lazy channel 会额外增加约 10ms。
 - WebUI 只在结果 source 标记为 `live_triton` 或 `live_engine_websocket` 且带 `audio` 字段时代表可回放的实时合成音频。

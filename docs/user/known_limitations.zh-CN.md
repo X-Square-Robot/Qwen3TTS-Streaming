@@ -40,7 +40,7 @@
 
 ## 性能数字限制
 
-`13ms TTFT` 不是通用承诺。它通常需要同时满足：
+单路 TTFT 数字（实测 server TTFT 14.9 ± 0.2ms;见 [Benchmark 方法](benchmark_methodology.zh-CN.md)）不是通用承诺。它通常需要同时满足：
 
 - engine 已 warm up。
 - prefix/cache 命中。

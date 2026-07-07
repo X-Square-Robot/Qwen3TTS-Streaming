@@ -37,9 +37,9 @@
 - 测量位置：服务端、adapter、客户端。
 - 是否使用 fixture trace。
 
-## 13ms TTFT 的口径
+## 单路 TTFT 的口径
 
-`13ms TTFT` 只能描述为“特定条件下最低观测值”，不能描述为默认性能或稳定承诺。该数字需要同时满足：
+单路 TTFT 只能描述为"特定条件下的实测分布"，不能描述为默认性能或稳定承诺。当前实测参考值（2026-07-06，RTX 5090，全 bf16 `custom-1.7b`，batch=128 profile）为 **server TTFT 14.9 ± 0.2ms（min 14.5，p99 15.3，n=50）**——完整拆解与原始数据见[服务性能压测报告](../dev/investigation/serving_performance_benchmark.zh-CN.md)。历史上的"13ms"是旧版引擎构建的最低观测值，不应再引用。任何此类数字都需要同时满足：
 
 - cache 命中。
 - engine 已 warm。
@@ -51,13 +51,13 @@
 建议公开写法：
 
 ```text
-在指定硬件、warm engine、cache hit、单路请求、custom-1.7b profile 下，最低观测 server TTFT 约 13ms。
+在指定硬件、warm engine、cache hit、单路请求、custom-1.7b profile 下，实测 server TTFT 为 14.9 ± 0.2ms（min 14.5ms，n=50）。
 ```
 
 不建议写法：
 
 ```text
-TTFT 13ms。
+TTFT 15ms。
 ```
 
 ## 128 路并发口径

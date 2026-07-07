@@ -37,9 +37,9 @@ Public benchmarks must record:
 - Measurement location: server, adapter, client.
 - Whether a fixture trace is used.
 
-## The 13ms TTFT Convention
+## The Single-Stream TTFT Convention
 
-`13ms TTFT` can only be described as a "lowest observed value under specific conditions", not as default performance or a stable guarantee. This number requires all of the following to hold simultaneously:
+Single-stream TTFT can only be described as a measured distribution under specific conditions, not as default performance or a stable guarantee. The current measured reference (2026-07-06, RTX 5090, all-bf16 `custom-1.7b`, batch=128 profile) is a **server TTFT of 14.9 ± 0.2ms (min 14.5, p99 15.3, n=50)** — see the [serving performance benchmark](../dev/investigation/serving_performance_benchmark.md) for the full breakdown and raw data. The historical "13ms" figure was the lowest observed value on an older engine build and should no longer be quoted. Any such number requires all of the following to hold simultaneously:
 
 - Cache hit.
 - The engine is already warm.
@@ -51,13 +51,13 @@ Public benchmarks must record:
 Recommended public wording:
 
 ```text
-Under the specified hardware, a warm engine, a cache hit, a single-stream request, and the custom-1.7b profile, the lowest observed server TTFT is about 13ms.
+Under the specified hardware, a warm engine, a cache hit, a single-stream request, and the custom-1.7b profile, the measured server TTFT is 14.9 ± 0.2ms (min 14.5ms, n=50).
 ```
 
 Discouraged wording:
 
 ```text
-TTFT 13ms.
+TTFT 15ms.
 ```
 
 ## The 128-Stream Concurrency Convention

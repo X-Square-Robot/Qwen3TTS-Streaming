@@ -50,7 +50,7 @@ RELEASE_METADATA = {
 STREAMING_LIMITATIONS = [
     "The current stable open-source scope is focused on the custom-1.7b/custom_voice path.",
     "Streaming mode may still hallucinate, repeat, skip, or insert text that was not provided, especially on longer inputs.",
-    "The 13ms TTFT figure is only the lowest observed value under specific hardware, a warm engine, a cache hit, and a single request.",
+    "The ~15ms single-stream TTFT figure (measured server TTFT 14.9 +/- 0.2ms) only holds under specific hardware, a warm engine, a cache hit, and a single request.",
     "The upstream token rate in LLM PK is client-side simulation, intended only to demonstrate the perceived difference between streaming and offline TTS.",
 ]
 
