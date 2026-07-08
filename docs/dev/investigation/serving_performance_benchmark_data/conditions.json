@@ -6,10 +6,11 @@
     "driver_version": "580.126.20"
   },
   "software": {
-    "engine_image": "qwen3-engine:25.10 (rebuilt 2026-07-07 with the optimization commits below)",
+    "engine_image": "qwen3-engine:25.10 (NGC 25.10 base nvcr.io/nvidia/tensorrt:25.10-py3, verified via image env NVIDIA_TENSORRT_VERSION=25.10; rebuilt 2026-07-08, full-bf16)",
     "triton_image": "qwen3tts-streaming:25.10 (Triton dataset from 2026-07-06, see dataset_provenance)",
     "tensorrt_version": "10.13.3.9",
     "ngc_tag": "25.10",
+    "cuda_version": "13.0.2.006",
     "engine_optimizations_included": [
       "ff8dc4f feat(export): CP 15-stage unroll keeps KV cache (~3x decode compute reduction)",
       "c9c63c2 perf(engine): CUDA-graph decode replay (eliminates ~2700 kernel launches/step of CPU cost)",
@@ -22,12 +23,13 @@
       "cc58c6a fix(engine,gateway): post-review audit fix batch (ghost-trailing crash, prefill staging aliasing, per-session delivery isolation, chunk coalescing actually taking effect)",
       "8596996 perf(engine): batched p3_launch (bit-exact), full-width decode iteration 48 -> 41.5 ms",
       "b80c38d perf(server): session open only offloads to a thread when ref-audio feature extraction is needed"
-    ]
+    ],
+    "runtime_note": "This dataset was re-collected 2026-07-08 on a fresh full-bf16 rebuild at repo HEAD 7db42d7. The two commits since the b80c38d baseline (9ad7cb0, 7db42d7) change only build-time precision defaults and docs, not engine runtime code, so the runtime is identical to the b80c38d baseline; the refreshed engine numbers reproduce the 2026-07-08 (ca6ddb9) dataset within trial-to-trial variance."
   },
   "dataset_provenance": {
-    "engine_rows": "collected 2026-07-07/08 on the engine build above (includes b80cf45/2a9578b/a8e7274 plus the round-3 commits cc58c6a/8596996/b80c38d); trials engine-01..03",
+    "engine_rows": "re-collected 2026-07-08 on the full-bf16 rebuild above; trials bf16refresh-engine-01..03 (this refresh reproduces the prior ca6ddb9 engine dataset within noise)",
     "triton_rows": "retained from the 2026-07-06 dataset (engine core WITHOUT b80cf45 and every later optimization commit); trials triton-01..03. The Triton BLS path wraps the same engine core, so the engine-side commits would improve it too -- its rows OVERSTATE current Triton latency and are kept only as the last measured reference.",
-    "note": "raw_requests.csv = one representative engine trial (engine-01, 2026-07-07) + one representative Triton trial (triton-01, 2026-07-06)"
+    "note": "raw_requests.csv = one representative engine trial (bf16refresh-engine-01, 2026-07-08) + one representative Triton trial (triton-01, 2026-07-06)"
   },
   "metric_semantics_change": {
     "prefill_ms": "As of b80cf45 (batched burst admission), prefill_started/prefill_completed bracket the whole batched admission pass (slot allocation + batched prefix-cache restore + batched suffix embed for every session admitted in that pass), not one session's own suffix compute. Under burst load prefill_ms therefore reads as tens of ms per session (engine rows) even though per-session GPU work is unchanged; at concurrency 1 the pass contains a single session and the value is comparable to the old semantics (~1ms). Triton rows predate the change and use the old per-session semantics. prefill_ms values are NOT comparable across the two datasets at load."
@@ -41,7 +43,7 @@
     "code2wav_precision": "bf16",
     "engine_dtype": "bf16",
     "triton_io_float_dtype": "bf16",
-    "note": "Full-bf16 engine. cp=bf16 validated hallucination-free on the internal 0701 checkpoint (0/100 deterministic probe; see docs/dev/investigation/streaming_hallucination.md). Re-probed 0/100 on 2026-07-07 on this exact build immediately before this dataset was collected (runs=100, duration min 9.04s / median 10.08s / max 10.72s)."
+    "note": "Full-bf16 engine (the shipped default). cp=bf16 validated hallucination-free on the internal 0701 checkpoint (0/100 deterministic probe; see docs/dev/investigation/streaming_hallucination.md). Re-probed 0/100 on 2026-07-08 on this exact rebuild immediately before this dataset was collected (runs=100, duration min 9.36s / median 10.08s / max 10.88s). A code2wav=fp16 variant was also evaluated 2026-07-08 and rejected as the default: it speeds single-stream decode (-21% at c1) but regresses the b128 decode step (+8%, crossover ~c32); kept as a low-concurrency opt-in (see engine_overview.md 1.5)."
   },
   "engine_profile": {
     "max_batch_size": 128,
@@ -82,6 +84,7 @@
     "connection_modes": ["reuse", "cold"],
     "connection_mode_measured_rounds": 50,
     "connection_mode_warmup_rounds": 5,
+    "engine_trial_ids": ["bf16refresh-engine-01", "bf16refresh-engine-02", "bf16refresh-engine-03"],
     "total_requests": 51981,
     "engine_requests": 35022,
     "triton_requests": 16959,
@@ -90,21 +93,21 @@
   },
   "supplementary_measurements": {
     "server_ttft_single_stream_warm_ms": {
-      "basis": "server_session_create_to_first_raw_audio_ms from the done-event meta (same basis as the historical '13ms' claim), re-measured 2026-07-08 on this engine build",
+      "basis": "server_session_create_to_first_raw_audio_ms from the done-event meta (same basis as the historical '13ms' claim), re-measured 2026-07-08 on this rebuild",
       "n": 50,
-      "min": 14.46,
-      "p50": 14.85,
-      "avg": 14.96,
-      "stdev": 0.28,
-      "p99": 15.55,
-      "max": 15.67,
-      "note": "statistically unchanged vs the 2026-07-07 measurement (avg 14.92, stdev 0.26) -- the round-3 commits do not touch the single-stream path"
+      "min": 14.41,
+      "p50": 14.80,
+      "avg": 14.89,
+      "stdev": 0.34,
+      "p99": 15.85,
+      "max": 16.25,
+      "note": "statistically unchanged vs the 2026-07-07/08 measurements (avg 14.92-14.96) -- the round-3 commits and the rebuild do not touch the single-stream path"
     },
     "burst_ramp_decomposition": {
       "tool": "workspace/ttft_ramp_decompose.py, 128 concurrent sessions, shared gRPC channel, warm engine",
       "runs": 2,
       "client_ttft_avg_ms": [285.8, 287.9],
-      "note": "per-stage table in the report's 'Where burst TTFT goes' section; measured 2026-07-07 on the round-2 build (predates cc58c6a/8596996/b80c38d) -- the mechanism analysis still applies, headline TTFT has since improved"
+      "note": "per-stage table in the report's 'Where burst TTFT goes' section; measured 2026-07-07 on the round-2 build (predates cc58c6a/8596996/b80c38d) and RETAINED -- the mechanism analysis still applies, headline TTFT has since settled at grpc ~275ms / ws ~242ms"
     }
   }
 }
