@@ -67,17 +67,22 @@ TRITON_IO_FLOAT_DTYPE="${TRITON_IO_FLOAT_DTYPE:-}"
 # now follows ENGINE_DTYPE; set CP_PRECISION=fp32 to reproduce the historical
 # mixed-precision build or to debug numerical parity against ORT/PyTorch.
 #
-# Code2Wav (default fp16): TRT 10.13 on sm120 has no optimized bf16 conv kernel
-# (microbench fp16 2.5-3.4x faster; conv768 k7 0.509->0.148ms), so a bf16 c2w
-# vocoder dominates the decode step. c2w=fp16 pins only /code2wav/* to fp16 (the
-# vocoder does not flow back into the talker sampling path — verified halluprobe
-# 0/100 + normal audio level/spectrum, commit 23127b7) and cuts that cost hard.
-# The mixed build auto-selects --precisionConstraints=prefer (see below) so the
-# c2w Pad/Slice glue that lacks an fp16 kernel falls back instead of failing.
-# Set CODE2WAV_PRECISION=bf16 for a uniform-bf16 numerical-parity build.
+# Code2Wav (empty = follow ENGINE_DTYPE, i.e. bf16 — full-bf16 is the default):
+# TRT 10.13 on sm120 has no optimized bf16 conv kernel (microbench fp16 2.5-3.4x
+# faster in isolation), so CODE2WAV_PRECISION=fp16 is available as an opt-in — it
+# pins only /code2wav/* to fp16 (the vocoder does not flow back into talker
+# sampling; verified halluprobe 0/100 + normal audio, commit 23127b7) and the
+# mixed build auto-selects --precisionConstraints=prefer (see below) for the c2w
+# glue that lacks an fp16 kernel.
+# WARNING: fp16 is a WIN only at LOW concurrency (decode -21% at c1, -8% at c16)
+# and a LOSS at HIGH concurrency (decode +8% at c128, crossover ~c32) — the
+# per-step bf16<->fp16 c2w-state reformats scale with batch and overwhelm the
+# conv win (measured 2026-07-08, see docs/dev/architecture/engine_overview.md
+# §1.5). Keep the default bf16 for the batch-128 serving profile; use
+# CODE2WAV_PRECISION=fp16 only for single-stream / low-concurrency latency.
 BACKBONE_PRECISION="${BACKBONE_PRECISION:-}"
 CP_PRECISION="${CP_PRECISION:-}"
-CODE2WAV_PRECISION="${CODE2WAV_PRECISION:-fp16}"
+CODE2WAV_PRECISION="${CODE2WAV_PRECISION:-}"
 # Exported so the make-bundle manifest writer (a python heredoc subprocess) can
 # persist these into build_manifest.json for the cross-host build to honor.
 export BACKBONE_PRECISION CP_PRECISION CODE2WAV_PRECISION
@@ -750,7 +755,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --dtype bf16|fp16|fp32|fp8  Engine precision (default: bfloat16)"
             echo "  --backbone-precision T      Talker backbone precision (default: follow --dtype)"
             echo "  --cp-precision T            Code Predictor precision (default: follow --dtype, i.e. bf16)"
-            echo "  --code2wav-precision T      Code2Wav precision (default: fp16 — faster conv; bf16 for uniform build)"
+            echo "  --code2wav-precision T      Code2Wav precision (default: follow --dtype/bf16; fp16 opt-in, low-concurrency only)"
             echo "  --triton-io-float-dtype T   Float I/O dtype (default: same as --dtype)"
             echo "  --dry-run              Show docker commands without executing"
             echo "  --pull-only            Pull the container image and exit"

@@ -107,18 +107,18 @@ BUILD_IMAGE_EXPLICIT=false
 ENGINE_DTYPE="${ENGINE_DTYPE:-}"
 TRITON_IO_FLOAT_DTYPE="${TRITON_IO_FLOAT_DTYPE:-}"
 # Per-submodule compute precision for the fused engine (backbone / code-predictor
-# / code2wav build independently). Defaults match build_engines.sh:
-#   backbone / cp: empty = follow ENGINE_DTYPE (bf16). 0701 retrain made full-bf16
-#     hallucination-free (0/100), so cp no longer needs fp32; set CP_PRECISION=fp32
-#     only for numerical-parity debugging.
-#   code2wav: fp16 by default — TRT bf16 conv has no tensor-core kernel, so fp16
-#     is the fast c2w path (verified 0/100 + normal audio, commit 23127b7). Pinned
-#     explicitly (not empty) so make-bundle's build_manifest.json records fp16 and
-#     the cross-host build reproduces it — an empty value would be re-defaulted to
-#     ENGINE_DTYPE (bf16) downstream, leaving the manifest disagreeing with intent.
+# / code2wav build independently). Defaults match build_engines.sh — all empty =
+# follow ENGINE_DTYPE (bf16), i.e. a full-bf16 engine:
+#   cp: 0701 retrain made full-bf16 hallucination-free (0/100), so cp no longer
+#     needs fp32; set CP_PRECISION=fp32 only for numerical-parity debugging.
+#   code2wav: fp16 is available as an opt-in (TRT bf16 conv has no tensor-core
+#     kernel) but WINS only at low concurrency and LOSES at high concurrency
+#     (decode +8% at c128, crossover ~c32; measured 2026-07-08). Default stays
+#     bf16 for the batch-128 serving profile; set CODE2WAV_PRECISION=fp16 only for
+#     single-stream / low-concurrency latency.
 BACKBONE_PRECISION="${BACKBONE_PRECISION:-}"
 CP_PRECISION="${CP_PRECISION:-}"
-CODE2WAV_PRECISION="${CODE2WAV_PRECISION:-fp16}"
+CODE2WAV_PRECISION="${CODE2WAV_PRECISION:-}"
 BUNDLE_OUT="${BUNDLE_OUT:-${REPO_ROOT}/workspace/engine_build_bundle.tar.zst}"
 ARTIFACT_IN=""
 REMOTE_HOST=""
@@ -223,8 +223,8 @@ Phase B options (forwarded to build_engines.sh):
   --backbone-precision <type>   Talker backbone precision (default: follow --dtype)
   --cp-precision <type>         Code Predictor precision (default: follow --dtype, i.e. bf16;
                           use fp32 only for numerical-parity debugging)
-  --code2wav-precision <type>   Code2Wav precision (default: fp16 — faster c2w conv on
-                          TRT; per-layer fallback via prefer. Use bf16 for a uniform build)
+  --code2wav-precision <type>   Code2Wav precision (default: follow --dtype, i.e. bf16).
+                          fp16 opt-in: faster only at LOW concurrency, +8% decode at c128
   --triton-io-float-dtype <type>
                           Float I/O dtype for generated TRT/Triton configs
                           Default: same as --dtype. Use fp32 if Triton reports dtype mismatch
@@ -636,9 +636,9 @@ run_phase_b() {
     local build_device="${BUILD_GPU_DEVICE:-${GLOBAL_DEVICE:-auto}}"
 
     # Propagate per-submodule precision to build_engines.sh (invoked by
-    # compile_engines_in_bundle) via its env interface. Empty backbone/cp =
-    # follow dtype (bf16); CODE2WAV_PRECISION defaults to fp16 (the fast c2w
-    # path), matching build_engines.sh.
+    # compile_engines_in_bundle) via its env interface. All empty = follow dtype
+    # (bf16), a full-bf16 engine; CODE2WAV_PRECISION=fp16 is a low-concurrency
+    # opt-in only (see the defaults comment near the top).
     export BACKBONE_PRECISION CP_PRECISION CODE2WAV_PRECISION
 
     # Resolve build profile defaults from target GPU memory.  Same logic
@@ -998,14 +998,14 @@ _prompt_build_dtypes() {
     echo "  精度配置 (阶段 B) — fused 引擎按子模块独立编译"
     echo "    基础精度: TensorRT builder/compute 精度，作为各子模块默认"
     echo "    Backbone / Code Predictor / Code2Wav 可单独覆盖 (空 = 跟随基础)"
-    echo "    最佳性能配置: Code Predictor 跟随基础 (bf16)，Code2Wav 用 fp16"
-    echo "    Code2Wav 推荐 fp16：TRT bf16 卷积无 tensor-core kernel，fp16 更快 (已验证 0/100)"
+    echo "    默认全 bf16 (各子模块跟随基础)——batch-128 服务档最优"
+    echo "    Code2Wav fp16 为低并发 opt-in：仅低并发更快，c128 反而 decode +8% (交叉 ~c32)"
     echo "    I/O 精度: fused TensorRT/Triton float binding dtype，默认跟随基础精度"
 
     ENGINE_DTYPE=$(_prompt_with_default "  基础引擎精度 bf16|fp16|fp32|fp8" "$engine_default")
     BACKBONE_PRECISION=$(_prompt_with_default "  Backbone 精度 (空=跟随基础)" "${BACKBONE_PRECISION:-}")
     CP_PRECISION=$(_prompt_with_default "  Code Predictor 精度 (空=跟随基础 bf16；fp32 仅数值对齐调试)" "${CP_PRECISION:-}")
-    CODE2WAV_PRECISION=$(_prompt_with_default "  Code2Wav 精度 (推荐 fp16)" "${CODE2WAV_PRECISION:-fp16}")
+    CODE2WAV_PRECISION=$(_prompt_with_default "  Code2Wav 精度 (空=跟随基础 bf16；fp16 仅低并发)" "${CODE2WAV_PRECISION:-}")
     local io_default="${TRITON_IO_FLOAT_DTYPE:-$(_default_triton_io_dtype "$ENGINE_DTYPE")}"
     TRITON_IO_FLOAT_DTYPE=$(_prompt_with_default "  浮点 I/O 精度 bf16|fp16|fp32|fp8" "$io_default")
 }
@@ -1106,7 +1106,6 @@ interactive_cross_host_guide() {
     bash scripts/bash/autorun.sh make-bundle -m custom-1.7b \\
       --target-profile target_profile.json \\
       --dtype bf16 \\
-      --code2wav-precision fp16 \\
       --triton-io-float-dtype bf16 \\
       --out workspace/engine_build_bundle.tar.zst
 
@@ -1130,7 +1129,6 @@ interactive_cross_host_guide() {
     bash scripts/bash/autorun.sh remote-build -m custom-1.7b \\
       --target-profile target_profile.json \\
       --dtype bf16 \\
-      --code2wav-precision fp16 \\
       --triton-io-float-dtype bf16 \\
       --remote-host user@your-gpu-host \\
       --remote-workdir /tmp/qwen3-engine-build
@@ -1163,10 +1161,10 @@ show_run_banner() {
     [ -n "$MODEL_VERSION" ] && echo "  版本:      $MODEL_VERSION"
     [ -n "${GATEWAY_MODE:-}" ] && echo "  阶段 C:    $GATEWAY_MODE"
     [ -n "$ENGINE_DTYPE" ] && echo "  基础精度:  $ENGINE_DTYPE"
-    # Per-submodule precision (empty backbone/cp = follow base; c2w defaults fp16).
+    # Per-submodule precision (empty = follow base; c2w=fp16 is a low-concurrency opt-in).
     echo "  Backbone:  ${BACKBONE_PRECISION:-${ENGINE_DTYPE:-bf16} (跟随基础)}"
     echo "  CodePred:  ${CP_PRECISION:-${ENGINE_DTYPE:-bf16} (跟随基础)}"
-    echo "  Code2Wav:  ${CODE2WAV_PRECISION:-fp16}$([ "${CODE2WAV_PRECISION:-fp16}" = fp16 ] && echo ' (提速默认)')"
+    echo "  Code2Wav:  ${CODE2WAV_PRECISION:-${ENGINE_DTYPE:-bf16} (跟随基础)}$([ "${CODE2WAV_PRECISION:-}" = fp16 ] && echo ' (低并发 opt-in)')"
     if [ -n "$TRITON_IO_FLOAT_DTYPE" ]; then
         echo "  I/O 精度:  $TRITON_IO_FLOAT_DTYPE"
     elif [ -n "$ENGINE_DTYPE" ]; then

@@ -44,7 +44,7 @@ report format follows [`docs/user/benchmark_methodology.md`](../../user/benchmar
 | Hallucination gate | deterministic probe re-run **0/100** on this exact build immediately before data collection (duration min 9.04 s / median 10.08 s / max 10.72 s) |
 | Harness | [`tools/validation/perf_matrix_sdk.py`](../../../tools/validation/perf_matrix_sdk.py), built on the `qwen3tts` client SDK |
 
-> **Post-run note.** This dataset was collected on a **full-bf16** engine. Since collection, `code2wav` defaults to **fp16** (the fast c2w conv path on sm120 — see [engine_overview §1.5](../architecture/engine_overview.md)), a further per-decode-step win not reflected in the numbers below; treat these as a conservative floor for the current default. `cp` remains bf16 in both.
+> **Note.** This dataset is the **shipped default: full-bf16** (backbone/cp/code2wav all bf16). A `code2wav=fp16` variant was evaluated on 2026-07-08 — it speeds up single-stream decode (−21% at c1) but **regresses the b128 decode step (+8%, crossover ~c32)** because the c2w streaming states round-trip through a per-step bf16↔fp16 reformat that scales with batch. It is therefore a low-concurrency opt-in, **not** the default; the numbers below stand as the batch-128 reference (see [engine_overview §1.5](../architecture/engine_overview.md)).
 
 ### ⚠️ `prefill_ms` semantics changed in this dataset
 

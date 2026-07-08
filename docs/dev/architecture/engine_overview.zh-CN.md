@@ -52,12 +52,18 @@
 - **缺陷**：**CP 的 FP16 坏掉**（stage argmax 敏感），只能 fp32/bf16；图大编译慢。
 - **可避免**：CP FP16 不可用是数值本质。
 
-### 1.5 子模块精度（CP fp32 为历史方案；当前默认 cp=bf16 + code2wav=fp16）
+### 1.5 子模块精度（CP fp32 为历史方案；默认全 bf16；code2wav fp16 是低并发 opt-in）
 - **曾是什么**：backbone=bf16、CP=fp32、code2wav=bf16，是排查 0601 时代幻觉时的配置。
 - **当时为什么**：CP bf16 下 stage 近似平局被舍入翻转（Finding #15：孤立 CP bf16 TRT vs ORT 随机输入 7/10 不匹配，fp32 则 0/10）——被怀疑级联成幻觉。
 - **关键认知（至今成立）**：**精度从来不是幻觉根因**（Finding #17-18）——0601 权重下各精度同种子都 ~10-18%，全 fp32 反而 17.5% 更糟，精度只是"换一批坏种子"。真正根因是 0601 checkpoint 训坏了,0701 重训修复（同种子 0/100）。
 - **现状（2026-07-06）**：0701 权重下,**全 bf16 引擎（cp=bf16）在同一组确定性种子上同样 0/100**——CP bf16 的数值噪声（Finding #15 作为数值事实仍成立）在健康权重上被证实不会转化为幻觉。CP fp32 不再必要,且它有真实的性能代价（fp32 下 CP 占 kernel 时间 ~45%）。
-- **code2wav fp16（默认）**：TRT 10.13 在 sm120 上没有 tensor-core 的 bf16 conv kernel（fp16 conv 快 2.5-3.4×），bf16 下 c2w 声码器占 b128 decode step ~35ms，fp16 下 ~9ms。因此 `CODE2WAV_PRECISION` 现在在 `build_engines.sh` 与 `autorun.sh` 里**默认 fp16**。emitter 只把 `/code2wav/*` 钉成 fp16，并把 `/talker_fused/*` 兜底钉回 bf16（防止全局 `--fp16` 让 talker/CP kernel 漂移改变采样数值口径）；`build_engines.sh` 对这类提速钉自动选用 `--precisionConstraints=prefer`（`trt_fused_io_formats.py --emit constraints`——c2w 的 Pad/Slice glue 无 fp16 kernel，必须允许回退）。c2w 不回流 talker；已过 halluprobe 0/100 + 音频电平/频谱检查。与 CP 不同，c2w 的 fp16 数值上没问题。设 `CODE2WAV_PRECISION=bf16` 可构建全 bf16（数值对齐 / 复现基线）。
+- **code2wav fp16（opt-in，非默认——收益随并发反转）**：TRT 10.13 在 sm120 上没有 tensor-core 的 bf16 conv kernel（*孤立* fp16 conv 快 2.5-3.4×），所以 `CODE2WAV_PRECISION=fp16` 只把 `/code2wav/*` 钉成 fp16（emitter 同时把 `/talker_fused/*` 兜底钉回 bf16，防止全局 `--fp16` 让 talker/CP kernel 漂移改变采样口径；`build_engines.sh` 经 `trt_fused_io_formats.py --emit constraints` 自动选 `--precisionConstraints=prefer`，因 c2w 的 Pad/Slice glue 无 fp16 kernel 必须回退）。数值上没问题（c2w 不回流 talker；halluprobe 0/100 + 音频电平/频谱正常）。**但孤立卷积的收益扛不住批量化**：引擎所有 float I/O（含 17+4 个 c2w conv/transconv 流式状态）统一绑定为单个 `triton_io_float_dtype`（bf16），所以 fp16 的 c2w 每个 decode step 都要把这些状态做一次 bf16↔fp16 reformat，而 reformat 成本随 batch 放大。实测 2026-07-08（RTX 5090、custom-1.7b、b128 profile、engine-grpc），c2w=fp16 相对全 bf16 基线的 **decode step**：
+
+  | 并发 | 1 | 8 | 16 | 32 | 64 | 128 |
+  |---|---|---|---|---|---|---|
+  | Δ decode | **−20.8%** | **−12.9%** | **−7.8%** | +1.3% | **+6.2%** | **+7.8%** |
+
+  fp16 在 ~c16 以下赢（单流 −21%）、~c32 以上输（b128 +8%，RTF 0.525→0.566）。**因此默认全 bf16**（batch-128 服务档是生产目标）；只在单流/低并发延迟场景用 `CODE2WAV_PRECISION=fp16`。（若想只让 c2w 状态走 fp16 以消掉 reformat，需要按张量分别绑定 I/O + 运行时混合 dtype 状态 buffer——是更大的、未落地的改动。）
 - 详见 [[mixed_precision_plan]]、`streaming_hallucination.md`。
 
 ### 1.6 Prefix KV cache

@@ -52,7 +52,7 @@ Phase B:
   --max-seq-len <N>             KV cache max sequence length
   --dtype bf16|fp16|fp32|fp8    TensorRT build precision (base default for each submodule)
   --cp-precision <T>            Code Predictor precision (default: follow --dtype, i.e. bf16)
-  --code2wav-precision <T>      Code2Wav precision (default: fp16 — faster conv; bf16 for uniform build)
+  --code2wav-precision <T>      Code2Wav precision (default: follow --dtype/bf16; fp16 opt-in, low-concurrency only)
   --triton-io-float-dtype <T>   TensorRT/Triton float I/O dtype, defaults to --dtype
   --target-driver <ver>         select NGC image by deployment host NVIDIA driver
   --build-device <dev>          trtexec build GPU

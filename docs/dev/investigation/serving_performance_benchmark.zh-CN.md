@@ -43,7 +43,7 @@
 | 幻觉门禁 | 采集前在本构建上确定性探针重跑 **0/100**(时长 min 9.04s / 中位 10.08s / max 10.72s) |
 | 压测工具 | [`tools/validation/perf_matrix_sdk.py`](../../../tools/validation/perf_matrix_sdk.py),基于 `qwen3tts` client SDK |
 
-> **采集后注记。** 本数据集采集于**全 bf16** 引擎。采集之后，`code2wav` 默认改为 **fp16**（sm120 上更快的 c2w 卷积路径，见 [engine_overview §1.5](../architecture/engine_overview.zh-CN.md)），是下方数字未反映的又一 decode-step 提速；因此这些数字应视为当前默认配置的保守下限。`cp` 两者都仍是 bf16。
+> **注记。** 本数据集就是**出厂默认:全 bf16**（backbone/cp/code2wav 均 bf16）。`code2wav=fp16` 变体于 2026-07-08 评估过——单流 decode 更快（c1 −21%），但 **b128 decode step 反而 +8%（交叉 ~c32）**,因为 c2w 流式状态每步都要做随 batch 放大的 bf16↔fp16 reformat。因此它是低并发 opt-in，**不是**默认;下方数字仍是 batch-128 的参考基准（见 [engine_overview §1.5](../architecture/engine_overview.zh-CN.md)）。
 
 ### ⚠️ 本数据集中 `prefill_ms` 语义已变
 
