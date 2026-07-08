@@ -1,5 +1,5 @@
 {
-  "date_utc": "2026-07-07",
+  "date_utc": "2026-07-08",
   "hardware": {
     "gpu": "NVIDIA GeForce RTX 5090",
     "gpu_memory_mib": 32607,
@@ -18,12 +18,15 @@
       "d5741b6 fix(triton): ServerTimingAccumulator wiring + end->done terminal event unification",
       "b80cf45 perf(engine): batched burst admission + Phase-1 per-slot tax elimination (c2w state arenas)",
       "2a9578b perf(engine,gateway): c2w KV sliding window pooled per slot + serving hot-path slimming (async logging, orjson, gRPC chunk coalescing, uvloop)",
-      "a8e7274 perf(gateway): VAD-disabled sessions bypass the per-chunk int16 round-trip (also removes a hidden 15-bit quantization for pcm_f32)"
+      "a8e7274 perf(gateway): VAD-disabled sessions bypass the per-chunk int16 round-trip (also removes a hidden 15-bit quantization for pcm_f32)",
+      "cc58c6a fix(engine,gateway): post-review audit fix batch (ghost-trailing crash, prefill staging aliasing, per-session delivery isolation, chunk coalescing actually taking effect)",
+      "8596996 perf(engine): batched p3_launch (bit-exact), full-width decode iteration 48 -> 41.5 ms",
+      "b80c38d perf(server): session open only offloads to a thread when ref-audio feature extraction is needed"
     ]
   },
   "dataset_provenance": {
-    "engine_rows": "collected 2026-07-07 on the engine build above (includes b80cf45/2a9578b/a8e7274); trials engine-01..03",
-    "triton_rows": "retained from the 2026-07-06 dataset (engine core WITHOUT b80cf45/2a9578b/a8e7274); trials triton-01..03. The Triton BLS path wraps the same engine core, so the engine-side commits would improve it too -- its rows OVERSTATE current Triton latency and are kept only as the last measured reference.",
+    "engine_rows": "collected 2026-07-07/08 on the engine build above (includes b80cf45/2a9578b/a8e7274 plus the round-3 commits cc58c6a/8596996/b80c38d); trials engine-01..03",
+    "triton_rows": "retained from the 2026-07-06 dataset (engine core WITHOUT b80cf45 and every later optimization commit); trials triton-01..03. The Triton BLS path wraps the same engine core, so the engine-side commits would improve it too -- its rows OVERSTATE current Triton latency and are kept only as the last measured reference.",
     "note": "raw_requests.csv = one representative engine trial (engine-01, 2026-07-07) + one representative Triton trial (triton-01, 2026-07-06)"
   },
   "metric_semantics_change": {
@@ -38,7 +41,7 @@
     "code2wav_precision": "bf16",
     "engine_dtype": "bf16",
     "triton_io_float_dtype": "bf16",
-    "note": "Full-bf16 engine. cp=bf16 validated hallucination-free on the internal 0701 checkpoint (0/100 deterministic probe; see docs/dev/investigation/streaming_hallucination.md). Re-probed 0/100 on 2026-07-07 immediately before this dataset was collected (runs=100, duration min 9.04s / median 10.08s / max 10.72s)."
+    "note": "Full-bf16 engine. cp=bf16 validated hallucination-free on the internal 0701 checkpoint (0/100 deterministic probe; see docs/dev/investigation/streaming_hallucination.md). Re-probed 0/100 on 2026-07-07 on this exact build immediately before this dataset was collected (runs=100, duration min 9.04s / median 10.08s / max 10.72s)."
   },
   "engine_profile": {
     "max_batch_size": 128,
@@ -87,20 +90,21 @@
   },
   "supplementary_measurements": {
     "server_ttft_single_stream_warm_ms": {
-      "basis": "server_session_create_to_first_raw_audio_ms from the done-event meta (same basis as the historical '13ms' claim), re-measured 2026-07-07 on this engine build",
+      "basis": "server_session_create_to_first_raw_audio_ms from the done-event meta (same basis as the historical '13ms' claim), re-measured 2026-07-08 on this engine build",
       "n": 50,
       "min": 14.46,
-      "p50": 14.84,
-      "avg": 14.92,
-      "stdev": 0.26,
-      "p99": 15.65,
-      "max": 15.65
+      "p50": 14.85,
+      "avg": 14.96,
+      "stdev": 0.28,
+      "p99": 15.55,
+      "max": 15.67,
+      "note": "statistically unchanged vs the 2026-07-07 measurement (avg 14.92, stdev 0.26) -- the round-3 commits do not touch the single-stream path"
     },
     "burst_ramp_decomposition": {
       "tool": "workspace/ttft_ramp_decompose.py, 128 concurrent sessions, shared gRPC channel, warm engine",
       "runs": 2,
       "client_ttft_avg_ms": [285.8, 287.9],
-      "note": "per-stage table in the report's 'Where burst TTFT goes' section"
+      "note": "per-stage table in the report's 'Where burst TTFT goes' section; measured 2026-07-07 on the round-2 build (predates cc58c6a/8596996/b80c38d) -- the mechanism analysis still applies, headline TTFT has since improved"
     }
   }
 }

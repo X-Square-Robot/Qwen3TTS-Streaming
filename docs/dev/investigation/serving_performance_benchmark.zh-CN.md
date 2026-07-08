@@ -17,9 +17,10 @@
 [`docs/dev/operations/timing_metrics.zh-CN.md`](../operations/timing_metrics.zh-CN.md);
 报告格式遵循 [`docs/user/benchmark_methodology.zh-CN.md`](../../user/benchmark_methodology.zh-CN.md)。
 
-> **数据集修订(2026-07-07)。** 下文 engine 侧数字在突发准入/热路径优化轮
-> (commit `b80cf45`、`2a9578b`、`a8e7274`)落库后重新采集。`triton-grpc`
-> 数字**未重测**:沿用 2026-07-06 数据集,其引擎核心不含上述 commit。由于
+> **数据集修订(2026-07-08)。** 下文 engine 侧数字在第三轮优化落库后重新采集:
+> 复盘审计修复批(`cc58c6a`)+ 批量化 `p3_launch` decode 步优化(`8596996`),
+> 叠加在 2026-07-07 那轮(`b80cf45`、`2a9578b`、`a8e7274`)之上。`triton-grpc`
+> 数字**未重测**:沿用 2026-07-06 数据集,其引擎核心不含上述全部 commit。由于
 > Triton BLS 路径包装的是同一个引擎核心,这些沿用数字**高估**了当前 Triton
 > 延迟;仅作最近一次实测参考,下文各表以"(07-06)"标注。
 
@@ -31,15 +32,15 @@
 | 镜像 | `qwen3-engine:25.10`(NGC tag 25.10),2026-07-07 重建;`qwen3tts-streaming:25.10`(Triton 数据集为 2026-07-06) |
 | TensorRT | 10.13.3.9 |
 | 模型 | `custom-1.7b`、`custom_voice`、engine_mode=trt,**全 bf16**(backbone/cp/code2wav) |
-| 引擎优化 | CP 展开图内保留 KV(decode 计算量 ~3×↓)、CUDA-graph decode 回放、批 KV gather arena 化、**突发批量准入 + Phase-1 逐 slot 税消除(`b80cf45`)、c2w KV 入池 + 服务热路径瘦身(`2a9578b`)、VAD 禁用路径旁路(`a8e7274`)**——commit 哈希见 `conditions.json` |
+| 引擎优化 | CP 展开图内保留 KV(decode 计算量 ~3×↓)、CUDA-graph decode 回放、批 KV gather arena 化、突发批量准入 + Phase-1 逐 slot 税消除(`b80cf45`)、c2w KV 入池 + 服务热路径瘦身(`2a9578b`)、VAD 禁用路径旁路(`a8e7274`)、**复盘审计修复批(`cc58c6a`)+ 批量化 `p3_launch` decode 步(`8596996`)+ session open 线程卸载精简(`b80c38d`)**——commit 哈希见 `conditions.json` |
 | 引擎 profile | **`max_batch_size=128`**、`max_input_len=128`、`max_seq_len=512`——由 export-aware 选型自动选出(本卡原始容量 ~141 路);**batch profile 是测试变量,不是硬件天花板**(见下文) |
 | 调度器 | `max_sessions=128`、`max_queue_size=256`,MLFQ 开启 |
 | 请求 | 每个请求固定文本/说话人(`Serena`)/`task_type=custom_voice`/`language=auto`——隔离协议/并发效应,同时把全部测量轮次钉在 **~100% prefix-cache 命中**状态(已验证:测量行 `cache_hit=True` 占 100%);下文所有 `prefill_ms` 都是缓存命中(仅后缀)的 prefill |
 | 隔离 | **每次只跑一个服务**:测 engine 时停 Triton,测 Triton 时停 engine(batch=128 下引擎单独就占 ~29 GiB,这张卡上两者无法共存) |
 | Warmup | 并发扫描 3 轮 / 连接隔离 5 轮;有记录,并与 2026-07-06 数据集同口径地计入汇总(各档影响 ≤1%) |
-| 轮次 | engine 侧 3 轮独立完整重跑(2026-07-07,档位 1–128 含新增的 8)+ Triton 侧 3 轮沿用 2026-07-06(跨轮一致性见 `summary_by_trial.csv`) |
+| 轮次 | engine 侧 3 轮独立完整重跑(2026-07-07/08,档位 1–128 含 8)+ Triton 侧 3 轮沿用 2026-07-06(跨轮一致性见 `summary_by_trial.csv`) |
 | 请求总数 | 51,981(engine 侧新采 35,022 + Triton 侧沿用 16,959),**0 失败** |
-| 幻觉门禁 | 采集前确定性探针重跑 **0/100**(时长 min 9.04s / 中位 10.08s / max 10.72s) |
+| 幻觉门禁 | 采集前在本构建上确定性探针重跑 **0/100**(时长 min 9.04s / 中位 10.08s / max 10.72s) |
 | 压测工具 | [`tools/validation/perf_matrix_sdk.py`](../../../tools/validation/perf_matrix_sdk.py),基于 `qwen3tts` client SDK |
 
 ### ⚠️ 本数据集中 `prefill_ms` 语义已变
@@ -47,7 +48,7 @@
 自批量突发准入(`b80cf45`)起,`server_prefill_started/completed` 括起的是**整个批量准入
 pass**——slot 分配 + 批量 prefix-cache 恢复 + 该 pass 内*所有* session 的批量后缀
 embed——而不再是单个 session 自己的后缀计算。因此突发负载下每 session 的 `prefill_ms`
-会读出几十 ms(128 并发时均值 63.5ms),尽管单 session 的 GPU 工作量没变、总准入耗时
+会读出几十 ms(128 并发时均值 59.7ms),尽管单 session 的 GPU 工作量没变、总准入耗时
 反而*下降*了。并发 1 时一个 pass 只含一个 session,数值与旧语义一致(~1ms)。沿用的
 Triton 行早于该变更,仍是旧的单 session 语义——**负载下两个数据集的 `prefill_ms`
 不可互相对比。**
@@ -67,8 +68,8 @@ Triton 行早于该变更,仍是旧的单 session 语义——**负载下两个�
 
 | 传输方式 | cold TTFT 均值 | reuse TTFT 均值 | Δ(连接开销) |
 |---|---|---|---|
-| engine-grpc | 29.2 ms | 16.6 ms | **~12.6 ms** |
-| engine-websocket | 16.0 ms | 16.0 ms | ~0(噪声) |
+| engine-grpc | 28.7 ms | 16.6 ms | **~12.1 ms** |
+| engine-websocket | 15.9 ms | 15.8 ms | ~0(噪声) |
 | triton-grpc(07-06) | 21.4 ms | 21.7 ms | ~0(噪声) |
 
 只有 `engine-grpc` 有可测量的连接建立开销(~13ms,gRPC channel + HTTP/2 握手),这也是 client SDK 默认跨 session 保持 gRPC channel 常驻的原因。WebSocket 握手和 Triton 的 channel 建立在本机链路上都在噪声水平;跨真实网络时以上开销都随 RTT 缩放。
@@ -79,14 +80,14 @@ Triton 行早于该变更,仍是旧的单 session 语义——**负载下两个�
 
 | 阶段 | 数值 |
 |---|---|
-| `queue_wait_ms`(软件层 inbox 排队) | 0.54 ms 均值 |
-| `prefill_ms`(prefix-cache 命中,仅后缀;单 session 准入 pass) | 0.95 ms 均值 |
+| `queue_wait_ms`(软件层 inbox 排队) | 0.62 ms 均值 |
+| `prefill_ms`(prefix-cache 命中,仅后缀;单 session 准入 pass) | 0.98 ms 均值 |
 | decode step(平均间隔) | 12.8 ms → 每路 RTF ~0.16 |
-| **服务端 TTFT**(session 创建 → 首帧原始音频;与历史"13ms"同口径) | **14.9 ± 0.3 ms**(min 14.5,p50 14.8,p99 15.7,n=50,2026-07-07 复测) |
-| 客户端 TTFT(本机,复用连接) | engine-grpc p50 16.2 ms / engine-websocket p50 15.9 ms(各 n=165) |
+| **服务端 TTFT**(session 创建 → 首帧原始音频;与历史"13ms"同口径) | **14.9 ± 0.3 ms**(min 14.5,p50 14.8,p99 15.7,n=50,2026-07-07 测量;2026-07-08 在第三轮构建上复核:avg 14.96 ± 0.28,n=50——噪声范围内持平) |
+| 客户端 TTFT(本机,复用连接) | engine-grpc p50 16.2 ms / engine-websocket p50 15.8 ms(各 n=165) |
 | total(完整 ~10s 语句) | ~1.17 s |
 
-冷启动、缓存未命中的 prefill 远贵于这里的 0.95ms(抽查实测 ~30ms);见"已知局限"。
+冷启动、缓存未命中的 prefill 远贵于这里的 0.98ms(抽查实测 ~30ms);见"已知局限"。
 
 ## 三协议对比
 
@@ -94,14 +95,14 @@ Triton 行早于该变更,仍是旧的单 session 语义——**负载下两个�
 
 | 并发 | engine-grpc | engine-websocket | triton-grpc(07-06) |
 |---|---|---|---|
-| 1 | 17.7 | 15.8 | 22.4 |
-| 8 | 42.4 | **35.9** | — |
-| 16 | 56.6 | **51.1** | 71.3 |
-| 32 | 87.8 | **78.8** | 112.6 |
-| 64 | 144.8 | **137.5** | 185.7 |
-| 128 | 274.6 | **256.0** | 309.3 |
+| 1 | 17.5 | 15.7 | 22.4 |
+| 8 | 41.0 | **35.3** | — |
+| 16 | 55.5 | **49.7** | 71.3 |
+| 32 | 84.2 | **75.4** | 112.6 |
+| 64 | 140.2 | **127.8** | 185.7 |
+| 128 | 268.6 | **241.9** | 309.3 |
 
-`engine-websocket` 在负载下仍然最快,但 128 路时对 gRPC 的领先从 ~20% 收窄到 ~7%——服务热路径优化轮(`2a9578b`)会合并 gRPC 侧积压的音频 chunk,正打在 gRPC 每消息开销的痛点上。尾部差距仍较大(128 路 p99:grpc 474ms vs ws 373ms)。Triton 列为沿用的 2026-07-06 数据集(优化前引擎核心;其 128 路 p99 为 672ms)——不可直接对比,仅作最近实测参考。三者共享引擎核心,扩展*形态*一致;差异来自传输/网关开销。
+`engine-websocket` 在所有档位都最快;128 路时对 gRPC 的领先在均值上约 11%(本轮两种传输都有改善,WebSocket 改善略多)。尾部差距更大(128 路 p99:grpc 469ms vs ws 336ms)。Triton 列为沿用的 2026-07-06 数据集(优化前引擎核心;其 128 路 p99 为 672ms)——不可直接对比,仅作最近实测参考。三者共享引擎核心,扩展*形态*一致;差异来自传输/网关开销。
 
 ## 并发扩展性:时间究竟花在哪
 
@@ -109,26 +110,26 @@ Triton 行早于该变更,仍是旧的单 session 语义——**负载下两个�
 
 | 并发 | TTFT | `queue_wait_ms` | decode step(均值) | 每路 RTF | `batch_size_seen` |
 |---|---|---|---|---|---|
-| 1 | 17.7 ms | 0.57 ms | 12.8 ms | 0.16 | 1 |
-| 8 | 42.4 ms | 5.7 ms | 14.3 ms | 0.18 | 8 |
-| 16 | 56.6 ms | 10.3 ms | 15.9 ms | 0.20 | 16 |
-| 32 | 87.8 ms | 22.0 ms | 19.0 ms | 0.24 | 32 |
-| 64 | 144.8 ms | 27.8 ms | 27.1 ms | 0.34 | 64 |
-| 128 | 274.6 ms | 53.4 ms | 47.4 ms | **0.59** | **128** |
+| 1 | 17.5 ms | 0.75 ms | 12.8 ms | 0.16 | 1 |
+| 8 | 41.0 ms | 5.9 ms | 14.0 ms | 0.17 | 8 |
+| 16 | 55.5 ms | 11.1 ms | 15.2 ms | 0.19 | 16 |
+| 32 | 84.2 ms | 22.6 ms | 17.7 ms | 0.22 | 32 |
+| 64 | 140.2 ms | 27.0 ms | 24.5 ms | 0.31 | 64 |
+| 128 | 268.6 ms | 56.3 ms | 42.0 ms | **0.53** | **128** |
 
 (每个 decode step 产出 80ms 音频;每路 RTF = step 耗时 / 80ms)
 
 三个观察:
 
 1. **128 路真正同批解码**——`batch_size_seen` 到达 128,TTFT 平滑增长,无悬崖。实测佐证:128 路突发期间轮询 `/health`,`active_sessions=128` 一次性全部接纳。
-2. **满宽解码现在有了真实余量。** 2026-07-06 数据集在 128 宽时测得 RTF 0.84("仍可实时,余量 ~16%,接近饱和")。Phase-1 逐 slot 税消除 + c2w 入池后,128 宽的 step 为 47.4ms/80ms 音频——**RTF 0.59,余量 ~41%**。本 GPU/模型的容量表述更新为:**128 路并发实时流,且有余量**;128 路的约束项已是编译进 plan 的 batch profile(和 ~141 路的显存容量),不再是解码吞吐。
-3. **排队仍是次要项。** 128 路下 `queue_wait_ms` 均值也只有 ≤54ms(对比 profile 卡在 32 时数秒级的槽位等待——见下节)。
+2. **满宽解码现在有了真实余量。** 2026-07-06 数据集在 128 宽时测得 RTF 0.84("仍可实时,余量 ~16%,接近饱和");2026-07-07 那轮降到 0.59。第三轮批量化 `p3_launch`(`8596996`)后,128 宽的 step 为 42.0ms/80ms 音频——**RTF 0.53,余量 ~47%**。本 GPU/模型的容量表述更新为:**128 路并发实时流,且有余量**;128 路的约束项已是编译进 plan 的 batch profile(和 ~141 路的显存容量),不再是解码吞吐。
+3. **排队仍是次要项。** 128 路下 `queue_wait_ms` 均值也只有 ≤57ms(对比 profile 卡在 32 时数秒级的槽位等待——见下节)。
 
-本数据集中 `prefill_ms` 随并发增长(均值从档位 1 的 1.5ms 到 128 的 63.5ms)——这是**语义变化**(数值现在覆盖整个批量准入 pass,见"测试条件"),不是 prefill 回退;单 session 的后缀 prefill 工作量没变,总准入斜坡反而更快了(下节)。
+本数据集中 `prefill_ms` 随并发增长(均值从档位 1 的 1.3ms 到 128 的 59.7ms)——这是**语义变化**(数值现在覆盖整个批量准入 pass,见"测试条件"),不是 prefill 回退;单 session 的后缀 prefill 工作量没变,总准入斜坡反而更快了(下节)。
 
 ## 突发 TTFT 花在哪:准入已批量化,到达散布成为主项
 
-2026-07-06 数据集显示 128 突发 TTFT(均值 ~334ms)的主项是**爬坡串行化**:session 在不断变宽的 batch 的 decode 步之间逐个 prefill(最后一个 ~376ms 才准入;调度间隙均值 78.7ms;每 session 首步等待均值 89.2ms)。`b80cf45`(批量准入)消除的正是这个机制。用同一工具重跑逐 session 生命周期拆解(`workspace/ttft_ramp_decompose.py`,128/128 全采集,时间戳取自 done 事件的服务端 epoch 字段;两次运行,客户端 TTFT 均值 285.8/287.9ms):
+2026-07-06 数据集显示 128 突发 TTFT(均值 ~334ms)的主项是**爬坡串行化**:session 在不断变宽的 batch 的 decode 步之间逐个 prefill(最后一个 ~376ms 才准入;调度间隙均值 78.7ms;每 session 首步等待均值 89.2ms)。`b80cf45`(批量准入)消除的正是这个机制。用同一工具重跑逐 session 生命周期拆解(`workspace/ttft_ramp_decompose.py`,128/128 全采集,时间戳取自 done 事件的服务端 epoch 字段;两次运行,客户端 TTFT 均值 285.8/287.9ms;**2026-07-07 在第二轮构建上测量**——突发 TTFT 总量此后已改善至 grpc ~269ms / ws ~242ms,但下表的分阶段机制不变):
 
 | 阶段 | avg | p50 | p90 | max |
 |---|---|---|---|---|
@@ -149,31 +150,31 @@ Triton 行早于该变更,仍是旧的单 session 语义——**负载下两个�
 
 TRT 引擎的 `max_batch_size` **编译进 plan 文件**,决定一次前向传播最多带多少会话。超出的会话会被接纳(`max_sessions`)但要等空闲执行槽位——等的是前面会话的*整段话*,不是一步。
 
-同一张卡上早前采集的 **batch=32** 数据集(优化前引擎代码、cp=fp32、双服务共存——条件差异不止 profile 一项,所以只作机制演示、不作受控对比)完整展示了那种失效模式:128 路并发时会话按 32 一波执行,`active_sessions` 阶梯式 128→96→64→32 下降,decode step 在上限处平台化,**TTFT 均值 ~6.5s**——比本报告同并发的 ~275ms 差 ~24 倍。而 batch=32 这个 profile 本身是选型 bug 的产物(上文修复 #4),不是硬件极限。
+同一张卡上早前采集的 **batch=32** 数据集(优化前引擎代码、cp=fp32、双服务共存——条件差异不止 profile 一项,所以只作机制演示、不作受控对比)完整展示了那种失效模式:128 路并发时会话按 32 一波执行,`active_sessions` 阶梯式 128→96→64→32 下降,decode step 在上限处平台化,**TTFT 均值 ~6.5s**——比本报告同并发的 ~269ms 差 ~24 倍。而 batch=32 这个 profile 本身是选型 bug 的产物(上文修复 #4),不是硬件极限。
 
 选型指引现在内置于 `scripts/python/suggest_engine_profile.py`(export-aware;本模型每路 ~160 MiB + 固定 ~5 GiB):32 GiB 卡容纳 batch=128;~19 GiB 容纳 64;~13.5 GiB 容纳 32。按预期峰值并发选 profile——batch 宽度超卖正是 TTFT 悬崖的来源。
 
 ## 优化效果(开发期参考)
 
-同一张卡 batch=128 下的两轮优化(各列原始数据:"第 1 轮"对应 2026-07-06 数据集,"第 2 轮"对应本数据集;优化前原始数据未保留,仅汇总数字):
+同一张卡 batch=128 下的三轮优化(原始数据:"第 1 轮"对应 2026-07-06 数据集,"第 2 轮"对应 2026-07-07 数据集,"第 3 轮"对应本数据集;优化前原始数据未保留,仅汇总数字):
 
-| | 优化前 | 第 1 轮(07-06:CP-KV + CUDA-graph + KV arena) | 第 2 轮(07-07:批量准入 + Phase-1 税 + 热路径 + VAD 旁路) |
-|---|---|---|---|
-| decode step @128 | 119.8 ms(RTF 1.5——**不能**实时) | 67.5 ms(RTF 0.84) | **47.4 ms(RTF 0.59)** |
-| decode step @64 | 63.6 ms | 36.8 ms | **27.1 ms** |
-| decode step @1 | 11.3 ms | 12.7 ms | 12.8 ms(较优化前 +1.5ms;CP-KV/CUDA-graph 路径的每步固定开销) |
-| TTFT 均值 @128(engine-grpc) | ~371 ms | ~334 ms | **~275 ms** |
-| 服务端 total latency p50 @128 | — | 6333 ms | **4453 ms**(−30%) |
+| | 优化前 | 第 1 轮(07-06:CP-KV + CUDA-graph + KV arena) | 第 2 轮(07-07:批量准入 + Phase-1 税 + 热路径 + VAD 旁路) | 第 3 轮(07-08:审计修复批 + 批量化 p3_launch) |
+|---|---|---|---|---|
+| decode step @128 | 119.8 ms(RTF 1.5——**不能**实时) | 67.5 ms(RTF 0.84) | 47.4 ms(RTF 0.59) | **42.0 ms(RTF 0.53)** |
+| decode step @64 | 63.6 ms | 36.8 ms | 27.1 ms | **24.5 ms** |
+| decode step @1 | 11.3 ms | 12.7 ms | 12.8 ms | 12.8 ms(较优化前 +1.5ms;CP-KV/CUDA-graph 路径的每步固定开销) |
+| TTFT 均值 @128(engine-grpc) | ~371 ms | ~334 ms | ~275 ms | **~269 ms** |
+| 服务端 total latency p50 @128 | — | 6333 ms | 4453 ms(−30%) | **3963 ms**(较第 2 轮 −11%,较第 1 轮 −37%) |
 
-第 1 轮用单流每步 ~1.4ms 的代价换来满 batch 宽度下 ~44% 的每步耗时下降——把 128 路服务从低于实时拉回实时。第 2 轮在满宽下再降 ~30% 每步耗时(Phase-1 逐 slot CPU 税 + c2w 入池)、消除了串行准入斜坡(TTFT −18%),并瘦身了服务热路径(异步日志、orjson、gRPC chunk 合并、VAD 路径旁路)。第 2 轮的纯数据搬运改动经逐字节验证输出音频不变(8 个确定性种子,sha256),幻觉探针保持 0/100。
+第 1 轮用单流每步 ~1.4ms 的代价换来满 batch 宽度下 ~44% 的每步耗时下降——把 128 路服务从低于实时拉回实时。第 2 轮在满宽下再降 ~30% 每步耗时(Phase-1 逐 slot CPU 税 + c2w 入池)、消除了串行准入斜坡(TTFT −18%),并瘦身了服务热路径(异步日志、orjson、gRPC chunk 合并、VAD 路径旁路)。第 2 轮的纯数据搬运改动经逐字节验证输出音频不变(8 个确定性种子,sha256)。第 3 轮为复盘审计修复批(`cc58c6a`)+ 位级一致的批量化 `p3_launch`(`8596996`),满宽下每 decode 步再降 ~11%,`server_total` 同幅传导;相对 2026-07-06 数据集累计为 128 宽下 **TTFT −20%、decode step −38%、server total −37%**。每轮采集数据前幻觉探针均保持 0/100。
 
 ## 已知局限 / 后续引擎优化线索
 
 - **固定文本/说话人——所有 prefill 数字都是缓存命中的 prefill。** 冷 prefix(缓存未命中)的 prefill 抽查实测 ~30ms vs ~1ms;缓存未命中在并发负载下的表现未覆盖。文本长度、说话人多样性、缓存未命中扫描是自然的后续方向。
-- **Triton 数字已过期(2026-07-06)。** Triton BLS 路径包装同一个引擎核心,`b80cf45`/`2a9578b` 的引擎侧收益会传导过去,但未重新压测;其网关侧在新准入模式下的表现未测量。
+- **Triton 数字已过期(2026-07-06)。** Triton BLS 路径包装同一个引擎核心,引擎侧收益(`b80cf45` 至 `8596996`)会传导过去,但未重新压测;其网关侧在新准入模式下的表现未测量。
 - **突发到达是最坏情况。** 并发测试同时发起全部 N 路;真实世界错峰到达时,同样稳态并发下单请求 TTFT 会更低。此外,实测突发 TTFT 还包含共享 channel 上 ~163ms 的客户端侧到达散布(见爬坡拆解)。
 - **仅本机链路。** 网络 RTT 直接叠加到连接开销和 TTFT 上;~13ms 的 gRPC 连接差值随 RTT 缩放。
-- **批处理优化的单流回退。** batch=1 时每步 +1.5ms(两轮合计,11.3 → 12.8ms)的代价是真实的;未来可以做自适应路径,在 batch 宽度低于阈值时跳过 arena/graph 机制。
+- **批处理优化的单流回退。** batch=1 时每步 +1.5ms(11.3 → 12.8ms,第 2、3 轮间持平)的代价是真实的;未来可以做自适应路径,在 batch 宽度低于阈值时跳过 arena/graph 机制。
 - **`serving_endpoints.py` 仍未使用 `qwen3tts` client SDK**——迁移作为独立后续工作跟踪;本压测工具(`perf_matrix_sdk.py`)是基于 SDK 的。
 
 ## 复现方法

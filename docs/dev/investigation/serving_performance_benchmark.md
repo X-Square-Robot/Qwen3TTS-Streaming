@@ -17,12 +17,13 @@ Raw per-request data and the aggregated CSVs backing every number here live in
 [`docs/dev/operations/timing_metrics.md`](../operations/timing_metrics.md);
 report format follows [`docs/user/benchmark_methodology.md`](../../user/benchmark_methodology.md).
 
-> **Dataset revision (2026-07-07).** The engine-side numbers below were re-measured after the
-> burst-admission / hot-path optimization round (commits `b80cf45`, `2a9578b`, `a8e7274`) landed.
-> The `triton-grpc` numbers were **not re-run**: they are retained from the 2026-07-06 dataset,
-> whose engine core predates those commits. Since the Triton BLS path wraps the same engine core,
-> its retained numbers **overstate** current Triton latency; treat them as the last measured
-> reference, marked "(07-06)" in every table below.
+> **Dataset revision (2026-07-08).** The engine-side numbers below were re-measured after the
+> third optimization round landed: the post-review audit fix batch (`cc58c6a`) and the batched
+> `p3_launch` decode-step optimization (`8596996`), on top of the 2026-07-07 round
+> (`b80cf45`, `2a9578b`, `a8e7274`). The `triton-grpc` numbers were **not re-run**: they are
+> retained from the 2026-07-06 dataset, whose engine core predates all of those commits. Since
+> the Triton BLS path wraps the same engine core, its retained numbers **overstate** current
+> Triton latency; treat them as the last measured reference, marked "(07-06)" in every table below.
 
 ## Test conditions
 
@@ -32,15 +33,15 @@ report format follows [`docs/user/benchmark_methodology.md`](../../user/benchmar
 | Images | `qwen3-engine:25.10` (NGC tag 25.10), rebuilt 2026-07-07; `qwen3tts-streaming:25.10` (Triton dataset from 2026-07-06) |
 | TensorRT | 10.13.3.9 |
 | Model | `custom-1.7b`, `custom_voice`, engine_mode=trt, **full bf16** (backbone/cp/code2wav) |
-| Engine optimizations | CP-KV retained in the unrolled graph (~3× decode compute ↓), CUDA-graph decode replay, arena-ized batch KV gather, **batched burst admission + per-slot Phase-1 tax elimination (`b80cf45`), c2w KV slot pooling + serving hot-path slimming (`2a9578b`), VAD-disabled chunk-path bypass (`a8e7274`)** — see `conditions.json` for commit hashes |
+| Engine optimizations | CP-KV retained in the unrolled graph (~3× decode compute ↓), CUDA-graph decode replay, arena-ized batch KV gather, batched burst admission + per-slot Phase-1 tax elimination (`b80cf45`), c2w KV slot pooling + serving hot-path slimming (`2a9578b`), VAD-disabled chunk-path bypass (`a8e7274`), **post-review audit fix batch (`cc58c6a`) + batched `p3_launch` decode step (`8596996`) + session-open thread-offload trim (`b80c38d`)** — see `conditions.json` for commit hashes |
 | Engine profile | **`max_batch_size=128`**, `max_input_len=128`, `max_seq_len=512` — auto-selected by export-aware sizing (raw capacity ~141 lanes on this card); **the batch profile is a test variable, not a hardware ceiling** (see below) |
 | Scheduler | `max_sessions=128`, `max_queue_size=256`, MLFQ enabled |
 | Request | fixed text/speaker(`Serena`)/`task_type=custom_voice`/`language=auto` for every request — isolates protocol/concurrency effects, and pins all measured rounds to a **~100% prefix-cache-hit regime** (verified: `cache_hit=True` on 100% of measured rows); every `prefill_ms` below is cache-hit (suffix-only) prefill |
 | Isolation | **single service per run**: Triton stopped during engine trials, engine stopped during Triton trials (at batch=128 the engine alone holds ~29 GiB; the two cannot coexist on this card) |
 | Warmup | 3 rounds (concurrency sweep) / 5 rounds (connection isolation); recorded, and pooled into the aggregates exactly as in the 2026-07-06 dataset (effect ≤1% at every level) |
-| Trials | 3 independent full engine-side runs 2026-07-07 (levels 1–128 incl. new level 8) + 3 Triton-side runs retained from 2026-07-06 (reproducibility check: `summary_by_trial.csv`) |
+| Trials | 3 independent full engine-side runs 2026-07-07/08 (levels 1–128 incl. level 8) + 3 Triton-side runs retained from 2026-07-06 (reproducibility check: `summary_by_trial.csv`) |
 | Requests | 51,981 total (35,022 engine-side new + 16,959 Triton-side retained), **0 failures** |
-| Hallucination gate | deterministic probe re-run **0/100** immediately before data collection (duration min 9.04 s / median 10.08 s / max 10.72 s) |
+| Hallucination gate | deterministic probe re-run **0/100** on this exact build immediately before data collection (duration min 9.04 s / median 10.08 s / max 10.72 s) |
 | Harness | [`tools/validation/perf_matrix_sdk.py`](../../../tools/validation/perf_matrix_sdk.py), built on the `qwen3tts` client SDK |
 
 ### ⚠️ `prefill_ms` semantics changed in this dataset
@@ -48,7 +49,7 @@ report format follows [`docs/user/benchmark_methodology.md`](../../user/benchmar
 As of the batched burst admission (`b80cf45`), `server_prefill_started/completed` bracket the
 **whole batched admission pass** — slot allocation + batched prefix-cache restore + batched
 suffix embed for *every* session admitted in that pass — not one session's own suffix compute.
-Under burst load `prefill_ms` therefore reads as tens of ms per session (avg 63.5 ms at
+Under burst load `prefill_ms` therefore reads as tens of ms per session (avg 59.7 ms at
 concurrency 128) even though per-session GPU work is unchanged and total admission time went
 *down*. At concurrency 1 the pass contains a single session and the value matches the old
 semantics (~1 ms). The retained Triton rows predate the change and use the old per-session
@@ -69,8 +70,8 @@ Single-stream, 50 measured rounds per mode, pooled across 3 trials; `cold` = fre
 
 | Transport | cold TTFT avg | reuse TTFT avg | Δ (connection cost) |
 |---|---|---|---|
-| engine-grpc | 29.2 ms | 16.6 ms | **~12.6 ms** |
-| engine-websocket | 16.0 ms | 16.0 ms | ~0 (noise) |
+| engine-grpc | 28.7 ms | 16.6 ms | **~12.1 ms** |
+| engine-websocket | 15.9 ms | 15.8 ms | ~0 (noise) |
 | triton-grpc (07-06) | 21.4 ms | 21.7 ms | ~0 (noise) |
 
 Only `engine-grpc` shows a measurable connection-setup cost (~13 ms, gRPC channel + HTTP/2 handshake), which is why the client SDK keeps gRPC channels warm across sessions by default. Both WebSocket handshake and Triton's channel setup are noise-level on a local link; over a real network all of these scale with RTT.
@@ -81,11 +82,11 @@ Single stream, warm engine, prefix-cache hit — the standard low-load profile:
 
 | Stage | value |
 |---|---|
-| `queue_wait_ms` (software inbox wait) | 0.54 ms avg |
-| `prefill_ms` (prefix-cache hit, suffix-only; single-session admission pass) | 0.95 ms avg |
+| `queue_wait_ms` (software inbox wait) | 0.62 ms avg |
+| `prefill_ms` (prefix-cache hit, suffix-only; single-session admission pass) | 0.98 ms avg |
 | decode step (mean interval) | 12.8 ms → per-stream RTF ~0.16 |
-| **server TTFT** (session create → first raw audio; same basis as the historical "13ms" claim) | **14.9 ± 0.3 ms** (min 14.5, p50 14.8, p99 15.7, n=50, re-measured 2026-07-07) |
-| client TTFT (localhost, reused channel) | 16.2 ms p50 engine-grpc / 15.9 ms p50 engine-websocket (n=165 each) |
+| **server TTFT** (session create → first raw audio; same basis as the historical "13ms" claim) | **14.9 ± 0.3 ms** (min 14.5, p50 14.8, p99 15.7, n=50, measured 2026-07-07; re-verified 2026-07-08 on the round-3 build: avg 14.96 ± 0.28, n=50 — unchanged within noise) |
+| client TTFT (localhost, reused channel) | 16.2 ms p50 engine-grpc / 15.8 ms p50 engine-websocket (n=165 each) |
 | total (full ~10 s utterance) | ~1.17 s |
 
 A cold, cache-miss prefill costs far more than the 0.95 ms shown here (~30 ms measured in spot checks); see Known limitations.
@@ -96,14 +97,19 @@ TTFT avg (ms) by protocol × concurrency, pooled across 3 trials each:
 
 | Concurrency | engine-grpc | engine-websocket | triton-grpc (07-06) |
 |---|---|---|---|
-| 1 | 17.7 | 15.8 | 22.4 |
-| 8 | 42.4 | **35.9** | — |
-| 16 | 56.6 | **51.1** | 71.3 |
-| 32 | 87.8 | **78.8** | 112.6 |
-| 64 | 144.8 | **137.5** | 185.7 |
-| 128 | 274.6 | **256.0** | 309.3 |
+| 1 | 17.5 | 15.7 | 22.4 |
+| 8 | 41.0 | **35.3** | — |
+| 16 | 55.5 | **49.7** | 71.3 |
+| 32 | 84.2 | **75.4** | 112.6 |
+| 64 | 140.2 | **127.8** | 185.7 |
+| 128 | 268.6 | **241.9** | 309.3 |
 
-`engine-websocket` is still the fastest under load, but the gRPC gap narrowed from ~20% to ~7% at 128 — the serving hot-path round (`2a9578b`) coalesces backlogged gRPC audio chunks, which is exactly where gRPC's per-message overhead used to bite. The tail gap remains larger (p99 at 128: 474 ms grpc vs 373 ms ws). The Triton column is the retained 2026-07-06 dataset (pre-optimization engine core; its p99 at 128 was 672 ms) — not directly comparable, kept as the last measured reference. All three share the engine core, so scaling *shape* is identical; the differences are transport/gateway overhead.
+`engine-websocket` is the fastest under load at every level; the gRPC gap at 128 is ~11% on the
+average (both transports improved this round, WebSocket slightly more). The tail gap is larger
+still (p99 at 128: 469 ms grpc vs 336 ms ws). The Triton column is the retained 2026-07-06 dataset
+(pre-optimization engine core; its p99 at 128 was 672 ms) — not directly comparable, kept as the
+last measured reference. All three share the engine core, so scaling *shape* is identical; the
+differences are transport/gateway overhead.
 
 ## Concurrency scaling: where the time actually goes
 
@@ -111,26 +117,26 @@ TTFT avg (ms) by protocol × concurrency, pooled across 3 trials each:
 
 | Concurrency | TTFT | `queue_wait_ms` | decode step (mean) | per-stream RTF | `batch_size_seen` |
 |---|---|---|---|---|---|
-| 1 | 17.7 ms | 0.57 ms | 12.8 ms | 0.16 | 1 |
-| 8 | 42.4 ms | 5.7 ms | 14.3 ms | 0.18 | 8 |
-| 16 | 56.6 ms | 10.3 ms | 15.9 ms | 0.20 | 16 |
-| 32 | 87.8 ms | 22.0 ms | 19.0 ms | 0.24 | 32 |
-| 64 | 144.8 ms | 27.8 ms | 27.1 ms | 0.34 | 64 |
-| 128 | 274.6 ms | 53.4 ms | 47.4 ms | **0.59** | **128** |
+| 1 | 17.5 ms | 0.75 ms | 12.8 ms | 0.16 | 1 |
+| 8 | 41.0 ms | 5.9 ms | 14.0 ms | 0.17 | 8 |
+| 16 | 55.5 ms | 11.1 ms | 15.2 ms | 0.19 | 16 |
+| 32 | 84.2 ms | 22.6 ms | 17.7 ms | 0.22 | 32 |
+| 64 | 140.2 ms | 27.0 ms | 24.5 ms | 0.31 | 64 |
+| 128 | 268.6 ms | 56.3 ms | 42.0 ms | **0.53** | **128** |
 
 (each decode step yields 80 ms of audio; per-stream RTF = step time / 80 ms)
 
 Three observations:
 
 1. **All 128 streams genuinely decode together** — `batch_size_seen` reaches 128, and TTFT grows smoothly with no cliff. Verified live: polling `/health` during a 128-burst shows `active_sessions=128` with all sessions admitted at once.
-2. **Full-width decode now has real headroom.** The 2026-07-06 dataset measured RTF 0.84 at 128-wide ("still real-time, ~16% headroom, near saturation"). After the Phase-1 per-slot tax elimination and c2w pooling, the 128-wide step is 47.4 ms per 80 ms of audio — **RTF 0.59, ~41% headroom**. The capacity statement for this GPU/model is now: **128 concurrent real-time streams with margin**; the binding limit at 128 is the compiled batch profile (and the ~141-lane memory capacity), no longer decode throughput.
-3. **Queueing stays a minor term.** `queue_wait_ms` is ≤54 ms avg even at 128 (vs. multi-second slot-waits when the profile was capped at 32 — next section).
+2. **Full-width decode now has real headroom.** The 2026-07-06 dataset measured RTF 0.84 at 128-wide ("still real-time, ~16% headroom, near saturation"); the 2026-07-07 round brought it to 0.59. After the round-3 batched `p3_launch` (`8596996`), the 128-wide step is 42.0 ms per 80 ms of audio — **RTF 0.53, ~47% headroom**. The capacity statement for this GPU/model is now: **128 concurrent real-time streams with margin**; the binding limit at 128 is the compiled batch profile (and the ~141-lane memory capacity), no longer decode throughput.
+3. **Queueing stays a minor term.** `queue_wait_ms` is ≤57 ms avg even at 128 (vs. multi-second slot-waits when the profile was capped at 32 — next section).
 
-`prefill_ms` grows with concurrency in this dataset (1.5 → 63.5 ms avg from level 1 to 128) — this is the **semantics change** (the value now spans the whole batched admission pass, see Test conditions), not a prefill regression; per-session suffix prefill work is unchanged and the total admission ramp got faster (next section).
+`prefill_ms` grows with concurrency in this dataset (1.3 → 59.7 ms avg from level 1 to 128) — this is the **semantics change** (the value now spans the whole batched admission pass, see Test conditions), not a prefill regression; per-session suffix prefill work is unchanged and the total admission ramp got faster (next section).
 
 ## Where burst TTFT goes: admission is now batched; arrival spread dominates
 
-The 2026-07-06 dataset showed 128-burst TTFT (~334 ms avg) was dominated by **ramp serialization**: sessions were prefilled one at a time between decode steps of the growing batch (last admission at ~376 ms; scheduling gap avg 78.7 ms; per-session first-step wait avg 89.2 ms). That mechanism is what `b80cf45` (batched admission) removed. Re-running the same per-session lifecycle decomposition (`workspace/ttft_ramp_decompose.py`, 128/128 sessions captured, server epoch timestamps from the done-event meta; two runs, client TTFT avg 285.8/287.9 ms) now shows:
+The 2026-07-06 dataset showed 128-burst TTFT (~334 ms avg) was dominated by **ramp serialization**: sessions were prefilled one at a time between decode steps of the growing batch (last admission at ~376 ms; scheduling gap avg 78.7 ms; per-session first-step wait avg 89.2 ms). That mechanism is what `b80cf45` (batched admission) removed. Re-running the same per-session lifecycle decomposition (`workspace/ttft_ramp_decompose.py`, 128/128 sessions captured, server epoch timestamps from the done-event meta; two runs, client TTFT avg 285.8/287.9 ms; **measured 2026-07-07 on the round-2 build** — headline burst TTFT has since improved to ~269 ms grpc / ~242 ms ws, but the stage-level mechanism below is unchanged) shows:
 
 | Stage | avg | p50 | p90 | max |
 |---|---|---|---|---|
@@ -151,31 +157,31 @@ Admission now lands in a few wide passes instead of 128 serial ones: the first s
 
 The TRT engine's `max_batch_size` is **compiled into the plan** and bounds how many sessions can execute in one forward pass. Sessions beyond it are admitted (`max_sessions`) but wait for a free execution slot — for their predecessors' *entire utterances*, not just one step.
 
-An earlier dataset collected on this same card with **batch=32** (pre-optimization engine code, cp=fp32, dual-resident services — conditions differ in more than the profile, so treat this as an illustration of the mechanism, not a controlled comparison) showed exactly that failure mode: at 128 concurrent requests, sessions executed in waves of 32, `active_sessions` stepped down 128→96→64→32 as each wave finished, decode step plateaued at the cap, and **TTFT averaged ~6.5 s** — ~24× worse than the ~275 ms measured here at the same concurrency. The batch=32 profile itself was an artifact of the broken auto-sizing (fix #4 above), not a hardware limit.
+An earlier dataset collected on this same card with **batch=32** (pre-optimization engine code, cp=fp32, dual-resident services — conditions differ in more than the profile, so treat this as an illustration of the mechanism, not a controlled comparison) showed exactly that failure mode: at 128 concurrent requests, sessions executed in waves of 32, `active_sessions` stepped down 128→96→64→32 as each wave finished, decode step plateaued at the cap, and **TTFT averaged ~6.5 s** — ~24× worse than the ~269 ms measured here at the same concurrency. The batch=32 profile itself was an artifact of the broken auto-sizing (fix #4 above), not a hardware limit.
 
 Sizing guidance now ships in `scripts/python/suggest_engine_profile.py` (export-aware; ~160 MiB per lane + ~5 GiB fixed for this model): a 32 GiB card fits batch=128; ~19 GiB fits 64; ~13.5 GiB fits 32. Pick the profile to cover your expected peak concurrency — oversubscribing the batch width is what creates the TTFT cliff.
 
 ## Optimization impact (dev-time reference)
 
-Two optimization rounds measured at batch=128 on this card (each column's raw data: 2026-07-06 dataset for "round 1", this dataset for "round 2"; pre-opt raw data not retained, summary numbers only):
+Three optimization rounds measured at batch=128 on this card (raw data: 2026-07-06 dataset for "round 1", the 2026-07-07 dataset for "round 2", this dataset for "round 3"; pre-opt raw data not retained, summary numbers only):
 
-| | pre-opt | round 1 (07-06: CP-KV + CUDA-graph + KV arena) | round 2 (07-07: batched admission + Phase-1 tax + hot path + VAD bypass) |
-|---|---|---|---|
-| decode step @128 | 119.8 ms (RTF 1.5 — **not** real-time) | 67.5 ms (RTF 0.84) | **47.4 ms (RTF 0.59)** |
-| decode step @64 | 63.6 ms | 36.8 ms | **27.1 ms** |
-| decode step @1 | 11.3 ms | 12.7 ms | 12.8 ms (+1.5 ms vs pre-opt; fixed per-step overhead of the CP-KV/CUDA-graph path) |
-| TTFT avg @128 (engine-grpc) | ~371 ms | ~334 ms | **~275 ms** |
-| server total latency p50 @128 | — | 6333 ms | **4453 ms** (−30%) |
+| | pre-opt | round 1 (07-06: CP-KV + CUDA-graph + KV arena) | round 2 (07-07: batched admission + Phase-1 tax + hot path + VAD bypass) | round 3 (07-08: audit fix batch + batched p3_launch) |
+|---|---|---|---|---|
+| decode step @128 | 119.8 ms (RTF 1.5 — **not** real-time) | 67.5 ms (RTF 0.84) | 47.4 ms (RTF 0.59) | **42.0 ms (RTF 0.53)** |
+| decode step @64 | 63.6 ms | 36.8 ms | 27.1 ms | **24.5 ms** |
+| decode step @1 | 11.3 ms | 12.7 ms | 12.8 ms | 12.8 ms (+1.5 ms vs pre-opt; fixed per-step overhead of the CP-KV/CUDA-graph path) |
+| TTFT avg @128 (engine-grpc) | ~371 ms | ~334 ms | ~275 ms | **~269 ms** |
+| server total latency p50 @128 | — | 6333 ms | 4453 ms (−30%) | **3963 ms** (−11% vs round 2, −37% vs round 1) |
 
-Round 1 traded ~1.4 ms/step of single-stream latency for a ~44% per-step cut at full width — moving 128-stream serving from below-real-time to real-time. Round 2 cut another ~30% per step at width (Phase-1 per-slot CPU tax + c2w pooling), removed the serial admission ramp (TTFT −18%), and slimmed the serving hot path (async logging, orjson, gRPC chunk coalescing, VAD-path bypass). Audio output was verified byte-identical across round 2's data-movement changes (8 deterministic seeds, sha256), and the hallucination probe stayed 0/100.
+Round 1 traded ~1.4 ms/step of single-stream latency for a ~44% per-step cut at full width — moving 128-stream serving from below-real-time to real-time. Round 2 cut another ~30% per step at width (Phase-1 per-slot CPU tax + c2w pooling), removed the serial admission ramp (TTFT −18%), and slimmed the serving hot path (async logging, orjson, gRPC chunk coalescing, VAD-path bypass). Audio output was verified byte-identical across round 2's data-movement changes (8 deterministic seeds, sha256). Round 3 is the post-review audit fix batch (`cc58c6a`) plus the bit-exact batched `p3_launch` (`8596996`), cutting another ~11% per decode step at width and carrying `server_total` down with it; cumulatively vs the 2026-07-06 dataset that is **TTFT −20%, decode step −38%, server total −37%** at 128-wide. The hallucination probe stayed 0/100 before every round's data collection.
 
 ## Known limitations / leads for future engine work
 
 - **Fixed text/speaker — every prefill number is cache-hit prefill.** Cold-prefix (cache-miss) prefill measured ~30 ms vs ~1 ms in spot checks; cache-miss behavior under concurrent load is uncharacterized. Text-length, speaker-variety, and cache-miss sweeps are the natural follow-up.
-- **Triton numbers are stale (2026-07-06).** The Triton BLS path wraps the same engine core, so `b80cf45`/`2a9578b` engine-side gains would carry over, but it was not re-benchmarked; its gateway-side behavior under the new admission pattern is unmeasured.
+- **Triton numbers are stale (2026-07-06).** The Triton BLS path wraps the same engine core, so the engine-side gains (`b80cf45` through `8596996`) would carry over, but it was not re-benchmarked; its gateway-side behavior under the new admission pattern is unmeasured.
 - **Burst arrival is the worst case.** The concurrency test fires all N sessions simultaneously; staggered real-world arrivals would see lower per-request TTFT at the same steady-state concurrency. On top of that, the measured burst TTFT includes ~163 ms of client-side arrival spread on a shared channel (see the ramp decomposition).
 - **Localhost only.** Network RTT adds directly to connection cost and TTFT; the ~13 ms gRPC connection delta scales with RTT.
-- **Single-stream regression from batching optimizations.** The +1.5 ms/step cost at batch=1 (11.3 → 12.8 ms across both rounds) is real; a future adaptive path could skip the arena/graph machinery below a batch-width threshold.
+- **Single-stream regression from batching optimizations.** The +1.5 ms/step cost at batch=1 (11.3 → 12.8 ms, unchanged across rounds 2–3) is real; a future adaptive path could skip the arena/graph machinery below a batch-width threshold.
 - **`serving_endpoints.py` still doesn't use the `qwen3tts` client SDK** — migrating it is tracked as separate follow-up work; this benchmark's harness (`perf_matrix_sdk.py`) is SDK-based.
 
 ## Reproducing
