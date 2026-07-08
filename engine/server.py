@@ -505,7 +505,18 @@ class TTSEngine:
         This is the public session-entry API for gateways/adapters. It keeps the
         transport layer from reaching into frontend internals directly.
         """
-        await asyncio.to_thread(self._validate_and_prepare_session_config, config)
+        # Hop to a worker thread only when reference-audio feature extraction
+        # will actually run (voice_clone with raw ref audio) — that is real
+        # blocking work.  For everything else validation is microseconds of
+        # string checks, while an unconditional to_thread costs two extra
+        # event-loop requeues per open; under a 128-way burst each requeue
+        # waits behind the whole ready queue, and this dominated session
+        # ingest serialization (t0→request.accepted avg ~83ms, measured via
+        # workspace/mp_burst_probe.py).
+        if config.ref_audio and config.spk_embedding is None:
+            await asyncio.to_thread(self._validate_and_prepare_session_config, config)
+        else:
+            self._validate_and_prepare_session_config(config)
         return await self._frontend.create_session(
             session_id,
             config=config,

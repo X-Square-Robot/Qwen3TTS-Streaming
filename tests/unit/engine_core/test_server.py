@@ -209,7 +209,14 @@ def test_start_session_validates_before_delegating():
     assert frontend.calls[0][1] is config
 
 
-def test_start_session_reference_preprocessing_runs_off_event_loop(monkeypatch):
+def test_start_session_offloads_only_when_ref_audio_needs_preprocessing(monkeypatch):
+    """Contract: validation runs inline on the loop for cheap configs; the
+    to_thread hop is reserved for configs whose reference audio actually
+    needs feature extraction (ref_audio present, no precomputed embedding).
+    The unconditional hop cost two event-loop requeues per session open and
+    was removed after it dominated nothing but added latency."""
+    import threading
+
     engine = TTSEngine(
         model_arch=ModelArchConfig(
             variant="custom-1.7b",
@@ -219,16 +226,37 @@ def test_start_session_reference_preprocessing_runs_off_event_loop(monkeypatch):
     )
     engine._frontend = _StubFrontend()
 
-    def _blocking_prepare(config):
-        time.sleep(0.05)
+    seen_threads: list[int] = []
 
-    monkeypatch.setattr(engine, "_prepare_reference_audio_features", _blocking_prepare)
+    def _recording_validate(config):
+        seen_threads.append(threading.get_ident())
+        if config.ref_audio:
+            time.sleep(0.05)
+
+    monkeypatch.setattr(
+        engine, "_validate_and_prepare_session_config", _recording_validate
+    )
 
     async def _run():
+        loop_thread = threading.get_ident()
+
+        # Cheap config (no ref audio): validation runs inline on the loop.
+        await engine.start_session(
+            "sid-inline",
+            config=SessionConfig(task_type="custom_voice", speaker="Serena"),
+        )
+        assert seen_threads[-1] == loop_thread
+
+        # Ref-audio config: heavy preprocessing goes off-loop and the loop
+        # stays responsive while it blocks.
         task = asyncio.create_task(
             engine.start_session(
                 "sid-offload",
-                config=SessionConfig(task_type="custom_voice", speaker="Serena"),
+                config=SessionConfig(
+                    task_type="custom_voice",
+                    speaker="Serena",
+                    ref_audio=b"\x00\x01",
+                ),
             )
         )
         ticks = []
@@ -240,6 +268,7 @@ def test_start_session_reference_preprocessing_runs_off_event_loop(monkeypatch):
         await asyncio.wait_for(_tick(), timeout=0.03)
         assert ticks == ["tick"]
         await task
+        assert seen_threads[-1] != loop_thread
 
     asyncio.run(_run())
 
