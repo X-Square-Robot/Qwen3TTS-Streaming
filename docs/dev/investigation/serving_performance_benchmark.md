@@ -44,6 +44,8 @@ report format follows [`docs/user/benchmark_methodology.md`](../../user/benchmar
 | Hallucination gate | deterministic probe re-run **0/100** on this exact build immediately before data collection (duration min 9.04 s / median 10.08 s / max 10.72 s) |
 | Harness | [`tools/validation/perf_matrix_sdk.py`](../../../tools/validation/perf_matrix_sdk.py), built on the `qwen3tts` client SDK |
 
+> **Post-run note.** This dataset was collected on a **full-bf16** engine. Since collection, `code2wav` defaults to **fp16** (the fast c2w conv path on sm120 — see [engine_overview §1.5](../architecture/engine_overview.md)), a further per-decode-step win not reflected in the numbers below; treat these as a conservative floor for the current default. `cp` remains bf16 in both.
+
 ### ⚠️ `prefill_ms` semantics changed in this dataset
 
 As of the batched burst admission (`b80cf45`), `server_prefill_started/completed` bracket the

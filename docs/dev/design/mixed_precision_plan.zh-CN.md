@@ -6,7 +6,7 @@
 > 状态：已落地，但**实现方式与本草案不同**——最终在 bash 生命周期实现，而非下文的 Python CLI 方案。
 > 范围：`talker_code2wav_fused` TensorRT 单引擎的子模块混合精度控制
 >
-> **2026-07-06 更新——cp=fp32 的动机已过时**：促成本方案的幻觉已定位为 0601 checkpoint 权重训坏,与 CP 精度无关（见 `../investigation/streaming_hallucination.zh-CN.md`）。0701 重训后,全 bf16 引擎（cp=bf16）在与 cp=fp32 基线相同的确定性探测集上实测 0/100,因此 `CP_PRECISION` 现默认跟随 `ENGINE_DTYPE`（bf16）。本方案建立的子模块精度控制*机制*保留且仍然有用（`--cp-precision fp32` 用于数值对齐调试）。
+> **2026-07-06 更新——cp=fp32 的动机已过时**：促成本方案的幻觉已定位为 0601 checkpoint 权重训坏,与 CP 精度无关（见 `../investigation/streaming_hallucination.zh-CN.md`）。0701 重训后,全 bf16 引擎（cp=bf16）在与 cp=fp32 基线相同的确定性探测集上实测 0/100,因此 `CP_PRECISION` 现默认跟随 `ENGINE_DTYPE`（bf16）。本方案建立的子模块精度控制*机制*保留且仍然有用。另外，`CODE2WAV_PRECISION` 现**默认 fp16**（sm120 上更快的 c2w 卷积路径，见 `../architecture/engine_overview.zh-CN.md` §1.5），混合构建经 `trt_fused_io_formats.py --emit constraints` 自动选用 `--precisionConstraints=prefer`。当前最佳性能默认为 **cp=bf16（跟随基础）+ code2wav=fp16**；`--cp-precision fp32` / `--code2wav-precision bf16` 保留用于数值对齐调试。
 >
 > **实际用法**：`bash scripts/bash/build_engines.sh --variant custom-1.7b --cp-precision fp32`（默认跟随 `ENGINE_DTYPE`）。
 > 精度写入 manifest，由 `scripts/python/trt_fused_io_formats.py --emit layer-precisions` 翻译成 trtexec

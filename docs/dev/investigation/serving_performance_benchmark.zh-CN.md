@@ -43,6 +43,8 @@
 | 幻觉门禁 | 采集前在本构建上确定性探针重跑 **0/100**(时长 min 9.04s / 中位 10.08s / max 10.72s) |
 | 压测工具 | [`tools/validation/perf_matrix_sdk.py`](../../../tools/validation/perf_matrix_sdk.py),基于 `qwen3tts` client SDK |
 
+> **采集后注记。** 本数据集采集于**全 bf16** 引擎。采集之后，`code2wav` 默认改为 **fp16**（sm120 上更快的 c2w 卷积路径，见 [engine_overview §1.5](../architecture/engine_overview.zh-CN.md)），是下方数字未反映的又一 decode-step 提速；因此这些数字应视为当前默认配置的保守下限。`cp` 两者都仍是 bf16。
+
 ### ⚠️ 本数据集中 `prefill_ms` 语义已变
 
 自批量突发准入(`b80cf45`)起,`server_prefill_started/completed` 括起的是**整个批量准入

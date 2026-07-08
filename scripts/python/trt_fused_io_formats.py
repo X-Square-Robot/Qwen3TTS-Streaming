@@ -126,6 +126,32 @@ def fused_layer_precisions(manifest: Dict[str, Any]) -> str:
     return ",".join(parts)
 
 
+def fused_precision_constraints(manifest: Dict[str, Any]) -> str:
+    """trtexec ``--precisionConstraints`` mode for a mixed-precision build.
+
+    Returns ``"prefer"`` when any sub-graph is pinned to a *lower-precision
+    speed pin* (fp16 / fp8) below a higher-precision backbone.  Such pins exist
+    for throughput — e.g. code2wav=fp16, because TRT's bf16 conv has no
+    tensor-core kernel on some GPUs — but the sub-graph's glue layers (Pad /
+    Slice) may have no fp16/fp8 kernel and must be allowed to fall back to a
+    conforming precision instead of hard-failing the build.
+
+    Returns ``"obey"`` otherwise: a uniform engine (spec unused) or a
+    higher-precision *numerical-repro pin* (e.g. cp=fp32).  fp32 kernels always
+    exist, so ``obey`` never spuriously fails and it guarantees the pinned
+    layers keep that precision.  ``"prefer"`` is a safe superset when a speed
+    pin and a repro pin coexist: fp32 layers still find their kernel and stay
+    put, while the speed-pinned glue is free to fall back.
+    """
+    precs = _submodule_precisions(manifest)
+    backbone = precs["backbone"]
+    speed_pins = {"fp16", "fp8"}
+    for key in ("cp", "code2wav"):
+        if precs[key] != backbone and precs[key] in speed_pins:
+            return "prefer"
+    return "obey"
+
+
 def fused_input_output_io_format_strings(manifest: Dict[str, Any]) -> Tuple[str, str]:
     """
     Return (input_io_formats, output_io_formats) comma-separated for trtexec.
@@ -199,9 +225,12 @@ def main() -> None:
     )
     p.add_argument(
         "--emit",
-        choices=("input", "output", "prec", "layer-precisions", "all"),
+        choices=("input", "output", "prec", "layer-precisions", "constraints", "all"),
         default="all",
-        help="Print one value, or all lines (input, output, prec, layer-precisions)",
+        help=(
+            "Print one value, or all lines "
+            "(input, output, prec, layer-precisions, constraints)"
+        ),
     )
     args = p.parse_args()
     m = load_manifest(args.manifest)
@@ -211,6 +240,7 @@ def main() -> None:
     # falls back to a single flag for a uniform engine.
     prec_str = " ".join(fused_precision_args(m))
     layer_prec = fused_layer_precisions(m)
+    constraints = fused_precision_constraints(m)
 
     if args.emit == "input":
         print(inp, end="")
@@ -220,11 +250,14 @@ def main() -> None:
         print(prec_str, end="")
     elif args.emit == "layer-precisions":
         print(layer_prec, end="")
+    elif args.emit == "constraints":
+        print(constraints, end="")
     else:
         print(inp)
         print(out)
         print(prec_str)
         print(layer_prec)
+        print(constraints)
 
 
 if __name__ == "__main__":

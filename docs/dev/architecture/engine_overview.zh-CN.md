@@ -52,12 +52,12 @@
 - **缺陷**：**CP 的 FP16 坏掉**（stage argmax 敏感），只能 fp32/bf16；图大编译慢。
 - **可避免**：CP FP16 不可用是数值本质。
 
-### 1.5 混合精度 bf16/fp32/bf16（历史方案；0701 起全 bf16）
+### 1.5 子模块精度（CP fp32 为历史方案；当前默认 cp=bf16 + code2wav=fp16）
 - **曾是什么**：backbone=bf16、CP=fp32、code2wav=bf16，是排查 0601 时代幻觉时的配置。
 - **当时为什么**：CP bf16 下 stage 近似平局被舍入翻转（Finding #15：孤立 CP bf16 TRT vs ORT 随机输入 7/10 不匹配，fp32 则 0/10）——被怀疑级联成幻觉。
 - **关键认知（至今成立）**：**精度从来不是幻觉根因**（Finding #17-18）——0601 权重下各精度同种子都 ~10-18%，全 fp32 反而 17.5% 更糟，精度只是"换一批坏种子"。真正根因是 0601 checkpoint 训坏了,0701 重训修复（同种子 0/100）。
 - **现状（2026-07-06）**：0701 权重下,**全 bf16 引擎（cp=bf16）在同一组确定性种子上同样 0/100**——CP bf16 的数值噪声（Finding #15 作为数值事实仍成立）在健康权重上被证实不会转化为幻觉。CP fp32 不再必要,且它有真实的性能代价（fp32 下 CP 占 kernel 时间 ~45%）。
-- **code2wav fp16（可选，默认关）**：TRT 10.13 在 sm120 上没有 tensor-core 的 bf16 conv kernel（fp16 conv 快 2.5-3.4×），bf16 下 c2w 声码器占 b128 decode step ~35ms，fp16 下 ~9ms。`CODE2WAV_PRECISION=fp16 PRECISION_CONSTRAINTS=prefer` 只把 `/code2wav/*` 钉成 fp16（emitter 同时把 `/talker_fused/*` 兜底钉回 bf16，防止全局 `--fp16` 让 talker/CP kernel 漂移改变采样数值口径）。c2w 不回流 talker；已过 halluprobe 0/100 + 音频电平/频谱检查。与 CP 不同，c2w 的 fp16 数值上没问题。
+- **code2wav fp16（默认）**：TRT 10.13 在 sm120 上没有 tensor-core 的 bf16 conv kernel（fp16 conv 快 2.5-3.4×），bf16 下 c2w 声码器占 b128 decode step ~35ms，fp16 下 ~9ms。因此 `CODE2WAV_PRECISION` 现在在 `build_engines.sh` 与 `autorun.sh` 里**默认 fp16**。emitter 只把 `/code2wav/*` 钉成 fp16，并把 `/talker_fused/*` 兜底钉回 bf16（防止全局 `--fp16` 让 talker/CP kernel 漂移改变采样数值口径）；`build_engines.sh` 对这类提速钉自动选用 `--precisionConstraints=prefer`（`trt_fused_io_formats.py --emit constraints`——c2w 的 Pad/Slice glue 无 fp16 kernel，必须允许回退）。c2w 不回流 talker；已过 halluprobe 0/100 + 音频电平/频谱检查。与 CP 不同，c2w 的 fp16 数值上没问题。设 `CODE2WAV_PRECISION=bf16` 可构建全 bf16（数值对齐 / 复现基线）。
 - 详见 [[mixed_precision_plan]]、`streaming_hallucination.md`。
 
 ### 1.6 Prefix KV cache

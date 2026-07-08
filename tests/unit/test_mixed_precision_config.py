@@ -174,6 +174,73 @@ class TestResolveSubmodelPrecisions:
 
 
 # ---------------------------------------------------------------------------
+#  trt_fused_io_formats tests (layer-precisions + constraints emitter)
+# ---------------------------------------------------------------------------
+
+
+class TestFusedPrecisionEmitter:
+    """Tests for the mixed-precision trtexec arg emitter.
+
+    Locks the default best-config behaviour (backbone/cp bf16, code2wav fp16):
+    the fp16 speed pin must pin /code2wav/* to fp16, pin the talker so it does
+    not drift to fp16, and auto-select --precisionConstraints=prefer.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        import sys
+
+        sys_path = str(Path(__file__).resolve().parents[3] / "scripts" / "python")
+        if sys_path not in sys.path:
+            sys.path.insert(0, sys_path)
+
+    def test_uniform_bf16_no_pins_obey(self):
+        from trt_fused_io_formats import (
+            fused_layer_precisions,
+            fused_precision_constraints,
+        )
+
+        m = {"engine_dtype": "bf16"}
+        assert fused_layer_precisions(m) == ""
+        assert fused_precision_constraints(m) == "obey"
+
+    def test_code2wav_fp16_speed_pin_prefers(self):
+        """Default best config: c2w=fp16 pins c2w + talker, constraints=prefer."""
+        from trt_fused_io_formats import (
+            fused_layer_precisions,
+            fused_precision_constraints,
+        )
+
+        m = {"engine_dtype": "bf16", "code2wav_precision": "fp16"}
+        assert (
+            fused_layer_precisions(m) == "/code2wav/*:fp16,/talker_fused/*:bf16"
+        )
+        assert fused_precision_constraints(m) == "prefer"
+
+    def test_cp_fp32_repro_pin_obeys(self):
+        """cp=fp32 numerical-repro pin keeps the strict obey constraint."""
+        from trt_fused_io_formats import (
+            fused_layer_precisions,
+            fused_precision_constraints,
+        )
+
+        m = {"engine_dtype": "bf16", "cp_precision": "fp32"}
+        assert fused_layer_precisions(m) == "/talker_fused/cp/*:fp32"
+        assert fused_precision_constraints(m) == "obey"
+
+    def test_speed_and_repro_pins_coexist_prefer(self):
+        """A speed pin forces prefer even when a fp32 repro pin coexists."""
+        from trt_fused_io_formats import fused_precision_constraints
+
+        m = {
+            "engine_dtype": "bf16",
+            "cp_precision": "fp32",
+            "code2wav_precision": "fp16",
+        }
+        assert fused_precision_constraints(m) == "prefer"
+
+
+# ---------------------------------------------------------------------------
 #  engine/config tests
 # ---------------------------------------------------------------------------
 

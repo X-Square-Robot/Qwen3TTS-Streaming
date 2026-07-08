@@ -50,7 +50,9 @@ Phase B:
   --max-batch-size <N>          TensorRT profile 最大 batch
   --max-input-len <N>           prefill/input 最大 token 长度
   --max-seq-len <N>             KV cache 最大 sequence 长度
-  --dtype bf16|fp16|fp32|fp8    TensorRT build precision
+  --dtype bf16|fp16|fp32|fp8    TensorRT build precision（各子模块默认基准）
+  --cp-precision <T>            Code Predictor 精度（默认跟随 --dtype，即 bf16）
+  --code2wav-precision <T>      Code2Wav 精度（默认 fp16——卷积更快；bf16 用于全 bf16 构建）
   --triton-io-float-dtype <T>   TensorRT/Triton float I/O dtype，默认等于 --dtype
   --target-driver <ver>         按部署机 NVIDIA driver 选择 NGC 镜像
   --build-device <dev>          trtexec 编译 GPU

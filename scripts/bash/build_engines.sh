@@ -55,19 +55,29 @@ MAX_INPUT_LEN="${MAX_INPUT_LEN:-}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-}"
 ENGINE_DTYPE="${ENGINE_DTYPE:-bfloat16}"
 TRITON_IO_FLOAT_DTYPE="${TRITON_IO_FLOAT_DTYPE:-}"
-# Per-submodule compute precision for the fused engine (empty = follow ENGINE_DTYPE).
-# History: CP once defaulted to fp32 while hunting the 0601-checkpoint-era
-# streaming hallucination (bf16 flips near-tie argmax in the CP tail; see
-# streaming_hallucination.md Finding #15). That hallucination turned out to be
-# the damaged 0601 weights, not precision: with the 0701 retrain, a full-bf16
-# engine (cp=bf16) measures 0/100 hallucinations on the same deterministic
-# seed set as the cp=fp32 baseline (2026-07-06), and cp=fp32 costs real decode
-# latency (CP was ~45% of kernel time under fp32). CP now follows ENGINE_DTYPE;
-# set CP_PRECISION=fp32 to reproduce the historical mixed-precision build or to
-# debug numerical parity against ORT/PyTorch.
+# Per-submodule compute precision for the fused engine.
+#
+# CP (empty = follow ENGINE_DTYPE, i.e. bf16): CP once defaulted to fp32 while
+# hunting the 0601-checkpoint-era streaming hallucination (bf16 flips near-tie
+# argmax in the CP tail; see streaming_hallucination.md Finding #15). That
+# hallucination turned out to be the damaged 0601 weights, not precision: with
+# the 0701 retrain, a full-bf16 engine (cp=bf16) measures 0/100 hallucinations
+# on the same deterministic seed set as the cp=fp32 baseline (2026-07-06), and
+# cp=fp32 costs real decode latency (CP was ~45% of kernel time under fp32). CP
+# now follows ENGINE_DTYPE; set CP_PRECISION=fp32 to reproduce the historical
+# mixed-precision build or to debug numerical parity against ORT/PyTorch.
+#
+# Code2Wav (default fp16): TRT 10.13 on sm120 has no optimized bf16 conv kernel
+# (microbench fp16 2.5-3.4x faster; conv768 k7 0.509->0.148ms), so a bf16 c2w
+# vocoder dominates the decode step. c2w=fp16 pins only /code2wav/* to fp16 (the
+# vocoder does not flow back into the talker sampling path — verified halluprobe
+# 0/100 + normal audio level/spectrum, commit 23127b7) and cuts that cost hard.
+# The mixed build auto-selects --precisionConstraints=prefer (see below) so the
+# c2w Pad/Slice glue that lacks an fp16 kernel falls back instead of failing.
+# Set CODE2WAV_PRECISION=bf16 for a uniform-bf16 numerical-parity build.
 BACKBONE_PRECISION="${BACKBONE_PRECISION:-}"
 CP_PRECISION="${CP_PRECISION:-}"
-CODE2WAV_PRECISION="${CODE2WAV_PRECISION:-}"
+CODE2WAV_PRECISION="${CODE2WAV_PRECISION:-fp16}"
 # Exported so the make-bundle manifest writer (a python heredoc subprocess) can
 # persist these into build_manifest.json for the cross-host build to honor.
 export BACKBONE_PRECISION CP_PRECISION CODE2WAV_PRECISION
@@ -423,11 +433,18 @@ build_talker_code2wav_fused_trt() {
         local layer_prec
         layer_prec=$(python3 "$fused_io_py" "$mf" --emit layer-precisions)
         if [ -n "$layer_prec" ]; then
-            # obey (default): hard-fail if a pinned layer has no conforming kernel —
-            # right for numerical-repro pins (e.g. cp=fp32). prefer: allow per-layer
-            # fallback — right for speed pins (e.g. code2wav=fp16, whose Pad/Slice
-            # glue has no fp16 Myelin implementation and must stay bf16).
-            local prec_constraints="${PRECISION_CONSTRAINTS:-obey}"
+            # Constraint mode is auto-derived from the manifest precisions:
+            #   prefer — when a speed pin (fp16/fp8 below a higher-precision
+            #     backbone, e.g. code2wav=fp16) is present: its Pad/Slice glue
+            #     has no fp16 Myelin kernel and must fall back instead of the
+            #     build hard-failing.
+            #   obey — uniform / higher-precision repro pins (e.g. cp=fp32),
+            #     where every pinned layer has a conforming kernel and a
+            #     missing one should hard-fail loudly.
+            # PRECISION_CONSTRAINTS overrides the auto choice when set.
+            local auto_constraints
+            auto_constraints=$(python3 "$fused_io_py" "$mf" --emit constraints)
+            local prec_constraints="${PRECISION_CONSTRAINTS:-${auto_constraints:-obey}}"
             mixed_args=(--precisionConstraints="$prec_constraints" --layerPrecisions="$layer_prec")
             log_info "  mixed precision: global=[$prec_flag] constraints=$prec_constraints layerPrecisions=$layer_prec"
         fi
@@ -731,6 +748,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --max-input-len N      Max input length for prefill (default: auto by exported model + target GPU memory)"
             echo "  --max-seq-len N        Max sequence length incl. KV cache (default: auto by exported model + target GPU memory)"
             echo "  --dtype bf16|fp16|fp32|fp8  Engine precision (default: bfloat16)"
+            echo "  --backbone-precision T      Talker backbone precision (default: follow --dtype)"
+            echo "  --cp-precision T            Code Predictor precision (default: follow --dtype, i.e. bf16)"
+            echo "  --code2wav-precision T      Code2Wav precision (default: fp16 — faster conv; bf16 for uniform build)"
             echo "  --triton-io-float-dtype T   Float I/O dtype (default: same as --dtype)"
             echo "  --dry-run              Show docker commands without executing"
             echo "  --pull-only            Pull the container image and exit"
