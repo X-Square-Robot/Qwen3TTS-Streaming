@@ -1300,6 +1300,29 @@ def main():
 
     cfg = load_config(args.config, cli_overrides=cli_overrides)
 
+    # Report the ground-truth code source via __file__ (not the entrypoint's
+    # intent): the model package bundles its own engine/ copy, selected by
+    # ENGINE_CODE_FROM_PACKAGE=1 as an emergency override of the image code.
+    engine_code_dir = Path(__file__).resolve().parent
+    package_dir = (
+        Path(cfg.paths.model_package_dir).resolve()
+        if cfg.paths.model_package_dir
+        else None
+    )
+    code_from_package = package_dir is not None and engine_code_dir.parent == package_dir
+    logger.info(
+        "Engine code source: %s (%s)",
+        engine_code_dir,
+        "model package copy" if code_from_package else "image/checkout",
+    )
+    if os.environ.get("ENGINE_CODE_FROM_PACKAGE", "") == "1" and not code_from_package:
+        logger.warning(
+            "ENGINE_CODE_FROM_PACKAGE=1 is set but the running engine/ code is "
+            "%s, not the model package copy — the override did not take effect "
+            "(start via scripts/compose/engine-entrypoint.sh to honor it)",
+            engine_code_dir,
+        )
+
     # Install the observability control plane and drive the root log level from
     # the resolved config. ENGINE_OBS_LEVEL is accepted as a shorthand alias for
     # ENGINE_OBSERVABILITY_LEVEL (the generic env override).
