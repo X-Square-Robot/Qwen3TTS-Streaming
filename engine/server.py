@@ -1362,6 +1362,12 @@ def main():
             device_id=args.device,
         )
 
+        # Single source of truth for every probe surface (health port + the
+        # same routes on the WebSocket port). Created unconditionally so an
+        # invalid probe_mode fails before the model load even with the health
+        # port disabled.
+        health_state = HealthState(engine, cfg.server.health_probe_mode)
+
         health_port = cfg.server.health_port
         health_server = None
         if health_port > 0:
@@ -1370,9 +1376,7 @@ def main():
             # own thread + event loop because engine.start() blocks this loop
             # synchronously for the entire load. A bind failure aborts here,
             # not minutes later inside a process the platform cannot probe.
-            health_server = HealthServerThread(
-                engine, health_port, probe_mode=cfg.server.health_probe_mode
-            )
+            health_server = HealthServerThread(engine, health_port, state=health_state)
             health_server.start()
 
         try:
@@ -1424,6 +1428,7 @@ def main():
                         stop_event=stop_event,
                         path=websocket_path,
                         started=ws_started,
+                        health_state=health_state,
                     ),
                 )
                 gateway_started.append(ws_started)
@@ -1443,8 +1448,7 @@ def main():
             # shutdown).
             for ev in gateway_started:
                 await ev.wait()
-            if health_server:
-                health_server.mark_ready()
+            health_state.mark_ready()
             logger.info("Engine ready, press Ctrl+C to stop")
 
         ready_task = asyncio.create_task(_mark_ready())
@@ -1484,11 +1488,14 @@ def main():
         uvloop.run(run())
 
 
-class HealthServerThread:
-    """HTTP health / metrics server on a dedicated thread with its own loop.
+class HealthState:
+    """Readiness / liveness state shared by every health probe surface.
 
-    Runs independently of the main asyncio loop so probes are answered while
-    ``engine.start()`` blocks that loop for the entire model load. Routes:
+    Thread-safe: ``mark_ready`` flips a ``threading.Event`` and
+    ``payload_and_status`` reads only that event plus atomic engine counters,
+    so the dedicated health thread (health port) and the gateway event loop
+    (the same routes on the WebSocket port) serve probes from one source of
+    truth. Route semantics:
 
     - ``/health``  — 503 until ready, then 200 (``probe_mode="ready"``, the
       default); ``probe_mode="alive"`` returns 200 whenever the port is up,
@@ -1508,8 +1515,53 @@ class HealthServerThread:
     top-level ``"running": true`` key that compose.sh greps for.
     """
 
-    _PROBE_MODES = ("ready", "alive")
-    _ROUTES = ("/health", "/readyz", "/livez", "/metrics")
+    PROBE_MODES = ("ready", "alive")
+    ROUTES = ("/health", "/readyz", "/livez", "/metrics")
+
+    def __init__(self, engine: TTSEngine, probe_mode: str = "ready") -> None:
+        if probe_mode not in self.PROBE_MODES:
+            raise ValueError(
+                f"server.health_probe_mode must be one of {self.PROBE_MODES}, "
+                f"got {probe_mode!r}"
+            )
+        self._engine = engine
+        self.probe_mode = probe_mode
+        self._ready = threading.Event()
+
+    def mark_ready(self) -> None:
+        self._ready.set()
+
+    def payload_and_status(self, path: str) -> tuple[dict, int]:
+        stats = self._engine.health_stats()
+        started = self._ready.is_set()
+        ready = started and self._engine.engine_thread_alive()
+        if ready:
+            stats["status"] = "ok"
+        elif started:
+            stats["status"] = "engine_loop_dead"
+        else:
+            stats["status"] = "loading"
+        ready_code = 200 if ready else 503
+        if path == "/health":
+            code = 200 if self.probe_mode == "alive" else ready_code
+        elif path == "/readyz":
+            code = ready_code
+        else:  # /livez, /metrics
+            code = 200
+        return stats, code
+
+
+class HealthServerThread:
+    """HTTP health / metrics server on a dedicated thread with its own loop.
+
+    Runs independently of the main asyncio loop so probes are answered while
+    ``engine.start()`` blocks that loop for the entire model load. Serves the
+    :class:`HealthState` routes (see there for semantics); the same state can
+    additionally be exposed on the WebSocket gateway port for platforms that
+    can only probe the service port — that surface binds late (after the
+    model load) and answers from the main loop, whereas this one is up from
+    process start and immune to a wedged gateway loop.
+    """
 
     def __init__(
         self,
@@ -1517,17 +1569,11 @@ class HealthServerThread:
         port: int,
         probe_mode: str = "ready",
         _force_fallback: bool = False,
+        state: HealthState | None = None,
     ) -> None:
-        if probe_mode not in self._PROBE_MODES:
-            raise ValueError(
-                f"server.health_probe_mode must be one of {self._PROBE_MODES}, "
-                f"got {probe_mode!r}"
-            )
-        self._engine = engine
+        self._state = state if state is not None else HealthState(engine, probe_mode)
         self._port = port
-        self._probe_mode = probe_mode
         self._force_fallback = _force_fallback
-        self._ready = threading.Event()
         self._bound = threading.Event()
         self._bind_error: BaseException | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -1559,7 +1605,7 @@ class HealthServerThread:
             ) from self._bind_error
 
     def mark_ready(self) -> None:
-        self._ready.set()
+        self._state.mark_ready()
 
     def stop(self, join_timeout_sec: float = 5.0) -> None:
         loop, stop = self._loop, self._stop
@@ -1567,27 +1613,6 @@ class HealthServerThread:
             loop.call_soon_threadsafe(stop.set)
         if self._thread.is_alive():
             self._thread.join(join_timeout_sec)
-
-    # -- request handling (health thread) -------------------------------
-
-    def _payload_and_status(self, path: str) -> tuple[dict, int]:
-        stats = self._engine.health_stats()
-        started = self._ready.is_set()
-        ready = started and self._engine.engine_thread_alive()
-        if ready:
-            stats["status"] = "ok"
-        elif started:
-            stats["status"] = "engine_loop_dead"
-        else:
-            stats["status"] = "loading"
-        ready_code = 200 if ready else 503
-        if path == "/health":
-            code = 200 if self._probe_mode == "alive" else ready_code
-        elif path == "/readyz":
-            code = ready_code
-        else:  # /livez, /metrics
-            code = 200
-        return stats, code
 
     # -- server (health thread) ------------------------------------------
 
@@ -1623,11 +1648,11 @@ class HealthServerThread:
         from aiohttp import web  # type: ignore[import-untyped]
 
         async def handle(request):
-            stats, code = self._payload_and_status(request.path)
+            stats, code = self._state.payload_and_status(request.path)
             return web.json_response(stats, status=code)
 
         app = web.Application()
-        for route in self._ROUTES:
+        for route in self._state.ROUTES:
             app.router.add_get(route, handle)
 
         runner = web.AppRunner(app, access_log=None)
@@ -1650,7 +1675,7 @@ class HealthServerThread:
             logger.info(
                 "Health/metrics HTTP server on port %d (aiohttp, probe_mode=%s)",
                 self.bound_port,
-                self._probe_mode,
+                self._state.probe_mode,
             )
             await self._stop.wait()
         finally:
@@ -1670,8 +1695,8 @@ class HealthServerThread:
                         path = parts[1].split("?", 1)[0]
                 except Exception:
                     pass
-                if path in self._ROUTES:
-                    stats, code = self._payload_and_status(path)
+                if path in self._state.ROUTES:
+                    stats, code = self._state.payload_and_status(path)
                     body = _json.dumps(stats).encode()
                 else:
                     body = b'{"error": "not found"}'
@@ -1705,7 +1730,7 @@ class HealthServerThread:
         logger.info(
             "Health/metrics HTTP server on port %d (asyncio fallback, probe_mode=%s)",
             self.bound_port,
-            self._probe_mode,
+            self._state.probe_mode,
         )
         async with server:
             serve_task = asyncio.create_task(server.serve_forever())

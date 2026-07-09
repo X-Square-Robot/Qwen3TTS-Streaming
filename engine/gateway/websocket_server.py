@@ -58,7 +58,7 @@ from ..interface.vad import (
 from .grpc_server import _build_vad_config, _inject_vad_metrics
 
 if TYPE_CHECKING:
-    from ..server import TTSEngine
+    from ..server import HealthState, TTSEngine
 
 try:
     from aiohttp import WSMsgType, web
@@ -567,6 +567,25 @@ def _is_terminal_frame(frame: dict[str, Any]) -> bool:
     return frame.get("event", {}).get("type") in {"done", "error"}
 
 
+def add_health_routes(app, health_state: HealthState) -> None:
+    """Expose the engine health probes on the gateway port as well.
+
+    Same routes and semantics as the dedicated health port (see
+    ``engine.server.HealthState``), for platforms that can only probe the
+    service port. Two caveats versus the health port: this surface binds
+    only after the model load (probes see connection-refused during the
+    load window), and it answers from the main event loop, so it also
+    exercises the actual serving path.
+    """
+
+    async def handle_probe(request):
+        stats, code = health_state.payload_and_status(request.path)
+        return web.json_response(stats, status=code)
+
+    for route in health_state.ROUTES:
+        app.router.add_get(route, handle_probe)
+
+
 async def serve(
     engine: TTSEngine,
     port: int,
@@ -574,11 +593,13 @@ async def serve(
     stop_event: asyncio.Event,
     path: str = "/v1/ws",
     started: asyncio.Event | None = None,
+    health_state: HealthState | None = None,
 ) -> None:
     """Start the websocket gateway using aiohttp.
 
     ``started`` is set once the port is bound so readiness can cover
-    "gateway actually listening".
+    "gateway actually listening". ``health_state`` additionally mounts the
+    health probe routes on this port.
     """
     if web is None:
         logger.error("aiohttp not installed. Run: pip install aiohttp")
@@ -589,6 +610,8 @@ async def serve(
     app = web.Application()
     app.router.add_get(_CAPABILITIES_PATH, gateway.handle_capabilities)
     app.router.add_get(ws_path, gateway.handle_websocket)
+    if health_state is not None:
+        add_health_routes(app, health_state)
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()

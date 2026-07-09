@@ -15,7 +15,7 @@ import pytest
 
 pytest.importorskip("torch")
 
-from engine.server import HealthServerThread
+from engine.server import HealthServerThread, HealthState
 
 
 class FakeEngine:
@@ -151,3 +151,73 @@ class TestBindFailure:
         )
         with pytest.raises(RuntimeError, match="failed to start"):
             server.start(bind_timeout_sec=5)
+
+
+@pytest.mark.asyncio
+async def test_gateway_port_routes_share_health_state():
+    """The WS-port probe routes must mirror the health-port semantics."""
+    pytest.importorskip("aiohttp")
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from engine.gateway.websocket_server import add_health_routes
+
+    engine = FakeEngine()
+    state = HealthState(engine)
+    app = web.Application()
+    add_health_routes(app, state)
+
+    server = TestServer(app)
+    async with server:
+        client = TestClient(server)
+        async with client:
+            resp = await client.get("/health")
+            assert resp.status == 503
+            assert (await resp.json())["status"] == "loading"
+            assert (await client.get("/livez")).status == 200
+            assert (await client.get("/metrics")).status == 200
+            assert (await client.get("/readyz")).status == 503
+
+            engine.running = True
+            engine.alive = True
+            state.mark_ready()
+
+            resp = await client.get("/health")
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["running"] is True
+            assert body["status"] == "ok"
+            assert (await client.get("/readyz")).status == 200
+
+
+@pytest.mark.asyncio
+async def test_gateway_and_thread_read_one_state():
+    """mark_ready on the shared state flips both probe surfaces at once."""
+    pytest.importorskip("aiohttp")
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from engine.gateway.websocket_server import add_health_routes
+
+    engine = FakeEngine()
+    state = HealthState(engine)
+    thread_server = HealthServerThread(engine, 0, state=state)
+    thread_server.start()
+    app = web.Application()
+    add_health_routes(app, state)
+    ws_server = TestServer(app)
+    try:
+        async with ws_server:
+            client = TestClient(ws_server)
+            async with client:
+                assert _get(thread_server.bound_port, "/health")[0] == 503
+                assert (await client.get("/health")).status == 503
+
+                engine.running = True
+                engine.alive = True
+                state.mark_ready()
+
+                assert _get(thread_server.bound_port, "/health")[0] == 200
+                assert (await client.get("/health")).status == 200
+    finally:
+        thread_server.stop()

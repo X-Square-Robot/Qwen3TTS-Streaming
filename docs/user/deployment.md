@@ -259,6 +259,14 @@ If the engine loop thread dies after startup, `/health` and `/readyz` drop back 
 `503` (`"status": "engine_loop_dead"`) so a platform liveness probe restarts the
 container — intended self-healing for a stateless engine.
 
+The same four routes are also served on the WebSocket port (default `50052`),
+sharing one readiness state, for platforms that can only probe the service port.
+Two differences versus the health port: the WebSocket port binds only after the
+model load (probes get connection-refused during the load window, so the startup
+grace must cover the cold start), and it answers from the gateway event loop, so
+it also verifies the actual serving path is responsive. Prefer the dedicated
+health port when your platform lets you choose.
+
 Platform probe checklist:
 
 - Size the startup grace to cover the cold start (TRT deserialize + warmup is
