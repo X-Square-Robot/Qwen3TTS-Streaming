@@ -413,7 +413,7 @@ ensure_engine_docker_image_current() {
         log_info "将按 Dockerfile.engine 重新构建..."
         need_build=true
     elif ! engine_docker_image_supports_model_package_engine "$img"; then
-        log_warn "镜像 $img 的 engine 代码或启动脚本较旧，无法优先使用模型包内的 engine/。"
+        log_warn "镜像 $img 的 engine 代码或启动脚本较旧（缺少 ENGINE_CODE_FROM_PACKAGE 镜像优先加载逻辑）。"
         log_info "将按 Dockerfile.engine 重新构建..."
         need_build=true
     elif [ -n "$EXPECTED_ENGINE_RELEASE" ] && ! engine_docker_image_matches_release "$img" "$EXPECTED_ENGINE_RELEASE"; then

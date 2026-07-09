@@ -403,13 +403,14 @@ engine_docker_image_has_app() {
 
 # ---------------------------------------------------------------------------
 #  engine_docker_image_supports_model_package_engine <image_tag>
-#  Returns 0 if the image contains the entrypoint/code needed to run engine.server
-#  from the assembled model package payload.
+#  Returns 0 if the image entrypoint is current: image-first code loading with
+#  the ENGINE_CODE_FROM_PACKAGE=1 emergency override, plus engine code new
+#  enough to parse the assembled package (EngineConfig.references).
 # ---------------------------------------------------------------------------
 engine_docker_image_supports_model_package_engine() {
     local image="$1"
     docker run --rm --entrypoint "" "$image" sh -lc '
-        grep -q "Prefer the engine/ package copied into the assembled model package" /app/scripts/compose/engine-entrypoint.sh &&
+        grep -q "ENGINE_CODE_FROM_PACKAGE" /app/scripts/compose/engine-entrypoint.sh &&
         python3 - <<'"'"'PY'"'"'
 from engine.config import EngineConfig
 

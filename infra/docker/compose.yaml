@@ -19,6 +19,9 @@ services:
       ENGINE_MODEL_NAME: ${ENGINE_MODEL_NAME:-tts_orchestrator}
       ENGINE_MODEL_VERSION: ${ENGINE_MODEL_VERSION:-1}
       ENGINE_MODEL_PACKAGE_DIR: ${ENGINE_MODEL_PACKAGE_DIR:-/models/tts_orchestrator/1}
+      # Emergency override: load engine/ code from the model package instead of
+      # the image (hotfix without an image rebuild). Default off = image code.
+      ENGINE_CODE_FROM_PACKAGE: ${ENGINE_CODE_FROM_PACKAGE:-0}
       ENGINE_DEVICE: ${ENGINE_DEVICE:-0}
       ENGINE_GRPC_PORT: ${ENGINE_GRPC_PORT:-50051}
       ENGINE_WEBSOCKET_PORT: ${ENGINE_WEBSOCKET_PORT:-50052}

@@ -9,14 +9,26 @@ model_name="${ENGINE_MODEL_NAME:-tts_orchestrator}"
 model_version="${ENGINE_MODEL_VERSION:-${MODEL_VERSION:-1}}"
 model_package_dir="${ENGINE_MODEL_PACKAGE_DIR:-${model_repo}/${model_name}/${model_version}}"
 
-# If the package is already present, use its engine/ implementation even while
-# resolving paths. This keeps the runtime code in lockstep with Phase C assemble.
-if [[ -d "${model_package_dir}/engine" ]]; then
-    export PYTHONPATH="${model_package_dir}:${PYTHONPATH:-/app}"
+# Engine code source. Default: the image's /app copy, so the image tag
+# identifies the code that runs. ENGINE_CODE_FROM_PACKAGE=1 switches to the
+# engine/ copy bundled in the model package — an emergency override to hotfix
+# runtime code without an image rebuild. The bundled copy itself always ships
+# in the package: Triton BLS loads it from the model repository regardless.
+engine_code_root="/app"
+if [[ "${ENGINE_CODE_FROM_PACKAGE:-0}" = "1" ]]; then
+    if [[ ! -d "${model_package_dir}/engine" ]]; then
+        echo "ENGINE_CODE_FROM_PACKAGE=1 but no engine/ code in model package: ${model_package_dir}" >&2
+        echo "Re-assemble with: bash scripts/bash/compose.sh prepare --gateway engine --engine-mode trt, or unset ENGINE_CODE_FROM_PACKAGE" >&2
+        exit 1
+    fi
+    engine_code_root="${model_package_dir}"
 fi
 
+# Run from the selected code root: python puts the CWD first on sys.path,
+# so the cd — not PYTHONPATH order — decides which engine/ copy resolves
+# the package paths.
 resolved_paths="$(
-    python3 - "$model_package_dir" <<'PY'
+    cd "$engine_code_root" && python3 - "$model_package_dir" <<'PY'
 import sys
 from engine.config import resolve_model_package_paths
 
@@ -87,10 +99,11 @@ if [[ -n "${ENGINE_HEALTH_PROBE_MODE:-}" ]]; then
     export ENGINE_SERVER_HEALTH_PROBE_MODE="${ENGINE_HEALTH_PROBE_MODE}"
 fi
 
-# Prefer the engine/ package copied into the assembled model package. The
-# Docker image supplies the Python/runtime environment; the model package
-# supplies the app code that was current at assemble time.
-export PYTHONPATH="${model_package_dir}:${PYTHONPATH:-/app}"
+if [[ "$engine_code_root" = "/app" ]]; then
+    export PYTHONPATH="${PYTHONPATH:-/app}"
+else
+    export PYTHONPATH="${engine_code_root}:${PYTHONPATH:-/app}"
+fi
 
 cmd=(
     python3 -m engine.server
@@ -167,6 +180,11 @@ elif [[ -z "$artifact_manifest" ]]; then
 fi
 
 echo "Starting engine from shared model package" >&2
+if [[ "$engine_code_root" = "/app" ]]; then
+    echo "  engine_code=image:/app" >&2
+else
+    echo "  engine_code=package:${engine_code_root} (ENGINE_CODE_FROM_PACKAGE=1)" >&2
+fi
 echo "  config=${config_path}" >&2
 echo "  model_repo=${model_repo}" >&2
 echo "  model_package=${model_package_dir}" >&2
@@ -179,5 +197,7 @@ echo "  runtime_artifact=${runtime_artifact}" >&2
 echo "  engine_mode=${engine_mode}" >&2
 echo "  pythonpath=${PYTHONPATH}" >&2
 
-cd "$model_package_dir"
+# python3 -m prepends the CWD to sys.path ahead of PYTHONPATH, so this cd —
+# not the exports above — is what actually selects the engine/ copy that runs.
+cd "$engine_code_root"
 exec "${cmd[@]}"
