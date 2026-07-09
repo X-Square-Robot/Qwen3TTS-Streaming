@@ -243,6 +243,38 @@ Endpoints:
 - capabilities: `http://localhost:50052/v1/capabilities`
 - health: `http://localhost:8080/health`
 
+#### Health endpoint and platform probes
+
+The health port binds at process start (before the model loads), so probes always
+get an HTTP answer instead of connection-refused. Routes:
+
+| Path | Semantics |
+|------|-----------|
+| `/health` | `503` + `{"status": "loading", ...}` until the engine is ready (model loaded, warmup done, gateways bound), then `200` + full stats. Point unified liveness/readiness/startup probes here. |
+| `/readyz` | Same ready gating as `/health`, unaffected by the probe-mode knob. |
+| `/livez` | `200` whenever the process is up (pure liveness). |
+| `/metrics` | Always `200`; the loading state is reported in the body, not as a scrape error. |
+
+If the engine loop thread dies after startup, `/health` and `/readyz` drop back to
+`503` (`"status": "engine_loop_dead"`) so a platform liveness probe restarts the
+container — intended self-healing for a stateless engine.
+
+Platform probe checklist:
+
+- Size the startup grace to cover the cold start (TRT deserialize + warmup is
+  roughly 20–40 s depending on GPU and batch profile; measure once and add margin,
+  e.g. `period 10s × failureThreshold 30`). Too little grace means the probe kills
+  the container mid-load and it never comes up.
+- Probe `127.0.0.1:8080`, not `localhost` — the server binds IPv4 `0.0.0.0` only.
+- If your platform's liveness grace cannot be configured to cover the load, set
+  `ENGINE_SERVER_HEALTH_PROBE_MODE=alive` (or `server.health_probe_mode: alive` in
+  `engine.yaml`): `/health` then returns `200` as soon as the port is up, and you
+  lose ready-gating on that path (`/readyz` keeps it). The short alias
+  `ENGINE_HEALTH_PROBE_MODE` works only in compose / engine-docker deployments,
+  where the entrypoint maps it.
+- Triton gateway deployments have no `/health`; point the probe at
+  `http://<host>:8000/v2/health/ready` instead.
+
 In the standalone TRT path, `base` / `icl` reference preprocessing is executed serially by
 `speaker_encoder.engine`, `speech_tokenizer_codec_fused.engine`, and the optional
 `code2wav_decoder.engine`, without batching for now. `spliter.max_concurrent_segments`

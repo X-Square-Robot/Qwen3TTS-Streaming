@@ -194,7 +194,7 @@ Run `engine.server` in local Python, suitable for debugging the engine, protocol
 bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway standalone --engine-mode trt
 ```
 
-Default ports: gRPC `50051`, WebSocket `ws://localhost:50052/v1/ws`, HTTP capabilities `http://localhost:50052/v1/capabilities`, health `http://localhost:8080/health`.
+Default ports: gRPC `50051`, WebSocket `ws://localhost:50052/v1/ws`, HTTP capabilities `http://localhost:50052/v1/capabilities`, health `http://localhost:8080/health` (binds at process start; returns `503` while the model loads, `200` once ready — see [deployment](docs/user/deployment.md) for probe details).
 
 ### Engine Docker
 

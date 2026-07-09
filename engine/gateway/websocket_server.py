@@ -573,8 +573,13 @@ async def serve(
     *,
     stop_event: asyncio.Event,
     path: str = "/v1/ws",
+    started: asyncio.Event | None = None,
 ) -> None:
-    """Start the websocket gateway using aiohttp."""
+    """Start the websocket gateway using aiohttp.
+
+    ``started`` is set once the port is bound so readiness can cover
+    "gateway actually listening".
+    """
     if web is None:
         logger.error("aiohttp not installed. Run: pip install aiohttp")
         return
@@ -590,6 +595,8 @@ async def serve(
     site = web.TCPSite(runner, "0.0.0.0", port)
     try:
         await site.start()
+        if started is not None:
+            started.set()
         logger.info(
             "WebSocket server listening on port %d (ws path %s, capabilities %s)",
             port,

@@ -123,6 +123,13 @@ class ServerConfig:
     websocket_port: int = 0
     websocket_path: str = "/v1/ws"
     health_port: int = 8080
+    # /health probe semantics. "ready": 503 until the engine is fully started
+    # (model loaded + warmup + gateways bound), then 200 — correct when one
+    # path serves unified liveness/readiness/startup probes. "alive": 200 as
+    # soon as the port is up — escape hatch for platforms whose liveness
+    # grace cannot be sized to cover the model load. /livez, /readyz and
+    # /metrics keep fixed semantics regardless of this knob.
+    health_probe_mode: str = "ready"
     max_sessions: int = 128
     request_timeout_sec: float = 120.0
     warmup_rounds: int = 3

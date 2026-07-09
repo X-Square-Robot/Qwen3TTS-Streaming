@@ -194,7 +194,7 @@ bash scripts/bash/autorun.sh deploy  -m custom-1.7b --gateway standalone --engin
 bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway standalone --engine-mode trt
 ```
 
-默认端口：gRPC `50051`，WebSocket `ws://localhost:50052/v1/ws`，HTTP capabilities `http://localhost:50052/v1/capabilities`，health `http://localhost:8080/health`。
+默认端口：gRPC `50051`，WebSocket `ws://localhost:50052/v1/ws`，HTTP capabilities `http://localhost:50052/v1/capabilities`，health `http://localhost:8080/health`（进程启动即监听；模型加载期间返回 `503`，就绪后返回 `200`，探针细节见[部署文档](docs/user/deployment.zh-CN.md)）。
 
 ### Engine Docker
 

@@ -310,11 +310,31 @@ class EngineLoop:
             self._thread.join(timeout=5)
         logger.info("Engine loop stopped")
 
+    def thread_alive(self) -> bool:
+        """True while the engine-loop thread is actually running.
+
+        ``_running`` is a lifecycle flag, not liveness: it stays True if the
+        loop thread dies on an uncaught exception. Health checks must use
+        this instead.
+        """
+        return self._thread is not None and self._thread.is_alive()
+
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
     def _run(self) -> None:
+        try:
+            self._run_inner()
+        except Exception:
+            logger.exception("Engine loop crashed")
+            raise
+        finally:
+            # Health checks read this; without it a dead engine thread keeps
+            # reporting running=True forever.
+            self._running = False
+
+    def _run_inner(self) -> None:
         prev_output: Optional[StepOutput] = None
 
         while self._running:

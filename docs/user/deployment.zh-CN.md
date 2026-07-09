@@ -243,6 +243,31 @@ bash scripts/bash/autorun.sh deploy \
 - capabilities: `http://localhost:50052/v1/capabilities`
 - health: `http://localhost:8080/health`
 
+#### Health 端点与平台探针
+
+health 端口在进程启动时立即监听（先于模型加载），探针始终能拿到 HTTP 应答而非拒连。路由：
+
+| 路径 | 语义 |
+|------|------|
+| `/health` | 未就绪（模型加载、warmup、gateway 绑定完成之前）返回 `503` + `{"status": "loading", ...}`，就绪后返回 `200` + 完整 stats。统一的 liveness/readiness/startup 探针指向这里。 |
+| `/readyz` | 与 `/health` 相同的就绪门控，不受 probe-mode 开关影响。 |
+| `/livez` | 进程活着即返回 `200`（纯 liveness）。 |
+| `/metrics` | 恒 `200`；加载状态体现在 body 里，而不是抓取错误。 |
+
+引擎循环线程在启动后死亡时，`/health` 和 `/readyz` 会回落到 `503`（`"status": "engine_loop_dead"`），平台 liveness 探针据此重启容器——这是无状态引擎期望的自愈行为。
+
+平台探针检查清单：
+
+- startup 宽限必须覆盖冷启动（TRT 反序列化 + warmup 约 20–40 秒，取决于 GPU 和 batch
+  档位；实测一次并留余量，例如 `period 10s × failureThreshold 30`）。宽限不足会导致
+  容器在加载中途被杀、永远起不来。
+- 探针地址用 `127.0.0.1:8080`，不要用 `localhost`——服务只绑定 IPv4 `0.0.0.0`。
+- 平台 liveness 宽限无法配置到覆盖加载时长时，设置 `ENGINE_SERVER_HEALTH_PROBE_MODE=alive`
+  （或 `engine.yaml` 里 `server.health_probe_mode: alive`）：`/health` 在端口起来后即返回
+  `200`，代价是该路径失去就绪门控（`/readyz` 仍保留）。短别名
+  `ENGINE_HEALTH_PROBE_MODE` 仅在 compose / engine-docker 部署下有效（由入口脚本映射）。
+- Triton gateway 部署没有 `/health`，探针请指向 `http://<host>:8000/v2/health/ready`。
+
 `base` / `icl` reference preprocessing 在 standalone TRT 路径中由
 `speaker_encoder.engine`、`speech_tokenizer_codec_fused.engine` 和可选
 `code2wav_decoder.engine` 串行执行，目前不做 batch。`spliter.max_concurrent_segments`

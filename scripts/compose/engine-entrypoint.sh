@@ -81,6 +81,11 @@ export ENGINE_SERVER_HEALTH_PORT="${ENGINE_HEALTH_PORT:-8080}"
 if [[ -n "${ENGINE_MAX_SEQ_LEN:-}" ]]; then
     export ENGINE_SCHEDULER_MAX_SEQ_LEN="${ENGINE_MAX_SEQ_LEN}"
 fi
+# Conditional (unlike the port exports above) so engine.yaml's
+# server.health_probe_mode still applies when the env is unset.
+if [[ -n "${ENGINE_HEALTH_PROBE_MODE:-}" ]]; then
+    export ENGINE_SERVER_HEALTH_PROBE_MODE="${ENGINE_HEALTH_PROBE_MODE}"
+fi
 
 # Prefer the engine/ package copied into the assembled model package. The
 # Docker image supplies the Python/runtime environment; the model package

@@ -37,6 +37,7 @@ import logging
 import os
 import queue
 import signal
+import threading
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
@@ -539,6 +540,13 @@ class TTSEngine:
 
     async def cancel(self, session_id: str) -> None:
         await self._frontend.cancel_session(session_id)
+
+    def engine_thread_alive(self) -> bool:
+        """True while the engine-loop thread is running (post-start liveness).
+
+        Safe to call from any thread at any point after ``__init__``.
+        """
+        return self._engine_loop is not None and self._engine_loop.thread_alive()
 
     def health_stats(self) -> dict:
         """Return engine health metrics (safe to call from asyncio thread)."""
@@ -1353,8 +1361,32 @@ def main():
             model_arch=model_arch,
             device_id=args.device,
         )
-        await engine.start()
 
+        health_port = cfg.server.health_port
+        health_server = None
+        if health_port > 0:
+            # Bind before the model load so platform probes see 503 "loading"
+            # instead of connection-refused for the whole load. Runs on its
+            # own thread + event loop because engine.start() blocks this loop
+            # synchronously for the entire load. A bind failure aborts here,
+            # not minutes later inside a process the platform cannot probe.
+            health_server = HealthServerThread(
+                engine, health_port, probe_mode=cfg.server.health_probe_mode
+            )
+            health_server.start()
+
+        try:
+            await engine.start()
+        except BaseException:
+            if health_server:
+                health_server.stop()
+            raise
+
+        # Installed only after start(): loop signal handlers replace the
+        # default disposition but cannot fire while start() blocks this loop,
+        # so installing them earlier would make SIGTERM a no-op for the whole
+        # model load. During the load the default disposition (immediate
+        # exit) is the desired behavior — there is nothing to drain yet.
         stop_event = asyncio.Event()
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -1363,18 +1395,19 @@ def main():
         port = cfg.server.port
         websocket_port = cfg.server.websocket_port
         websocket_path = cfg.server.websocket_path
-        health_port = cfg.server.health_port
 
         grpc_task = None
         websocket_task = None
-        health_task = None
+        gateway_started: list[asyncio.Event] = []
 
         try:
             from .gateway.grpc_server import serve as grpc_serve
 
+            grpc_started = asyncio.Event()
             grpc_task = asyncio.create_task(
-                grpc_serve(engine, port, stop_event=stop_event),
+                grpc_serve(engine, port, stop_event=stop_event, started=grpc_started),
             )
+            gateway_started.append(grpc_started)
             logger.info("gRPC server launched on port %d", port)
         except Exception as e:
             logger.warning("gRPC server not started: %s", e)
@@ -1383,14 +1416,17 @@ def main():
             try:
                 from .gateway.websocket_server import serve as websocket_serve
 
+                ws_started = asyncio.Event()
                 websocket_task = asyncio.create_task(
                     websocket_serve(
                         engine,
                         websocket_port,
                         stop_event=stop_event,
                         path=websocket_path,
+                        started=ws_started,
                     ),
                 )
+                gateway_started.append(ws_started)
                 logger.info(
                     "WebSocket server launched on port %d path %s",
                     websocket_port,
@@ -1399,14 +1435,28 @@ def main():
             except Exception as e:
                 logger.warning("WebSocket server not started: %s", e)
 
-        if health_port > 0:
-            health_task = asyncio.create_task(
-                _run_health_server(engine, health_port, stop_event),
-            )
+        async def _mark_ready() -> None:
+            # Readiness = engine.start() returned AND every launched gateway
+            # bound its port. A gateway that never binds keeps /health at 503
+            # so a bad deploy fails loudly instead of going ready-but-deaf
+            # (bind errors inside the serve tasks are otherwise silent until
+            # shutdown).
+            for ev in gateway_started:
+                await ev.wait()
+            if health_server:
+                health_server.mark_ready()
+            logger.info("Engine ready, press Ctrl+C to stop")
 
-        logger.info("Engine ready, press Ctrl+C to stop")
+        ready_task = asyncio.create_task(_mark_ready())
+
         await stop_event.wait()
 
+        if not ready_task.done():
+            ready_task.cancel()
+            try:
+                await ready_task
+            except asyncio.CancelledError:
+                pass
         if grpc_task:
             try:
                 await grpc_task
@@ -1417,12 +1467,9 @@ def main():
                 await websocket_task
             except Exception as e:
                 logger.warning("WebSocket server shutdown: %s", e)
-        if health_task:
-            try:
-                await health_task
-            except Exception as e:
-                logger.warning("Health server shutdown: %s", e)
         await engine.stop()
+        if health_server:
+            health_server.stop()
 
     # uvloop cuts event-loop overhead 2-4x vs stock asyncio.  The gateway's
     # session dispatch and audio fan-out share this loop (and the GIL) with
@@ -1437,65 +1484,239 @@ def main():
         uvloop.run(run())
 
 
-async def _run_health_server(
-    engine: TTSEngine,
-    port: int,
-    stop_event: asyncio.Event,
-) -> None:
-    """Minimal HTTP health / metrics endpoint.
+class HealthServerThread:
+    """HTTP health / metrics server on a dedicated thread with its own loop.
 
-    Uses aiohttp if available; otherwise falls back to a simple
-    asyncio.start_server implementation.
+    Runs independently of the main asyncio loop so probes are answered while
+    ``engine.start()`` blocks that loop for the entire model load. Routes:
+
+    - ``/health``  — 503 until ready, then 200 (``probe_mode="ready"``, the
+      default); ``probe_mode="alive"`` returns 200 whenever the port is up,
+      for platforms whose liveness grace cannot cover the model load.
+    - ``/readyz``  — 503 until ready, then 200 (fixed, ignores probe_mode).
+    - ``/livez``   — always 200 (process liveness).
+    - ``/metrics`` — always 200; scrapers must see the loading state as data,
+      not as a scrape error.
+
+    "Ready" is marked by the main loop once ``engine.start()`` returned and
+    every launched gateway signalled its port bind; after that the engine
+    loop thread must still be alive, so a crashed engine drops /health back
+    to 503 and a unified liveness probe restarts the process.
+
+    All responses carry the ``health_stats()`` JSON plus a ``status`` field
+    (``loading`` / ``ok`` / ``engine_loop_dead``). The ready body keeps the
+    top-level ``"running": true`` key that compose.sh greps for.
     """
-    import json as _json
 
-    try:
+    _PROBE_MODES = ("ready", "alive")
+    _ROUTES = ("/health", "/readyz", "/livez", "/metrics")
+
+    def __init__(
+        self,
+        engine: TTSEngine,
+        port: int,
+        probe_mode: str = "ready",
+        _force_fallback: bool = False,
+    ) -> None:
+        if probe_mode not in self._PROBE_MODES:
+            raise ValueError(
+                f"server.health_probe_mode must be one of {self._PROBE_MODES}, "
+                f"got {probe_mode!r}"
+            )
+        self._engine = engine
+        self._port = port
+        self._probe_mode = probe_mode
+        self._force_fallback = _force_fallback
+        self._ready = threading.Event()
+        self._bound = threading.Event()
+        self._bind_error: BaseException | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._stop: asyncio.Event | None = None
+        self._thread = threading.Thread(
+            target=self._thread_main, name="health-http", daemon=True
+        )
+        self.bound_port: int = port  # actual port after bind (differs for port=0)
+
+    # -- lifecycle (called from the main thread) ------------------------
+
+    def start(self, bind_timeout_sec: float = 15.0) -> None:
+        """Start the thread and wait for the bind result; raise on failure.
+
+        Called before ``engine.start()`` so a bind failure (e.g. port already
+        in use) exits immediately instead of after minutes of model loading
+        into a process the platform can never probe.
+        """
+        self._thread.start()
+        if not self._bound.wait(bind_timeout_sec):
+            raise RuntimeError(
+                f"Health server did not bind port {self._port} "
+                f"within {bind_timeout_sec}s"
+            )
+        if self._bind_error is not None:
+            raise RuntimeError(
+                f"Health server failed to start on port {self._port}: "
+                f"{self._bind_error}"
+            ) from self._bind_error
+
+    def mark_ready(self) -> None:
+        self._ready.set()
+
+    def stop(self, join_timeout_sec: float = 5.0) -> None:
+        loop, stop = self._loop, self._stop
+        if loop is not None and stop is not None and loop.is_running():
+            loop.call_soon_threadsafe(stop.set)
+        if self._thread.is_alive():
+            self._thread.join(join_timeout_sec)
+
+    # -- request handling (health thread) -------------------------------
+
+    def _payload_and_status(self, path: str) -> tuple[dict, int]:
+        stats = self._engine.health_stats()
+        started = self._ready.is_set()
+        ready = started and self._engine.engine_thread_alive()
+        if ready:
+            stats["status"] = "ok"
+        elif started:
+            stats["status"] = "engine_loop_dead"
+        else:
+            stats["status"] = "loading"
+        ready_code = 200 if ready else 503
+        if path == "/health":
+            code = 200 if self._probe_mode == "alive" else ready_code
+        elif path == "/readyz":
+            code = ready_code
+        else:  # /livez, /metrics
+            code = 200
+        return stats, code
+
+    # -- server (health thread) ------------------------------------------
+
+    def _thread_main(self) -> None:
+        try:
+            asyncio.run(self._serve())
+        except Exception as exc:
+            logger.exception("Health server thread exited abnormally")
+            if not self._bound.is_set():
+                # Startup died before a successful bind (e.g. out-of-range
+                # port raises OverflowError, not OSError); surface it to
+                # start() instead of reporting success with a dead thread.
+                self._bind_error = exc
+        finally:
+            # Unblock start() even if _serve failed before signalling.
+            self._bound.set()
+
+    async def _serve(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._stop = asyncio.Event()
+        use_aiohttp = not self._force_fallback
+        if use_aiohttp:
+            try:
+                import aiohttp  # noqa: F401  type: ignore[import-untyped]
+            except ImportError:
+                use_aiohttp = False
+        if use_aiohttp:
+            await self._serve_aiohttp()
+        else:
+            await self._serve_fallback()
+
+    async def _serve_aiohttp(self) -> None:
         from aiohttp import web  # type: ignore[import-untyped]
 
-        async def handle_health(request):
-            stats = engine.health_stats()
-            return web.json_response(stats)
+        async def handle(request):
+            stats, code = self._payload_and_status(request.path)
+            return web.json_response(stats, status=code)
 
         app = web.Application()
-        app.router.add_get("/health", handle_health)
-        app.router.add_get("/metrics", handle_health)
+        for route in self._ROUTES:
+            app.router.add_get(route, handle)
 
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", port)
+        site = web.TCPSite(runner, "0.0.0.0", self._port)
         try:
-            await site.start()
-            logger.info("Health/metrics HTTP server on port %d (aiohttp)", port)
-            await stop_event.wait()
+            try:
+                await site.start()
+            except OSError as exc:
+                self._bind_error = exc
+                self._bound.set()
+                return
+            try:
+                addresses = runner.addresses
+                if addresses:
+                    self.bound_port = int(addresses[0][1])
+            except Exception:
+                pass
+            self._bound.set()
+            logger.info(
+                "Health/metrics HTTP server on port %d (aiohttp, probe_mode=%s)",
+                self.bound_port,
+                self._probe_mode,
+            )
+            await self._stop.wait()
         finally:
             await runner.cleanup()
-        return
-    except ImportError:
-        pass
 
-    async def _handle_connection(reader, writer):
-        await reader.read(4096)
-        stats = engine.health_stats()
-        body = _json.dumps(stats).encode()
-        writer.write(
-            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-            b"Content-Length: %d\r\n\r\n" % len(body) + body
-        )
-        await writer.drain()
-        writer.close()
+    async def _serve_fallback(self) -> None:
+        import json as _json
 
-    server = await asyncio.start_server(_handle_connection, "0.0.0.0", port)
-    logger.info("Health/metrics HTTP server on port %d (asyncio)", port)
-    async with server:
-        serve_task = asyncio.create_task(server.serve_forever())
-        try:
-            await stop_event.wait()
-        finally:
-            serve_task.cancel()
+        async def handle_connection(reader, writer):
             try:
-                await serve_task
-            except asyncio.CancelledError:
-                pass
+                data = await reader.read(4096)
+                path = "/health"
+                try:
+                    request_line = data.split(b"\r\n", 1)[0].decode("latin-1")
+                    parts = request_line.split()
+                    if len(parts) >= 2:
+                        path = parts[1].split("?", 1)[0]
+                except Exception:
+                    pass
+                if path in self._ROUTES:
+                    stats, code = self._payload_and_status(path)
+                    body = _json.dumps(stats).encode()
+                else:
+                    body = b'{"error": "not found"}'
+                    code = 404
+                reason = {200: "OK", 404: "Not Found", 503: "Service Unavailable"}[
+                    code
+                ]
+                head = (
+                    f"HTTP/1.1 {code} {reason}\r\n"
+                    "Content-Type: application/json\r\n"
+                    f"Content-Length: {len(body)}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("latin-1")
+                writer.write(head + body)
+                await writer.drain()
+            finally:
+                writer.close()
+
+        try:
+            server = await asyncio.start_server(
+                handle_connection, "0.0.0.0", self._port
+            )
+        except OSError as exc:
+            self._bind_error = exc
+            self._bound.set()
+            return
+        sockets = server.sockets or ()
+        if sockets:
+            self.bound_port = sockets[0].getsockname()[1]
+        self._bound.set()
+        logger.info(
+            "Health/metrics HTTP server on port %d (asyncio fallback, probe_mode=%s)",
+            self.bound_port,
+            self._probe_mode,
+        )
+        async with server:
+            serve_task = asyncio.create_task(server.serve_forever())
+            try:
+                await self._stop.wait()
+            finally:
+                serve_task.cancel()
+                try:
+                    await serve_task
+                except asyncio.CancelledError:
+                    pass
 
 
 if __name__ == "__main__":

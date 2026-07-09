@@ -735,13 +735,18 @@ def _is_done_response(response: tts_pb2.SynthesizeResponse) -> bool:
 
 
 async def serve(
-    engine: TTSEngine, port: int = 50051, *, stop_event: asyncio.Event
+    engine: TTSEngine,
+    port: int = 50051,
+    *,
+    stop_event: asyncio.Event,
+    started: asyncio.Event | None = None,
 ) -> None:
     """Start gRPC aio server. Call from within an asyncio event loop.
 
     Waits on ``stop_event`` then calls ``server.stop()`` so SIGINT/SIGTERM can shut
     down cleanly. ``wait_for_termination()`` alone does not reliably react to
-    asyncio task cancellation.
+    asyncio task cancellation. ``started`` is set once the port is bound so
+    readiness can cover "gateway actually listening".
     """
     try:
         from grpc import aio as grpc_aio
@@ -756,6 +761,8 @@ async def serve(
 
     server.add_insecure_port(f"[::]:{port}")
     await server.start()
+    if started is not None:
+        started.set()
     logger.info("gRPC server listening on port %d", port)
     await stop_event.wait()
     await server.stop(5.0)

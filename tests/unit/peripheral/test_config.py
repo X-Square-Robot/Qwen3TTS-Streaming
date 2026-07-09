@@ -57,6 +57,13 @@ class TestEnvOverrides:
         assert raw["server"]["websocket_port"] == 50052
         assert raw["server"]["websocket_path"] == "/stream/ws"
 
+    def test_applies_server_health_probe_mode(self):
+        raw: dict = {}
+        env = {"ENGINE_SERVER_HEALTH_PROBE_MODE": "alive"}
+        with _patch_env(env):
+            _apply_env_overrides(raw)
+        assert raw["server"]["health_probe_mode"] == "alive"
+
     def test_applies_multiword_section_overrides(self):
         raw: dict = {}
         env = {
