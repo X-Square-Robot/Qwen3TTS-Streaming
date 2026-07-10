@@ -133,6 +133,7 @@ Qwen3TTS-Streaming —— 每个 decode step 1 个融合 engine
 > ⚠️ **128 路并发是压测出来的天花板，不是生产安全值。** 经三轮 decode 优化（2026-07-06:CP 展开图内 KV + CUDA graph decode 回放 + KV gather arena 化;2026-07-07:突发批量准入 + 逐 slot 状态入池 + 服务热路径瘦身;2026-07-08:复盘审计修复批 + 批量化 p3_launch）后，压测 GPU（RTX 5090，全 bf16 引擎，batch=128 profile）在 128 路并发下每 80ms 音频帧的解码耗时 42.1ms——RTF（音频时长 / 实际解码耗时）≈ 1.90，即约 47% 的实时余量（优化前为 119.8ms/帧，RTF ≈ 0.67,低于实时）。这点余量能吸收正常抖动，但持续的负载尖峰或偏重的请求仍可能把它吃掉。生产环境的并发规划仍应在 128 之下留足 buffer，不要顶格跑；64 路时解码耗时 24.5ms（RTF ≈ 3.3），余量充足。完整拆解与原始数据见[服务性能压测报告](docs/dev/investigation/serving_performance_benchmark.zh-CN.md)。
 
 - standalone `engine-grpc` TTFT 默认按 ready/reused gRPC channel 统计，和 WebSocket 一样不把客户端建连成本计入首包延迟；cold/lazy channel 会额外增加约 13ms。
+- WebUI **Concurrency 面板**显示的 TTFT 与上表不是同一测量窗口、也不是同一负载形态，**不能直接对比**：Triton 路径下每 lane 上报的是服务端 adapter TTFT——从模型开始处理该请求时起表，客户端建连、发出散布、处理前排队、首帧回传均不计入——且 demo 后端在单事件循环上逐路发起各 lane，到达是斜坡而非同时突发。同一硬件上面板在 128 路时通常显示 ~100–170ms；这是真实的 live 测量，但对外口径请以上表的客户端突发数字为准。
 - WebUI 只在结果 source 标记为 `live_triton` 或 `live_engine_websocket` 且带 `audio` 字段时代表可回放的实时合成音频。
 
 详细 benchmark 口径见 [Benchmark 方法](docs/user/benchmark_methodology.zh-CN.md)。
@@ -327,6 +328,8 @@ WebUI 包含三个板块：**Text Player**（按 engine decode step 播放文本
 **Concurrency**
 
 ![多路合成演示](docs/images/多路合成.gif)
+
+> 该面板显示的 TTFT 是服务端口径、斜坡到达的指标，会系统性低于突发压测数字——见[性能声明](#性能声明)中的注记。
 
 完整录屏：[演示视频.mp4](docs/videos/演示视频.mp4)
 

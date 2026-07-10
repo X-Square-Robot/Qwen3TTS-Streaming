@@ -133,6 +133,7 @@ The low-latency numbers mentioned in this project are conditional results, not g
 > ⚠️ **128 streams is the tested ceiling, not a safe production target.** After three decode-optimization rounds (2026-07-06: CP in-graph KV + CUDA-graph decode replay + arena-ized KV gather; 2026-07-07: batched burst admission + per-slot state pooling + serving hot-path slimming; 2026-07-08: post-review audit fix batch + batched p3_launch), the benchmarked GPU (RTX 5090, all-bf16 engine, batch=128 profile) sustains 128 concurrent streams at a decode step of 42.1ms per 80ms audio frame — RTF (audio duration / wall-clock decode time) ≈ 1.90, i.e. ~47% headroom above real-time (pre-optimization this was 119.8ms/frame, RTF ≈ 0.67 — below real-time). That margin absorbs normal jitter, but a sustained load spike or heavier-than-usual requests can still eat it. Size production concurrency with margin below 128 rather than running at it; at 64 streams the decode step is 24.5ms (RTF ≈ 3.3) with ample margin. Full breakdown and raw data: [serving performance benchmark](docs/dev/investigation/serving_performance_benchmark.md).
 
 - Standalone `engine-grpc` TTFT is measured by default over a ready/reused gRPC channel and, like WebSocket, does not count the client connection setup cost toward first-packet latency; a cold/lazy channel adds roughly 13ms.
+- The TTFT shown by the WebUI **Concurrency panel** is measured in a different window and under a different load shape than the table above, and is **not directly comparable**: on the Triton path each lane reports the server-side adapter TTFT — the clock starts when the model begins processing that request, so client connection setup, dispatch spread, queueing before processing, and the first-frame return trip are all excluded — and the demo backend issues the lanes serially on a single event loop, so arrival is a ramp rather than a simultaneous burst. On the same hardware the panel typically reads ~100–170ms at 128 lanes; that is a real live measurement, but for any external claim use the client-side burst figures above.
 - The WebUI only represents replayable real-time synthesized audio when the result source is marked `live_triton` or `live_engine_websocket` and carries an `audio` field.
 
 For detailed benchmark methodology, see [Benchmark Methodology](docs/user/benchmark_methodology.md).
@@ -323,6 +324,8 @@ The WebUI contains three panels: **Text Player** (plays text by engine decode st
 **Concurrency** — multi-stream TTFT distribution and throughput
 
 ![Multi-stream synthesis demo](docs/images/多路合成.gif)
+
+> The TTFT this panel reports is a server-side, ramped-arrival metric and reads systematically lower than the burst benchmark numbers — see the notes under [Performance Claims](#performance-claims).
 
 Full screen recording: [演示视频.mp4](docs/videos/演示视频.mp4)
 
