@@ -49,6 +49,13 @@ print(f'grpcio {grpc.__version__}')"
 
 FROM engine-deps AS engine-runtime
 
+# Release stamp (git describe at build time, injected by compose.sh).
+# Surfaces in /health responses and `docker inspect` — the pairing key
+# between a deployed engine and its matching client SDK wheel.
+ARG ENGINE_VERSION=""
+ENV ENGINE_VERSION=${ENGINE_VERSION}
+LABEL org.opencontainers.image.version=${ENGINE_VERSION}
+
 RUN mkdir -p /etc/qwen3-tts
 
 COPY engine.yaml /app/engine.yaml
@@ -60,3 +67,8 @@ COPY scripts/compose/ /app/scripts/compose/
 # but are pure-stdlib, so vendor the package directly onto PYTHONPATH (=/app)
 # instead of pulling the whole client dependency tree into the runtime image.
 COPY client/src/qwen3tts_protocol/ /app/qwen3tts_protocol/
+# Client SDK wheel(s) built from this same checkout (staged into client/dist/
+# by compose.sh before the build). Served at GET /sdk/ on the health port so a
+# deployment always hands out the SDK version that matches it. The directory
+# is committed (with .gitkeep) so this COPY works even when no wheel is staged.
+COPY client/dist/ /app/sdk/

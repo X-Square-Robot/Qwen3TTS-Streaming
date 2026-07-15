@@ -10,6 +10,7 @@ services:
       args:
         BASE_IMAGE: ${ENGINE_BASE_IMAGE:-nvcr.io/nvidia/tensorrt:26.02-py3}
         PYTORCH_CUDA_TAG: ${ENGINE_PYTORCH_CUDA_TAG:-cu130}
+        ENGINE_VERSION: ${ENGINE_VERSION:-}
     container_name: ${ENGINE_CONTAINER_NAME:-qwen3-engine}
     working_dir: /app
     command: ["/bin/bash", "/app/scripts/compose/engine-entrypoint.sh"]

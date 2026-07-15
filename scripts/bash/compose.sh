@@ -175,6 +175,9 @@ export_compose_env() {
     resolve_compose_runtime_controls
 
     export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-qwen3-tts}"
+    # Release stamp baked into the engine image (ENV + OCI label) and reported
+    # by /health; the pairing key with the client SDK wheel version.
+    export ENGINE_VERSION="${ENGINE_VERSION:-$(git -C "$REPO_ROOT" describe --tags --always --dirty 2>/dev/null || echo unknown)}"
     export MODEL_VARIANT="$VARIANT"
     export MODEL_REPO_DIR="$MODEL_REPO_DIR"
     MODEL_VERSION=$(resolve_model_version "$MODEL_VERSION") || exit 1
@@ -727,6 +730,24 @@ PY
     fi
 }
 
+# Build the client SDK wheel into client/dist/ so the engine image serves it
+# at GET /sdk/ (version-paired delivery: whatever engine you reach, the wheel
+# it hands out matches). Non-fatal — the image builds fine without it.
+stage_client_wheel() {
+    if $DRY_RUN; then
+        log_info "[DRY RUN] Would build client wheel into client/dist/"
+        return 0
+    fi
+    local dist_dir="$REPO_ROOT/client/dist"
+    mkdir -p "$dist_dir"
+    rm -f "$dist_dir"/*.whl
+    if python3 -m pip wheel --no-deps --wheel-dir "$dist_dir" "$REPO_ROOT/client" >/dev/null 2>&1; then
+        log_info "Client wheel staged for /sdk/: $(basename "$(ls "$dist_dir"/*.whl 2>/dev/null | head -1)")"
+    else
+        log_warn "Client wheel build failed; engine /sdk/ endpoint will be empty"
+    fi
+}
+
 cmd_build() {
     require_docker_compose_if_needed
     resolve_variant_if_needed
@@ -734,11 +755,13 @@ cmd_build() {
     resolve_compose_image_defaults
     case "$GATEWAY" in
         engine)
+            stage_client_wheel
             compose_cmd build engine
             verify_compose_engine_image
             ;;
         triton) compose_cmd build triton ;;
         all)
+            stage_client_wheel
             compose_cmd build engine triton
             verify_compose_engine_image
             ;;
@@ -765,6 +788,9 @@ cmd_prepare() {
 # Run `compose up` for the given services, honoring --build.
 _compose_up_exec() {
     if $BUILD_BEFORE_UP; then
+        if [[ " $* " == *" engine "* ]]; then
+            stage_client_wheel
+        fi
         compose_cmd up --build -d "$@"
     else
         compose_cmd up -d "$@"

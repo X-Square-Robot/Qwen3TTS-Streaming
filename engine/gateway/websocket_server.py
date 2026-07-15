@@ -585,6 +585,10 @@ def add_health_routes(app, health_state: HealthState) -> None:
     for route in health_state.ROUTES:
         app.router.add_get(route, handle_probe)
 
+    from ..server import add_sdk_route  # lazy: avoid import cycle at module load
+
+    add_sdk_route(app)
+
 
 async def serve(
     engine: TTSEngine,

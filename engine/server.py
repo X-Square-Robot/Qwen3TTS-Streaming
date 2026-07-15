@@ -1556,6 +1556,11 @@ class HealthState:
 
     def payload_and_status(self, path: str) -> tuple[dict, int]:
         stats = self._engine.health_stats()
+        # Release stamp baked into the image at build time (git describe);
+        # the pairing key with the client SDK wheel served under /sdk/.
+        version = os.environ.get("ENGINE_VERSION", "").strip()
+        if version:
+            stats["version"] = version
         started = self._ready.is_set()
         ready = started and self._engine.engine_thread_alive()
         if ready:
@@ -1572,6 +1577,23 @@ class HealthState:
         else:  # /livez, /metrics
             code = 200
         return stats, code
+
+
+def add_sdk_route(app) -> None:
+    """Serve the bundled client SDK wheel(s) at GET /sdk/ (aiohttp only).
+
+    The engine image bakes the wheel built from the same checkout into
+    ENGINE_SDK_DIR (default /app/sdk, see Dockerfile.engine); handing it out
+    from the service itself guarantees a caller always gets the SDK version
+    matching this engine. No-op when the directory is absent (source-tree
+    runs) — and never fatal, a broken SDK mount must not take down probes.
+    """
+    sdk_dir = os.environ.get("ENGINE_SDK_DIR", "/app/sdk")
+    try:
+        if os.path.isdir(sdk_dir):
+            app.router.add_static("/sdk", sdk_dir, show_index=True)
+    except Exception:
+        logger.exception("Failed to mount /sdk static route (dir=%s)", sdk_dir)
 
 
 class HealthServerThread:
@@ -1677,6 +1699,7 @@ class HealthServerThread:
         app = web.Application()
         for route in self._state.ROUTES:
             app.router.add_get(route, handle)
+        add_sdk_route(app)
 
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
