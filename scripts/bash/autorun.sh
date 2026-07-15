@@ -1010,6 +1010,140 @@ _prompt_build_dtypes() {
     TRITON_IO_FLOAT_DTYPE=$(_prompt_with_default "  浮点 I/O 精度 bf16|fp16|fp32|fp8" "$io_default")
 }
 
+# When the TUI checks out a tag to build honestly, remember where to return so
+# an EXIT trap restores the original branch/commit regardless of build outcome.
+_ORIG_GIT_REF=""
+_restore_git_ref() {
+    if [ -n "${_ORIG_GIT_REF:-}" ]; then
+        local ref="$_ORIG_GIT_REF"
+        _ORIG_GIT_REF=""
+        log_info "恢复原 git 位置: $ref"
+        git -C "$REPO_ROOT" checkout --quiet "$ref" 2>/dev/null \
+            || log_warn "自动切回 $ref 失败，请手动执行: git checkout $ref"
+    fi
+}
+
+# Interactive: pick the engine RELEASE stamp (git tag) a package/deploy build
+# carries. It becomes capabilities.engine_version and the /sdk/ wheel version —
+# the SDK<->engine pairing key (see docs/user/client_sdk.md). Default is auto
+# (git describe of HEAD). Choosing a tag HEAD is NOT on trips the guard: prefer
+# an honest `git checkout` (clean tree, restored on exit); on refusal a
+# stamp-only override needs explicit confirmation, because a stamp that does not
+# match the built code is a false label that breaks the 1:1 pairing guarantee.
+# A preset ENGINE_VERSION (env / CLI) is respected and skips the prompt.
+_prompt_release_version() {
+    if [ -n "${ENGINE_VERSION:-}" ]; then
+        log_info "沿用预设 ENGINE_VERSION=$ENGINE_VERSION"
+        return 0
+    fi
+    if [ ! -t 0 ]; then
+        return 0
+    fi
+
+    local auto_ver
+    auto_ver="$(git -C "$REPO_ROOT" describe --tags --always --dirty --match 'v[0-9]*' 2>/dev/null || echo unknown)"
+
+    echo ""
+    echo "  发布版本戳 (engine_version → capabilities + /sdk/ wheel 配对键)"
+    echo "    当前 HEAD 自动推导: $auto_ver"
+
+    local tags_raw
+    tags_raw="$(git -C "$REPO_ROOT" tag --list 'v[0-9]*' --sort=-version:refname 2>/dev/null || true)"
+    if [ -z "$tags_raw" ]; then
+        echo "    (仓库暂无 v[0-9]* 版本 tag，沿用自动推导)"
+        return 0
+    fi
+
+    local -a tag_arr=()
+    local t i=0
+    while IFS= read -r t; do
+        if [ -z "$t" ]; then
+            continue
+        fi
+        i=$((i + 1))
+        tag_arr+=("$t")
+        printf '      [%d] %s\n' "$i" "$t"
+        if [ "$i" -ge 20 ]; then
+            break
+        fi
+    done <<< "$tags_raw"
+
+    echo ""
+    local sel=""
+    read -rp "  选择 [回车=自动($auto_ver) / 序号 / 直接输 vX.Y.Z]: " -t 30 sel || true
+    if [ -z "$sel" ]; then
+        log_info "沿用自动推导 $auto_ver"
+        return 0
+    fi
+
+    local chosen=""
+    if [[ "$sel" =~ ^[0-9]+$ ]]; then
+        if [ "$sel" -ge 1 ] && [ "$sel" -le "${#tag_arr[@]}" ]; then
+            chosen="${tag_arr[$((sel - 1))]}"
+        else
+            log_error "序号超范围: $sel（沿用自动推导 $auto_ver）"
+            return 0
+        fi
+    else
+        chosen="$sel"
+    fi
+
+    if ! git -C "$REPO_ROOT" rev-parse -q --verify "refs/tags/${chosen}^{commit}" >/dev/null 2>&1; then
+        log_error "tag 不存在: $chosen（沿用自动推导 $auto_ver）"
+        return 0
+    fi
+
+    local head_sha tag_sha
+    head_sha="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo head)"
+    tag_sha="$(git -C "$REPO_ROOT" rev-parse "${chosen}^{commit}" 2>/dev/null || echo tag)"
+    if [ "$head_sha" = "$tag_sha" ]; then
+        export ENGINE_VERSION="$chosen"
+        log_info "HEAD 正好在 $chosen 上，戳=代码一致 → 使用 $chosen"
+        return 0
+    fi
+
+    # HEAD != tag → the guard.
+    log_warn "所选 tag $chosen 不是当前 HEAD——直接盖戳会造成「戳≠代码」的假标签，破坏 1:1 配对。"
+    local dirty
+    dirty="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)"
+    if [ -z "$dirty" ]; then
+        local co=""
+        read -rp "  切到 $chosen 构建（诚实做法，detached HEAD，结束时自动切回）？[Y/n]: " -t 30 co || true
+        case "${co:-y}" in
+            n|N|no|NO|No) : ;;
+            *)
+                local orig
+                orig="$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null \
+                    || git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo HEAD)"
+                if git -C "$REPO_ROOT" checkout --quiet "$chosen" 2>/dev/null; then
+                    _ORIG_GIT_REF="$orig"
+                    trap _restore_git_ref EXIT
+                    export ENGINE_VERSION="$chosen"
+                    log_info "已切到 $chosen（原位置 $orig，结束时恢复）；戳=代码一致"
+                    return 0
+                fi
+                log_error "checkout $chosen 失败（沿用自动推导 $auto_ver）"
+                return 0
+                ;;
+        esac
+    else
+        log_warn "工作树有未提交改动，无法安全 checkout（先 commit/stash 才能诚实构建该 tag）。"
+    fi
+
+    # Stamp-only override — needs explicit confirmation.
+    log_warn "只盖戳 $chosen 而不改代码：镜像会自称 $chosen、实跑当前代码。"
+    log_warn "仅当你确知当前代码就对应 $chosen（或从无 .git 的产物构建）时才这么做。"
+    local ov=""
+    read -rp "  确认只盖戳 $chosen（不改代码）？输入 yes 确认，其它=用自动($auto_ver): " -t 30 ov || true
+    if [ "$ov" = "yes" ]; then
+        export ENGINE_VERSION="$chosen"
+        log_warn "已只盖戳 ENGINE_VERSION=$chosen（代码未变）"
+    else
+        log_info "沿用自动推导 $auto_ver"
+    fi
+    return 0
+}
+
 interactive_cross_host_guide() {
     echo ""
     echo "  跨机 Engine 编译引导"
@@ -1159,6 +1293,7 @@ show_run_banner() {
     echo "  模式:      $description"
     [ -n "$VARIANT" ] && echo "  变体:      $VARIANT"
     [ -n "$MODEL_VERSION" ] && echo "  版本:      $MODEL_VERSION"
+    [ -n "${ENGINE_VERSION:-}" ] && echo "  发布戳:    $ENGINE_VERSION (engine_version)"
     [ -n "${GATEWAY_MODE:-}" ] && echo "  阶段 C:    $GATEWAY_MODE"
     [ -n "$ENGINE_DTYPE" ] && echo "  基础精度:  $ENGINE_DTYPE"
     # Per-submodule precision (empty = follow base; c2w=fp16 is a low-concurrency opt-in).
@@ -1392,6 +1527,13 @@ interactive_mode() {
         [ -z "$RUNTIME_MAX_SEQ_LEN" ] && read -rp "  runtime-max-seq-len [manifest]: " -t 30 _rs || true
         [ -n "$_rb" ] && RUNTIME_MAX_BATCH_SIZE="$_rb"
         [ -n "$_rs" ] && RUNTIME_MAX_SEQ_LEN="$_rs"
+    fi
+
+    # Release stamp (engine_version / /sdk/ wheel pairing key) — only for the
+    # Phase C paths that build/run an engine. Default auto; picking a specific
+    # tag is guarded (honest checkout preferred over a stamp-only relabel).
+    if $will_package || $will_deploy; then
+        _prompt_release_version
     fi
 
     case "${choice:-1}" in
