@@ -54,7 +54,17 @@ Documentation = "https://github.com/X-Square-Robot/Qwen3TTS-Streaming/blob/main/
 # are derived from the same tag, which is what keeps them paired).
 [tool.hatch.version]
 source = "vcs"
-raw-options = { root = ".." }
+
+# Repo rule: only v<digit> tags are version tags (they live on dev/beta/main;
+# personal branches never tag versions). Both the describe --match and the
+# tag_regex filter guarantee markers like rime/xxx or legacy odd tags can
+# never pollute wheel version derivation.
+[tool.hatch.version.raw-options]
+root = ".."
+tag_regex = "^v(?P<version>[0-9].*)$"
+git_describe_command = [
+  "git", "describe", "--dirty", "--tags", "--long", "--match", "v[0-9]*",
+]
 
 [tool.hatch.build.hooks.vcs]
 version-file = "src/qwen3tts/_version.py"

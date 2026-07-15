@@ -44,8 +44,10 @@ if [[ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]]; then
     exit 1
 fi
 
-tag="$(git -C "$REPO_ROOT" describe --tags --exact-match HEAD 2>/dev/null)" || {
-    log_error "HEAD is not on a tag (got '$(git -C "$REPO_ROOT" describe --tags --always)')."
+# --match "v[0-9]*": only version tags qualify — being on a personal marker
+# tag (rime/xxx) must not look like being on a release tag.
+tag="$(git -C "$REPO_ROOT" describe --tags --exact-match --match "v[0-9]*" HEAD 2>/dev/null)" || {
+    log_error "HEAD is not on a version tag (got '$(git -C "$REPO_ROOT" describe --tags --always --match "v[0-9]*")')."
     log_error "Release wheels must be built on a tag: git tag vX.Y.Z && re-run."
     exit 1
 }
