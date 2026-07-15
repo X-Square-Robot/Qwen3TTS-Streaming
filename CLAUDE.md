@@ -12,7 +12,7 @@ Qwen3TTS-Streaming 将官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运
 ```
 Qwen3TTS-Streaming/
 ├── engine/              # 推理引擎核心（frontend/backend/gateway/core/interface）
-├── client/              # 独立 Python SDK 包 (pip install qwen3-tts-client)
+├── client/              # 独立 Python SDK 包 (qwen3-tts-client，pip 从 Git 一步安装)
 │   ├── src/qwen3tts/     # 客户端实现与传输适配器
 │   └── src/qwen3tts_protocol/   # 共享协议层（单一真相源）
 ├── demo_api/            # WebUI Demo API 后端（aiohttp）
@@ -121,6 +121,7 @@ python -m engine.server --config engine.yaml
 | 导出 ONNX | `bash scripts/bash/autorun.sh setup -m custom-1.7b` |
 | 编译 TRT | `bash scripts/bash/build_engines.sh --variant custom-1.7b` |
 | 跨机编译 | `bash scripts/bash/autorun.sh make-bundle -m custom-1.7b --target-profile target_profile.json` |
+| 发版 client wheel | `bash scripts/bash/release_client_wheel.sh`（须在干净 tag 上；版本号=tag，与引擎镜像配对） |
 | 导入编译产物 | `bash scripts/bash/autorun.sh import-artifact workspace/engine_artifact_bundle.tar.zst` |
 | 采集目标机信息 | `bash scripts/bash/autorun.sh probe-target --out target_profile.json` |
 

@@ -31,18 +31,49 @@ print(result.audio_format, len(result.audio_bytes))
 
 ## Install
 
+Engine and SDK are **version-paired**: both are released from the same git
+tag, and the wheel version is derived from that tag. First ask your engine
+which version it is:
+
 ```bash
-pip install qwen3-tts-client          # core (WebSocket + HTTP transports)
+curl http://<engine-host>:<health-port>/health    # → {"version": "v0.1.0", ...}
 ```
 
-Extras, by what you connect to / need:
+**Channel 1 — straight from Git**, at the engine's tag (not on PyPI):
 
-| Extra | Install | Pulls in | Use when |
-|-------|---------|----------|----------|
-| `grpc` | `pip install "qwen3-tts-client[grpc]"` | `grpcio`, `protobuf` | engine-grpc transport |
-| `triton` | `pip install "qwen3-tts-client[triton]"` | `tritonclient` | triton-grpc transport |
-| `audio` | `pip install "qwen3-tts-client[audio]"` | `numpy` | `synthesize_array()` (ndarray output) |
-| `all` | `pip install "qwen3-tts-client[all]"` | everything above | not sure / want it all |
+```bash
+pip install "qwen3-tts-client @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@v0.1.0#subdirectory=client"
+```
+
+Over SSH, swap `https://github.com/` for `ssh://git@github.com/` (keep the
+`@<tag>#subdirectory=client` suffix).
+
+**Channel 2 — a delivered wheel.** Every engine serves its own matching wheel
+at `GET /sdk/` on the health port — whatever engine you reach, the wheel it
+hands out fits it:
+
+```bash
+curl http://<engine-host>:<health-port>/sdk/      # list the .whl
+pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-none-any.whl
+```
+
+Release wheels are built on a tag with
+`bash scripts/bash/release_client_wheel.sh` → `client/dist/`.
+
+From a local checkout: `pip install ./client` (repo root). A mispaired
+install fails fast at connect with `ProtocolVersionMismatchError`
+(set `QWEN3TTS_SKIP_PROTOCOL_CHECK=1` to downgrade it to a warning).
+
+Extras, by what you connect to / need — add them in the brackets, e.g.
+`"qwen3-tts-client[grpc] @ git+https://...#subdirectory=client"` or
+`pip install "./client[grpc]"`:
+
+| Extra | Pulls in | Use when |
+|-------|----------|----------|
+| `grpc` | `grpcio`, `protobuf` | engine-grpc transport |
+| `triton` | `tritonclient` | triton-grpc transport |
+| `audio` | `numpy` | `synthesize_array()` (ndarray output) |
+| `all` | everything above | not sure / want it all |
 
 Requires Python 3.10+.
 

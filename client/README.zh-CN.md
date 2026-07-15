@@ -29,18 +29,47 @@ print(result.audio_format, len(result.audio_bytes))
 
 ## 安装
 
+引擎与 SDK **版本一一配对**：两者从同一个 git tag 发布，wheel 版本号由该
+tag 推导。先问引擎它是什么版本：
+
 ```bash
-pip install qwen3-tts-client          # core (WebSocket + HTTP transports)
+curl http://<engine-host>:<health-port>/health    # → {"version": "v0.1.0", ...}
 ```
 
-附加项，按你连接的对象 / 所需功能划分：
+**通道一 —— 从 Git 直接安装**，指定引擎对应的 tag（未发布 PyPI）：
 
-| Extra | Install | Pulls in | Use when |
-|-------|---------|----------|----------|
-| `grpc` | `pip install "qwen3-tts-client[grpc]"` | `grpcio`, `protobuf` | engine-grpc transport |
-| `triton` | `pip install "qwen3-tts-client[triton]"` | `tritonclient` | triton-grpc transport |
-| `audio` | `pip install "qwen3-tts-client[audio]"` | `numpy` | `synthesize_array()` (ndarray output) |
-| `all` | `pip install "qwen3-tts-client[all]"` | everything above | not sure / want it all |
+```bash
+pip install "qwen3-tts-client @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@v0.1.0#subdirectory=client"
+```
+
+走 SSH 时把 `https://github.com/` 换成 `ssh://git@github.com/`（保留
+`@<tag>#subdirectory=client` 后缀）。
+
+**通道二 —— 交付 wheel。** 每个引擎都在 health 端口的 `GET /sdk/` 提供
+与自己匹配的 wheel —— 连的是哪个引擎，拿到的就是配它的版本：
+
+```bash
+curl http://<engine-host>:<health-port>/sdk/      # 查看 .whl 列表
+pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-none-any.whl
+```
+
+发版 wheel 在 tag 上用 `bash scripts/bash/release_client_wheel.sh` 构建，
+产物在 `client/dist/`。
+
+从本地检出安装：`pip install ./client`（在仓库根目录执行）。装错配对会在
+连接时立即报 `ProtocolVersionMismatchError`（设
+`QWEN3TTS_SKIP_PROTOCOL_CHECK=1` 可降级为警告）。
+
+附加项，按你连接的对象 / 所需功能划分 —— 写在方括号里，如
+`"qwen3-tts-client[grpc] @ git+https://...#subdirectory=client"` 或
+`pip install "./client[grpc]"`：
+
+| Extra | Pulls in | Use when |
+|-------|----------|----------|
+| `grpc` | `grpcio`, `protobuf` | engine-grpc transport |
+| `triton` | `tritonclient` | triton-grpc transport |
+| `audio` | `numpy` | `synthesize_array()` (ndarray output) |
+| `all` | everything above | not sure / want it all |
 
 需要 Python 3.10+。
 

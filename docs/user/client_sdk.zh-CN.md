@@ -28,20 +28,62 @@ SDK 作为独立子项目放在仓库的 [`client/`](../../client) 目录下：
 
 ## 安装
 
-核心包：
+### 版本配对
+
+引擎与 SDK **从同一个 git tag 发布**：引擎镜像构建时把 tag 烤进去
+（`git describe`），wheel 版本号也由同一 tag 推导（hatch-vcs）。查询运行中
+引擎的版本：
+
+```bash
+curl http://<engine-host>:<health-port>/health
+# → {"status": "ok", "version": "v0.1.0", ...}
+```
+
+按该版本安装 SDK。配对错误时 SDK 会在连接阶段立即报
+`ProtocolVersionMismatchError`（依据服务端 capabilities 中的协议代校验）；
+需要刻意跨版本实验时，设 `QWEN3TTS_SKIP_PROTOCOL_CHECK=1` 可把报错降级为
+警告。
+
+### 通道一 —— 从 Git 安装（有仓库访问权限的开发者）
+
+在 URL 中钉住引擎对应的 tag（包未发布 PyPI）：
+
+```bash
+pip install "qwen3-tts-client @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@v0.1.0#subdirectory=client"
+```
+
+走 SSH 时把 `https://github.com/` 换成 `ssh://git@github.com/`。可选
+extras 写在方括号里（`[grpc]` / `[triton]` / `[audio]` / `[all]`）：
+
+```bash
+pip install "qwen3-tts-client[all] @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@v0.1.0#subdirectory=client"
+```
+
+### 通道二 —— 交付 wheel（无需仓库访问权限）
+
+每个引擎部署都在 health 端口的 `GET /sdk/` 提供从自己源码构建的 wheel ——
+从你连的引擎本体获取，配对不可能出错：
+
+```bash
+curl http://<engine-host>:<health-port>/sdk/      # 查看可用 wheel
+pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-none-any.whl
+```
+
+独立交付的发版 wheel 在 tag 上构建：
+
+```bash
+git tag v0.2.0
+bash scripts/bash/release_client_wheel.sh         # → client/dist/*.whl
+```
+
+脚本会拒绝脏工作区和未打 tag 的提交，因此交付出去的 wheel 版本号总能
+精确对应它的源码。
+
+### 本地检出（开发）
 
 ```bash
 cd client
-pip install .
-```
-
-可选 extras：
-
-```bash
-pip install .[grpc]
-pip install .[triton]
-pip install .[audio]
-pip install .[all]
+pip install .          # extras 同理：pip install ".[grpc]"
 ```
 
 依赖策略：

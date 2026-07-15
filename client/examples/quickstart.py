@@ -3,8 +3,11 @@
 Prerequisite: a running Qwen3-TTS endpoint (standalone engine or Triton).
 See the repo README for how to start one.
 
-    pip install qwen3-tts-client
+    pip install "qwen3-tts-client @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@<tag>#subdirectory=client"
     python quickstart.py [endpoint]
+
+Use the tag matching your engine (its /health reports "version"); the engine
+also serves the matching wheel at GET /sdk/ on the health port.
 
 Default endpoint: ws://localhost:50052/v1/ws  (standalone engine WebSocket)
 Other examples: localhost:50051 (engine gRPC), http://localhost:8000 (Triton).

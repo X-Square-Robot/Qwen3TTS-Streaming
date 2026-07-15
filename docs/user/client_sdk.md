@@ -28,20 +28,64 @@ The purpose of this is to avoid packing heavy server-side dependencies and deplo
 
 ## Installation
 
-Core package:
+### Version pairing
+
+Engine and SDK are released **from the same git tag**: the engine image bakes
+the tag in at build time (`git describe`), and the wheel version is derived
+from the same tag (hatch-vcs). To find out what a running engine is:
+
+```bash
+curl http://<engine-host>:<health-port>/health
+# → {"status": "ok", "version": "v0.1.0", ...}
+```
+
+Install the SDK at that same version. If the pairing is wrong, the SDK fails
+fast at connect with `ProtocolVersionMismatchError` (the protocol generation
+is checked against the server's capabilities); set
+`QWEN3TTS_SKIP_PROTOCOL_CHECK=1` to downgrade the error to a warning for
+deliberate cross-version experiments.
+
+### Channel 1 — install from Git (developers with repo access)
+
+Pin the engine's tag in the URL (the package is not published to PyPI):
+
+```bash
+pip install "qwen3-tts-client @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@v0.1.0#subdirectory=client"
+```
+
+Over SSH, swap `https://github.com/` for `ssh://git@github.com/`. Optional
+extras go inside the brackets (`[grpc]` / `[triton]` / `[audio]` / `[all]`):
+
+```bash
+pip install "qwen3-tts-client[all] @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@v0.1.0#subdirectory=client"
+```
+
+### Channel 2 — delivered wheel (no repo access needed)
+
+Every engine deployment serves the wheel built from its own checkout at
+`GET /sdk/` on the health port — fetching from the engine you talk to makes a
+version mismatch impossible:
+
+```bash
+curl http://<engine-host>:<health-port>/sdk/      # list available wheels
+pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-none-any.whl
+```
+
+Standalone release wheels are built on a tag:
+
+```bash
+git tag v0.2.0
+bash scripts/bash/release_client_wheel.sh         # → client/dist/*.whl
+```
+
+The script refuses a dirty tree or an untagged commit, so a delivered wheel's
+version always names the exact source it was built from.
+
+### Local checkout (development)
 
 ```bash
 cd client
-pip install .
-```
-
-Optional extras:
-
-```bash
-pip install .[grpc]
-pip install .[triton]
-pip install .[audio]
-pip install .[all]
+pip install .          # extras likewise: pip install ".[grpc]"
 ```
 
 Dependency strategy:

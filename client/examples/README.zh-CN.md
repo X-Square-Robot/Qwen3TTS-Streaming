@@ -8,7 +8,8 @@
 请先启动一个 Qwen3-TTS 端点（见仓库 README），然后：
 
 ```bash
-pip install qwen3-tts-client          # or: pip install qwen3-tts-client[all]
+# @tag = 引擎的版本（curl http://<engine>:<health-port>/health 查看）
+pip install "qwen3-tts-client[all] @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@v0.1.0#subdirectory=client"
 python quickstart.py                  # one-shot synthesis -> quickstart.wav
 python streaming.py                   # incremental text -> streaming.wav
 python realtime.py                    # wall-clock aligned frames (WebRTC/playback)
