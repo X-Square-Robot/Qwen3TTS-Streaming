@@ -4,6 +4,10 @@
 
 > For contributors, architects, and deep-dive developers
 
+> **Branching & release rules** (user branches → `dev` → `beta` → `main`,
+> hotfix channel, `v`-prefixed version tags only): see
+> [CONTRIBUTING — Branching Model & Releases](../../CONTRIBUTING.md#branching-model--releases).
+
 ## Architecture
 
 | Document | Description |

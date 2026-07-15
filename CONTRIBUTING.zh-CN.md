@@ -47,9 +47,40 @@ make proto-sync   # 同步到 engine/ 与 client/ 消费方
 make proto-check  # 校验已同步（CI 会跑）
 ```
 
+## 分支模型与版本发布
+
+分支按单向晋升流水线组织：
+
+| 分支 | 用途 | 合并来源 |
+|------|------|----------|
+| `<用户名>`（如 `rime`） | 个人开发 | — |
+| `dev` | 跨用户集成同步 | 各用户分支 |
+| `beta` | beta 测试（开发+测试） | **仅** `dev` |
+| `main` | 稳定版本（所有人可见） | **仅** `beta` |
+
+**Hotfix 例外** —— 唯一绕过 `beta` 进 `main` 的通道：稳定版出紧急问题时，
+从 `main` 切 `hotfix/<topic>`，修复后合回 `main`（打补丁版本 tag
+`vX.Y.Z`），并**立即**把修复同步回 `dev`（若 `beta` 正在测试周期中也要同步）。
+
+**版本 tag** 是引擎镜像与 client wheel 的配对键（见
+[docs/user/client_sdk.zh-CN.md](docs/user/client_sdk.zh-CN.md)）：
+
+- 一律 `v` + PEP 440 形式：稳定 `vX.Y.Z`（打在 `main`），beta `vX.Y.Zb1` /
+  `vX.Y.Zrc1`（打在 `beta`）。版本 tag 只打在 `dev` / `beta` / `main` ——
+  **个人分支禁止打版本 tag**。
+- 个人分支不需要版本 tag：hatch-vcs 自动推导 `X.Y.Z.devN+g<hash>`，引擎
+  版本戳（`/health` 的 `version`）带 `git describe` 输出，都精确到 commit。
+- 工具链只认 `v[0-9]*` 形式的 tag（hatch-vcs `tag_regex` + `compose.sh` /
+  `release_client_wheel.sh` 里的 `git describe --match`）。个人标记请用
+  命名空间形式，如 `rime/some-checkpoint` —— 对版本推导完全不可见。
+
+**发版流程**：`dev` 收敛 → 合入 `beta` → 打 `vX.Y.Zb1` → 测试通过 →
+合入 `main` → 打 `vX.Y.Z` → `compose.sh build`（引擎镜像版本戳 + 烤入
+匹配 wheel 供 `/sdk/`）+ `release_client_wheel.sh`（交付 wheel）。
+
 ## 提交 PR
 
-1. 从 `main` 切分支；提交信息用 [Conventional Commits](https://www.conventionalcommits.org/) 前缀（`feat`/`fix`/`refactor`/`docs`/`chore` 等）。
+1. 从 `dev` 切分支，PR 目标也是 `dev`（见上文分支模型；`main` 只接受来自 `beta` 的合并）。提交信息用 [Conventional Commits](https://www.conventionalcommits.org/) 前缀（`feat`/`fix`/`refactor`/`docs`/`chore` 等）。
 2. 关联相关 issue，说明动机与验证方式（贴测试输出）。
 3. 不引入新的 `TODO`/调试残留；不提交 `workspace/` 运行时产物（已 gitignore）。
 4. 行为有变更时更新对应文档与测试。

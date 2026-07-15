@@ -125,6 +125,13 @@ python -m engine.server --config engine.yaml
 | 导入编译产物 | `bash scripts/bash/autorun.sh import-artifact workspace/engine_artifact_bundle.tar.zst` |
 | 采集目标机信息 | `bash scripts/bash/autorun.sh probe-target --out target_profile.json` |
 
+## 分支与版本发布规则
+
+- 分支单向晋升：`<用户名>`(个人开发) → `dev`(跨用户同步) → `beta`(只从 dev 合并) → `main`(只从 beta 合并)。紧急修复走 `hotfix/<topic>`：从 main 切出、合回 main 后**立即**同步回 dev（及在测的 beta）——这是唯一绕过 beta 进 main 的通道
+- 版本 tag 一律 `v`+PEP 440：稳定 `vX.Y.Z`（main）、beta `vX.Y.Zb1`/`vX.Y.Zrc1`（beta）；只打在 dev/beta/main，**个人分支禁止打版本 tag**（hatch-vcs 自动给 `X.Y.Z.devN+g<hash>`，引擎戳同理精确到 commit）
+- 工具链只认 `v[0-9]*` tag（client/pyproject.toml `tag_regex` + compose.sh / release_client_wheel.sh 的 `git describe --match`）；个人标记用 `rime/xxx` 命名空间，不参与版本推导
+- 发版：dev 收敛 → beta 打 `vX.Y.Zb1` 测试 → main 打 `vX.Y.Z` → `compose.sh build`（镜像版本戳+wheel 进 /sdk/）+ `release_client_wheel.sh`（交付 wheel）；引擎与 client wheel 从同一 tag 出、版本一一配对（详见 docs/user/client_sdk.md）
+
 ## 重要约束
 
 - `custom-1.7b` / `custom_voice` 是 v0.1 推荐路径，其他变体为实验状态
