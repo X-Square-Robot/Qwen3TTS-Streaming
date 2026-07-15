@@ -7,6 +7,13 @@ workspace/
 .ruff_cache/
 node_modules/
 dist/
+# client/dist/ stays tracked (empty, via .gitkeep) so Dockerfile.engine's
+# COPY client/dist/ works whether or not a wheel has been staged.
+!client/dist/
+client/dist/*
+!client/dist/.gitkeep
+client/build/
+client/src/qwen3tts/_version.py
 webui/node_modules/
 webui/dist/
 webui/tsconfig.tsbuildinfo

@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
 
 [project]
 name = "qwen3-tts-client"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Lightweight Python client SDK for Qwen3-TTS standalone engine and Triton endpoints."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -49,15 +49,15 @@ all = [
 Homepage = "https://github.com/X-Square-Robot/Qwen3TTS-Streaming"
 Documentation = "https://github.com/X-Square-Robot/Qwen3TTS-Streaming/blob/main/docs/user/client_sdk.md"
 
-[tool.setuptools]
-include-package-data = true
-package-dir = {"" = "src"}
+# Version comes from git tags at the repo root (this package lives in a
+# subdirectory of the engine monorepo — engine image tag and wheel version
+# are derived from the same tag, which is what keeps them paired).
+[tool.hatch.version]
+source = "vcs"
+raw-options = { root = ".." }
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = [
-  "qwen3tts",
-  "qwen3tts.*",
-  "qwen3tts_protocol",
-  "qwen3tts_protocol.*",
-]
+[tool.hatch.build.hooks.vcs]
+version-file = "src/qwen3tts/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qwen3tts", "src/qwen3tts_protocol"]

@@ -18,10 +18,19 @@ from .._internal.utils import (
     capabilities_from_payload,
     decode_stream_event,
 )
-from .._proto import tts_pb2, tts_pb2_grpc
 from ..constants import TRANSPORT_ENGINE_GRPC
 from ..exceptions import DependencyMissingError
 from .._session import BaseStreamSession
+
+# The generated pb2 modules need grpcio/protobuf at import time, but this
+# module is imported eagerly by client.py — a core install (no 'grpc' extra)
+# must still be able to `import qwen3tts`, so degrade to None and let
+# _require_grpc() raise when the transport is actually used.
+try:
+    from .._proto import tts_pb2, tts_pb2_grpc
+except ImportError:  # pragma: no cover - environment dependent
+    tts_pb2 = None
+    tts_pb2_grpc = None
 
 
 def _require_grpc():
@@ -31,6 +40,10 @@ def _require_grpc():
         raise DependencyMissingError(
             "engine-grpc requires the 'grpc' extra. Install qwen3-tts-client[grpc]."
         ) from exc
+    if tts_pb2 is None or tts_pb2_grpc is None:  # pragma: no cover
+        raise DependencyMissingError(
+            "engine-grpc requires the 'grpc' extra. Install qwen3-tts-client[grpc]."
+        )
     return grpc
 
 
