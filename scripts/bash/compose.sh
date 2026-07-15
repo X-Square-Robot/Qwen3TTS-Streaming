@@ -175,8 +175,9 @@ export_compose_env() {
     resolve_compose_runtime_controls
 
     export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-qwen3-tts}"
-    # Release stamp baked into the engine image (ENV + OCI label) and reported
-    # by /health; the pairing key with the client SDK wheel version.
+    # Release stamp baked into the engine image (ENV + OCI label) and advertised
+    # as engine_version in the capabilities; the pairing key with the client SDK
+    # wheel version (/health stays a pure liveness probe).
     # --match "v[0-9]*": only version tags count (personal markers like
     # rime/xxx must never pollute the stamp; mirrors hatch-vcs tag_regex).
     export ENGINE_VERSION="${ENGINE_VERSION:-$(git -C "$REPO_ROOT" describe --tags --always --dirty --match "v[0-9]*" 2>/dev/null || echo unknown)}"

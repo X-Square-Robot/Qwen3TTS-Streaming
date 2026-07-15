@@ -636,6 +636,7 @@ def _make_capabilities_response(cap: dict) -> tts_pb2.GetCapabilitiesResponse:
         ),
         ref_codec_reason=str(cap.get("ref_codec_reason", "") or ""),
         protocol_version=str(cap.get("protocol_version", "") or ""),
+        engine_version=str(cap.get("engine_version", "") or ""),
         supported_output_policy_features=[
             str(value)
             for value in cap.get("supported_output_policy_features", ()) or ()

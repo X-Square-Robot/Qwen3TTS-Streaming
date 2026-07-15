@@ -8,7 +8,7 @@ import requests
 from qwen3tts_protocol import DetectedTransport
 
 from ._internal.raw_websocket import ws_close, ws_connect, ws_recv_frame, ws_send_json
-from ._internal.utils import check_protocol_version
+from ._internal.utils import check_capabilities_pairing
 from .constants import (
     DEFAULT_ENGINE_CAPABILITIES_PATH,
     DEFAULT_ENGINE_GRPC_PORT,
@@ -138,7 +138,7 @@ def _detect_http_url(
         if response.status_code == 200:
             payload = response.json()
             if isinstance(payload, dict) and "loaded_model_type" in payload:
-                check_protocol_version(payload.get("protocol_version"))
+                check_capabilities_pairing(payload)
                 report.append(
                     {
                         "transport": "engine-http-capabilities",
@@ -364,9 +364,7 @@ def _probe_engine_websocket(url: str, *, timeout: float, headers) -> None:
                 continue
             message = json.loads(payload.decode("utf-8"))
             if message.get("type") == "capabilities":
-                check_protocol_version(
-                    (message.get("capabilities") or {}).get("protocol_version")
-                )
+                check_capabilities_pairing(message.get("capabilities") or {})
                 return
         raise TimeoutError("websocket probe timed out")
     finally:
@@ -389,7 +387,12 @@ def _probe_engine_grpc(endpoint: str, *, timeout: float) -> None:
         response = stub.GetCapabilities(
             tts_pb2.GetCapabilitiesRequest(), timeout=timeout
         )
-        check_protocol_version(getattr(response, "protocol_version", ""))
+        check_capabilities_pairing(
+            {
+                "protocol_version": getattr(response, "protocol_version", ""),
+                "engine_version": getattr(response, "engine_version", ""),
+            }
+        )
     finally:
         channel.close()
 

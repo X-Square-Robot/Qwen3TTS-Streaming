@@ -45,6 +45,7 @@ class TTSClient:
         timeout: float = 30.0,
         headers: dict[str, str] | None = None,
         metadata=None,
+        verify: bool = True,
     ):
         detected = detect_transport(
             endpoint,
@@ -64,7 +65,16 @@ class TTSClient:
             headers=headers,
             metadata=metadata,
         )
-        return cls(endpoint=endpoint, adapter=adapter, detected=detected)
+        client = cls(endpoint=endpoint, adapter=adapter, detected=detected)
+        # Connect-time compatibility guard via the versioned capabilities
+        # surface: protocol generation + engine/SDK release pairing. Auto-detect
+        # already exchanged capabilities (and validated), so only the explicit-
+        # transport path needs an extra in-band fetch here to close that gap.
+        # ``verify=False`` skips it for a lazy connect; a mismatch raises
+        # ProtocolVersionMismatchError / EngineVersionMismatchError.
+        if verify and transport != "auto":
+            client.get_capabilities()
+        return client
 
     def get_capabilities(self):
         return self._adapter.get_capabilities()

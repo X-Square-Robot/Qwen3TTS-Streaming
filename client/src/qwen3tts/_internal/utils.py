@@ -3,9 +3,10 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import socket
 import warnings
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlparse
 
 from qwen3tts_protocol.protocol import PROTOCOL_VERSION
@@ -25,7 +26,11 @@ from qwen3tts_protocol import (
 )
 
 from ..constants import DEFAULT_ENGINE_WS_PATH
-from ..exceptions import ProtocolError, ProtocolVersionMismatchError
+from ..exceptions import (
+    EngineVersionMismatchError,
+    ProtocolError,
+    ProtocolVersionMismatchError,
+)
 
 
 def parse_host_port(endpoint: str, *, default_port: int) -> tuple[str, int]:
@@ -190,10 +195,77 @@ def check_protocol_version(server_version: Any) -> None:
     raise ProtocolVersionMismatchError(message)
 
 
+# A "clean release" is a bare PEP 440 release, optionally an a/b/rc pre-release
+# (the repo tags betas as vX.Y.Zb1). Only when BOTH the engine and the SDK
+# report such a form does a difference mean a genuine mispairing worth raising
+# on. git-describe distance/dirty suffixes (v0.2.0-5-gabc123), hatch-vcs dev
+# builds (0.2.1.dev5+gabc123), and the 0.0.0 source-tree fallback are all
+# "unversioned" and only ever warn.
+_RELEASE_RE = re.compile(r"^\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?$")
+
+
+def _normalize_release(version: Any) -> str:
+    """Strip a leading ``v`` so the engine's ``git describe`` stamp (``v0.2.0``)
+    and the SDK's hatch-vcs version (``0.2.0``) compare equal on a matched tag."""
+    value = str(version or "").strip()
+    if value[:1] in ("v", "V"):
+        value = value[1:]
+    return value
+
+
+def _is_clean_release(version: Any) -> bool:
+    normalized = _normalize_release(version)
+    if normalized.startswith("0.0.0"):
+        return False  # SDK source-tree fallback; never a real release
+    return bool(_RELEASE_RE.match(normalized))
+
+
+def check_engine_version(server_version: Any) -> None:
+    """Connect-time SDK<->engine *release* pairing guard, read from capabilities.
+
+    Complements :func:`check_protocol_version` (the wire-protocol generation):
+    the engine image and the client wheel are cut 1:1 from the same git tag, so
+    a divergence between two *release* versions is a mispaired install. A
+    missing/empty engine value (pre-versioning build) is tolerated; a mismatch
+    where either side is a dev/dirty/source-tree build only warns.
+    ``QWEN3TTS_SKIP_PROTOCOL_CHECK=1`` downgrades a hard mismatch to a warning.
+    """
+    from qwen3tts import __version__  # deferred: the package imports this module
+
+    server = _normalize_release(server_version)
+    if not server or server == _normalize_release(__version__):
+        return
+    message = (
+        f"SDK/engine release mismatch: client qwen3-tts-client {__version__!r} "
+        f"vs engine {str(server_version).strip()!r}. The engine image and client "
+        f"wheel are released 1:1 from the same git tag — install the wheel this "
+        f"engine serves at GET /sdk/ (on its health port), or the SDK at the "
+        f"engine's tag. Set QWEN3TTS_SKIP_PROTOCOL_CHECK=1 to proceed anyway."
+    )
+    if (
+        os.environ.get("QWEN3TTS_SKIP_PROTOCOL_CHECK", "") == "1"
+        or not _is_clean_release(server_version)
+        or not _is_clean_release(__version__)
+    ):
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+        return
+    raise EngineVersionMismatchError(message)
+
+
+def check_capabilities_pairing(caps: Mapping[str, Any]) -> None:
+    """Run both connect-time pairing guards over a capabilities mapping:
+    protocol generation (:func:`check_protocol_version`) and engine release
+    (:func:`check_engine_version`). This is the single funnel every transport's
+    capability exchange flows through."""
+    getter = caps.get if isinstance(caps, Mapping) else (lambda _k: "")
+    check_protocol_version(getter("protocol_version"))
+    check_engine_version(getter("engine_version"))
+
+
 def capabilities_from_payload(payload: Any) -> Capabilities:
     if not isinstance(payload, dict):
         raise ProtocolError("capabilities payload must be a JSON object")
-    check_protocol_version(payload.get("protocol_version"))
+    check_capabilities_pairing(payload)
     return capabilities_from_mapping(payload)
 
 

@@ -31,6 +31,23 @@ class ProtocolVersionMismatchError(TTSClientError):
     """
 
 
+class EngineVersionMismatchError(TTSClientError):
+    """Raised at ``connect()`` when the engine's reported *release* version
+    differs from this SDK's.
+
+    The engine image and the client wheel are cut 1:1 from the same git tag.
+    ``connect()`` reads the engine's release stamp from the ``engine_version``
+    capability (the versioned capabilities surface, not ``/health``, which
+    stays a pure liveness probe) and compares it against this package's
+    ``__version__``. Install the wheel the engine serves at ``GET /sdk/``, or
+    pass ``verify=False`` (or set ``QWEN3TTS_SKIP_PROTOCOL_CHECK=1``) to
+    override.
+
+    Distinct from :class:`ProtocolVersionMismatchError`, which flags a changed
+    wire-protocol *generation* rather than a release skew.
+    """
+
+
 class DependencyMissingError(TransportNotSupportedError):
     """Raised when an optional dependency extra is required but unavailable."""
 

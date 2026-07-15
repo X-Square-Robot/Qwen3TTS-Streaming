@@ -47,6 +47,7 @@ from .async_client import AsyncTTSClient
 from .client import TTSClient
 from .exceptions import (
     DependencyMissingError,
+    EngineVersionMismatchError,
     ProtocolError,
     ProtocolVersionMismatchError,
     StreamClosedError,
@@ -65,6 +66,7 @@ __all__ = (
     "Capabilities",
     "DependencyMissingError",
     "DetectedTransport",
+    "EngineVersionMismatchError",
     "OutputPolicy",
     "ProtocolError",
     "ProtocolVersionMismatchError",

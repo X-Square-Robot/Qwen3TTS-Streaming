@@ -31,18 +31,20 @@ SDK 作为独立子项目放在仓库的 [`client/`](../../client) 目录下：
 ### 版本配对
 
 引擎与 SDK **从同一个 git tag 发布**：引擎镜像构建时把 tag 烤进去
-（`git describe`），wheel 版本号也由同一 tag 推导（hatch-vcs）。查询运行中
-引擎的版本：
+（`git describe`），wheel 版本号也由同一 tag 推导（hatch-vcs）。引擎把发布版本
+登记在**版本化的 capabilities** 里（字段 `engine_version`）；`/health` 是纯存活
+探针、不带版本。查询运行中引擎的版本：
 
 ```bash
-curl http://<engine-host>:<health-port>/health
-# → {"status": "ok", "version": "v0.1.0", ...}
+curl http://<engine-host>:<ws-port>/v1/capabilities
+# → {"loaded_model_type": "...", "engine_version": "v0.1.0", "protocol_version": "...", ...}
 ```
 
-按该版本安装 SDK。配对错误时 SDK 会在连接阶段立即报
-`ProtocolVersionMismatchError`（依据服务端 capabilities 中的协议代校验）；
-需要刻意跨版本实验时，设 `QWEN3TTS_SKIP_PROTOCOL_CHECK=1` 可把报错降级为
-警告。
+按该版本安装 SDK。`connect()` 读取服务端 capabilities，配对错误时立即快速失败——
+`ProtocolVersionMismatchError`（线协议代不匹配）或 `EngineVersionMismatchError`
+（引擎/SDK 发布版本不匹配）。需要刻意跨版本实验时，设
+`QWEN3TTS_SKIP_PROTOCOL_CHECK=1` 可把两者都降级为警告；或给 `connect()` 传
+`verify=False` 彻底跳过连接时的 capabilities 校验。
 
 ### 通道一 —— 从 Git 安装（有仓库访问权限的开发者）
 

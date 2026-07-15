@@ -111,6 +111,10 @@ message GetCapabilitiesResponse {
   repeated string supported_output_policy_features = 16;
   repeated string supported_vad_strategies = 17;
   repeated string supported_timing_fields = 18;
+  // Engine release stamp (git tag) for SDK<->engine wheel pairing; distinct
+  // from protocol_version, which is the wire-protocol generation. Empty on
+  // pre-versioning / source-tree builds.
+  string engine_version = 19;
 }
 
 message SessionConfig {

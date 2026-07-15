@@ -65,4 +65,4 @@ if [[ "$wheel_version" != "$expected" ]]; then
 fi
 
 log_info "Release wheel ready: $wheel_file"
-log_info "Deliver it alongside engine image tag $tag (engine /health reports 'version': $tag)"
+log_info "Deliver it alongside engine image tag $tag (engine advertises 'engine_version': $tag in its capabilities)"

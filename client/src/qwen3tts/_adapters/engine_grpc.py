@@ -403,6 +403,7 @@ def _capabilities_message_to_dict(resp) -> dict[str, Any]:
         "ref_c2w_warm_state_available": bool(resp.ref_c2w_warm_state_available),
         "ref_codec_reason": resp.ref_codec_reason,
         "protocol_version": resp.protocol_version,
+        "engine_version": resp.engine_version,
         "supported_output_policy_features": list(resp.supported_output_policy_features),
         "supported_vad_strategies": list(resp.supported_vad_strategies),
         "supported_timing_fields": list(resp.supported_timing_fields),

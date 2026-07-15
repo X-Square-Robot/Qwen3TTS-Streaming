@@ -32,18 +32,21 @@ The purpose of this is to avoid packing heavy server-side dependencies and deplo
 
 Engine and SDK are released **from the same git tag**: the engine image bakes
 the tag in at build time (`git describe`), and the wheel version is derived
-from the same tag (hatch-vcs). To find out what a running engine is:
+from the same tag (hatch-vcs). The engine advertises its release on the
+versioned **capabilities** surface as `engine_version` (`/health` is a pure
+liveness probe and carries no version). To find out what a running engine is:
 
 ```bash
-curl http://<engine-host>:<health-port>/health
-# → {"status": "ok", "version": "v0.1.0", ...}
+curl http://<engine-host>:<ws-port>/v1/capabilities
+# → {"loaded_model_type": "...", "engine_version": "v0.1.0", "protocol_version": "...", ...}
 ```
 
-Install the SDK at that same version. If the pairing is wrong, the SDK fails
-fast at connect with `ProtocolVersionMismatchError` (the protocol generation
-is checked against the server's capabilities); set
-`QWEN3TTS_SKIP_PROTOCOL_CHECK=1` to downgrade the error to a warning for
-deliberate cross-version experiments.
+Install the SDK at that same version. `connect()` reads the server's
+capabilities and fails fast on a mismatch — `ProtocolVersionMismatchError` (the
+wire-protocol generation) or `EngineVersionMismatchError` (the engine/SDK
+release). Set `QWEN3TTS_SKIP_PROTOCOL_CHECK=1` to downgrade either to a warning
+for deliberate cross-version experiments, or pass `verify=False` to `connect()`
+to skip the connect-time capabilities check entirely.
 
 ### Channel 1 — install from Git (developers with repo access)
 

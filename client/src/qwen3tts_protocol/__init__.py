@@ -195,6 +195,10 @@ class Capabilities:
     max_seq_len: int = 0
     ref_audio_max_duration_sec: float = 0.0
     protocol_version: str = ""
+    # Engine release stamp (git tag) for SDK<->engine wheel pairing; distinct
+    # from protocol_version (the wire-protocol generation). Empty on
+    # pre-versioning / source-tree engine builds.
+    engine_version: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -231,6 +235,7 @@ def capabilities_from_mapping(payload: dict[str, Any]) -> Capabilities:
             payload.get("ref_audio_max_duration_sec", 0) or 0
         ),
         protocol_version=str(payload.get("protocol_version", "") or ""),
+        engine_version=str(payload.get("engine_version", "") or ""),
         extra={
             k: v
             for k, v in payload.items()
@@ -247,6 +252,7 @@ def capabilities_from_mapping(payload: dict[str, Any]) -> Capabilities:
                 "max_seq_len",
                 "ref_audio_max_duration_sec",
                 "protocol_version",
+                "engine_version",
             }
         },
     )

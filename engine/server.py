@@ -580,6 +580,13 @@ class TTSEngine:
             {
                 "variant": self._model_arch.variant,
                 "loaded_model_type": self._loaded_model_type(),
+                # Release stamp (git tag) baked into the image at build time
+                # (ENGINE_VERSION); the SDK<->engine wheel pairing key the
+                # client checks at connect. Rides this versioned capabilities
+                # surface — /health stays a pure liveness probe. Empty on
+                # source-tree / pre-versioning builds (tolerated leniently by
+                # the client guard).
+                "engine_version": os.environ.get("ENGINE_VERSION", "").strip(),
                 "declared_supported_task_types": list(
                     self._model_arch.supported_task_types or ()
                 ),
@@ -1555,12 +1562,11 @@ class HealthState:
         self._ready.set()
 
     def payload_and_status(self, path: str) -> tuple[dict, int]:
+        # /health is a pure liveness/readiness probe — no version. The engine
+        # release stamp (ENGINE_VERSION) is advertised on the versioned
+        # capabilities surface as ``engine_version``, where the client reads it
+        # for SDK<->engine wheel pairing at connect.
         stats = self._engine.health_stats()
-        # Release stamp baked into the image at build time (git describe);
-        # the pairing key with the client SDK wheel served under /sdk/.
-        version = os.environ.get("ENGINE_VERSION", "").strip()
-        if version:
-            stats["version"] = version
         started = self._ready.is_set()
         ready = started and self._engine.engine_thread_alive()
         if ready:
