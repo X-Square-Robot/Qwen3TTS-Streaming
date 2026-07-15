@@ -21,6 +21,16 @@ class ProtocolError(TTSClientError):
     """Raised when the remote side returns malformed protocol data."""
 
 
+class ProtocolVersionMismatchError(TTSClientError):
+    """Raised when the server speaks a different protocol generation.
+
+    Engine and client SDK are version-paired: install the wheel the engine
+    serves at ``GET /sdk/`` on its health port, or the same git tag as the
+    deployed engine (``/health`` reports it in the ``version`` field). Set
+    ``QWEN3TTS_SKIP_PROTOCOL_CHECK=1`` to downgrade this error to a warning.
+    """
+
+
 class DependencyMissingError(TransportNotSupportedError):
     """Raised when an optional dependency extra is required but unavailable."""
 

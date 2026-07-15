@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import socket
+import warnings
 from typing import Any
 from urllib.parse import urlparse
 
+from qwen3tts_protocol.protocol import PROTOCOL_VERSION
 from qwen3tts_protocol import (
     AudioChunk,
     AudioFormat,
@@ -22,7 +25,7 @@ from qwen3tts_protocol import (
 )
 
 from ..constants import DEFAULT_ENGINE_WS_PATH
-from ..exceptions import ProtocolError
+from ..exceptions import ProtocolError, ProtocolVersionMismatchError
 
 
 def parse_host_port(endpoint: str, *, default_port: int) -> tuple[str, int]:
@@ -163,9 +166,34 @@ def build_bytes_result(
     )
 
 
+def check_protocol_version(server_version: Any) -> None:
+    """Runtime pairing guard: server protocol generation must match this SDK's.
+
+    A missing/empty server value is tolerated (older builds that predate the
+    handshake). On mismatch this raises with a pointer to the matching wheel;
+    ``QWEN3TTS_SKIP_PROTOCOL_CHECK=1`` downgrades it to a warning for
+    deliberate cross-version experiments.
+    """
+    server = str(server_version or "").strip()
+    if not server or server == PROTOCOL_VERSION:
+        return
+    message = (
+        f"Server protocol version {server!r} does not match this SDK's "
+        f"{PROTOCOL_VERSION!r}. Engine and client are version-paired: install "
+        "the wheel this engine serves at GET /sdk/ on its health port, or the "
+        "SDK at the engine's git tag (see the 'version' field in /health). "
+        "Set QWEN3TTS_SKIP_PROTOCOL_CHECK=1 to proceed anyway."
+    )
+    if os.environ.get("QWEN3TTS_SKIP_PROTOCOL_CHECK", "") == "1":
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+        return
+    raise ProtocolVersionMismatchError(message)
+
+
 def capabilities_from_payload(payload: Any) -> Capabilities:
     if not isinstance(payload, dict):
         raise ProtocolError("capabilities payload must be a JSON object")
+    check_protocol_version(payload.get("protocol_version"))
     return capabilities_from_mapping(payload)
 
 

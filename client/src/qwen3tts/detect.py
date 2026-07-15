@@ -8,6 +8,7 @@ import requests
 from qwen3tts_protocol import DetectedTransport
 
 from ._internal.raw_websocket import ws_close, ws_connect, ws_recv_frame, ws_send_json
+from ._internal.utils import check_protocol_version
 from .constants import (
     DEFAULT_ENGINE_CAPABILITIES_PATH,
     DEFAULT_ENGINE_GRPC_PORT,
@@ -24,7 +25,11 @@ from .constants import (
     TRANSPORT_TRITON_GRPC,
     TRANSPORT_TRITON_HTTP,
 )
-from .exceptions import DependencyMissingError, TransportProbeError
+from .exceptions import (
+    DependencyMissingError,
+    ProtocolVersionMismatchError,
+    TransportProbeError,
+)
 
 
 def detect_transport(
@@ -90,6 +95,9 @@ def _detect_websocket_url(
 ) -> DetectedTransport:
     try:
         _probe_engine_websocket(url, timeout=timeout, headers=headers)
+    except ProtocolVersionMismatchError:
+        # Definitive answer: we reached a live engine, wrong SDK pairing.
+        raise
     except Exception as exc:
         report.append(
             {
@@ -130,6 +138,7 @@ def _detect_http_url(
         if response.status_code == 200:
             payload = response.json()
             if isinstance(payload, dict) and "loaded_model_type" in payload:
+                check_protocol_version(payload.get("protocol_version"))
                 report.append(
                     {
                         "transport": "engine-http-capabilities",
@@ -153,6 +162,8 @@ def _detect_http_url(
                 "reason": f"http {response.status_code}",
             }
         )
+    except ProtocolVersionMismatchError:
+        raise
     except Exception as exc:
         report.append(
             {
@@ -251,6 +262,8 @@ def _detect_bare_endpoint(
                     model_version=model_version,
                     probe_report=report,
                 )
+            except ProtocolVersionMismatchError:
+                raise
             except Exception as exc:
                 report.append(
                     {
@@ -307,6 +320,8 @@ def _detect_bare_endpoint(
                     model_version=model_version,
                     probe_report=report,
                 )
+            except ProtocolVersionMismatchError:
+                raise
             except Exception as exc:
                 report.append(
                     {
@@ -349,6 +364,9 @@ def _probe_engine_websocket(url: str, *, timeout: float, headers) -> None:
                 continue
             message = json.loads(payload.decode("utf-8"))
             if message.get("type") == "capabilities":
+                check_protocol_version(
+                    (message.get("capabilities") or {}).get("protocol_version")
+                )
                 return
         raise TimeoutError("websocket probe timed out")
     finally:
@@ -368,7 +386,10 @@ def _probe_engine_grpc(endpoint: str, *, timeout: float) -> None:
     try:
         grpc.channel_ready_future(channel).result(timeout=timeout)
         stub = tts_pb2_grpc.TTSServiceStub(channel)
-        stub.GetCapabilities(tts_pb2.GetCapabilitiesRequest(), timeout=timeout)
+        response = stub.GetCapabilities(
+            tts_pb2.GetCapabilitiesRequest(), timeout=timeout
+        )
+        check_protocol_version(getattr(response, "protocol_version", ""))
     finally:
         channel.close()
 

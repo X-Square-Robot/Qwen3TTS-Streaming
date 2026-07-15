@@ -15,6 +15,16 @@ Public entry points:
 Optional latency/timing diagnostics live in `qwen3tts.diagnostics`.
 """
 
+try:
+    from ._version import __version__
+except ImportError:  # source-tree run (PYTHONPATH) — no build-generated file
+    try:
+        from importlib.metadata import version as _dist_version
+
+        __version__ = _dist_version("qwen3-tts-client")
+    except Exception:
+        __version__ = "0.0.0"
+
 from qwen3tts_protocol import (
     ArrayResult,
     AudioChunk,
@@ -38,6 +48,7 @@ from .client import TTSClient
 from .exceptions import (
     DependencyMissingError,
     ProtocolError,
+    ProtocolVersionMismatchError,
     StreamClosedError,
     TTSClientError,
     TransportNotSupportedError,
@@ -56,6 +67,7 @@ __all__ = (
     "DetectedTransport",
     "OutputPolicy",
     "ProtocolError",
+    "ProtocolVersionMismatchError",
     "RealtimeAudioStream",
     "SessionEndRequest",
     "SessionStartRequest",
@@ -71,4 +83,5 @@ __all__ = (
     "TransportNotSupportedError",
     "TransportProbeError",
     "VADPolicy",
+    "__version__",
 )
