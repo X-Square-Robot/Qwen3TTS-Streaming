@@ -412,7 +412,7 @@ end_count 是**响应速度 vs 效果**的核心取舍：
 
 ## 7. 不在本次范围
 
-- Backend 重复 token 模式检测（1-2-3-1-2-3）——独立任务，本期演进 `pad_silence_*` 职责
+- Backend 重复 token 模式检测（1-2-3-1-2-3）——独立任务，本期演进 `pad_silence_*` 职责。*（后已落地，2026-07：`scheduler.token_loop_abort_frames` 在 codebook-0 连续 N 个相同 token 时终止 segment，`eos_reason=loop_abort`。实测幻觉循环是 codebook-0 上的周期 1，而非 1-2-3。）*
 - 模型侧幻觉根因修复
 - VAD 训练/微调
 - 客户端多段音频拼接逻辑（VAD 对客户端透明，不需要）

@@ -412,7 +412,7 @@ end_count is the core trade-off between **responsiveness vs. effectiveness**:
 
 ## 7. Out of Scope for This Iteration
 
-- Backend repeated token pattern detection (1-2-3-1-2-3)—a separate task; this iteration evolves the `pad_silence_*` responsibility
+- Backend repeated token pattern detection (1-2-3-1-2-3)—a separate task; this iteration evolves the `pad_silence_*` responsibility. *(Since implemented, 2026-07: `scheduler.token_loop_abort_frames` aborts a segment after N consecutive identical codebook-0 tokens, `eos_reason=loop_abort`. Empirically hallucination loops are period-1 on codebook-0, not 1-2-3.)*
 - Root-cause fix of hallucinations on the model side
 - VAD training/fine-tuning
 - Client-side multi-segment audio concatenation logic (VAD is transparent to the client, so this is not needed)

@@ -920,3 +920,16 @@ cp=fp32 这个缓解措施（Finding #15 时代引入）在 0701 重训之后从
 随后按 batch=128 重编的全 bf16 引擎抽查同样干净（0/40）。两组分布在统计上无法区分；CP bf16 的近平局 argmax 翻转在健康权重上被证实不会级联成 runaway——与之前"精度只是重新洗牌坏种子"的发现一致，而 0701 在这个探测集上没有坏种子。
 
 **影响**：`build_engines.sh` 不再把 `CP_PRECISION` 默认为 fp32（现在跟随 `ENGINE_DTYPE`）；fp32 CP 有真实的解码延迟代价（fp32 下 CP 占 kernel 时间 ~45%）。`CP_PRECISION=fp32` 保留,用于数值对齐调试或复现历史混合精度构建。
+
+## 2026-07-16：Token 循环守卫——codebook-0 连续 N 个相同 token 即终止跑飞
+
+一次 500 席确定性扫描（halluprobe-0101..0600，0601 checkpoint，本地 bf16 TRT 引擎，`ENGINE_DUMP_OUTPUT_KEYS=full_codec`）采集了 74 条幻觉 + 426 条正常 segment 的逐步 codec token，发现了干净的 token 级签名：
+
+- **所有幻觉循环都是 codebook-0 上的周期 1**——同一个 token 连续重复 10–39 帧（p50=13）。检查周期 2–8 不改变结果；跑飞时 15 路 CP 残差码本仍持续变化，16 元组从不重复。
+- **正常语音的 codebook-0 连跑从不超过 3**（实测最大 = 3，出现在句中顿挫）。
+
+这个间隙让极简守卫可行：codebook-0 连续 **N 帧**相同即终止 segment。此数据集上 N=4 召回 93.2%（69/74）、误杀 0/426；N=3 召回 97.3% 但误杀 1.88%。触发点中位在第 243 帧（对照 504 步 overflow 上限），单条命中省 ~19s 跑飞音频 + KV。2 条漏网是无周期结构的"胡说型"跑飞，能自行发 codec EOS。
+
+**已落地**（默认常开，`scheduler.token_loop_abort_frames: 4`，0 = 关闭）：`GPUFuture.wait()` 在现有 EOS 检查的同步点顺带把 codebook-0 token id 拷回 CPU（`StepOutput.tokens`，B=128 时 ~1KB/步，零额外同步），`engine_loop` 每 segment 维护连跑计数器，命中即走 `_handle_segment_eos(eos_reason="loop_abort")`——与 `silence_abort` 同一条踢出/释放路径。最后一帧做 80ms 线性淡出（触发点按构造落在有声处）。已用全量 500 种子对照真实引擎重放验证。
+
+注意事项：阈值在单文本/单 speaker/0601 分布上调出，收紧到 4 以下前需在更广语料上复验。守卫是止损而非预防——循环建立前已流出的音频收不回。数据集与分析脚本：`workspace/token_loop_analysis/`。

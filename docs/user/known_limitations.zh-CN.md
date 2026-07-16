@@ -29,7 +29,7 @@
 
 当前流式模式仍可能出现：
 
-- 幻觉：生成用户没有输入的内容。**该风险强依赖 checkpoint,而本项目不发布模型权重**——我们测过的一个 checkpoint 在 ~10-18% 的采样种子上跑飞（永不吐 EOS），另一个在同一组确定性种子上实测 0/100（方法论见 `docs/dev/investigation/streaming_hallucination.zh-CN.md`）。无论你使用什么权重,在完成自己 checkpoint 的验证之前,都应把流式幻觉当作现实风险对待；引擎的 runaway 防御（512 步上限、VAD 裁剪）始终开启。
+- 幻觉：生成用户没有输入的内容。**该风险强依赖 checkpoint,而本项目不发布模型权重**——我们测过的一个 checkpoint 在 ~10-18% 的采样种子上跑飞（永不吐 EOS），另一个在同一组确定性种子上实测 0/100（方法论见 `docs/dev/investigation/streaming_hallucination.zh-CN.md`）。无论你使用什么权重,在完成自己 checkpoint 的验证之前,都应把流式幻觉当作现实风险对待；引擎的 runaway 防御（512 步上限、token 循环守卫 `scheduler.token_loop_abort_frames`、VAD 裁剪）始终开启。
 - 重复：局部词、短语或音频片段重复。
 - 漏读：跳过部分输入文本。
 - 插入：在停顿或跨 segment 时插入额外字词。

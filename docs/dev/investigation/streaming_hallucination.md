@@ -825,3 +825,16 @@ Single-variable test: rebuilt the fused engine as **full bf16** (`--cp-precision
 A follow-up full-bf16 build at batch=128 also probed clean (0/40). The distributions are statistically indistinguishable; CP bf16's near-tie argmax flips demonstrably do not cascade into runaway on healthy weights — consistent with the earlier finding that precision only reshuffles bad seeds, and 0701 has none on this probe set.
 
 **Consequence**: `build_engines.sh` no longer defaults `CP_PRECISION` to fp32 (it now follows `ENGINE_DTYPE`); fp32 CP cost real decode latency (~45% of kernel time was CP under fp32). `CP_PRECISION=fp32` remains available for numerical-parity debugging or reproducing the historical mixed-precision build.
+
+## 2026-07-16: Token Loop Guard — Runaway Cycles Abort at N Consecutive Identical Codebook-0 Tokens
+
+A 500-session deterministic sweep (halluprobe-0101..0600, 0601 checkpoint, local bf16 TRT engine, `ENGINE_DUMP_OUTPUT_KEYS=full_codec`) captured per-step codec tokens for 74 hallucinated + 426 normal segments and revealed a clean token-level signature:
+
+- **Every hallucination cycle is period-1 on codebook-0** — the same token repeated for 10–39 consecutive frames (p50=13). Cross-checking periods 2–8 changes nothing; the 15 CP residual codebooks keep varying even inside a runaway, so the full 16-tuple never repeats.
+- **Normal speech never exceeds 3 consecutive identical codebook-0 tokens** (max observed = 3, in mid-sentence pauses).
+
+That gap makes a trivial guard viable: abort the segment once codebook-0 repeats **N consecutive frames**. On this dataset N=4 recalls 93.2% (69/74) of hallucinations with 0/426 false aborts; N=3 reaches 97.3% but falsely kills 1.88% of normal segments. Median trigger is frame 243 (vs the 504-step overflow cap), saving ~19s of runaway audio + KV per hit. The two misses are non-cyclic "rambling" runaways that emit codec EOS on their own.
+
+**Implemented** (always on, `scheduler.token_loop_abort_frames: 4`, 0 = off): `GPUFuture.wait()` now returns codebook-0 token ids to the CPU alongside the existing EOS check (`StepOutput.tokens`, ~1KB/step at B=128, no extra sync), and `engine_loop` keeps a per-segment run counter that fires `_handle_segment_eos(eos_reason="loop_abort")` — the same eviction path as `silence_abort`. The final frame gets an 80ms linear fade-out since the cut lands mid-voice by construction. Verified by replaying the full 500-seed set against the live engine.
+
+Caveats: the threshold was tuned on one text/one speaker/0601; re-validate on broader corpora before tightening below 4. The guard is damage control, not prevention — audio streamed before the loop establishes is already out. Dataset + analysis scripts: `workspace/token_loop_analysis/`.

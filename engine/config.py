@@ -160,6 +160,12 @@ class SchedulerConfig:
     # Pad-phase near-silence detection thresholds.
     pad_silence_peak_threshold: float = 5e-4
     pad_silence_mean_abs_threshold: float = 2e-4
+    # Token loop guard: abort a segment when codebook-0 emits the same token
+    # for this many consecutive decode steps (0 = disabled). Hallucination
+    # runaways lock codebook-0 onto one token for 10-39 frames, while normal
+    # speech never exceeds 3 consecutive repeats (500-session sweep,
+    # 2026-07-16); 4 gave 93.2% recall with zero false aborts there.
+    token_loop_abort_frames: int = 4
 
 
 @dataclass

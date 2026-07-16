@@ -238,7 +238,7 @@ At each segment's close, record one sampling + close-out summary (segment-level,
   "obs": "segment_synthesis", "session_id": "abc123", "segment_id": 2,
   "do_sample": true, "temperature": 0.9, "repetition_penalty": 1.1, "sampling_seed": 178412,
   "audio_steps": 511, "text_tokens": 40, "audio_text_ratio": 12.8,
-  "eos_reason": "kv_overflow",              // codec_eos | silence_abort | kv_overflow
+  "eos_reason": "kv_overflow",              // codec_eos | silence_abort | kv_overflow | loop_abort
   "anomaly": ["hit_kv_512", "ratio_outlier_gt_clamp"],   // empty array = normal
   "reason": "ran to KV cap 512 without codec EOS; ratio 12.8 > clamp 10 → likely hallucination tail"
 }

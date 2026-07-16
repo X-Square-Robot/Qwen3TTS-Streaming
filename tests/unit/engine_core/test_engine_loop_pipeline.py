@@ -719,3 +719,158 @@ class TestPrefillBoundary:
             slot.next_embed,
             req_embeds.to(torch.float32),
         )
+
+
+class TestTokenLoopGuard:
+    """Token loop guard: same codebook-0 token N consecutive steps → loop_abort."""
+
+    def _make_env(self, model_config, guard_frames):
+        inbox = queue.Queue()
+        loop = asyncio.new_event_loop()
+
+        pool = KVCachePool(
+            max_slots=4,
+            config=model_config,
+            device=torch.device("cpu"),
+            preallocate=False,
+        )
+
+        class StubExecutor:
+            kv_pool = pool
+            _device = torch.device("cpu")
+            _config = model_config
+
+        engine_loop = EngineLoop(
+            engine_inbox=inbox,
+            async_loop=loop,
+            executor=StubExecutor(),
+            max_batch_size=4,
+            token_loop_abort_frames=guard_frames,
+        )
+
+        result_queue = queue.Queue()
+        engine_loop._handle_request(
+            EngineRequest(
+                type=RequestType.NEW_SESSION,
+                session_id="s1",
+                result_queue=result_queue,
+            )
+        )
+        slot = pool.allocate("s1:0")
+        seg = EngineSegment("s1", 0)
+        seg.slot = slot
+        seg.state = "active"
+        engine_loop._groups["s1"].segments[0] = seg
+        engine_loop._seg_by_slot[slot.slot_id] = seg
+        return engine_loop, loop, pool, seg, slot, result_queue
+
+    @staticmethod
+    def _step(engine_loop, slot, token, audio):
+        output = StepOutput(
+            slots=[slot],
+            eos_flags=[False],
+            tokens=[token],
+            audio_chunks=[audio],
+            split_c2w_conv=[[]],
+            split_c2w_transconv=[[]],
+        )
+        engine_loop._process_step_output(output)
+
+    @staticmethod
+    def _drain(loop, result_queue):
+        loop.run_until_complete(asyncio.sleep(0.01))
+        results = []
+        while True:
+            try:
+                results.append(result_queue.get_nowait())
+            except queue.Empty:
+                return results
+
+    def test_loop_abort_after_threshold_with_faded_last_chunk(self, model_config):
+        import numpy as np
+
+        engine_loop, loop, pool, seg, slot, result_queue = self._make_env(
+            model_config, guard_frames=4
+        )
+        audio = (np.ones(1920, dtype=np.float32) * 0.5).tobytes()
+
+        for _ in range(3):
+            self._step(engine_loop, slot, 1354, audio)
+        assert seg.state == "active"
+        assert seg.loop_run == 3
+
+        self._step(engine_loop, slot, 1354, audio)
+        assert seg.state == "done"
+        assert pool.free_count == 4
+
+        results = self._drain(loop, result_queue)
+        chunks = [r for r in results if r.type == ResultType.AUDIO_CHUNK]
+        ends = [r for r in results if r.type == ResultType.SEGMENT_END]
+        assert len(chunks) == 4
+        assert len(ends) == 1
+        assert ends[0].metrics["eos_reason"] == "loop_abort"
+
+        # First three chunks unmodified; the final one linearly faded to zero.
+        for r in chunks[:3]:
+            assert r.audio_bytes == audio
+        faded = np.frombuffer(chunks[3].audio_bytes, dtype=np.float32)
+        assert faded[0] == pytest.approx(0.5)
+        assert faded[-1] == 0.0
+        assert faded[960] == pytest.approx(0.25, abs=1e-3)
+        loop.close()
+
+    def test_run_counter_resets_on_token_change(self, model_config):
+        engine_loop, loop, pool, seg, slot, result_queue = self._make_env(
+            model_config, guard_frames=4
+        )
+        audio = b"\x00" * 8
+        for token in (7, 7, 7, 8, 8, 8, 7):
+            self._step(engine_loop, slot, token, audio)
+        assert seg.state == "active"
+        assert seg.loop_token == 7
+        assert seg.loop_run == 1
+        loop.close()
+
+    def test_guard_disabled_with_zero(self, model_config):
+        engine_loop, loop, pool, seg, slot, result_queue = self._make_env(
+            model_config, guard_frames=0
+        )
+        audio = b"\x00" * 8
+        for _ in range(10):
+            self._step(engine_loop, slot, 42, audio)
+        assert seg.state == "active"
+        loop.close()
+
+    def test_missing_tokens_field_skips_guard(self, model_config):
+        engine_loop, loop, pool, seg, slot, result_queue = self._make_env(
+            model_config, guard_frames=4
+        )
+        for _ in range(6):
+            output = StepOutput(
+                slots=[slot],
+                eos_flags=[False],
+                audio_chunks=[b"\x00" * 8],
+                split_c2w_conv=[[]],
+                split_c2w_transconv=[[]],
+            )
+            engine_loop._process_step_output(output)
+        assert seg.state == "active"
+        assert seg.loop_run == 0
+        loop.close()
+
+    def test_scheduler_config_has_token_loop_abort_frames(self):
+        from engine.config import SchedulerConfig
+
+        sc = SchedulerConfig()
+        assert sc.token_loop_abort_frames == 4
+
+    def test_fade_out_chunk_is_linear(self):
+        import numpy as np
+
+        samples = np.ones(4, dtype=np.float32)
+        faded = np.frombuffer(
+            EngineLoop._fade_out_chunk(samples.tobytes()), dtype=np.float32
+        )
+        expected = np.linspace(1.0, 0.0, 4, dtype=np.float32)
+        np.testing.assert_allclose(faded, expected)
+        assert EngineLoop._fade_out_chunk(b"") == b""

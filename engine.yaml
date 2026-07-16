@@ -44,6 +44,10 @@ scheduler:
   max_idle_sec: 10.0         # evict slots idle longer than this
   max_queue_size: 256        # backpressure: reject new sessions beyond this
   session_timeout_sec: 300.0 # force-cancel sessions exceeding this duration
+  # Hallucination loop guard: abort a segment when codebook-0 repeats the
+  # same token this many consecutive decode steps (0 = off). Normal speech
+  # maxes out at 3 consecutive repeats; runaway loops run 10-39.
+  token_loop_abort_frames: 4
 
 prefix_cache:
   enabled: true

@@ -438,8 +438,13 @@ class GPUFuture:
         eos_flags = []
         audio_chunks = []
         if full_codec is not None:
-            eos_list = (full_codec[:, 0] == codec_eos_id).cpu().tolist()
+            # Codebook-0 token ids come back to the CPU (B int64s on the
+            # already-synced stream) so the engine loop can run the token
+            # loop guard; EOS detection reuses the same copy.
+            codec0_list = full_codec[:, 0].cpu().tolist()
+            eos_list = [t == codec_eos_id for t in codec0_list]
         else:
+            codec0_list = [None] * batch_size
             eos_list = [False] * batch_size
         if wav is not None:
             wav_cpu = wav.cpu().float()
@@ -457,6 +462,7 @@ class GPUFuture:
         return StepOutput(
             slots=self._slots,
             eos_flags=eos_flags,
+            tokens=codec0_list,
             audio_chunks=audio_chunks,
             batch_talker_kv=raw.get("talker_new_kv"),
             batch_c2w_kv=raw.get("c2w_new_kv"),
@@ -486,6 +492,9 @@ class StepOutput:
     slots: List[SlotKVState]
     eos_flags: List[bool]
     audio_chunks: List[Optional[bytes]]
+    # Per-row codebook-0 token ids (None when full_codec is unavailable);
+    # may be empty for test-constructed outputs.
+    tokens: List[Optional[int]] = field(default_factory=list)
     batch_talker_kv: Optional[torch.Tensor] = None
     batch_c2w_kv: Optional[torch.Tensor] = None
     original_past_lens: List[int] = field(default_factory=list)

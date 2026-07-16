@@ -29,7 +29,7 @@ Recommended v0.1 stable scope:
 
 The current streaming mode may still exhibit:
 
-- Hallucination: generating content the user did not input. **This risk is strongly checkpoint-dependent, and this project does not ship model weights** — one checkpoint we tested ran away (never emitting EOS) on ~10-18% of sampling seeds, while another measured 0/100 on the same deterministic seed set (see `docs/dev/investigation/streaming_hallucination.md` for the methodology). Whatever weights you bring, treat streaming hallucination as a live risk until you have validated your own checkpoint; the engine's runaway defenses (512-step cap, VAD gating) are always on.
+- Hallucination: generating content the user did not input. **This risk is strongly checkpoint-dependent, and this project does not ship model weights** — one checkpoint we tested ran away (never emitting EOS) on ~10-18% of sampling seeds, while another measured 0/100 on the same deterministic seed set (see `docs/dev/investigation/streaming_hallucination.md` for the methodology). Whatever weights you bring, treat streaming hallucination as a live risk until you have validated your own checkpoint; the engine's runaway defenses (512-step cap, token loop guard `scheduler.token_loop_abort_frames`, VAD gating) are always on.
 - Repetition: local words, phrases, or audio segments repeating.
 - Dropped reading: skipping part of the input text.
 - Insertion: inserting extra words at pauses or across segments.

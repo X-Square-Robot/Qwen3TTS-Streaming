@@ -109,6 +109,8 @@ class EngineSegment:
         "pending_token_ids",
         "eos_trailing_added",
         "first_raw_audio_sent",
+        "loop_token",
+        "loop_run",
         "dequeued_at",
         "prefill_started_at",
         "prefill_completed_at",
@@ -140,6 +142,10 @@ class EngineSegment:
         self.pending_token_ids: list[int] = []
         self.eos_trailing_added: bool = False
         self.first_raw_audio_sent: bool = False
+        # Token loop guard state: last codebook-0 token and its consecutive
+        # run length (-1/0 = no run yet; token ids are always >= 0).
+        self.loop_token: int = -1
+        self.loop_run: int = 0
         self.dequeued_at: Optional[float] = None
         self.prefill_started_at: Optional[float] = None
         self.prefill_completed_at: Optional[float] = None
@@ -223,6 +229,7 @@ class EngineLoop:
         min_pad_steps: int = 4,
         pad_silence_peak_threshold: float = 5e-4,
         pad_silence_mean_abs_threshold: float = 2e-4,
+        token_loop_abort_frames: int = 4,
         max_slots_per_session: int = 2,
     ):
         self._inbox = engine_inbox
@@ -236,6 +243,7 @@ class EngineLoop:
         self._min_pad_steps = min_pad_steps
         self._pad_silence_peak_threshold = float(pad_silence_peak_threshold)
         self._pad_silence_mean_abs_threshold = float(pad_silence_mean_abs_threshold)
+        self._token_loop_abort_frames = max(0, int(token_loop_abort_frames))
         self._max_slots_per_session = max(1, int(max_slots_per_session))
 
         self._groups: Dict[str, EngineSessionGroup] = {}
@@ -1899,6 +1907,61 @@ class EngineLoop:
             else:
                 audio = output.audio_chunks[i]
 
+                # --- Token loop guard ---
+                # Hallucination runaways lock codebook-0 onto one token for
+                # 10-39 consecutive frames; normal speech never exceeds 3
+                # (500-session sweep, 2026-07-16 — see
+                # docs/dev/investigation/streaming_hallucination.md). Abort
+                # once the run hits the threshold, fading the final frame so
+                # a mid-voice cut doesn't click.
+                if self._token_loop_abort_frames > 0 and i < len(output.tokens):
+                    token = output.tokens[i]
+                    if token is not None:
+                        if token == seg.loop_token:
+                            seg.loop_run += 1
+                        else:
+                            seg.loop_token = token
+                            seg.loop_run = 1
+                        if seg.loop_run >= self._token_loop_abort_frames:
+                            logger.info(
+                                "Loop abort: %s seg=%d token=%d run=%d frame=%d",
+                                seg.session_id,
+                                seg.segment_idx,
+                                token,
+                                seg.loop_run,
+                                slot.frame_idx,
+                            )
+                            # L2: why this segment got loop-aborted.
+                            session_level = self._session_obs_level(group)
+                            if obs.is_enabled(obs.ObsLevel.DEBUG, session_level):
+                                LifecycleLogger.emit(
+                                    session_id=seg.session_id,
+                                    phase="loop_guard",
+                                    segment_idx=seg.segment_idx,
+                                    min_level=obs.ObsLevel.DEBUG,
+                                    session_level=session_level,
+                                    decision="loop_abort",
+                                    token=token,
+                                    run=seg.loop_run,
+                                    frame_idx=slot.frame_idx,
+                                )
+                            if audio is not None and len(audio) > 0:
+                                self._send_result(
+                                    group,
+                                    EngineResult(
+                                        type=ResultType.AUDIO_CHUNK,
+                                        session_id=seg.session_id,
+                                        segment_idx=seg.segment_idx,
+                                        audio_bytes=self._fade_out_chunk(audio),
+                                    ),
+                                )
+                            self._handle_segment_eos(
+                                group,
+                                seg,
+                                eos_reason="loop_abort",
+                            )
+                            continue
+
                 if in_pad:
                     if audio is not None and len(audio) > 0:
                         if self._is_pad_silence(audio):
@@ -2087,6 +2150,19 @@ class EngineLoop:
             and mean_abs <= self._pad_silence_mean_abs_threshold
         )
 
+    @staticmethod
+    def _fade_out_chunk(audio: bytes) -> bytes:
+        """Linear fade to zero across one frame (80ms).
+
+        Applied to the last chunk of a loop-aborted segment: the cut lands
+        mid-voice by construction, and a hard step to zero would click.
+        """
+        audio_np = np.frombuffer(audio, dtype=np.float32)
+        if audio_np.size == 0:
+            return audio
+        ramp = np.linspace(1.0, 0.0, audio_np.size, dtype=np.float32)
+        return (audio_np * ramp).tobytes()
+
     def _handle_segment_eos(
         self,
         group: EngineSessionGroup,
@@ -2099,7 +2175,8 @@ class EngineLoop:
 
         ``eos_reason`` records *why* the segment ended (daily L1 observability):
         ``codec_eos`` (model emitted EOS — normal), ``kv_overflow`` (hit the KV
-        budget cap), or ``silence_abort`` (pad-phase silence heuristic). When not
+        budget cap), ``silence_abort`` (pad-phase silence heuristic), or
+        ``loop_abort`` (token loop guard — hallucination cycle). When not
         given it is derived from ``overflow``.
         """
         self._total_eos += 1

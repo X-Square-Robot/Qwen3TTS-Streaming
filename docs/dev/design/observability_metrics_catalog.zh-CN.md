@@ -65,7 +65,7 @@
 
 - **触发**：每段 EOS（`_handle_segment_eos`）
 - **字段**：`segment_id` · `segment_text_preview`(钳) · `audio_steps` · `text_tokens` · `audio_text_ratio` ·
-  `eos_reason`(codec_eos/silence_abort/kv_overflow) · `overflow` · `cache_hit` · `segment_prefill_ms` · `batched`(bool) · `batch_size_at_prefill`
+  `eos_reason`(codec_eos/silence_abort/kv_overflow/loop_abort) · `overflow` · `cache_hit` · `segment_prefill_ms` · `batched`(bool) · `batch_size_at_prefill`
 - **来源**：`backend/engine_loop.py:_handle_segment_eos`
 - **现状**：🟡（segment_end meta 已有部分，缺 `eos_reason`/`batched`/`ratio`）·**协议**：是（segment_end 事件 meta）
 

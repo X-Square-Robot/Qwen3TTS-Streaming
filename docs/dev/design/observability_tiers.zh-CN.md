@@ -237,7 +237,7 @@ L1 只给 VAD 汇总；L2 给每次 begin/end 跳变（来自 `vad_processor.pro
   "obs": "segment_synthesis", "session_id": "abc123", "segment_id": 2,
   "do_sample": true, "temperature": 0.9, "repetition_penalty": 1.1, "sampling_seed": 178412,
   "audio_steps": 511, "text_tokens": 40, "audio_text_ratio": 12.8,
-  "eos_reason": "kv_overflow",              // codec_eos | silence_abort | kv_overflow
+  "eos_reason": "kv_overflow",              // codec_eos | silence_abort | kv_overflow | loop_abort
   "anomaly": ["hit_kv_512", "ratio_outlier_gt_clamp"],   // 空数组=正常
   "reason": "ran to KV cap 512 without codec EOS; ratio 12.8 > clamp 10 → likely hallucination tail"
 }
