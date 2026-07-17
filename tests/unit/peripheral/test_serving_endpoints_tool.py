@@ -16,17 +16,12 @@ if str(_tools_dir) not in sys.path:
 import serving_endpoints
 
 
-class _FakeSocket:
+class _FakeConnection:
     def __init__(self) -> None:
         self.timeouts: list[float] = []
 
     def settimeout(self, value: float) -> None:
         self.timeouts.append(value)
-
-
-class _FakeConnection:
-    def __init__(self) -> None:
-        self.sock = _FakeSocket()
 
 
 def test_websocket_oneshot_waits_through_short_socket_idle(monkeypatch):
@@ -86,44 +81,6 @@ def test_websocket_idle_drain_still_returns_on_socket_idle(monkeypatch):
     assert terminal is False
     assert result.error is None
     assert result.events == []
-
-
-def test_websocket_oneshot_replies_to_ping_and_keeps_waiting(monkeypatch):
-    frames = [
-        (0x9, b"heartbeat"),
-        (
-            0x1,
-            b'{"type":"event","event":{"type":"done","meta":{}}}',
-        ),
-    ]
-    sent_frames = []
-
-    def fake_recv_frame(_conn):
-        return frames.pop(0)
-
-    def fake_send_frame(_conn, *, opcode, payload):
-        sent_frames.append((opcode, payload))
-
-    monkeypatch.setattr(serving_endpoints, "ws_recv_frame", fake_recv_frame)
-    monkeypatch.setattr(serving_endpoints, "ws_send_frame", fake_send_frame)
-
-    transport = serving_endpoints.EngineWebSocketTransport("ws://example.test/v1/ws")
-    result = serving_endpoints.SynthesisResult("engine-websocket", "sid", "text")
-
-    terminal = transport._read_until_timeout(
-        _FakeConnection(),
-        result,
-        [],
-        [],
-        {"first_ts": None, "encoding": "pcm_f32"},
-        deadline=time.perf_counter() + 1.0,
-        stop_on_idle=False,
-    )
-
-    assert terminal is True
-    assert sent_frames == [(0xA, b"heartbeat")]
-    assert result.error is None
-    assert result.events == ["done"]
 
 
 def test_decode_audio_bytes_rejects_partial_float32_frame():

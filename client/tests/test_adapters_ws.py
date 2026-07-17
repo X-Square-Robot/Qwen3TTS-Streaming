@@ -20,15 +20,10 @@ class FakeRawWebSocketConnection:
     def __init__(self):
         self.sent: list[dict] = []
         self.closed = False
-        self.buffer = bytearray()
-        self.sock = self
         self._timeout = 5.0
 
     def settimeout(self, value):
         self._timeout = value
-
-    def sendall(self, data: bytes):
-        pass
 
     def close(self):
         self.closed = True
@@ -137,10 +132,6 @@ class TestEngineWebSocketAdapter:
             "qwen3tts._adapters.engine_websocket.ws_close",
             _make_ws_close(closed),
         )
-        monkeypatch.setattr(
-            "qwen3tts._adapters.engine_websocket.ws_send_frame",
-            lambda conn, *, opcode, payload: None,
-        )
 
         adapter = EngineWebSocketAdapter("ws://localhost:50052/v1/ws", timeout=5.0)
         start = SessionStartRequest(
@@ -177,10 +168,6 @@ class TestEngineWebSocketAdapter:
         monkeypatch.setattr(
             "qwen3tts._adapters.engine_websocket.ws_close",
             _make_ws_close(closed),
-        )
-        monkeypatch.setattr(
-            "qwen3tts._adapters.engine_websocket.ws_send_frame",
-            lambda conn, *, opcode, payload: None,
         )
 
         adapter = EngineWebSocketAdapter("ws://localhost:50052/v1/ws", timeout=5.0)

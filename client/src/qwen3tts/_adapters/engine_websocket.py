@@ -21,7 +21,6 @@ from .._internal.raw_websocket import (
     ws_close,
     ws_connect,
     ws_recv_frame,
-    ws_send_frame,
     ws_send_json,
 )
 from .._internal.utils import (
@@ -56,13 +55,8 @@ class EngineWebSocketAdapter:
             ws_send_json(conn, {"type": "get_capabilities"})
             deadline = time.perf_counter() + self.timeout
             while time.perf_counter() < deadline:
-                conn.sock.settimeout(
-                    max(0.05, min(0.2, deadline - time.perf_counter()))
-                )
+                conn.settimeout(max(0.05, min(0.2, deadline - time.perf_counter())))
                 opcode, payload = ws_recv_frame(conn)
-                if opcode == 0x9:
-                    ws_send_frame(conn, opcode=0xA, payload=payload)
-                    continue
                 if opcode != 0x1:
                     continue
                 message = json.loads(payload.decode("utf-8"))
@@ -129,15 +123,10 @@ def _iter_conn_messages(
     deadline = time.perf_counter() + timeout
     current_audio = AudioFormat()
     while time.perf_counter() < deadline:
-        conn.sock.settimeout(max(0.02, min(0.5, deadline - time.perf_counter())))
+        conn.settimeout(max(0.02, min(0.5, deadline - time.perf_counter())))
         try:
             opcode, payload = ws_recv_frame(conn)
         except socket.timeout:
-            continue
-        if opcode == 0x9:
-            ws_send_frame(conn, opcode=0xA, payload=payload)
-            continue
-        if opcode == 0xA:
             continue
         if opcode == 0x2:
             yield AudioChunk(

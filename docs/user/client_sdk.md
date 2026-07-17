@@ -93,10 +93,21 @@ pip install .          # extras likewise: pip install ".[grpc]"
 
 Dependency strategy:
 
-- `core`: `requests`, plus pure-Python websocket/http logic
+- `core`: `requests` + `websocket-client` (pure-Python)
 - `grpc`: runtime required for standalone gRPC
 - `triton`: runtime required for Triton gRPC / HTTP
 - `audio`: `numpy`, used by `synthesize_array`
+
+Notes on the websocket transport (since the migration to `websocket-client`):
+
+- The `/sdk/` wheel channel serves the client wheel only; `pip install` still
+  fetches `requests` / `websocket-client` from your package index. On
+  restricted networks, pre-install them or point pip at a local mirror.
+- `ws://` / `wss://` connections now honor the standard `http_proxy` /
+  `https_proxy` / `no_proxy` environment variables (same as `requests`).
+  Previously the websocket path always connected directly. If your deployment
+  sets a corporate proxy, make sure `no_proxy` covers the engine host, or the
+  connection will be tunneled through (and possibly rejected by) the proxy.
 
 ## Quick Start
 

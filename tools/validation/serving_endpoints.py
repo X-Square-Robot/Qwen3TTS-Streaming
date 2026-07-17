@@ -60,12 +60,11 @@ from tests.support.token_streaming import (
     TokenChunkingUnavailable,
     build_token_text_chunks,
 )
-from raw_websocket import (
+from qwen3tts._internal.raw_websocket import (
     RawWebSocketError,
     ws_close,
     ws_connect,
     ws_recv_frame,
-    ws_send_frame,
     ws_send_json,
 )
 
@@ -1197,9 +1196,7 @@ class EngineWebSocketTransport:
             ws_send_json(conn, {"type": "get_capabilities"})
             deadline = time.perf_counter() + timeout
             while time.perf_counter() < deadline:
-                conn.sock.settimeout(
-                    max(0.05, min(0.2, deadline - time.perf_counter()))
-                )
+                conn.settimeout(max(0.05, min(0.2, deadline - time.perf_counter())))
                 opcode, payload = ws_recv_frame(conn)
                 if opcode == 0x1:
                     message = json.loads(payload.decode("utf-8"))
@@ -1320,11 +1317,6 @@ class EngineWebSocketTransport:
             return consume_event_message(message)
         if opcode == 0x8:
             return True if treat_close_as_ok else result.error is not None
-        if opcode == 0x9:
-            return False
-        if opcode == 0x0:
-            result.warnings.append("ignored websocket continuation frame")
-            return False
         return False
 
     def _read_until_timeout(
@@ -1341,19 +1333,12 @@ class EngineWebSocketTransport:
     ) -> bool:
         while time.perf_counter() < deadline:
             remaining = deadline - time.perf_counter()
-            conn.sock.settimeout(
-                max(0.02, min(0.1 if stop_on_idle else 0.5, remaining))
-            )
+            conn.settimeout(max(0.02, min(0.1 if stop_on_idle else 0.5, remaining)))
             try:
                 opcode, payload = ws_recv_frame(conn)
             except socket.timeout:
                 if stop_on_idle:
                     return False
-                continue
-            if opcode == 0x9:
-                ws_send_frame(conn, opcode=0xA, payload=payload)
-                continue
-            if opcode == 0xA:
                 continue
             terminal = self._consume_frame(
                 result,
@@ -2045,7 +2030,9 @@ def _make_concurrent_round_sample(
         float(result.total_ms) for result in successful if result.total_ms > 0
     ]
     lane_queue_waits = [
-        result.queue_wait_ms for result in successful if result.queue_wait_ms is not None
+        result.queue_wait_ms
+        for result in successful
+        if result.queue_wait_ms is not None
     ]
     lane_prefills = [
         result.prefill_ms for result in successful if result.prefill_ms is not None
@@ -2132,7 +2119,9 @@ def _concurrent_round_detail(
     lane_records = []
     for lane_idx, lane in enumerate(lanes):
         record = _lane_raw_record(lane)
-        record.update({"level": level, "phase": phase, "run": run_idx, "lane": lane_idx})
+        record.update(
+            {"level": level, "phase": phase, "run": run_idx, "lane": lane_idx}
+        )
         lane_records.append(record)
     return {
         "summary": sample.to_summary(),

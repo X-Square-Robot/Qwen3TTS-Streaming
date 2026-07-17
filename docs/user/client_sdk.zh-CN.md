@@ -90,10 +90,19 @@ pip install .          # extras 同理：pip install ".[grpc]"
 
 依赖策略：
 
-- `core`：`requests`，以及纯 Python websocket/http 逻辑
+- `core`：`requests` + `websocket-client`（均为纯 Python）
 - `grpc`：standalone gRPC 所需 runtime
 - `triton`：Triton gRPC / HTTP 所需 runtime
 - `audio`：`numpy`，用于 `synthesize_array`
+
+websocket 传输层迁移到 `websocket-client` 后的两点说明：
+
+- `/sdk/` wheel 通道只提供 client 本体 wheel；`pip install` 仍会从你的包索引
+  拉取 `requests` / `websocket-client`。受限网络环境请预装依赖或配置本地镜像源。
+- `ws://` / `wss://` 连接现在遵循标准的 `http_proxy` / `https_proxy` /
+  `no_proxy` 环境变量（与 `requests` 行为一致）。此前 websocket 路径总是直连。
+  如果部署机配置了企业代理，请确认 `no_proxy` 覆盖引擎主机，否则连接会被
+  代理隧道转发（且很可能被代理拒绝）。
 
 ## 快速开始
 

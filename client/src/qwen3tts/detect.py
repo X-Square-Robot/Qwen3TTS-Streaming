@@ -354,12 +354,10 @@ def _probe_engine_websocket(url: str, *, timeout: float, headers) -> None:
         ws_send_json(conn, {"type": "get_capabilities"})
         deadline = __import__("time").perf_counter() + timeout
         while __import__("time").perf_counter() < deadline:
-            conn.sock.settimeout(
+            conn.settimeout(
                 max(0.05, min(0.2, deadline - __import__("time").perf_counter()))
             )
             opcode, payload = ws_recv_frame(conn)
-            if opcode == 0x9:
-                continue
             if opcode != 0x1:
                 continue
             message = json.loads(payload.decode("utf-8"))

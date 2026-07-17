@@ -29,7 +29,6 @@
 | `build_talker_code2wav_fused_trt_host.py` | 在主机上构建 fused TRT 引擎 |
 | `codec_embedding_sum.py` | Codec embedding 求和工具 |
 | `generate_triton_configs.py` | 生成 Triton 模型仓库配置 |
-| `raw_websocket.py` | 最小的 RFC6455 WebSocket 客户端辅助 |
 | `triton_manifest_io.py` | 读/写 triton_manifest.json |
 | `trt_fused_io_formats.py` | Fused TRT 引擎 I/O 格式工具 |
 | `trt_fused_talk_c2w_profiles.py` | Fused Talker + Code2Wav TRT profiles |

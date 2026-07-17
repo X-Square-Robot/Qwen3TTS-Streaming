@@ -7,10 +7,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_PYTHON_DIR = REPO_ROOT / "scripts" / "python"
+CLIENT_SRC_DIR = REPO_ROOT / "client" / "src"
 
 
 def bootstrap_tool_imports() -> Path:
-    for import_path in (REPO_ROOT, SCRIPTS_PYTHON_DIR):
+    for import_path in (REPO_ROOT, SCRIPTS_PYTHON_DIR, CLIENT_SRC_DIR):
         raw = str(import_path)
         if raw not in sys.path:
             sys.path.insert(0, raw)
