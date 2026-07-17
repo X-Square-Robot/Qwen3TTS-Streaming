@@ -14,6 +14,12 @@ from typing import Any, Mapping
 from urllib.parse import urlparse
 
 
+# Legitimate engine frames are far smaller than this; a larger parsed length
+# almost certainly means the byte stream got desynchronized (e.g. PCM bytes
+# misread as a frame header).
+MAX_FRAME_PAYLOAD_BYTES = 64 * 1024 * 1024
+
+
 class RawWebSocketError(RuntimeError):
     """Expected websocket transport error."""
 
@@ -23,7 +29,13 @@ class RawWebSocketConnection:
     sock: socket.socket
     buffer: bytearray
 
-    def recv_exact(self, n: int) -> bytes:
+    def fill(self, n: int) -> None:
+        """Grow ``buffer`` to at least ``n`` bytes without consuming any.
+
+        ``socket.timeout`` from ``recv`` must propagate with the buffer
+        intact so that an interrupted frame read resumes from the same
+        frame boundary instead of desynchronizing the stream.
+        """
         while len(self.buffer) < n:
             chunk = self.sock.recv(max(4096, n - len(self.buffer)))
             if not chunk:
@@ -31,9 +43,6 @@ class RawWebSocketConnection:
                     "websocket closed before enough data was received"
                 )
             self.buffer.extend(chunk)
-        data = bytes(self.buffer[:n])
-        del self.buffer[:n]
-        return data
 
 
 def ws_connect(
@@ -137,19 +146,43 @@ def ws_send_frame(conn: RawWebSocketConnection, *, opcode: int, payload: bytes) 
 
 
 def ws_recv_frame(conn: RawWebSocketConnection) -> tuple[int, bytes]:
-    header = conn.recv_exact(2)
-    first, second = header[0], header[1]
+    """Read one frame, consuming buffered bytes only once the frame is complete.
+
+    Callers may poll with a short socket timeout (see the engine websocket
+    adapter): a ``socket.timeout`` raised mid-frame leaves ``conn.buffer``
+    untouched, and the next call re-parses from the same frame start.
+    """
+    conn.fill(2)
+    first, second = conn.buffer[0], conn.buffer[1]
     opcode = first & 0x0F
     masked = bool(second & 0x80)
     length = second & 0x7F
+    offset = 2
 
     if length == 126:
-        length = struct.unpack("!H", conn.recv_exact(2))[0]
+        conn.fill(offset + 2)
+        length = struct.unpack_from("!H", conn.buffer, offset)[0]
+        offset += 2
     elif length == 127:
-        length = struct.unpack("!Q", conn.recv_exact(8))[0]
+        conn.fill(offset + 8)
+        length = struct.unpack_from("!Q", conn.buffer, offset)[0]
+        offset += 8
 
-    mask = conn.recv_exact(4) if masked else b""
-    payload = conn.recv_exact(length)
+    if length > MAX_FRAME_PAYLOAD_BYTES:
+        raise RawWebSocketError(
+            f"websocket frame payload length {length} exceeds "
+            f"{MAX_FRAME_PAYLOAD_BYTES} bytes; stream is likely desynchronized"
+        )
+
+    mask = b""
+    if masked:
+        conn.fill(offset + 4)
+        mask = bytes(conn.buffer[offset : offset + 4])
+        offset += 4
+
+    conn.fill(offset + length)
+    payload = bytes(conn.buffer[offset : offset + length])
+    del conn.buffer[: offset + length]
     if masked:
         payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
     return opcode, payload
