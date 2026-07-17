@@ -80,6 +80,9 @@ class SlotKVState:
     slot_id: int
     session_id: Optional[str] = None
     segment_idx: int = -1
+    # Segment rerun attempt (0 = first attempt). >0 salts the sampling seed
+    # so a hallucinated segment reruns on a fresh trajectory.
+    retry_idx: int = 0
     is_free: bool = True
     prefill_source: str = ""
 
@@ -297,6 +300,7 @@ class KVCachePool:
         slot = self._slots[slot_id]
         slot.session_id = session_id
         slot.segment_idx = -1
+        slot.retry_idx = 0
         slot.is_free = False
         slot.prefill_source = ""
         slot.past_len = 0
@@ -336,6 +340,7 @@ class KVCachePool:
             return
         slot.session_id = None
         slot.segment_idx = -1
+        slot.retry_idx = 0
         slot.is_free = True
         slot.prefill_source = ""
         slot.past_len = 0
@@ -393,6 +398,7 @@ class KVCachePool:
 
     def reset_for_new_segment(self, slot: SlotKVState) -> None:
         """Reset decode state but preserve KV cache (for segment continuation)."""
+        slot.retry_idx = 0
         slot.text_idx = 0
         slot.trailing = []
         slot.next_embed = None

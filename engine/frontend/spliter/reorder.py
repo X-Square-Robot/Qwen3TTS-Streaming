@@ -57,21 +57,44 @@ class AudioReorder:
         self, group_idx: int, local_idx: int, *, group_final: bool = False
     ) -> List[bytes]:
         """Mark a segment as fully complete; drain any contiguous completions."""
+        return [
+            chunk
+            for _, chunks, _ in self.mark_done_ex(
+                group_idx, local_idx, group_final=group_final
+            )
+            for chunk in chunks
+        ]
+
+    def mark_done_ex(
+        self, group_idx: int, local_idx: int, *, group_final: bool = False
+    ) -> List[tuple]:
+        """Like :meth:`mark_done`, but preserves segment attribution.
+
+        Returns ``[(key, chunks, fully_passed)]`` in drain order — one entry
+        per segment the drain touched. ``fully_passed`` is True when the
+        playhead advanced past that segment (all of its audio is out of this
+        buffer). Guarded delivery needs this: segment verdicts must be applied
+        to that segment's own audio, and a single mark_done can chain-drain
+        several already-done segments."""
         key = (group_idx, local_idx)
         self._done.add(key)
         if group_final:
             self._final_locals[group_idx] = local_idx
-        return self._try_drain()
+        return self._try_drain_ex()
 
     def _try_drain(self) -> List[bytes]:
-        out: List[bytes] = []
+        return [chunk for _, chunks, _ in self._try_drain_ex() for chunk in chunks]
+
+    def _try_drain_ex(self) -> List[tuple]:
+        out: List[tuple] = []
         while True:
             key = (self._next_group, self._next_local)
             buf = self._buffers.get(key)
             if buf is None and key not in self._done:
                 break
+            chunks: List[bytes] = []
             if buf:
-                out.extend(buf)
+                chunks = list(buf)
                 buf.clear()
             if key in self._done:
                 if key in self._buffers:
@@ -84,9 +107,24 @@ class AudioReorder:
                     self._next_local = 0
                 else:
                     self._next_local += 1
+                out.append((key, chunks, True))
             else:
+                if chunks:
+                    out.append((key, chunks, False))
                 break
         return out
+
+    def discard(self, group_idx: int, local_idx: int) -> int:
+        """Drop the buffered (not yet drained) chunks of one segment.
+
+        Used when the engine reruns a hallucinated lookahead segment: the
+        buffered attempt is garbage and the rerun pushes fresh chunks under
+        the same key. Playhead and done-set are untouched, so this is only
+        meaningful for segments the drain has not reached yet; chunks already
+        drained to the client cannot be recalled. Returns the chunk count
+        dropped."""
+        buf = self._buffers.pop((group_idx, local_idx), None)
+        return len(buf) if buf else 0
 
     def reset(self) -> None:
         self._next_group = 0

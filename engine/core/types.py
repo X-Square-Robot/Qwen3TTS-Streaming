@@ -198,6 +198,9 @@ class ResultType(Enum):
     AUDIO_CHUNK = auto()
     WARNING = auto()
     SEGMENT_END = auto()
+    # Engine is rerunning a hallucinated lookahead segment with a fresh seed;
+    # the frontend must discard that segment's buffered (undelivered) audio.
+    SEGMENT_RETRY = auto()
     SESSION_DONE = auto()
     RATIO_UPDATE = auto()  # EMA audio:text ratio feedback
     ERROR = auto()

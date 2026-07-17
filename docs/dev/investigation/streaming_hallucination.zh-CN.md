@@ -933,3 +933,10 @@ cp=fp32 这个缓解措施（Finding #15 时代引入）在 0701 重训之后从
 **已落地**（默认常开，`scheduler.token_loop_abort_frames: 4`，0 = 关闭）：`GPUFuture.wait()` 在现有 EOS 检查的同步点顺带把 codebook-0 token id 拷回 CPU（`StepOutput.tokens`，B=128 时 ~1KB/步，零额外同步），`engine_loop` 每 segment 维护连跑计数器，命中即走 `_handle_segment_eos(eos_reason="loop_abort")`——与 `silence_abort` 同一条踢出/释放路径。最后一帧做 80ms 线性淡出（触发点按构造落在有声处）。已用全量 500 种子对照真实引擎重放验证。
 
 注意事项：阈值在单文本/单 speaker/0601 分布上调出，收紧到 4 以下前需在更广语料上复验。守卫是止损而非预防——循环建立前已流出的音频收不回。数据集与分析脚本：`workspace/token_loop_analysis/`。
+
+### 补记（同日）：换种子重跑 + 守护交付
+
+在守卫之上落了两级升级，把修复闭环收在服务端（客户端零逻辑）：
+
+- **段重跑**（`scheduler.token_loop_max_retries`，默认 1）：守卫（或 pad 静音中止）在 *lookahead* 段上触发时——该段音频还整段缓冲在前端 reorder 里、前面还有在跑的段——引擎丢弃缓冲的这次尝试（内部 `SEGMENT_RETRY` 结果 → `AudioReorder.discard`），把段重置回 `pending_prefill`，用加盐种子重跑（blake2b 推导**仅在 N>0 时**追加 `retry:N`，retry-0 种子与全部冻结 halluprobe id 逐位不变）。失败尝试不发 SEGMENT_END；客户端只会听到第 N+1 次尝试。播放头段永不重跑——音频已流出。
+- **守护交付**（opt-in，`output_policy.config: {"delivery": "guarded", "delivery_window_ms": "1500"}`）：reorder 之后的音频过一个随播放头移动的持有窗口（`engine/frontend/hold_window.py`）。确认的音频仍然全速 burst：codec EOS 时持有尾部整体放行（最后一个 chunk 的离开时刻与 firehose 相同），loop/silence abort 则丢弃被判定的尾部——SEGMENT_END metrics 里的 `abort_tail_frames`（循环/静音连跑）加上超出 EMA 预期句长的部分——并放行更早的持有音频（那是播放窗口还没走到的合法语音）。实测（halluprobe-0111，RTX 5090 约 6× 实时）：firehose 交付全部 158 帧；guarded 保留 154 帧、恰好丢弃 4 帧循环，其余字节流一致。abort 段同时被排除出 spliter 的 audio:text EMA（幻觉膨胀的比例曾拉偏后续切分预算）。

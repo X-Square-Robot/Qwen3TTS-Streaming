@@ -166,6 +166,12 @@ class SchedulerConfig:
     # speech never exceeds 3 consecutive repeats (500-session sweep,
     # 2026-07-16); 4 gave 93.2% recall with zero false aborts there.
     token_loop_abort_frames: int = 4
+    # When the guard (or pad-silence abort) fires on a segment whose audio is
+    # still fully buffered behind an earlier live segment, rerun it with a
+    # reseeded sampling stream instead of aborting, up to this many attempts
+    # (0 = always abort). Reruns of the playhead segment are never attempted:
+    # its audio already streamed.
+    token_loop_max_retries: int = 1
 
 
 @dataclass

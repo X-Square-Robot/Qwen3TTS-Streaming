@@ -387,6 +387,7 @@ class TTSEngine:
             pad_silence_peak_threshold=sched.pad_silence_peak_threshold,
             pad_silence_mean_abs_threshold=sched.pad_silence_mean_abs_threshold,
             token_loop_abort_frames=sched.token_loop_abort_frames,
+            token_loop_max_retries=sched.token_loop_max_retries,
             max_slots_per_session=self._cfg.spliter.max_concurrent_segments,
         )
         self._engine_loop.start()

@@ -65,7 +65,7 @@ Following [[observability_goals]] §Event definition table. 7 are already emitte
 
 - **Trigger**: each segment's EOS (`_handle_segment_eos`)
 - **Fields**: `segment_id` · `segment_text_preview`(clamped) · `audio_steps` · `text_tokens` · `audio_text_ratio` ·
-  `eos_reason`(codec_eos/silence_abort/kv_overflow/loop_abort) · `overflow` · `cache_hit` · `segment_prefill_ms` · `batched`(bool) · `batch_size_at_prefill`
+  `eos_reason`(codec_eos/silence_abort/kv_overflow/loop_abort) · `abort_tail_frames`(abort reasons only: provably-bad trailing frames) · `overflow` · `cache_hit` · `segment_prefill_ms` · `batched`(bool) · `batch_size_at_prefill`
 - **Source**: `backend/engine_loop.py:_handle_segment_eos`
 - **State**: 🟡 (segment_end meta already has some, missing `eos_reason`/`batched`/`ratio`) · **Protocol**: yes (segment_end event meta)
 

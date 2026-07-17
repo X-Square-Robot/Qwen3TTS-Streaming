@@ -874,3 +874,161 @@ class TestTokenLoopGuard:
         expected = np.linspace(1.0, 0.0, 4, dtype=np.float32)
         np.testing.assert_allclose(faded, expected)
         assert EngineLoop._fade_out_chunk(b"") == b""
+
+
+class TestSegmentRetry:
+    """Reseed-and-rerun for hallucinated lookahead segments (V2)."""
+
+    def _make_env(self, model_config, *, max_retries=1):
+        inbox = queue.Queue()
+        loop = asyncio.new_event_loop()
+
+        pool = KVCachePool(
+            max_slots=4,
+            config=model_config,
+            device=torch.device("cpu"),
+            preallocate=False,
+        )
+
+        class StubExecutor:
+            kv_pool = pool
+            _device = torch.device("cpu")
+            _config = model_config
+
+        engine_loop = EngineLoop(
+            engine_inbox=inbox,
+            async_loop=loop,
+            executor=StubExecutor(),
+            max_batch_size=4,
+            token_loop_abort_frames=4,
+            token_loop_max_retries=max_retries,
+        )
+
+        result_queue = queue.Queue()
+        engine_loop._handle_request(
+            EngineRequest(
+                type=RequestType.NEW_SESSION,
+                session_id="s1",
+                result_queue=result_queue,
+            )
+        )
+        return engine_loop, loop, pool, result_queue
+
+    @staticmethod
+    def _add_segment(engine_loop, pool, segment_idx, state="active"):
+        seg = EngineSegment("s1", segment_idx)
+        seg.slot = pool.allocate(f"s1:{segment_idx}")
+        seg.slot.segment_idx = segment_idx
+        seg.state = state
+        engine_loop._groups["s1"].segments[segment_idx] = seg
+        engine_loop._seg_by_slot[seg.slot.slot_id] = seg
+        return seg
+
+    @staticmethod
+    def _loop_step(engine_loop, slot, token=1354):
+        output = StepOutput(
+            slots=[slot],
+            eos_flags=[False],
+            tokens=[token],
+            audio_chunks=[b"\x00\x00\x80\x3f" * 480],
+            split_c2w_conv=[[]],
+            split_c2w_transconv=[[]],
+        )
+        engine_loop._process_step_output(output)
+
+    @staticmethod
+    def _drain(loop, result_queue):
+        loop.run_until_complete(asyncio.sleep(0.01))
+        results = []
+        while True:
+            try:
+                results.append(result_queue.get_nowait())
+            except queue.Empty:
+                return results
+
+    def test_lookahead_segment_retries_with_reseed(self, model_config):
+        engine_loop, loop, pool, result_queue = self._make_env(model_config)
+        self._add_segment(engine_loop, pool, 0)  # earlier live segment
+        seg1 = self._add_segment(engine_loop, pool, 1)
+
+        for _ in range(4):
+            self._loop_step(engine_loop, seg1.slot)
+
+        assert seg1.state == "pending_prefill"
+        assert seg1.retry_idx == 1
+        assert seg1.slot is None
+        assert seg1.loop_run == 0 and seg1.loop_token == -1
+        assert pool.free_count == 3  # seg1's slot back, seg0 still holds one
+
+        results = self._drain(loop, result_queue)
+        types = [r.type for r in results]
+        assert ResultType.SEGMENT_RETRY in types
+        assert ResultType.SEGMENT_END not in types
+        retry = next(r for r in results if r.type == ResultType.SEGMENT_RETRY)
+        assert retry.segment_idx == 1
+        assert retry.metrics["retry_idx"] == 1
+        assert retry.metrics["retry_reason"] == "loop"
+        # Steps 1-3 streamed; the triggering 4th frame is not sent on retry.
+        assert types.count(ResultType.AUDIO_CHUNK) == 3
+        loop.close()
+
+    def test_retry_cap_falls_back_to_loop_abort(self, model_config):
+        engine_loop, loop, pool, result_queue = self._make_env(model_config)
+        self._add_segment(engine_loop, pool, 0)
+        seg1 = self._add_segment(engine_loop, pool, 1)
+        seg1.retry_idx = 1  # cap (max_retries=1) already spent
+
+        for _ in range(4):
+            self._loop_step(engine_loop, seg1.slot)
+
+        assert seg1.state == "done"
+        results = self._drain(loop, result_queue)
+        ends = [r for r in results if r.type == ResultType.SEGMENT_END]
+        assert len(ends) == 1
+        assert ends[0].metrics["eos_reason"] == "loop_abort"
+        assert not any(r.type == ResultType.SEGMENT_RETRY for r in results)
+        loop.close()
+
+    def test_playhead_segment_never_retries(self, model_config):
+        engine_loop, loop, pool, result_queue = self._make_env(model_config)
+        seg0 = self._add_segment(engine_loop, pool, 0)  # no earlier live seg
+
+        for _ in range(4):
+            self._loop_step(engine_loop, seg0.slot)
+
+        assert seg0.state == "done"
+        assert seg0.retry_idx == 0
+        results = self._drain(loop, result_queue)
+        assert any(
+            r.type == ResultType.SEGMENT_END
+            and r.metrics["eos_reason"] == "loop_abort"
+            for r in results
+        )
+        loop.close()
+
+    def test_retry_salt_changes_seed_conditionally(self):
+        from types import SimpleNamespace
+
+        from engine.backend.executor import Executor, _stable_sampling_seed
+        from engine.backend.kv_cache_pool import SlotKVState
+
+        ns = SimpleNamespace(_random_seed=0, _device=torch.device("cpu"))
+
+        def seed_for(retry_idx):
+            slot = SlotKVState(slot_id=0)
+            slot.session_id = "sess:0"
+            slot.segment_idx = 0
+            slot.retry_idx = retry_idx
+            Executor._slot_sampling_generator(ns, slot)
+            return slot.sampling_seed
+
+        # retry-0 must keep the historical derivation bit-identical.
+        assert seed_for(0) == _stable_sampling_seed(0, "sess:0", 0)
+        assert seed_for(1) != seed_for(0)
+        assert seed_for(2) != seed_for(1)
+        assert seed_for(1) == _stable_sampling_seed(0, "sess:0", 0, "retry:1")
+
+    def test_scheduler_config_has_max_retries(self):
+        from engine.config import SchedulerConfig
+
+        assert SchedulerConfig().token_loop_max_retries == 1

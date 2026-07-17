@@ -31,7 +31,9 @@ from ..core.lifecycle import LifecycleLogger
 from ..core import observability as obs
 from ..core.timing import ServerTimingAccumulator
 from ..text_normalization import strip_emoji, split_pending_emoji
+from ..interface.output import ENGINE_SAMPLE_RATE
 from .dispatcher import Dispatcher
+from .hold_window import DeliveryHoldWindow
 from .spliter import Spliter
 from .spliter.driver import ActionType
 from .spliter.reorder import AudioReorder
@@ -332,6 +334,25 @@ class FrontendInterface:
         await self._dispatch_segment_actions(session, seg_actions)
         await self._dispatcher.maybe_send_session_tokens_done(session)
 
+    @staticmethod
+    def _guarded_hold_for(session: Session) -> Optional[DeliveryHoldWindow]:
+        """Build the guarded-delivery hold window when the session opted in.
+
+        Opt-in rides the free-form ``output_policy.config`` map:
+        ``delivery: guarded`` enables it, ``delivery_window_ms`` sizes the
+        window (default 1500ms). Engine audio is float32 mono at
+        ENGINE_SAMPLE_RATE regardless of the client's output format (the
+        gateway converts downstream of this hold)."""
+        cfg = session.config.output_policy.config or {}
+        if str(cfg.get("delivery", "")).strip().lower() != "guarded":
+            return None
+        try:
+            window_ms = float(cfg.get("delivery_window_ms", 1500) or 1500)
+        except (TypeError, ValueError):
+            window_ms = 1500.0
+        window_ms = min(max(window_ms, 100.0), 10_000.0)
+        return DeliveryHoldWindow(window_ms / 1000.0, ENGINE_SAMPLE_RATE * 4)
+
     async def _consume_results(
         self,
         session: Session,
@@ -344,6 +365,109 @@ class FrontendInterface:
         # daily "拼没拼 batch / 合成了什么" questions).
         batch_agg = {"segments": 0, "batched": 0, "solo": 0, "max_batch_size_seen": 0}
         final_text_parts: list[str] = []
+
+        # Guarded delivery (opt-in): post-reorder chunks pass through a hold
+        # window so hallucinated tails can still be discarded server-side.
+        # One lock serializes every release→send path (queue consumer and
+        # ticker), keeping chunk order intact.
+        hold = self._guarded_hold_for(session)
+        hold_lock = asyncio.Lock() if hold is not None else None
+        hold_ticker: Optional[asyncio.Task] = None
+        # Guarded delivery bookkeeping: verdicts recorded at SEGMENT_END for
+        # segments whose audio has NOT fully passed into the hold yet
+        # (segments complete out of order; the verdict must be applied to the
+        # segment's own audio when the reorder drain reaches it), and a
+        # once-only guard for prefill_done events (a rerun re-prefills, but
+        # the retry is not client-visible).
+        hold_verdicts: dict = {}
+        prefill_done_seen: set = set()
+
+        async def _send_chunks(chunks: list) -> None:
+            if on_audio:
+                for chunk in chunks:
+                    await on_audio(session.session_id, chunk)
+
+        async def _deliver(chunks: list) -> None:
+            """Route in-order chunks to the client, via the hold if guarded."""
+            if not chunks:
+                return
+            if hold is None:
+                await _send_chunks(chunks)
+                return
+            hold.push(chunks)
+            async with hold_lock:
+                await _send_chunks(hold.release_due())
+
+        async def _settle_hold(verdict: dict) -> None:
+            """Apply a segment's verdict to its audio, now fully in the hold.
+
+            codec EOS / kv_overflow validate the tail (flush; kv_overflow
+            audio legitimately continues in the follow-up segment carrying
+            the overflow tokens); loop/silence aborts drop the condemned
+            trailing bytes and flush the older held audio — legitimate speech
+            the playback window had not reached yet. The lock is taken even
+            when there is nothing to send: it doubles as the barrier against
+            a ticker mid-send, keeping event/audio order intact."""
+            async with hold_lock:
+                dropped = 0
+                if verdict["discard_bytes"] > 0:
+                    dropped = hold.discard_tail(verdict["discard_bytes"])
+                flushed = hold.flush()
+                await _send_chunks(flushed)
+            if dropped:
+                logger.info(
+                    "Guarded delivery: %s seg=%d %s kept %d frames, "
+                    "discarded %d held chunks, flushed %d",
+                    session.session_id,
+                    verdict["seg_idx"],
+                    verdict["eos_reason"],
+                    verdict["keep_frames"],
+                    dropped,
+                    len(flushed),
+                )
+                LifecycleLogger.emit(
+                    session_id=session.session_id,
+                    phase="guarded_delivery_discard",
+                    segment_idx=verdict["seg_idx"],
+                    eos_reason=verdict["eos_reason"],
+                    kept_frames=verdict["keep_frames"],
+                    discarded_chunks=dropped,
+                    flushed_chunks=len(flushed),
+                )
+
+        def _hold_verdict(seg_idx: int, metrics: dict) -> dict:
+            eos_reason = str(metrics.get("eos_reason", ""))
+            discard_bytes = 0
+            keep = -1
+            if eos_reason in ("loop_abort", "silence_abort"):
+                frame_bytes = ENGINE_SAMPLE_RATE * 4 * 80 // 1000
+                audio_steps = int(metrics.get("audio_steps", 0) or 0)
+                tail = int(metrics.get("abort_tail_frames", 0) or 0)
+                keep = max(0, audio_steps - tail)
+                ema = float(getattr(session.spliter, "_ema_ratio", 0.0) or 0.0)
+                text_tokens = int(metrics.get("text_tokens", 0) or 0)
+                if ema > 0 and text_tokens > 0:
+                    expected = int(ema * text_tokens * 1.15) + 2
+                    keep = min(keep, expected)
+                discard_bytes = max(0, (audio_steps - keep) * frame_bytes)
+            return {
+                "eos_reason": eos_reason,
+                "discard_bytes": discard_bytes,
+                "keep_frames": keep,
+                "seg_idx": seg_idx,
+            }
+
+        if hold is not None:
+
+            async def _hold_tick() -> None:
+                while True:
+                    await asyncio.sleep(0.1)
+                    if hold.held_bytes:
+                        async with hold_lock:
+                            await _send_chunks(hold.release_due())
+
+            hold_ticker = asyncio.create_task(_hold_tick())
+
         try:
             while True:
                 result: EngineResult = await session.result_queue.get()
@@ -368,9 +492,7 @@ class FrontendInterface:
                         SegmentOrderMeta(result.segment_idx, 0, True),
                     )
                     ready = reorder.push(meta.group_idx, meta.local_idx, audio)
-                    if ready and on_audio:
-                        for chunk in ready:
-                            await on_audio(session.session_id, chunk)
+                    await _deliver(ready)
 
                 elif result.type == ResultType.PREFILL_DONE:
                     # Propagate prefill timing from engine thread
@@ -406,7 +528,10 @@ class FrontendInterface:
                             except (ValueError, TypeError):
                                 pass
 
-                    if on_event:
+                    # Once per segment: a hallucination rerun re-prefills the
+                    # same segment_idx, but the retry is not client-visible.
+                    if on_event and result.segment_idx not in prefill_done_seen:
+                        prefill_done_seen.add(result.segment_idx)
                         await on_event(
                             session.session_id,
                             {
@@ -421,6 +546,35 @@ class FrontendInterface:
                                 },
                             },
                         )
+
+                elif result.type == ResultType.SEGMENT_RETRY:
+                    # Engine is rerunning a hallucinated lookahead segment with
+                    # a fresh seed: drop the buffered garbage attempt so the
+                    # rerun's chunks land in a clean buffer. Not client-visible;
+                    # no SEGMENT_END was (or will yet be) sent for this segment.
+                    meta = session.segment_order.get(
+                        result.segment_idx,
+                        SegmentOrderMeta(result.segment_idx, 0, True),
+                    )
+                    dropped = session.reorder.discard(meta.group_idx, meta.local_idx)
+                    rm = result.metrics or {}
+                    logger.info(
+                        "Segment retry: %s seg=%d reason=%s attempt=%s "
+                        "(discarded %d buffered chunks)",
+                        session.session_id,
+                        result.segment_idx,
+                        rm.get("retry_reason", ""),
+                        rm.get("retry_idx", ""),
+                        dropped,
+                    )
+                    LifecycleLogger.emit(
+                        session_id=session.session_id,
+                        phase="segment_retry_discard",
+                        segment_idx=result.segment_idx,
+                        discarded_chunks=dropped,
+                        retry_reason=str(rm.get("retry_reason", "")),
+                        retry_idx=str(rm.get("retry_idx", "")),
+                    )
 
                 elif result.type == ResultType.SEGMENT_END:
                     seg_idx = result.segment_idx
@@ -445,14 +599,52 @@ class FrontendInterface:
                         seg_idx,
                         SegmentOrderMeta(seg_idx, 0, True),
                     )
-                    ready = reorder.mark_done(
-                        meta.group_idx,
-                        meta.local_idx,
-                        group_final=meta.group_final,
-                    )
-                    if ready and on_audio:
-                        for chunk in ready:
-                            await on_audio(session.session_id, chunk)
+
+                    # Guarded delivery: a segment's verdict must be applied to
+                    # that segment's own audio, and segments complete out of
+                    # order. If this segment IS the playhead, all its audio is
+                    # already in the hold (playhead chunks pass straight
+                    # through the reorder) — settle now. Otherwise its audio
+                    # is still buffered inside the reorder; record the verdict
+                    # and settle when the drain below (or a later chained
+                    # drain) moves it into the hold.
+                    if hold is not None:
+                        verdict = _hold_verdict(seg_idx, result.metrics or {})
+                        if reorder.next_emit_segment == (
+                            meta.group_idx,
+                            meta.local_idx,
+                        ):
+                            await _settle_hold(verdict)
+                        else:
+                            hold_verdicts[(meta.group_idx, meta.local_idx)] = verdict
+
+                    if hold is None:
+                        await _deliver(
+                            reorder.mark_done(
+                                meta.group_idx,
+                                meta.local_idx,
+                                group_final=meta.group_final,
+                            )
+                        )
+                    else:
+                        # Segment-attributed drain: push each drained
+                        # segment's chunks and settle it as soon as it has
+                        # fully passed (its verdict is already recorded — a
+                        # segment can only be fully drained after its own
+                        # SEGMENT_END marked it done). The trailing partially
+                        # drained segment is the new playhead: its audio just
+                        # enters the window and waits for its own verdict.
+                        for key, chunks, fully_passed in reorder.mark_done_ex(
+                            meta.group_idx,
+                            meta.local_idx,
+                            group_final=meta.group_final,
+                        ):
+                            if chunks:
+                                hold.push(chunks)
+                                async with hold_lock:
+                                    await _send_chunks(hold.release_due())
+                            if fully_passed and key in hold_verdicts:
+                                await _settle_hold(hold_verdicts.pop(key))
 
                     # L2 reorder_state: buffered audio waiting on an earlier
                     # segment at this boundary = reorder stall risk.
@@ -473,7 +665,15 @@ class FrontendInterface:
                         audio_steps = result.metrics.get("audio_steps", 0)
                         text_tokens = result.metrics.get("text_tokens", 0)
                         overflow = result.metrics.get("overflow", False)
-                        if audio_steps > 0 and text_tokens > 0:
+                        eos_reason = str(result.metrics.get("eos_reason", ""))
+                        # Aborted segments report hallucination-inflated
+                        # audio_steps; feeding them into the audio:text EMA
+                        # would skew every later split budget.
+                        if (
+                            audio_steps > 0
+                            and text_tokens > 0
+                            and eos_reason not in ("loop_abort", "silence_abort")
+                        ):
                             session.spliter.update_ratio(
                                 audio_steps,
                                 text_tokens,
@@ -546,6 +746,13 @@ class FrontendInterface:
                         )
 
                 elif result.type == ResultType.SESSION_DONE:
+                    # Lock unconditionally: it is the barrier that keeps the
+                    # done event from overtaking ticker-in-flight audio
+                    # (held_bytes hits 0 while popped chunks are still being
+                    # awaited into the outbound queue).
+                    if hold is not None:
+                        async with hold_lock:
+                            await _send_chunks(hold.flush())
                     session.state = SessionState.DONE
                     self._emit_session_summary(session, batch_agg, final_text_parts)
                     LifecycleLogger.emit(
@@ -572,6 +779,9 @@ class FrontendInterface:
                     break
 
                 elif result.type == ResultType.ERROR:
+                    if hold is not None:
+                        async with hold_lock:
+                            await _send_chunks(hold.flush())
                     logger.error(
                         "Session %s error: %s", session.session_id, result.error_msg
                     )
@@ -602,6 +812,8 @@ class FrontendInterface:
         except asyncio.CancelledError:
             pass
         finally:
+            if hold_ticker is not None:
+                hold_ticker.cancel()
             self._cleanup_session(session.session_id, expected=session)
 
     def _emit_session_summary(

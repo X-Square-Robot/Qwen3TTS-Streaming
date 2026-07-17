@@ -2173,11 +2173,24 @@ class Executor:
         identity = (
             slot.session_id if slot.session_id is not None else f"slot:{slot.slot_id}"
         )
-        seed = _stable_sampling_seed(
-            self._random_seed,
-            identity,
-            slot.segment_idx,
-        )
+        if slot.retry_idx > 0:
+            # Rerun re-roll: salt the derivation so attempt N+1 samples a fresh
+            # trajectory (same seed would replay the hallucination bit-exactly).
+            # Appended conditionally: retry-0 must keep the historical
+            # (base_seed, session, segment) derivation bit-identical, or every
+            # frozen halluprobe session id stops reproducing.
+            seed = _stable_sampling_seed(
+                self._random_seed,
+                identity,
+                slot.segment_idx,
+                f"retry:{slot.retry_idx}",
+            )
+        else:
+            seed = _stable_sampling_seed(
+                self._random_seed,
+                identity,
+                slot.segment_idx,
+            )
         gen = torch.Generator(device=self._device)
         gen.manual_seed(seed)
         slot.sampling_seed = seed

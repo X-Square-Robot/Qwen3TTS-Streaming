@@ -48,6 +48,10 @@ scheduler:
   # same token this many consecutive decode steps (0 = off). Normal speech
   # maxes out at 3 consecutive repeats; runaway loops run 10-39.
   token_loop_abort_frames: 4
+  # Reseed-and-rerun a guarded-abort segment when its audio is still fully
+  # buffered behind an earlier live segment (transparent to the client).
+  # 0 = always abort instead.
+  token_loop_max_retries: 1
 
 prefix_cache:
   enabled: true

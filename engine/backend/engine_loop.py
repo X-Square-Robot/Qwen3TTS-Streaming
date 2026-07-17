@@ -111,6 +111,7 @@ class EngineSegment:
         "first_raw_audio_sent",
         "loop_token",
         "loop_run",
+        "retry_idx",
         "dequeued_at",
         "prefill_started_at",
         "prefill_completed_at",
@@ -146,6 +147,8 @@ class EngineSegment:
         # run length (-1/0 = no run yet; token ids are always >= 0).
         self.loop_token: int = -1
         self.loop_run: int = 0
+        # Rerun attempt count (0 = first attempt); salts the sampling seed.
+        self.retry_idx: int = 0
         self.dequeued_at: Optional[float] = None
         self.prefill_started_at: Optional[float] = None
         self.prefill_completed_at: Optional[float] = None
@@ -230,6 +233,7 @@ class EngineLoop:
         pad_silence_peak_threshold: float = 5e-4,
         pad_silence_mean_abs_threshold: float = 2e-4,
         token_loop_abort_frames: int = 4,
+        token_loop_max_retries: int = 1,
         max_slots_per_session: int = 2,
     ):
         self._inbox = engine_inbox
@@ -244,6 +248,7 @@ class EngineLoop:
         self._pad_silence_peak_threshold = float(pad_silence_peak_threshold)
         self._pad_silence_mean_abs_threshold = float(pad_silence_mean_abs_threshold)
         self._token_loop_abort_frames = max(0, int(token_loop_abort_frames))
+        self._token_loop_max_retries = max(0, int(token_loop_max_retries))
         self._max_slots_per_session = max(1, int(max_slots_per_session))
 
         self._groups: Dict[str, EngineSessionGroup] = {}
@@ -868,6 +873,7 @@ class EngineLoop:
                 break
             seg.slot = slot
             slot.segment_idx = int(seg.segment_idx)
+            slot.retry_idx = seg.retry_idx
             self._seg_by_slot[slot.slot_id] = seg
             self._mlfq.on_segment_created(seg.mlfq_meta)
             seg.prefill_started_at = batch_start
@@ -1020,6 +1026,7 @@ class EngineLoop:
             return False
         best.slot = slot
         slot.segment_idx = int(best.segment_idx)
+        slot.retry_idx = best.retry_idx
         self._seg_by_slot[slot.slot_id] = best
         self._mlfq.on_segment_created(best.mlfq_meta)
 
@@ -1923,6 +1930,8 @@ class EngineLoop:
                             seg.loop_token = token
                             seg.loop_run = 1
                         if seg.loop_run >= self._token_loop_abort_frames:
+                            if self._try_segment_retry(group, seg, reason="loop"):
+                                continue
                             logger.info(
                                 "Loop abort: %s seg=%d token=%d run=%d frame=%d",
                                 seg.session_id,
@@ -1959,6 +1968,7 @@ class EngineLoop:
                                 group,
                                 seg,
                                 eos_reason="loop_abort",
+                                abort_tail_frames=seg.loop_run,
                             )
                             continue
 
@@ -1975,6 +1985,12 @@ class EngineLoop:
                         remaining_kv = max(0, max_seq - slot.past_len)
                         silence_limit = self._dynamic_silence_limit(remaining_kv)
                         if slot.pad_consecutive_silence > silence_limit:
+                            # No rerun here (unlike the loop guard): silence
+                            # abort usually means the sentence finished and
+                            # only the pad tail degenerated — discarding a
+                            # complete, likely-good synthesis to re-roll the
+                            # seed would trade a trimmed silent tail for a
+                            # fresh hallucination risk.
                             logger.info(
                                 "Silence abort: %s seg=%d silence=%d limit=%d "
                                 "pad=%d remaining_kv=%d",
@@ -2000,10 +2016,19 @@ class EngineLoop:
                                     silence_limit=silence_limit,
                                     remaining_kv=remaining_kv,
                                 )
+                            # The triggering frame was never sent (this path
+                            # continues before the send below), so the shipped
+                            # condemned tail is one frame shorter than the
+                            # silent run. The loop-abort path differs: its
+                            # faded trigger frame IS sent, so it reports the
+                            # full run.
                             self._handle_segment_eos(
                                 group,
                                 seg,
                                 eos_reason="silence_abort",
+                                abort_tail_frames=max(
+                                    0, slot.pad_consecutive_silence - 1
+                                ),
                             )
                             continue
 
@@ -2150,6 +2175,77 @@ class EngineLoop:
             and mean_abs <= self._pad_silence_mean_abs_threshold
         )
 
+    def _try_segment_retry(
+        self,
+        group: EngineSessionGroup,
+        seg: EngineSegment,
+        *,
+        reason: str,
+    ) -> bool:
+        """Reseed-and-rerun a hallucinated segment instead of aborting it.
+
+        Only safe for a lookahead segment — one with an earlier live segment
+        in the same session — because the frontend reorder buffer then still
+        holds every chunk this attempt produced, and the SEGMENT_RETRY result
+        tells it to discard them. The playhead segment falls through to the
+        normal abort path: its audio already streamed and cannot be replaced.
+
+        The reset returns the segment to ``pending_prefill`` so the regular
+        admission path re-allocates a slot and re-prefills from the intact
+        ``pending_token_ids``; ``retry_idx`` salts the sampling seed so the
+        rerun explores a fresh trajectory. No SEGMENT_END is sent — for the
+        frontend the segment simply has not finished yet, which also keeps
+        ``_check_session_done`` from racing a SESSION_DONE past the rerun.
+        """
+        if seg.retry_idx >= self._token_loop_max_retries:
+            return False
+        earlier_live = any(
+            other.segment_idx < seg.segment_idx and other.state != "done"
+            for other in group.segments.values()
+        )
+        if not earlier_live:
+            return False
+
+        seg.retry_idx += 1
+        self._release_segment_slot(seg)
+        seg.state = "pending_prefill"
+        seg.prefill_plan = None
+        seg.loop_token = -1
+        seg.loop_run = 0
+        seg.first_raw_audio_sent = False
+        seg.eos_trailing_added = False
+        seg.decode_start_frame = 0
+        seg.cache_hit = False
+        seg.cache_tokens_reused = 0
+        seg.prefill_started_at = None
+        seg.prefill_completed_at = None
+        seg.mlfq_meta = MLFQMeta()
+
+        self._send_result(
+            group,
+            EngineResult(
+                type=ResultType.SEGMENT_RETRY,
+                session_id=seg.session_id,
+                segment_idx=seg.segment_idx,
+                metrics={"retry_idx": seg.retry_idx, "retry_reason": reason},
+            ),
+        )
+        LifecycleLogger.emit(
+            session_id=seg.session_id,
+            phase="engine.segment.retry",
+            segment_idx=seg.segment_idx,
+            retry_idx=seg.retry_idx,
+            retry_reason=reason,
+        )
+        logger.info(
+            "Segment retry: %s seg=%d reason=%s attempt=%d",
+            seg.session_id,
+            seg.segment_idx,
+            reason,
+            seg.retry_idx,
+        )
+        return True
+
     @staticmethod
     def _fade_out_chunk(audio: bytes) -> bytes:
         """Linear fade to zero across one frame (80ms).
@@ -2170,6 +2266,7 @@ class EngineLoop:
         *,
         overflow: bool = False,
         eos_reason: Optional[str] = None,
+        abort_tail_frames: int = 0,
     ) -> None:
         """Handle EOS for one segment.
 
@@ -2178,6 +2275,11 @@ class EngineLoop:
         budget cap), ``silence_abort`` (pad-phase silence heuristic), or
         ``loop_abort`` (token loop guard — hallucination cycle). When not
         given it is derived from ``overflow``.
+
+        ``abort_tail_frames`` — for abort reasons, how many trailing frames
+        are provably garbage (the token loop run / the silent pad run). Lets
+        guarded delivery drop exactly that tail instead of the whole held
+        buffer.
         """
         self._total_eos += 1
         if eos_reason is None:
@@ -2213,6 +2315,8 @@ class EngineLoop:
             "batch_size_seen": seg.max_decode_batch,
             "cache_hit": seg.cache_hit,
         }
+        if abort_tail_frames > 0:
+            metrics["abort_tail_frames"] = int(abort_tail_frames)
 
         seg.state = "done"
         self._release_segment_slot(seg)
