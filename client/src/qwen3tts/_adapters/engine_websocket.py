@@ -18,6 +18,7 @@ from qwen3tts_protocol import (
 
 from .._internal.raw_websocket import (
     RawWebSocketConnection,
+    RawWebSocketError,
     ws_close,
     ws_connect,
     ws_recv_frame,
@@ -32,7 +33,7 @@ from .._internal.utils import (
 )
 from .._session import BaseStreamSession, _is_terminal_message
 from ..constants import TRANSPORT_ENGINE_WEBSOCKET
-from ..exceptions import ProtocolError
+from ..exceptions import ProtocolError, StreamClosedError
 
 
 class EngineWebSocketAdapter:
@@ -130,14 +131,21 @@ def _iter_conn_messages(
     *,
     timeout: float,
 ):
-    deadline = time.perf_counter() + timeout
+    # ``timeout`` is an *idle* limit: the clock re-arms on every received
+    # frame, so a healthy long synthesis can stream for arbitrarily long
+    # while a silent link still fails within ``timeout``.  It used to be an
+    # absolute deadline for the whole stream, which truncated any synthesis
+    # whose wall time exceeded it (~230 chars of text at the observed
+    # generation speed with the default 120 s).
+    idle_deadline = time.perf_counter() + timeout
     current_audio = AudioFormat()
-    while time.perf_counter() < deadline:
-        conn.settimeout(max(0.02, min(0.5, deadline - time.perf_counter())))
+    while time.perf_counter() < idle_deadline:
+        conn.settimeout(max(0.02, min(0.5, idle_deadline - time.perf_counter())))
         try:
             opcode, payload = ws_recv_frame(conn)
         except socket.timeout:
             continue
+        idle_deadline = time.perf_counter() + timeout
         if opcode == 0x2:
             yield AudioChunk(
                 pcm_bytes=payload,
@@ -158,7 +166,9 @@ def _iter_conn_messages(
         yield event
         if event.type in {"done", "error"}:
             return
-    raise TimeoutError("websocket stream timed out waiting for terminal event")
+    raise TimeoutError(
+        f"websocket stream idle for {timeout:.0f}s waiting for terminal event"
+    )
 
 
 class EngineWebSocketStreamSession(BaseStreamSession):
@@ -240,7 +250,7 @@ class EngineWebSocketStreamSession(BaseStreamSession):
         )
         payload = {"type": "text"}
         payload.update(stream_text_chunk_to_mapping(chunk))
-        ws_send_json(self._conn, payload)
+        self._send_or_close(payload)
 
     def end(self, *, client_timestamp_ms: int | None = None) -> None:
         self._check_send_open()
@@ -248,11 +258,34 @@ class EngineWebSocketStreamSession(BaseStreamSession):
         payload = {"type": "end"}
         if client_timestamp_ms is not None:
             payload["client_timestamp_ms"] = int(client_timestamp_ms)
-        ws_send_json(self._conn, payload)
+        self._send_or_close(payload)
 
     def cancel(self, reason: str = "") -> None:
         if self._send_closed:
             return
         self._mark_send_closed()
         request = StreamCancelRequest(reason=reason)
-        ws_send_json(self._conn, {"type": "cancel", "reason": request.reason})
+        try:
+            ws_send_json(self._conn, {"type": "cancel", "reason": request.reason})
+        except RawWebSocketError:
+            # Best-effort: a dead connection already achieves what cancel
+            # wanted (the server tears the session down on disconnect).
+            pass
+
+    def _send_or_close(self, payload: dict) -> None:
+        """Send a control/text payload, mapping a dead connection to
+        ``StreamClosedError``.
+
+        From the caller's perspective a connection that died mid-stream is
+        the same condition as sending after ``end()`` — the stream is closed
+        for sending — so both surface the same exception type and existing
+        handlers cover both.  The terminal error event still arrives through
+        the reader path.
+        """
+        try:
+            ws_send_json(self._conn, payload)
+        except RawWebSocketError as exc:
+            self._mark_send_closed()
+            raise StreamClosedError(
+                f"stream session {self.session_id} connection closed while sending"
+            ) from exc

@@ -279,3 +279,99 @@ class TestConnectionClosedWithoutTerminal:
             raise AssertionError("expected ProtocolError on truncated stream")
         except ProtocolError as exc:
             assert "without terminal event" in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Idle-timeout semantics (_iter_conn_messages) & dead-connection send mapping
+# ---------------------------------------------------------------------------
+
+import socket as _socket
+import time as _time
+
+import pytest
+
+from qwen3tts._adapters.engine_websocket import (
+    EngineWebSocketStreamSession,
+    _iter_conn_messages,
+)
+from qwen3tts._internal.raw_websocket import RawWebSocketError
+from qwen3tts._session import BaseStreamSession
+from qwen3tts.exceptions import StreamClosedError
+import qwen3tts._adapters.engine_websocket as _ew
+
+
+class TestIterConnMessagesIdleTimeout:
+    def test_slow_but_alive_stream_outlives_timeout(self, monkeypatch):
+        """timeout 是空闲上限而非整流总死线：帧间隔 < timeout 但总时长 > timeout
+        的健康长流必须完整走完（旧的绝对死线语义会在 timeout 处拦腰截断）。"""
+        frames = [b"\x00\x01"] * 4 + [
+            {"type": "event", "event": {"type": "done", "session_id": "s"}}
+        ]
+        idx = [0]
+
+        def fake_recv(conn):
+            if idx[0] >= len(frames):
+                raise AssertionError("read past terminal event")
+            _time.sleep(0.15)  # 每帧间隔 0.15s < timeout=0.3s；总时长 0.75s > 0.3s
+            item = frames[idx[0]]
+            idx[0] += 1
+            if isinstance(item, bytes):
+                return 0x2, item
+            return 0x1, json.dumps(item).encode("utf-8")
+
+        monkeypatch.setattr(_ew, "ws_recv_frame", fake_recv)
+        conn = FakeRawWebSocketConnection()
+
+        messages = list(_iter_conn_messages(conn, timeout=0.3))
+
+        audio = [m for m in messages if getattr(m, "pcm_bytes", None)]
+        assert len(audio) == 4
+        assert messages[-1].type == "done"
+
+    def test_silent_link_fails_within_idle_timeout(self, monkeypatch):
+        def fake_recv(conn):
+            _time.sleep(0.02)
+            raise _socket.timeout("no data")
+
+        monkeypatch.setattr(_ew, "ws_recv_frame", fake_recv)
+        conn = FakeRawWebSocketConnection()
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError, match="idle"):
+            list(_iter_conn_messages(conn, timeout=0.3))
+        assert _time.perf_counter() - start < 2.0
+
+
+class TestSendOnDeadConnection:
+    @staticmethod
+    def _make_session() -> EngineWebSocketStreamSession:
+        session = EngineWebSocketStreamSession.__new__(EngineWebSocketStreamSession)
+        BaseStreamSession.__init__(
+            session, session_id="s-dead", transport="engine-websocket"
+        )
+        session._conn = FakeRawWebSocketConnection()
+        return session
+
+    @staticmethod
+    def _raise_raw(conn, payload):
+        raise RawWebSocketError("websocket closed")
+
+    def test_send_text_maps_to_stream_closed(self, monkeypatch):
+        monkeypatch.setattr(_ew, "ws_send_json", self._raise_raw)
+        session = self._make_session()
+        with pytest.raises(StreamClosedError, match="connection closed"):
+            session.send_text("你好")
+        # 之后的 send 走 _check_send_open 短路，同一异常类型
+        with pytest.raises(StreamClosedError):
+            session.send_text("再见")
+
+    def test_end_maps_to_stream_closed(self, monkeypatch):
+        monkeypatch.setattr(_ew, "ws_send_json", self._raise_raw)
+        session = self._make_session()
+        with pytest.raises(StreamClosedError, match="connection closed"):
+            session.end()
+
+    def test_cancel_on_dead_connection_is_silent(self, monkeypatch):
+        monkeypatch.setattr(_ew, "ws_send_json", self._raise_raw)
+        session = self._make_session()
+        session.cancel(reason="interrupt")  # 不抛：死连接下 cancel 目的已达成
