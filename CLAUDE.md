@@ -2,6 +2,7 @@
 
 > 本文件面向 **AI 编码助手（Claude Code 等）**，是仓库导航与约定的速查。
 > **用户请从 [README](README.md) 与 [用户文档](docs/user/README.md) 开始**；贡献者见 [CONTRIBUTING](CONTRIBUTING.md)。
+> 注意！不要重复造轮子！像是手搓websocket协议这样的事情不要做！有成熟的库就用成熟的库！不要搓个半成品！
 
 ## 项目概述
 
