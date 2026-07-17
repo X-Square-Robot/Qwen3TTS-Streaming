@@ -86,3 +86,63 @@ def test_close_releases_the_channel(fake_server):
 
     adapter.close()
     assert adapter._grpc_channel is None
+
+
+class _NoTerminalTTSService(tts_pb2_grpc.TTSServiceServicer):
+    """Ends the response stream WITHOUT a done/error event (e.g. a redeploy
+    tearing the server down mid-session)."""
+
+    def SynthesizeStream(self, request_iterator, context):
+        for request in request_iterator:
+            which = request.WhichOneof("request")
+            if which in ("end", "done", "cancel"):
+                return  # stream ends cleanly, no terminal event
+
+
+@pytest.fixture
+def no_terminal_server():
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    tts_pb2_grpc.add_TTSServiceServicer_to_server(_NoTerminalTTSService(), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        yield f"127.0.0.1:{port}"
+    finally:
+        server.stop(None)
+
+
+def test_stream_end_without_terminal_does_not_hang(no_terminal_server):
+    """Regression: a clean stream end without done/error used to leave the
+    message queue without a sentinel — iter_messages() blocked forever and
+    permanently pinned the consumer thread."""
+    import threading
+
+    from qwen3tts_protocol import StreamEvent
+
+    adapter = EngineGrpcAdapter(
+        no_terminal_server, timeout=5.0, metadata=None, headers=None
+    )
+    session = adapter.open_stream(
+        SessionStartRequest(
+            session_id="s-no-terminal",
+            config=SynthesisConfig(task_type="custom_voice"),
+        )
+    )
+    session.end()
+
+    messages: list = []
+
+    def consume():
+        for msg in session.iter_messages():
+            messages.append(msg)
+
+    consumer = threading.Thread(target=consume, daemon=True)
+    consumer.start()
+    consumer.join(timeout=5.0)
+    assert not consumer.is_alive(), "iter_messages() hung after clean stream end"
+    assert messages, "expected a synthesized terminal event"
+    last = messages[-1]
+    # The terminal may be the synthesized "without terminal event" error (clean
+    # stream end) or a transport-level RpcError (depending on how the server
+    # tears the stream down) — either way iteration MUST end with an error.
+    assert isinstance(last, StreamEvent) and last.type == "error"

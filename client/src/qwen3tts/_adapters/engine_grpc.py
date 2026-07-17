@@ -176,6 +176,7 @@ class EngineGrpcStreamSession(BaseStreamSession):
             yield item
 
     def _reader_loop(self) -> None:
+        terminal_seen = False
         try:
             for response in self._stream:
                 which = response.WhichOneof("response")
@@ -204,13 +205,31 @@ class EngineGrpcStreamSession(BaseStreamSession):
                     )
                 elif which == "event":
                     event = decode_stream_event(_stream_event_to_dict(response.event))
-                    self._put_message(event)
                     if event.type in {"done", "error"}:
+                        terminal_seen = True
+                    self._put_message(event)
+                    if terminal_seen:
                         break
         except Exception as exc:
+            terminal_seen = True
             self._put_message(
                 StreamEvent(type="error", session_id=self.session_id, message=str(exc))
             )
+        finally:
+            if not terminal_seen:
+                # The server ended the stream without done/error (e.g. a
+                # redeploy). Without a terminal event the queue sentinel is
+                # never enqueued and iter_messages() blocks forever, pinning
+                # the caller's thread. Same failure class as the websocket
+                # close-frame path.
+                self._put_message(
+                    StreamEvent(
+                        type="error",
+                        session_id=self.session_id,
+                        message="stream ended without terminal event",
+                    )
+                )
+            self._close_message_queue()
 
     def send_text(
         self,

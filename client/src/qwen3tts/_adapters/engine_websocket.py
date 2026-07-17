@@ -30,7 +30,7 @@ from .._internal.utils import (
     stream_text_chunk_to_mapping,
     synthesis_config_to_mapping,
 )
-from .._session import BaseStreamSession
+from .._session import BaseStreamSession, _is_terminal_message
 from ..constants import TRANSPORT_ENGINE_WEBSOCKET
 from ..exceptions import ProtocolError
 
@@ -86,6 +86,7 @@ class EngineWebSocketAdapter:
                     "config": synthesis_config_to_mapping(request.config),
                 },
             )
+            terminal_seen = False
             for message in _iter_conn_messages(conn, timeout=self.timeout):
                 if isinstance(message, AudioChunk):
                     audio_parts.append(message.pcm_bytes)
@@ -95,7 +96,16 @@ class EngineWebSocketAdapter:
                 if message.type == "warning" and message.message:
                     warnings.append(message.message)
                 if message.type in {"done", "error"}:
+                    terminal_seen = True
                     break
+            if not terminal_seen:
+                # Connection closed (opcode 0x8) before done/error: the
+                # audio collected so far is silently truncated. Fail loudly
+                # instead of returning a partial result with no signal.
+                raise ProtocolError(
+                    "websocket stream closed without terminal event "
+                    f"({len(audio_parts)} audio chunks received)"
+                )
         finally:
             ws_close(conn)
         return build_bytes_result(
@@ -177,12 +187,16 @@ class EngineWebSocketStreamSession(BaseStreamSession):
         self._reader.start()
 
     def _reader_loop(self) -> None:
+        terminal_seen = False
         try:
             for message in _iter_conn_messages(
                 self._conn, timeout=self._adapter.timeout
             ):
+                if _is_terminal_message(message):
+                    terminal_seen = True
                 self._put_message(message)
         except Exception as exc:
+            terminal_seen = True
             self._put_message(
                 StreamEvent(
                     type="error",
@@ -191,6 +205,24 @@ class EngineWebSocketStreamSession(BaseStreamSession):
                 )
             )
         finally:
+            if not terminal_seen:
+                # Clean reader exit without done/error — e.g. the gateway
+                # closed the connection mid-redeploy (close frame, opcode
+                # 0x8). Without a terminal event the queue sentinel is never
+                # enqueued and iter_messages() blocks forever, permanently
+                # pinning the caller's thread (this starved a relay worker
+                # pool in production). Surface it as an error so callers can
+                # log and run their error path.
+                self._put_message(
+                    StreamEvent(
+                        type="error",
+                        session_id=self.session_id,
+                        message="connection closed without terminal event",
+                    )
+                )
+            # Last-resort unblock: idempotent, and covers any exit path the
+            # branches above might miss.
+            self._close_message_queue()
             ws_close(self._conn)
 
     def send_text(
