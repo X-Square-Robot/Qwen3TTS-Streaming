@@ -201,11 +201,23 @@ class RealtimeAudioStream:
                     time.sleep(ahead)
         finally:
             # Ensure the feeder thread is not left hanging if the caller
-            # breaks out of the iterator early.
+            # breaks out of the iterator early.  A single drain pass is not
+            # enough: with the consumer gone the engine keeps producing, the
+            # bounded bridge fills up again and the feeder blocks forever on
+            # ``put`` — it never reaches its terminal sentinel (thread leak).
+            # Cancel the session so the stream terminates, then keep draining
+            # until the feeder exits (bounded, in case cancel is a no-op
+            # because ``end()`` was already sent and the engine keeps going).
             if feeder_thread.is_alive():
-                # Drain remaining items so the feeder can exit cleanly
-                while not bridge.empty():
+                cancel = getattr(self._session, "cancel", None)
+                if cancel is not None:
                     try:
-                        bridge.get_nowait()
+                        cancel(reason="realtime consumer stopped")
+                    except Exception:
+                        pass
+                drain_deadline = time.monotonic() + 5.0
+                while feeder_thread.is_alive() and time.monotonic() < drain_deadline:
+                    try:
+                        bridge.get(timeout=0.1)
                     except Empty:
-                        break
+                        pass

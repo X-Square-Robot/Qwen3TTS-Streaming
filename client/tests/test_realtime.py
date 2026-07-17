@@ -335,3 +335,46 @@ class TestPublicAPI:
 
         assert "RealtimeAudioStream" in qwen3tts.__all__
         assert "TimedAudio" in qwen3tts.__all__
+
+
+# ---------------------------------------------------------------------------
+# Feeder-thread lifecycle on early consumer exit
+# ---------------------------------------------------------------------------
+
+
+def test_early_break_cancels_session_and_reaps_feeder_thread():
+    """消费者提前退出时不得泄漏 feeder 线程。
+
+    预置远超 bridge 容量(64)的音频帧且不投终止事件：旧实现单次 drain 后
+    feeder 会永久阻塞（put 满队列 / get 等不来的终止），线程泄漏。修复后
+    finally 会 cancel 会话并持续 drain 直到 feeder 退出。
+    """
+    import threading
+    import time as time_mod
+
+    session = BaseStreamSession(session_id="leak-test", transport="fake")
+    for _ in range(80):  # > bridge maxsize=64
+        session._put_message(_make_audio_chunk(0.02))
+    cancels: list[str] = []
+
+    def _cancel(reason: str = "") -> None:
+        cancels.append(reason)
+        session._put_message(
+            StreamEvent(type="error", session_id="leak-test", message="cancelled")
+        )
+
+    session.cancel = _cancel  # type: ignore[attr-defined]
+
+    before = set(threading.enumerate())
+    for _frame in RealtimeAudioStream(session, chunk_s=0.01):
+        break  # 拿到第一帧即提前退出
+
+    assert cancels == ["realtime consumer stopped"]
+    deadline = time_mod.time() + 3.0
+    leaked: list[threading.Thread] = []
+    while time_mod.time() < deadline:
+        leaked = [t for t in threading.enumerate() if t not in before and t.is_alive()]
+        if not leaked:
+            break
+        time_mod.sleep(0.05)
+    assert not leaked, f"feeder thread leaked: {leaked}"
