@@ -44,20 +44,33 @@ class EngineWebSocketAdapter:
         endpoint: str,
         *,
         timeout: float,
+        connect_timeout: float | None = None,
         headers: dict[str, str] | None = None,
     ) -> None:
         self.endpoint = endpoint
         self.timeout = timeout
+        # Keep the historical behavior when omitted, while allowing callers
+        # to bound a stalled handshake independently from a long stream's idle
+        # timeout.  A single timeout previously made a 120-second stream budget
+        # also occupy a worker thread for up to 120 seconds during connect.
+        self.connect_timeout = timeout if connect_timeout is None else connect_timeout
         self.headers = dict(headers or {})
 
     def get_capabilities(self) -> Capabilities:
-        conn = ws_connect(self.endpoint, timeout=self.timeout, headers=self.headers)
+        conn = ws_connect(
+            self.endpoint,
+            timeout=self.connect_timeout,
+            headers=self.headers,
+        )
         try:
             ws_send_json(conn, {"type": "get_capabilities"})
             deadline = time.perf_counter() + self.timeout
             while time.perf_counter() < deadline:
                 conn.settimeout(max(0.05, min(0.2, deadline - time.perf_counter())))
-                opcode, payload = ws_recv_frame(conn)
+                try:
+                    opcode, payload = ws_recv_frame(conn)
+                except socket.timeout:
+                    continue
                 if opcode != 0x1:
                     continue
                 message = json.loads(payload.decode("utf-8"))
@@ -72,7 +85,11 @@ class EngineWebSocketAdapter:
 
     def synthesize_bytes(self, text: str, *, request) -> BytesResult:
         session_id = request.session_id or ""
-        conn = ws_connect(self.endpoint, timeout=self.timeout, headers=self.headers)
+        conn = ws_connect(
+            self.endpoint,
+            timeout=self.connect_timeout,
+            headers=self.headers,
+        )
         events: list[StreamEvent] = []
         warnings: list[str] = []
         audio_format = request.config.audio
@@ -181,16 +198,25 @@ class EngineWebSocketStreamSession(BaseStreamSession):
         self._adapter = adapter
         self._start_request = start_request
         self._conn = ws_connect(
-            adapter.endpoint, timeout=adapter.timeout, headers=adapter.headers
+            adapter.endpoint,
+            timeout=adapter.connect_timeout,
+            headers=adapter.headers,
         )
-        ws_send_json(
-            self._conn,
-            {
-                "type": "start",
-                "session_id": start_request.session_id,
-                "config": synthesis_config_to_mapping(start_request.config),
-            },
-        )
+        try:
+            ws_send_json(
+                self._conn,
+                {
+                    "type": "start",
+                    "session_id": start_request.session_id,
+                    "config": synthesis_config_to_mapping(start_request.config),
+                },
+            )
+        except BaseException:
+            # The constructor cannot return a session for the caller to close
+            # when the initial start send fails.  Close the already-connected
+            # socket here so repeated failures cannot leak descriptors.
+            ws_close(self._conn)
+            raise
         self._reader = threading.Thread(
             target=self._reader_loop, name=f"ws-session-{self.session_id}", daemon=True
         )

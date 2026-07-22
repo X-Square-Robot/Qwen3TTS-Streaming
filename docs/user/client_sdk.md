@@ -126,6 +126,19 @@ print(result.audio_format)
 print(len(result.audio_bytes))
 ```
 
+For the `engine-websocket` transport, `timeout` is the receive-idle budget for
+an established request. Set `connect_timeout` separately when a failed network
+handshake should release the calling thread sooner; if omitted, it defaults to
+`timeout` for backward compatibility:
+
+```python
+client = TTSClient.connect(
+    "ws://localhost:50052/v1/ws",
+    timeout=120.0,
+    connect_timeout=5.0,
+)
+```
+
 ## Unified Streaming Interface
 
 ```python

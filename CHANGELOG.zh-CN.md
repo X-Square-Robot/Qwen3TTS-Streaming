@@ -9,6 +9,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 将引擎 WebSocket 握手预算（`connect_timeout`）与连接建立后的请求接收空闲预算
+  （`timeout`）分离，并覆盖自动探测路径，避免不可达端点按完整请求超时长期占用
+  流式 worker。
+- 流式连接的首个 `start` 消息发送失败时关闭已经建立的 WebSocket，避免重复失败时
+  泄漏文件描述符。
+- 等待 capabilities 时容忍短轮询的接收超时，不再因为首个 200 ms 轮询超时而误判失败。
+- 将 WebSocket 发送超时及 `ECONNRESET` 等 socket 错误统一归一化，使流式调用方稳定
+  收到 `StreamClosedError`。
+
 ## [0.1.0] —— 工程预览
 
 > ⚠️ **v0.1 工程预览**：流式模式仍可能出现幻觉/重复/漏读，不建议用于生产。

@@ -68,9 +68,14 @@ def ws_send_json(conn: RawWebSocketConnection, payload: dict[str, Any]) -> None:
     try:
         conn.ws.send(json.dumps(payload, ensure_ascii=False))
     except WebSocketTimeoutException as exc:
-        raise socket.timeout(str(exc)) from exc
+        raise RawWebSocketError(f"websocket send timed out: {exc}") from exc
     except WebSocketConnectionClosedException as exc:
         raise RawWebSocketError("websocket closed") from exc
+    except OSError as exc:
+        # websocket-client deliberately lets non-timeout socket failures such
+        # as ECONNRESET escape unchanged. Normalize them so stream sessions
+        # consistently surface StreamClosedError and stop accepting sends.
+        raise RawWebSocketError(f"websocket send failed: {exc}") from exc
 
 
 def ws_recv_frame(conn: RawWebSocketConnection) -> tuple[int, bytes]:

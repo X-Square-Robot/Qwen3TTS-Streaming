@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Split the engine WebSocket handshake budget (`connect_timeout`) from the
+  established request receive-idle budget (`timeout`), including auto-detect
+  probes, so an unreachable endpoint cannot occupy a streaming worker for the
+  full request timeout.
+- Close an already-connected WebSocket when the initial streaming `start`
+  message fails, preventing descriptor leaks across repeated start failures.
+- Retry short WebSocket receive timeouts while waiting for capabilities instead
+  of failing on the first 200 ms polling interval.
+- Normalize WebSocket send timeouts and socket errors (for example,
+  `ECONNRESET`) so streaming callers consistently receive `StreamClosedError`.
+
 ## [0.1.0] — Engineering Preview
 
 > ⚠️ **v0.1 engineering preview**: streaming mode may still exhibit hallucination/repetition/dropped reading, and is not recommended for production.

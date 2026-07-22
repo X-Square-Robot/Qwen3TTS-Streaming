@@ -4,6 +4,8 @@ import pytest
 
 from qwen3tts import SessionStartRequest, SynthesisConfig, TTSClient
 from qwen3tts.audio import decode_audio_bytes_to_array
+from qwen3tts.client import _build_adapter
+from qwen3tts.constants import TRANSPORT_ENGINE_WEBSOCKET
 
 
 class _FakeAdapter:
@@ -91,3 +93,20 @@ def test_open_stream_delegates_to_adapter():
         SessionStartRequest(session_id="sid", config=SynthesisConfig())
     )
     assert session.session_id == "sid"
+
+
+def test_build_websocket_adapter_forwards_connect_timeout():
+    adapter = _build_adapter(
+        TRANSPORT_ENGINE_WEBSOCKET,
+        endpoint="ws://localhost:50052/v1/ws",
+        model_name=None,
+        model_version="1",
+        timeout=120.0,
+        connect_timeout=5.0,
+        headers={"X-Test": "1"},
+        metadata=None,
+    )
+
+    assert adapter.timeout == 120.0
+    assert adapter.connect_timeout == 5.0
+    assert adapter.headers == {"X-Test": "1"}

@@ -121,6 +121,18 @@ print(result.audio_format)
 print(len(result.audio_bytes))
 ```
 
+对于 `engine-websocket` 传输，`timeout` 表示连接建立后请求的接收空闲预算。
+如果网络握手失败时需要更快释放调用线程，可以单独设置 `connect_timeout`；
+不传时为保持向后兼容，它默认等于 `timeout`：
+
+```python
+client = TTSClient.connect(
+    "ws://localhost:50052/v1/ws",
+    timeout=120.0,
+    connect_timeout=5.0,
+)
+```
+
 ## 统一流式接口
 
 ```python

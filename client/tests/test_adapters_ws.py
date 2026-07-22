@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import json
+import socket
+import time
+
+import pytest
+import qwen3tts._adapters.engine_websocket as _ew
 
 from qwen3tts_protocol import (
     BytesResult,
@@ -10,8 +15,13 @@ from qwen3tts_protocol import (
 )
 from qwen3tts._adapters.engine_websocket import (
     EngineWebSocketAdapter,
+    EngineWebSocketStreamSession,
+    _iter_conn_messages,
 )
+from qwen3tts._internal.raw_websocket import RawWebSocketError
+from qwen3tts._session import BaseStreamSession
 from qwen3tts.constants import TRANSPORT_ENGINE_WEBSOCKET
+from qwen3tts.exceptions import StreamClosedError
 
 
 class FakeRawWebSocketConnection:
@@ -107,6 +117,95 @@ class TestEngineWebSocketAdapter:
         assert sent[0]["type"] == "get_capabilities"
         assert closed[0]
 
+    def test_connect_timeout_is_distinct_from_request_idle_timeout(self, monkeypatch):
+        caps_response = {
+            "type": "capabilities",
+            "capabilities": {"variant": "standalone"},
+        }
+        fake_conn = FakeRawWebSocketConnection()
+        connect_timeouts: list[float] = []
+
+        def connect(url, *, timeout, headers=None):
+            connect_timeouts.append(timeout)
+            return fake_conn
+
+        monkeypatch.setattr(
+            "qwen3tts._adapters.engine_websocket.ws_connect",
+            connect,
+        )
+        monkeypatch.setattr(
+            "qwen3tts._adapters.engine_websocket.ws_send_json",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            "qwen3tts._adapters.engine_websocket.ws_recv_frame",
+            _make_ws_recv_frame([caps_response]),
+        )
+        monkeypatch.setattr(
+            "qwen3tts._adapters.engine_websocket.ws_close",
+            lambda _conn: None,
+        )
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=120.0,
+            connect_timeout=3.5,
+        )
+
+        adapter.get_capabilities()
+
+        assert connect_timeouts == [3.5]
+        assert adapter.timeout == 120.0
+
+    def test_connect_timeout_defaults_to_request_timeout(self):
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=17.0,
+        )
+
+        assert adapter.connect_timeout == 17.0
+
+    def test_get_capabilities_retries_short_receive_timeouts(self, monkeypatch):
+        fake_conn = FakeRawWebSocketConnection()
+        responses = iter(
+            [
+                socket.timeout("not ready yet"),
+                {
+                    "type": "capabilities",
+                    "capabilities": {"variant": "standalone"},
+                },
+            ]
+        )
+
+        def recv_frame(_conn):
+            response = next(responses)
+            if isinstance(response, BaseException):
+                raise response
+            return 0x1, json.dumps(response).encode("utf-8")
+
+        monkeypatch.setattr(
+            "qwen3tts._adapters.engine_websocket.ws_connect",
+            _make_ws_connect(fake_conn),
+        )
+        monkeypatch.setattr(
+            "qwen3tts._adapters.engine_websocket.ws_send_json",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            "qwen3tts._adapters.engine_websocket.ws_recv_frame",
+            recv_frame,
+        )
+        monkeypatch.setattr(
+            "qwen3tts._adapters.engine_websocket.ws_close",
+            lambda _conn: None,
+        )
+
+        capabilities = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+        ).get_capabilities()
+
+        assert capabilities.variant == "standalone"
+
     def test_synthesize_bytes_oneshot(self, monkeypatch):
         done_event = {
             "type": "event",
@@ -187,6 +286,47 @@ class TestEngineWebSocketAdapter:
 
         session.end()
         assert sent[2]["type"] == "end"
+
+    def test_open_stream_start_send_failure_closes_connection(self, monkeypatch):
+        fake_conn = FakeRawWebSocketConnection()
+        closed = [False]
+        connect_timeouts: list[float] = []
+
+        def connect(url, *, timeout, headers=None):
+            connect_timeouts.append(timeout)
+            return fake_conn
+
+        def fail_start_send(conn, payload):
+            raise OSError("start send failed")
+
+        monkeypatch.setattr(
+            "qwen3tts._adapters.engine_websocket.ws_connect",
+            connect,
+        )
+        monkeypatch.setattr(
+            "qwen3tts._adapters.engine_websocket.ws_send_json",
+            fail_start_send,
+        )
+        monkeypatch.setattr(
+            "qwen3tts._adapters.engine_websocket.ws_close",
+            _make_ws_close(closed),
+        )
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=120.0,
+            connect_timeout=5.0,
+        )
+
+        with pytest.raises(OSError, match="start send failed"):
+            adapter.open_stream(
+                SessionStartRequest(
+                    session_id="s-start-failed",
+                    config=SynthesisConfig(task_type="custom_voice"),
+                )
+            )
+
+        assert connect_timeouts == [5.0]
+        assert closed[0]
 
 
 class TestConnectionClosedWithoutTerminal:
@@ -285,21 +425,6 @@ class TestConnectionClosedWithoutTerminal:
 # Idle-timeout semantics (_iter_conn_messages) & dead-connection send mapping
 # ---------------------------------------------------------------------------
 
-import socket as _socket
-import time as _time
-
-import pytest
-
-from qwen3tts._adapters.engine_websocket import (
-    EngineWebSocketStreamSession,
-    _iter_conn_messages,
-)
-from qwen3tts._internal.raw_websocket import RawWebSocketError
-from qwen3tts._session import BaseStreamSession
-from qwen3tts.exceptions import StreamClosedError
-import qwen3tts._adapters.engine_websocket as _ew
-
-
 class TestIterConnMessagesIdleTimeout:
     def test_slow_but_alive_stream_outlives_timeout(self, monkeypatch):
         """timeout 是空闲上限而非整流总死线：帧间隔 < timeout 但总时长 > timeout
@@ -312,7 +437,7 @@ class TestIterConnMessagesIdleTimeout:
         def fake_recv(conn):
             if idx[0] >= len(frames):
                 raise AssertionError("read past terminal event")
-            _time.sleep(0.15)  # 每帧间隔 0.15s < timeout=0.3s；总时长 0.75s > 0.3s
+            time.sleep(0.15)  # 每帧间隔 0.15s < timeout=0.3s；总时长 0.75s > 0.3s
             item = frames[idx[0]]
             idx[0] += 1
             if isinstance(item, bytes):
@@ -330,16 +455,16 @@ class TestIterConnMessagesIdleTimeout:
 
     def test_silent_link_fails_within_idle_timeout(self, monkeypatch):
         def fake_recv(conn):
-            _time.sleep(0.02)
-            raise _socket.timeout("no data")
+            time.sleep(0.02)
+            raise socket.timeout("no data")
 
         monkeypatch.setattr(_ew, "ws_recv_frame", fake_recv)
         conn = FakeRawWebSocketConnection()
 
-        start = _time.perf_counter()
+        start = time.perf_counter()
         with pytest.raises(TimeoutError, match="idle"):
             list(_iter_conn_messages(conn, timeout=0.3))
-        assert _time.perf_counter() - start < 2.0
+        assert time.perf_counter() - start < 2.0
 
 
 class TestSendOnDeadConnection:

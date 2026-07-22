@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import socket
+
 import pytest
 
 from qwen3tts.constants import (
@@ -11,6 +14,7 @@ from qwen3tts.constants import (
     TRANSPORT_TRITON_HTTP,
 )
 from qwen3tts.detect import detect_transport
+from qwen3tts import detect as detect_module
 
 
 def test_explicit_ws_transport_resolves_ws_endpoint():
@@ -61,8 +65,8 @@ def test_explicit_triton_grpc_default_model_name():
 def test_ws_scheme_short_circuit(monkeypatch):
     calls = []
 
-    def fake_probe(url, *, timeout, headers):
-        calls.append((url, timeout))
+    def fake_probe(url, *, timeout, connect_timeout, headers):
+        calls.append((url, timeout, connect_timeout))
 
     monkeypatch.setattr("qwen3tts.detect._probe_engine_websocket", fake_probe)
     detected = detect_transport(
@@ -70,9 +74,55 @@ def test_ws_scheme_short_circuit(monkeypatch):
         transport="auto",
         model_name=None,
         timeout=2.0,
+        connect_timeout=0.5,
     )
     assert detected.transport == TRANSPORT_ENGINE_WEBSOCKET
-    assert calls == [("ws://example.test/v1/ws", 2.0)]
+    assert calls == [("ws://example.test/v1/ws", 2.0, 0.5)]
+
+
+def test_websocket_probe_retries_short_receive_timeouts(monkeypatch):
+    class _Connection:
+        def settimeout(self, _timeout):
+            pass
+
+    connection = _Connection()
+    connect_timeouts: list[float] = []
+    closed: list[object] = []
+    responses = iter(
+        [
+            socket.timeout("not ready yet"),
+            {
+                "type": "capabilities",
+                "capabilities": {},
+            },
+        ]
+    )
+
+    def connect(_url, *, timeout, headers):
+        connect_timeouts.append(timeout)
+        return connection
+
+    def recv_frame(_conn):
+        response = next(responses)
+        if isinstance(response, BaseException):
+            raise response
+        return 0x1, json.dumps(response).encode("utf-8")
+
+    monkeypatch.setattr(detect_module, "ws_connect", connect)
+    monkeypatch.setattr(detect_module, "ws_send_json", lambda *_args: None)
+    monkeypatch.setattr(detect_module, "ws_recv_frame", recv_frame)
+    monkeypatch.setattr(detect_module, "ws_close", closed.append)
+    monkeypatch.setattr(detect_module, "check_capabilities_pairing", lambda _caps: None)
+
+    detect_module._probe_engine_websocket(
+        "ws://example.test/v1/ws",
+        timeout=1.0,
+        connect_timeout=0.25,
+        headers=None,
+    )
+
+    assert connect_timeouts == [0.25]
+    assert closed == [connection]
 
 
 def test_http_scheme_prefers_standalone_capabilities(monkeypatch):
@@ -114,7 +164,7 @@ def test_host_port_prefers_engine_grpc(monkeypatch):
 def test_host_without_port_expands_candidates(monkeypatch):
     seen = []
 
-    def fake_engine_ws(url, *, timeout, headers):
+    def fake_engine_ws(url, *, timeout, connect_timeout, headers):
         seen.append(url)
 
     monkeypatch.setattr("qwen3tts.detect._probe_engine_websocket", fake_engine_ws)

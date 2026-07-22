@@ -26,13 +26,26 @@ import pytest
 from qwen3tts_protocol import AudioChunk
 from qwen3tts._adapters.engine_websocket import _iter_conn_messages
 from qwen3tts._internal.raw_websocket import (
+    RawWebSocketConnection,
     RawWebSocketError,
     ws_connect,
     ws_recv_frame,
     ws_close,
+    ws_send_json,
 )
 
 _WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def test_send_socket_error_is_normalized_to_transport_error():
+    class _ResetSocket:
+        def send(self, _payload):
+            raise ConnectionResetError("peer reset")
+
+    conn = RawWebSocketConnection(_ResetSocket())
+
+    with pytest.raises(RawWebSocketError, match="send failed"):
+        ws_send_json(conn, {"type": "text", "text": "hello"})
 
 
 def _server_frame(opcode: int, payload: bytes) -> bytes:

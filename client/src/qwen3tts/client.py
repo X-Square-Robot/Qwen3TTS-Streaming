@@ -43,6 +43,7 @@ class TTSClient:
         model_name: str | None = None,
         model_version: str = DEFAULT_MODEL_VERSION,
         timeout: float = 30.0,
+        connect_timeout: float | None = None,
         headers: dict[str, str] | None = None,
         metadata=None,
         verify: bool = True,
@@ -53,6 +54,7 @@ class TTSClient:
             model_name=model_name,
             model_version=model_version,
             timeout=timeout,
+            connect_timeout=connect_timeout,
             headers=headers,
             metadata=metadata,
         )
@@ -62,6 +64,7 @@ class TTSClient:
             model_name=detected.model_name or model_name,
             model_version=detected.model_version or model_version,
             timeout=timeout,
+            connect_timeout=connect_timeout,
             headers=headers,
             metadata=metadata,
         )
@@ -142,11 +145,17 @@ def _build_adapter(
     model_name: str | None,
     model_version: str,
     timeout: float,
+    connect_timeout: float | None,
     headers,
     metadata,
 ):
     if transport == TRANSPORT_ENGINE_WEBSOCKET:
-        return EngineWebSocketAdapter(endpoint, timeout=timeout, headers=headers)
+        return EngineWebSocketAdapter(
+            endpoint,
+            timeout=timeout,
+            connect_timeout=connect_timeout,
+            headers=headers,
+        )
     if transport == TRANSPORT_ENGINE_GRPC:
         return EngineGrpcAdapter(
             endpoint, timeout=timeout, metadata=metadata, headers=headers

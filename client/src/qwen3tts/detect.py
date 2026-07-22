@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import socket
+import time
 from urllib.parse import urlparse
 
 import requests
@@ -39,6 +41,7 @@ def detect_transport(
     model_name: str | None,
     model_version: str = DEFAULT_MODEL_VERSION,
     timeout: float,
+    connect_timeout: float | None = None,
     headers: dict[str, str] | None = None,
     metadata=None,
 ) -> DetectedTransport:
@@ -68,6 +71,7 @@ def detect_transport(
         return _detect_websocket_url(
             endpoint,
             timeout=timeout,
+            connect_timeout=connect_timeout,
             headers=headers,
             report=report,
             model_version=model_version,
@@ -84,6 +88,7 @@ def detect_transport(
     return _detect_bare_endpoint(
         endpoint,
         timeout=timeout,
+        connect_timeout=connect_timeout,
         report=report,
         model_name=model_name,
         model_version=model_version,
@@ -91,10 +96,21 @@ def detect_transport(
 
 
 def _detect_websocket_url(
-    url: str, *, timeout: float, headers, report: list[dict], model_version: str
+    url: str,
+    *,
+    timeout: float,
+    connect_timeout: float | None,
+    headers,
+    report: list[dict],
+    model_version: str,
 ) -> DetectedTransport:
     try:
-        _probe_engine_websocket(url, timeout=timeout, headers=headers)
+        _probe_engine_websocket(
+            url,
+            timeout=timeout,
+            connect_timeout=connect_timeout,
+            headers=headers,
+        )
     except ProtocolVersionMismatchError:
         # Definitive answer: we reached a live engine, wrong SDK pairing.
         raise
@@ -215,6 +231,7 @@ def _detect_bare_endpoint(
     endpoint: str,
     *,
     timeout: float,
+    connect_timeout: float | None,
     report: list[dict],
     model_name: str | None,
     model_version: str,
@@ -304,7 +321,12 @@ def _detect_bare_endpoint(
         if port == DEFAULT_ENGINE_WS_PORT:
             ws_url = f"ws://{host}:{port}{DEFAULT_ENGINE_WS_PATH}"
             try:
-                _probe_engine_websocket(ws_url, timeout=timeout, headers=None)
+                _probe_engine_websocket(
+                    ws_url,
+                    timeout=timeout,
+                    connect_timeout=connect_timeout,
+                    headers=None,
+                )
                 report.append(
                     {
                         "transport": TRANSPORT_ENGINE_WEBSOCKET,
@@ -348,16 +370,27 @@ def _detect_bare_endpoint(
     )
 
 
-def _probe_engine_websocket(url: str, *, timeout: float, headers) -> None:
-    conn = ws_connect(url, timeout=timeout, headers=headers)
+def _probe_engine_websocket(
+    url: str,
+    *,
+    timeout: float,
+    connect_timeout: float | None = None,
+    headers,
+) -> None:
+    conn = ws_connect(
+        url,
+        timeout=timeout if connect_timeout is None else connect_timeout,
+        headers=headers,
+    )
     try:
         ws_send_json(conn, {"type": "get_capabilities"})
-        deadline = __import__("time").perf_counter() + timeout
-        while __import__("time").perf_counter() < deadline:
-            conn.settimeout(
-                max(0.05, min(0.2, deadline - __import__("time").perf_counter()))
-            )
-            opcode, payload = ws_recv_frame(conn)
+        deadline = time.perf_counter() + timeout
+        while time.perf_counter() < deadline:
+            conn.settimeout(max(0.05, min(0.2, deadline - time.perf_counter())))
+            try:
+                opcode, payload = ws_recv_frame(conn)
+            except socket.timeout:
+                continue
             if opcode != 0x1:
                 continue
             message = json.loads(payload.decode("utf-8"))
