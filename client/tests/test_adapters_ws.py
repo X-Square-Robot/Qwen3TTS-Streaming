@@ -500,3 +500,16 @@ class TestSendOnDeadConnection:
         monkeypatch.setattr(_ew, "ws_send_json", self._raise_raw)
         session = self._make_session()
         session.cancel(reason="interrupt")  # 不抛：死连接下 cancel 目的已达成
+
+    def test_close_is_public_hard_stop_and_unblocks_consumer(self, monkeypatch):
+        session = self._make_session()
+        sent: list[dict] = []
+        closed = [False]
+        monkeypatch.setattr(_ew, "ws_send_json", _make_ws_send_json(sent))
+        monkeypatch.setattr(_ew, "ws_close", _make_ws_close(closed))
+
+        session.close(reason="worker shutdown")
+
+        assert sent == [{"type": "cancel", "reason": "worker shutdown"}]
+        assert closed[0]
+        assert list(session.iter_messages()) == []

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 
 import pytest
 
@@ -44,6 +46,41 @@ class TestBaseStreamSession:
         with pytest.raises(StreamClosedError, match="already closed"):
             session._check_send_open()
 
+    def test_close_cancels_and_unblocks_iter_messages(self):
+        session = BaseStreamSession(session_id="s-close", transport="test")
+        cancel_reasons = []
+        session.cancel = lambda reason="": cancel_reasons.append(reason)
+
+        session.close(reason="worker shutdown")
+
+        assert cancel_reasons == ["worker shutdown"]
+        assert list(session.iter_messages()) == []
+        assert session._closed is True
+
+    def test_post_send_idle_timeout_does_not_count_pre_end_silence(self):
+        session = BaseStreamSession(session_id="s-wait", transport="test")
+
+        def finish_later():
+            time.sleep(0.08)
+            session._put_message(StreamEvent(type="done", session_id="s-wait"))
+
+        producer = threading.Thread(target=finish_later, daemon=True)
+        producer.start()
+        messages = list(session.iter_messages(post_send_idle_timeout=0.02))
+        producer.join(timeout=1.0)
+
+        assert [message.type for message in messages] == ["done"]
+
+    def test_post_send_idle_timeout_fires_after_end_without_terminal(self):
+        session = BaseStreamSession(session_id="s-idle", transport="test")
+        session._mark_send_closed()
+
+        started = time.monotonic()
+        with pytest.raises(TimeoutError, match="after send side closed"):
+            list(session.iter_messages(post_send_idle_timeout=0.03))
+
+        assert time.monotonic() - started < 0.5
+
 
 class TestAsyncStreamSession:
     def test_async_iter_messages(self):
@@ -63,6 +100,31 @@ class TestAsyncStreamSession:
         assert messages[0].type == "start"
         assert messages[1].type == "done"
 
+    def test_async_iter_messages_passes_post_send_idle_timeout(self):
+        sync_session = BaseStreamSession(session_id="s-idle-async", transport="test")
+        sync_session._mark_send_closed()
+
+        async def _run():
+            session = AsyncStreamSession(sync_session)
+            with pytest.raises(TimeoutError, match="after send side closed"):
+                async for _message in session.aiter_messages(post_send_idle_timeout=0.03):
+                    pass
+
+        asyncio.get_event_loop().run_until_complete(_run())
+
+    def test_close_still_unblocks_when_cancel_fails(self):
+        session = BaseStreamSession(session_id="s-close-fail", transport="test")
+
+        def fail_cancel(reason=""):
+            raise RuntimeError("transport already gone")
+
+        session.cancel = fail_cancel
+        session.close(reason="worker shutdown")
+
+        assert list(session.iter_messages()) == []
+        with pytest.raises(StreamClosedError, match="already closed"):
+            session._check_send_open()
+
     def test_async_delegates_to_sync(self):
         sync_session = BaseStreamSession(session_id="s1", transport="test")
         sync_session.send_text = lambda text, **kw: None
@@ -76,3 +138,15 @@ class TestAsyncStreamSession:
             assert session.degraded_to_oneshot is False
 
         asyncio.get_event_loop().run_until_complete(_run())
+
+    def test_async_close_delegates_to_sync(self):
+        sync_session = BaseStreamSession(session_id="s1", transport="test")
+        close_reasons = []
+        sync_session.close = lambda reason="": close_reasons.append(reason)
+
+        async def _run():
+            session = AsyncStreamSession(sync_session)
+            await session.aclose(reason="async shutdown")
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert close_reasons == ["async shutdown"]

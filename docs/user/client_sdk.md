@@ -160,6 +160,15 @@ for message in session.iter_messages():
     print(type(message).__name__, getattr(message, "meta", {}))
 ```
 
+Relays can bound a remote stream that accepted `end()` or `cancel()` but never
+returned a terminal event with
+`session.iter_messages(post_send_idle_timeout=30.0)`. Silence before the send
+side closes is not counted, and each received message resets the idle budget.
+Use `session.close(reason="worker shutdown")` for a hard local stop; it sends a
+best-effort cancel, closes the transport when supported, and immediately
+unblocks message consumers. Async sessions expose the matching `aclose()` and
+`aiter_messages(post_send_idle_timeout=...)` methods.
+
 ## Auto-Probing Rules
 
 When `transport=` is set explicitly, no probing is done and the specified adaptor is used directly.

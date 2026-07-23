@@ -298,6 +298,19 @@ class EngineWebSocketStreamSession(BaseStreamSession):
             # wanted (the server tears the session down on disconnect).
             pass
 
+    def close(self, reason: str = "client closed") -> None:
+        """Cancel and force-close the websocket from any caller thread.
+
+        This is intentionally stronger than ``cancel()``: a stalled or broken
+        link may never deliver a terminal event, so relays need a public way to
+        unblock both the SDK reader and ``iter_messages()`` without reaching
+        into ``session._conn`` or importing private websocket helpers.
+        """
+        try:
+            super().close(reason=reason)
+        finally:
+            ws_close(self._conn)
+
     def _send_or_close(self, payload: dict) -> None:
         """Send a control/text payload, mapping a dead connection to
         ``StreamClosedError``.

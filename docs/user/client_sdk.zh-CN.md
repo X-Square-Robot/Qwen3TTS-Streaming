@@ -154,6 +154,13 @@ for message in session.iter_messages():
     print(type(message).__name__, getattr(message, "meta", {}))
 ```
 
+中继服务可用 `session.iter_messages(post_send_idle_timeout=30.0)` 限制已经接收
+`end()` 或 `cancel()`、但迟迟不返回终态事件的远端流。发送侧关闭前的静默不计入
+预算，每条新消息都会重置空闲计时。需要立即终止本地会话时使用
+`session.close(reason="worker shutdown")`：它会尽力发送 cancel，在传输支持时强制
+断开连接，并立即解除消息消费者的阻塞。异步会话提供对应的 `aclose()` 和
+`aiter_messages(post_send_idle_timeout=...)`。
+
 ## 自动探测规则
 
 显式 `transport=` 时不探测，直接走指定 adaptor。
