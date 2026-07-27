@@ -9,6 +9,7 @@ import requests
 
 from qwen3tts_protocol import DetectedTransport
 
+from ._internal.auth import grpc_metadata_as_headers, normalize_grpc_metadata
 from ._internal.raw_websocket import ws_close, ws_connect, ws_recv_frame, ws_send_json
 from ._internal.utils import check_capabilities_pairing
 from .constants import (
@@ -89,6 +90,8 @@ def detect_transport(
         endpoint,
         timeout=timeout,
         connect_timeout=connect_timeout,
+        headers=headers,
+        metadata=metadata,
         report=report,
         model_name=model_name,
         model_version=model_version,
@@ -164,7 +167,10 @@ def _detect_http_url(
                 )
                 return DetectedTransport(
                     requested_endpoint=base_url,
-                    resolved_endpoint=f"{base_url.rstrip('/')}{DEFAULT_ENGINE_WS_PATH}",
+                    resolved_endpoint=(
+                        f"{_http_base_to_websocket(base_url).rstrip('/')}"
+                        f"{DEFAULT_ENGINE_WS_PATH}"
+                    ),
                     transport=TRANSPORT_ENGINE_WEBSOCKET,
                     model_name="",
                     model_version=model_version,
@@ -227,11 +233,21 @@ def _detect_http_url(
     )
 
 
+def _http_base_to_websocket(base_url: str) -> str:
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError(f"expected HTTP endpoint, got {base_url!r}")
+    websocket_scheme = "wss" if parsed.scheme == "https" else "ws"
+    return parsed._replace(scheme=websocket_scheme).geturl()
+
+
 def _detect_bare_endpoint(
     endpoint: str,
     *,
     timeout: float,
     connect_timeout: float | None,
+    headers,
+    metadata,
     report: list[dict],
     model_name: str | None,
     model_version: str,
@@ -252,7 +268,7 @@ def _detect_bare_endpoint(
                 return _detect_http_url(
                     candidate,
                     timeout=timeout,
-                    headers=None,
+                    headers=headers,
                     report=report,
                     model_name=model_name,
                     model_version=model_version,
@@ -263,7 +279,12 @@ def _detect_bare_endpoint(
         host, port = _split_host_port(candidate)
         if port == DEFAULT_ENGINE_GRPC_PORT:
             try:
-                _probe_engine_grpc(candidate, timeout=timeout)
+                _probe_engine_grpc(
+                    candidate,
+                    timeout=timeout,
+                    headers=headers,
+                    metadata=metadata,
+                )
                 report.append(
                     {
                         "transport": TRANSPORT_ENGINE_GRPC,
@@ -293,7 +314,13 @@ def _detect_bare_endpoint(
         if port == DEFAULT_TRITON_GRPC_PORT:
             try:
                 triton_model = model_name or DEFAULT_TRITON_GRPC_MODEL
-                _probe_triton_grpc(candidate, timeout=timeout, model_name=triton_model)
+                _probe_triton_grpc(
+                    candidate,
+                    timeout=timeout,
+                    model_name=triton_model,
+                    headers=headers,
+                    metadata=metadata,
+                )
                 report.append(
                     {
                         "transport": TRANSPORT_TRITON_GRPC,
@@ -325,7 +352,7 @@ def _detect_bare_endpoint(
                     ws_url,
                     timeout=timeout,
                     connect_timeout=connect_timeout,
-                    headers=None,
+                    headers=headers,
                 )
                 report.append(
                     {
@@ -358,7 +385,7 @@ def _detect_bare_endpoint(
             return _detect_http_url(
                 http_fallback,
                 timeout=timeout,
-                headers=None,
+                headers=headers,
                 report=report,
                 model_name=model_name,
                 model_version=model_version,
@@ -402,7 +429,13 @@ def _probe_engine_websocket(
         ws_close(conn)
 
 
-def _probe_engine_grpc(endpoint: str, *, timeout: float) -> None:
+def _probe_engine_grpc(
+    endpoint: str,
+    *,
+    timeout: float,
+    headers=None,
+    metadata=None,
+) -> None:
     try:
         import grpc
     except ImportError as exc:
@@ -416,7 +449,9 @@ def _probe_engine_grpc(endpoint: str, *, timeout: float) -> None:
         grpc.channel_ready_future(channel).result(timeout=timeout)
         stub = tts_pb2_grpc.TTSServiceStub(channel)
         response = stub.GetCapabilities(
-            tts_pb2.GetCapabilitiesRequest(), timeout=timeout
+            tts_pb2.GetCapabilitiesRequest(),
+            timeout=timeout,
+            metadata=normalize_grpc_metadata(metadata, headers),
         )
         check_capabilities_pairing(
             {
@@ -428,7 +463,14 @@ def _probe_engine_grpc(endpoint: str, *, timeout: float) -> None:
         channel.close()
 
 
-def _probe_triton_grpc(endpoint: str, *, timeout: float, model_name: str) -> None:
+def _probe_triton_grpc(
+    endpoint: str,
+    *,
+    timeout: float,
+    model_name: str,
+    headers=None,
+    metadata=None,
+) -> None:
     try:
         import tritonclient.grpc as grpcclient
     except ImportError as exc:
@@ -436,11 +478,14 @@ def _probe_triton_grpc(endpoint: str, *, timeout: float, model_name: str) -> Non
             "auto-detect for triton-grpc requires the 'triton' extra"
         ) from exc
     client = grpcclient.InferenceServerClient(url=endpoint)
-    if not client.is_server_live():
+    grpc_headers = grpc_metadata_as_headers(metadata, headers)
+    if not client.is_server_live(headers=grpc_headers, client_timeout=timeout):
         raise RuntimeError("server_live=false")
-    if not client.is_server_ready():
+    if not client.is_server_ready(headers=grpc_headers, client_timeout=timeout):
         raise RuntimeError("server_ready=false")
-    if model_name and not client.is_model_ready(model_name):
+    if model_name and not client.is_model_ready(
+        model_name, headers=grpc_headers, client_timeout=timeout
+    ):
         raise RuntimeError(f"model_ready[{model_name}]=false")
 
 

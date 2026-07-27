@@ -57,6 +57,17 @@ class TestBaseStreamSession:
         assert list(session.iter_messages()) == []
         assert session._closed is True
 
+    def test_stop_delegates_to_end(self):
+        session = BaseStreamSession(session_id="s-stop", transport="test")
+        timestamps = []
+        session.end = lambda **kwargs: timestamps.append(
+            kwargs.get("client_timestamp_ms")
+        )
+
+        session.stop(client_timestamp_ms=123)
+
+        assert timestamps == [123]
+
     def test_post_send_idle_timeout_does_not_count_pre_end_silence(self):
         session = BaseStreamSession(session_id="s-wait", transport="test")
 
@@ -107,7 +118,9 @@ class TestAsyncStreamSession:
         async def _run():
             session = AsyncStreamSession(sync_session)
             with pytest.raises(TimeoutError, match="after send side closed"):
-                async for _message in session.aiter_messages(post_send_idle_timeout=0.03):
+                async for _message in session.aiter_messages(
+                    post_send_idle_timeout=0.03
+                ):
                     pass
 
         asyncio.get_event_loop().run_until_complete(_run())
@@ -150,3 +163,17 @@ class TestAsyncStreamSession:
 
         asyncio.get_event_loop().run_until_complete(_run())
         assert close_reasons == ["async shutdown"]
+
+    def test_async_stop_delegates_to_sync(self):
+        sync_session = BaseStreamSession(session_id="s-stop", transport="test")
+        timestamps = []
+        sync_session.stop = lambda **kwargs: timestamps.append(
+            kwargs.get("client_timestamp_ms")
+        )
+
+        async def _run():
+            session = AsyncStreamSession(sync_session)
+            await session.stop(client_timestamp_ms=456)
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert timestamps == [456]

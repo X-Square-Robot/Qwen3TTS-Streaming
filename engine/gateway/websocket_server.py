@@ -5,6 +5,7 @@ Protocol:
     {"type":"start","session_id":"...","config":{...}}
     {"type":"text","text":"...","seq_no":1}
     {"type":"end"}
+    {"type":"stop"}  # alias for end
     {"type":"cancel"}
     {"type":"oneshot","session_id":"...","text":"...","config":{...}}
     {"type":"get_capabilities"}
@@ -15,6 +16,10 @@ Protocol:
 
   Server binary frames:
     raw PCM audio bytes matching the audio format declared by the ``start`` event.
+
+A connection carries at most one active synthesis session, but it may carry
+multiple sessions serially.  A session ``done``/``error`` event ends only that
+logical session; the websocket remains available for the next ``start``.
 """
 
 from __future__ import annotations
@@ -77,12 +82,13 @@ _CAPABILITIES_PATH = "/v1/capabilities"
 _WEBSOCKET_HEARTBEAT_SEC = float(
     os.environ.get("ENGINE_WEBSOCKET_HEARTBEAT_SEC", "30") or "30"
 )
+_WEBSOCKET_REUSABLE_META_KEY = "websocket_connection_reusable"
 
 logger = logging.getLogger(__name__)
 
 
 class WebSocketGateway:
-    """Bridge a single websocket connection to one TTS engine session."""
+    """Bridge one websocket to a serial sequence of TTS engine sessions."""
 
     def __init__(self, engine: TTSEngine):
         self._engine = engine
@@ -97,24 +103,69 @@ class WebSocketGateway:
         await ws.prepare(request)
 
         session_id = None
-        outbound_queue: asyncio.Queue = asyncio.Queue(
-            maxsize=_WEBSOCKET_AUDIO_QUEUE_MAXSIZE
-        )
+        # A fresh queue is allocated for every logical session.  Engine
+        # callbacks can race with cancellation/completion; keeping their old
+        # queue detached prevents a late callback from leaking audio/events
+        # into the next session that reuses this websocket.
+        outbound_queue: asyncio.Queue | None = None
         request_queue: asyncio.Queue = asyncio.Queue(
             maxsize=_WEBSOCKET_REQUEST_QUEUE_MAXSIZE
         )
-        got_cancel = False
         connection_closed = False
+        input_closed = False
         start_request: SessionStartRequest | None = None
         request_task: asyncio.Task | None = None
         outbound_task: asyncio.Task | None = None
         pump_task = asyncio.create_task(self._pump_messages(ws, request_queue))
 
+        async def reset_session() -> None:
+            """Release the current logical session without closing ``ws``."""
+
+            nonlocal session_id, start_request, outbound_queue, outbound_task
+            nonlocal input_closed
+            # Usually the queue-get task delivered the terminal itself. It can
+            # still be pending when cancel sends its terminal directly.
+            if outbound_task is not None and not outbound_task.done():
+                outbound_task.cancel()
+                try:
+                    await outbound_task
+                except asyncio.CancelledError:
+                    pass
+            outbound_task = None
+            session_id = None
+            input_closed = False
+            start_request = None
+            outbound_queue = None
+
+        async def send_outbound_frame(frame: dict[str, Any]) -> bool:
+            """Send one queued frame; return true when it ends the session."""
+
+            nonlocal connection_closed
+            terminal = _is_terminal_frame(frame)
+            event_type = str(frame.get("event", {}).get("type", ""))
+            reusable = terminal and event_type == "done" and input_closed
+            if reusable:
+                # Older gateways closed the physical socket after each terminal
+                # event. The explicit marker lets a new SDK distinguish this
+                # persistent protocol and safely fall back when it is absent.
+                event = frame.setdefault("event", {})
+                event.setdefault("meta", {})[_WEBSOCKET_REUSABLE_META_KEY] = "true"
+            await _send_frame(ws, frame)
+            if not terminal:
+                return False
+            await reset_session()
+            if not reusable:
+                # An engine error (or an unexpected early done while input is
+                # still open) can race with already queued client text. Closing
+                # prevents those old frames from contaminating a later session.
+                connection_closed = True
+            return True
+
         try:
             while True:
                 if request_task is None and not connection_closed:
                     request_task = asyncio.create_task(request_queue.get())
-                if outbound_task is None and session_id and not got_cancel:
+                if outbound_task is None and session_id and outbound_queue is not None:
                     outbound_task = asyncio.create_task(outbound_queue.get())
 
                 wait_set = {
@@ -127,25 +178,32 @@ class WebSocketGateway:
                     wait_set, return_when=asyncio.FIRST_COMPLETED
                 )
 
-                # Flush any ready outbound frame BEFORE handling a control frame,
-                # so a parked chunk is not reordered behind frames the request
-                # branch drains via get_nowait (full-duplex: the client keeps
-                # sending text while receiving audio).
+                # Flush a ready outbound frame before handling a control frame,
+                # preserving callback queue order while the client continues
+                # sending text full-duplex.
                 if outbound_task in done:
                     frame = outbound_task.result()
                     outbound_task = None
+                    # Capture the queue: a terminal frame resets the connection's
+                    # current queue, but coalescing this batch must stay bound to
+                    # the session that produced it.
+                    current_queue = outbound_queue
+                    if current_queue is None:  # defensive; no session owns frame
+                        raise RuntimeError("websocket outbound frame has no session")
                     while True:
                         leftover = None
                         if frame.get("type") == "audio":
                             frame, leftover = _coalesce_queued_audio_frames(
-                                frame, outbound_queue
+                                frame, current_queue
                             )
-                        await _send_frame(ws, frame)
-                        if _is_terminal_frame(frame):
-                            return ws
+                        if await send_outbound_frame(frame):
+                            break
                         if leftover is None:
                             break
                         frame = leftover
+
+                    if connection_closed:
+                        break
 
                 if request_task in done:
                     kind, payload = request_task.result()
@@ -156,7 +214,6 @@ class WebSocketGateway:
 
                     if kind == "closed":
                         connection_closed = True
-                        got_cancel = True
                     else:
                         message = payload
                         msg_type = str(message.get("type", "") or "").strip().lower()
@@ -165,6 +222,7 @@ class WebSocketGateway:
                             await ws.send_json(
                                 {
                                     "type": "capabilities",
+                                    _WEBSOCKET_REUSABLE_META_KEY: True,
                                     "capabilities": normalize_capabilities(
                                         self._engine.describe_capabilities()
                                     ),
@@ -180,6 +238,9 @@ class WebSocketGateway:
                             start_request = _start_request_from_ws_message(
                                 message,
                                 default_mode=InputMode.AUTO,
+                            )
+                            outbound_queue = asyncio.Queue(
+                                maxsize=_WEBSOCKET_AUDIO_QUEUE_MAXSIZE
                             )
                             session_id = await self._create_session(
                                 message.get("session_id"),
@@ -199,11 +260,15 @@ class WebSocketGateway:
                             start_request.config.input_mode = InputMode.FULL_TEXT
                             if start_request.config.group_policy == GroupPolicy.NONE:
                                 start_request.config.group_policy = GroupPolicy.AUTO
+                            outbound_queue = asyncio.Queue(
+                                maxsize=_WEBSOCKET_AUDIO_QUEUE_MAXSIZE
+                            )
                             session_id = await self._create_session(
                                 message.get("session_id"),
                                 start_request=start_request,
                                 outbound_queue=outbound_queue,
                             )
+                            input_closed = True
                             text = str(message.get("text", "") or "")
                             if not text:
                                 raise ValueError(
@@ -229,36 +294,65 @@ class WebSocketGateway:
                                 str(message.get("text", "") or ""),
                             )
 
-                        elif msg_type == "end":
+                        elif msg_type in {"end", "stop"}:
                             if not session_id:
-                                raise ValueError("received 'end' before 'start'")
+                                raise ValueError(
+                                    f"received '{msg_type}' before 'start'"
+                                )
                             if start_request is not None:
                                 client_ts_ms = _coerce_ws_int(
                                     message.get("client_timestamp_ms"), 0
                                 )
                                 if client_ts_ms > 0:
                                     start_request.timing.client_end_ts_ms = client_ts_ms
+                            input_closed = True
                             await self._engine.mark_input_complete(session_id)
 
                         elif msg_type == "cancel":
                             if session_id:
-                                await self._engine.cancel(session_id)
-                            got_cancel = True
-                            connection_closed = True
+                                cancelled_session_id = session_id
+                                cancel_reason = str(message.get("reason", "") or "")
+
+                                # Stop a parked queue read before detaching the
+                                # per-session queue.  Frames already sent before
+                                # this control message remain valid; queued frames
+                                # are intentionally discarded by abandoning the
+                                # queue after the engine is cancelled.
+                                if (
+                                    outbound_task is not None
+                                    and not outbound_task.done()
+                                ):
+                                    outbound_task.cancel()
+                                    try:
+                                        await outbound_task
+                                    except asyncio.CancelledError:
+                                        pass
+                                    outbound_task = None
+
+                                await self._engine.cancel(cancelled_session_id)
+                                await ws.send_json(
+                                    _make_event_frame(
+                                        event_type="done",
+                                        session_id=cancelled_session_id,
+                                        message=cancel_reason,
+                                        meta={
+                                            "terminal_reason": "cancelled",
+                                            "cancel_reason": cancel_reason,
+                                            _WEBSOCKET_REUSABLE_META_KEY: "true",
+                                        },
+                                    )
+                                )
+                                # Reset detaches this session's queue. It remains
+                                # reachable only from old callbacks; the next
+                                # session cannot observe their late frames.
+                                await reset_session()
 
                         else:
                             raise ValueError(
                                 f"unsupported websocket message type: '{msg_type or '<empty>'}'"
                             )
 
-                        async for frame in self._drain_available_messages(
-                            outbound_queue
-                        ):
-                            await _send_frame(ws, frame)
-                            if _is_terminal_frame(frame):
-                                return ws
-
-                if connection_closed and got_cancel:
+                if connection_closed:
                     break
 
         except asyncio.CancelledError:
@@ -430,10 +524,6 @@ class WebSocketGateway:
             await request_queue.put(("error", exc))
         finally:
             await request_queue.put(("closed", None))
-
-    async def _drain_available_messages(self, outbound_queue: asyncio.Queue):
-        while not outbound_queue.empty():
-            yield outbound_queue.get_nowait()
 
 
 def _coalesce_queued_audio_frames(

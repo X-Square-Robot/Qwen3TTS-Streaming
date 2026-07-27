@@ -5,7 +5,12 @@ import pytest
 from qwen3tts import SessionStartRequest, SynthesisConfig, TTSClient
 from qwen3tts.audio import decode_audio_bytes_to_array
 from qwen3tts.client import _build_adapter
-from qwen3tts.constants import TRANSPORT_ENGINE_WEBSOCKET
+from qwen3tts.constants import (
+    TRANSPORT_ENGINE_GRPC,
+    TRANSPORT_ENGINE_WEBSOCKET,
+    TRANSPORT_TRITON_GRPC,
+    TRANSPORT_TRITON_HTTP,
+)
 
 
 class _FakeAdapter:
@@ -103,10 +108,89 @@ def test_build_websocket_adapter_forwards_connect_timeout():
         model_version="1",
         timeout=120.0,
         connect_timeout=5.0,
+        reconnect_attempts=3,
+        max_idle_connections=4,
+        keepalive_interval=9.0,
         headers={"X-Test": "1"},
         metadata=None,
     )
 
     assert adapter.timeout == 120.0
     assert adapter.connect_timeout == 5.0
+    assert adapter.reconnect_attempts == 3
+    assert adapter.max_idle_connections == 4
+    assert adapter.keepalive_interval == 9.0
     assert adapter.headers == {"X-Test": "1"}
+
+
+@pytest.mark.parametrize(
+    ("transport", "endpoint"),
+    [
+        (TRANSPORT_ENGINE_WEBSOCKET, "ws://localhost:50052/v1/ws"),
+        (TRANSPORT_TRITON_HTTP, "http://localhost:8000"),
+    ],
+)
+def test_connect_key_adds_bearer_header_for_http_transports(transport, endpoint):
+    client = TTSClient.connect(
+        endpoint,
+        transport=transport,
+        key="secret",
+        verify=False,
+    )
+
+    assert client._adapter.headers == {"Authorization": "Bearer secret"}
+
+
+@pytest.mark.parametrize(
+    ("transport", "endpoint"),
+    [
+        (TRANSPORT_ENGINE_GRPC, "localhost:50051"),
+        (TRANSPORT_TRITON_GRPC, "localhost:8001"),
+    ],
+)
+def test_connect_key_adds_lowercase_grpc_metadata(transport, endpoint):
+    client = TTSClient.connect(
+        endpoint,
+        transport=transport,
+        key="secret",
+        verify=False,
+    )
+
+    assert ("authorization", "Bearer secret") in client._adapter.metadata
+
+
+def test_connect_key_overrides_authorization_without_mutating_inputs():
+    headers = {"X-Test": "1", "authorization": "Bearer old-header"}
+    metadata = [("x-meta", "2"), ("Authorization", "Bearer old-metadata")]
+
+    client = TTSClient.connect(
+        "localhost:50051",
+        transport=TRANSPORT_ENGINE_GRPC,
+        key="new-key",
+        headers=headers,
+        metadata=metadata,
+        verify=False,
+    )
+
+    assert headers == {"X-Test": "1", "authorization": "Bearer old-header"}
+    assert metadata == [
+        ("x-meta", "2"),
+        ("Authorization", "Bearer old-metadata"),
+    ]
+    assert client._adapter.metadata == (
+        ("x-test", "1"),
+        ("x-meta", "2"),
+        ("authorization", "Bearer new-key"),
+    )
+
+
+def test_connect_key_none_does_not_inject_authorization():
+    client = TTSClient.connect(
+        "ws://localhost:50052/v1/ws",
+        transport=TRANSPORT_ENGINE_WEBSOCKET,
+        key=None,
+        headers={"X-Test": "1"},
+        verify=False,
+    )
+
+    assert client._adapter.headers == {"X-Test": "1"}

@@ -77,6 +77,13 @@ class BaseStreamSession:
             self._mark_send_closed()
             self._close_message_queue()
 
+    def stop(self, *, client_timestamp_ms: int | None = None) -> None:
+        """Graceful alias for :meth:`end` across all streaming transports."""
+        end = getattr(self, "end", None)
+        if not callable(end):  # pragma: no cover - concrete sessions implement end
+            raise NotImplementedError("stream session does not implement end()")
+        end(client_timestamp_ms=client_timestamp_ms)
+
     def iter_messages(
         self,
         *,
@@ -150,6 +157,11 @@ class AsyncStreamSession:
 
     async def end(self, *, client_timestamp_ms: int | None = None) -> None:
         await asyncio.to_thread(self._sync.end, client_timestamp_ms=client_timestamp_ms)
+
+    async def stop(self, *, client_timestamp_ms: int | None = None) -> None:
+        await asyncio.to_thread(
+            self._sync.stop, client_timestamp_ms=client_timestamp_ms
+        )
 
     async def cancel(self, reason: str = "") -> None:
         await asyncio.to_thread(self._sync.cancel, reason=reason)

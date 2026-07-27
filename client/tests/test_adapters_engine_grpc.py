@@ -41,6 +41,48 @@ class _FakeTTSService(tts_pb2_grpc.TTSServiceServicer):
                 return
 
 
+class _AuthCapturingTTSService(tts_pb2_grpc.TTSServiceServicer):
+    def __init__(self):
+        self.calls: list[tuple[str, dict[str, str]]] = []
+
+    def _capture(self, name, context):
+        self.calls.append(
+            (
+                name,
+                {item.key: item.value for item in context.invocation_metadata()},
+            )
+        )
+
+    def GetCapabilities(self, request, context):
+        self._capture("capabilities", context)
+        return tts_pb2.GetCapabilitiesResponse()
+
+    def SynthesizeOnce(self, request, context):
+        self._capture("oneshot", context)
+        yield tts_pb2.SynthesizeResponse(
+            event=tts_pb2.StreamEvent(type="done", session_id=request.session_id)
+        )
+
+    def SynthesizeStream(self, request_iterator, context):
+        self._capture("stream", context)
+        session_id = ""
+        for request in request_iterator:
+            which = request.WhichOneof("request")
+            if which in ("start", "init"):
+                session_id = (
+                    request.start.session_id
+                    if which == "start"
+                    else request.init.session_id
+                )
+            elif which in ("end", "done"):
+                yield tts_pb2.SynthesizeResponse(
+                    event=tts_pb2.StreamEvent(type="done", session_id=session_id)
+                )
+                return
+            elif which == "cancel":
+                return
+
+
 @pytest.fixture
 def fake_server():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
@@ -49,6 +91,19 @@ def fake_server():
     server.start()
     try:
         yield f"127.0.0.1:{port}"
+    finally:
+        server.stop(None)
+
+
+@pytest.fixture
+def auth_server():
+    service = _AuthCapturingTTSService()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    tts_pb2_grpc.add_TTSServiceServicer_to_server(service, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        yield f"127.0.0.1:{port}", service
     finally:
         server.stop(None)
 
@@ -86,6 +141,38 @@ def test_close_releases_the_channel(fake_server):
 
     adapter.close()
     assert adapter._grpc_channel is None
+
+
+def test_all_engine_grpc_rpcs_forward_lowercase_metadata(auth_server):
+    endpoint, service = auth_server
+    adapter = EngineGrpcAdapter(
+        endpoint,
+        timeout=5.0,
+        metadata=(("X-Meta", "value"),),
+        headers={"Authorization": "Bearer secret"},
+    )
+    config = SynthesisConfig(task_type="custom_voice")
+    start = SessionStartRequest(
+        session_id="s-auth",
+        config=config,
+        output_policy=config.output_policy,
+        timing=config.timing_context,
+    )
+
+    adapter.get_capabilities()
+    adapter.synthesize_bytes("hello", request=start)
+    session = adapter.open_stream(start)
+    session.end()
+    list(session.iter_messages())
+
+    assert [name for name, _metadata in service.calls] == [
+        "capabilities",
+        "oneshot",
+        "stream",
+    ]
+    for _name, metadata in service.calls:
+        assert metadata["authorization"] == "Bearer secret"
+        assert metadata["x-meta"] == "value"
 
 
 class _NoTerminalTTSService(tts_pb2_grpc.TTSServiceServicer):

@@ -17,7 +17,7 @@ Unify the standalone `gateway -> interface -> dispatcher -> backend` around an e
 
 The Gateway acts only as a protocol adapter.
 
-- Receives `start -> text* -> end/cancel`
+- Receives `start -> text* -> stop/end/cancel`
 - Validates and normalizes `SessionConfig`
 - Parses the canonical `OutputPolicy`, `VADPolicy`, and `TimingContext`
 - Converts output audio to the requested output format via the shared output pipeline
@@ -88,11 +88,20 @@ The interface contract version is:
 Current transports remain backward-compatible:
 
 - gRPC legacy `init/text_complete`
-- WebSocket `start/text/end/cancel/oneshot`
+- WebSocket `start/text/stop/end/cancel/oneshot`
 - Triton legacy JSON request fields
 - Remote worker top-level compatibility fields
 
 Missing new fields always default to the existing behavior.
+
+For WebSocket, one physical connection carries one active session at a time
+and may carry multiple sessions serially. `stop` and legacy `end` both finish
+input and drain output; `cancel` discards queued output. A terminal `done` or
+`error` event is the session boundary, so clients must not wait for socket
+closure. Persistent gateways add
+`event.meta.websocket_connection_reusable="true"` only to safely reusable
+successful/cancelled `done` events. Engine errors close the connection; an
+absent marker tells a new SDK to fall back safely to a new connection.
 
 ### Capability Query
 

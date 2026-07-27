@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Standalone WebSocket connections can now carry multiple logical TTS sessions
+  serially. The SDK adds a concurrent connection pool, idle keepalive, stale
+  connection probing, new-session reconnects, and a `stop()` alias for `end()`.
+  A reusable-`done` capability marker makes mixed-version deployments safely
+  fall back to reconnect-per-session; engine-error connections are discarded.
+- `TTSClient.connect()` now accepts `key=None`. A non-`None` key injects
+  `Authorization: Bearer <key>` for HTTP/WebSocket and lowercase
+  `authorization` metadata for gRPC. Authentication remains the deployment
+  platform's responsibility; the engine does not validate this header.
+
 ### Fixed
 
 - Split the engine WebSocket handshake budget (`connect_timeout`) from the

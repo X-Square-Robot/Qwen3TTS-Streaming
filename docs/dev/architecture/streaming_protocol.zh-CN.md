@@ -17,7 +17,7 @@
 
 Gateway 仅作为协议适配器。
 
-- 接收 `start -> text* -> end/cancel`
+- 接收 `start -> text* -> stop/end/cancel`
 - 验证并规范化 `SessionConfig`
 - 解析规范的 `OutputPolicy`、`VADPolicy` 和 `TimingContext`
 - 通过共享输出流水线将输出音频转换为请求的输出格式
@@ -88,11 +88,18 @@ Backend 拥有合成状态。
 当前传输保持向后兼容：
 
 - gRPC 遗留 `init/text_complete`
-- WebSocket `start/text/end/cancel/oneshot`
+- WebSocket `start/text/stop/end/cancel/oneshot`
 - Triton 遗留 JSON 请求字段
 - 远程 worker 顶层兼容字段
 
 缺失的新字段始终默认为现有行为。
+
+WebSocket 的一条物理连接同一时刻只承载一个活动 session，但可串行承载多个
+session。`stop` 与兼容接口 `end` 都表示停止输入并排空输出，`cancel` 会丢弃排队
+输出。session 以终态 `done` 或 `error` 事件为边界，客户端不能再等待 socket 关闭。
+支持长连接的 gateway 只会在可安全复用的成功/取消 `done` 中添加
+`event.meta.websocket_connection_reusable="true"`。engine error 会关闭连接；缺少该
+标识时，新 SDK 会安全退化为重新建连。
 
 ### 能力查询
 

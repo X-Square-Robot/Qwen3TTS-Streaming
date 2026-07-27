@@ -13,6 +13,7 @@ from ._adapters.engine_grpc import EngineGrpcAdapter
 from ._adapters.engine_websocket import EngineWebSocketAdapter
 from ._adapters.triton_grpc import TritonGrpcAdapter
 from ._adapters.triton_http import TritonHttpAdapter
+from ._internal.auth import apply_bearer_key
 from .audio import decode_audio_bytes_to_array
 from .constants import (
     DEFAULT_MODEL_VERSION,
@@ -44,10 +45,15 @@ class TTSClient:
         model_version: str = DEFAULT_MODEL_VERSION,
         timeout: float = 30.0,
         connect_timeout: float | None = None,
+        reconnect_attempts: int = 1,
+        max_idle_connections: int = 8,
+        keepalive_interval: float = 15.0,
+        key: str | None = None,
         headers: dict[str, str] | None = None,
         metadata=None,
         verify: bool = True,
     ):
+        headers, metadata = apply_bearer_key(headers, metadata, key)
         detected = detect_transport(
             endpoint,
             transport=transport,
@@ -65,6 +71,9 @@ class TTSClient:
             model_version=detected.model_version or model_version,
             timeout=timeout,
             connect_timeout=connect_timeout,
+            reconnect_attempts=reconnect_attempts,
+            max_idle_connections=max_idle_connections,
+            keepalive_interval=keepalive_interval,
             headers=headers,
             metadata=metadata,
         )
@@ -77,6 +86,11 @@ class TTSClient:
         # ProtocolVersionMismatchError / EngineVersionMismatchError.
         if verify and transport != "auto":
             client.get_capabilities()
+        elif transport == "auto" and detected.transport == TRANSPORT_ENGINE_WEBSOCKET:
+            # Auto-detection used a short-lived probe socket.  Warm the actual
+            # adapter pool now so the first synthesis does not pay a second
+            # PaaS/LB websocket handshake.
+            adapter.connect()
         return client
 
     def get_capabilities(self):
@@ -148,6 +162,9 @@ def _build_adapter(
     connect_timeout: float | None,
     headers,
     metadata,
+    reconnect_attempts: int = 1,
+    max_idle_connections: int = 8,
+    keepalive_interval: float = 15.0,
 ):
     if transport == TRANSPORT_ENGINE_WEBSOCKET:
         return EngineWebSocketAdapter(
@@ -155,6 +172,9 @@ def _build_adapter(
             timeout=timeout,
             connect_timeout=connect_timeout,
             headers=headers,
+            reconnect_attempts=reconnect_attempts,
+            max_idle_connections=max_idle_connections,
+            keepalive_interval=keepalive_interval,
         )
     if transport == TRANSPORT_ENGINE_GRPC:
         return EngineGrpcAdapter(
@@ -167,6 +187,7 @@ def _build_adapter(
             model_version=model_version,
             timeout=timeout,
             metadata=metadata,
+            headers=headers,
         )
     if transport == TRANSPORT_TRITON_HTTP:
         return TritonHttpAdapter(

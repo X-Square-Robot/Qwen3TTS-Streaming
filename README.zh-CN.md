@@ -370,10 +370,14 @@ standalone engine 同时支持 gRPC 和 WebSocket。WebSocket 控制帧示例：
 ```json
 {"type":"start","session_id":"demo","config":{"task_type":"custom_voice","speaker":"Serena"}}
 {"type":"text","text":"你好，世界。"}
-{"type":"end"}
+{"type":"stop"}
 ```
 
-服务端返回 JSON event frame（协议事件、文本 token、边界、完成）和 Binary frame（PCM audio chunk，格式由 start/event 元数据声明）。
+`stop` 表示优雅停止输入并排空音频（`end` 仍是兼容别名），`cancel` 表示中止当前
+session。服务端返回 JSON event frame 和 Binary PCM frame。逻辑 session 以
+`done`/`error` 事件为边界，而不是以 socket 关闭为边界；同一 WebSocket 随后可再次
+接收 `start`。成功完成或取消产生的 `done` 可复用连接；engine `error` 会关闭连接，
+下一 session 重新建立。
 
 ## 项目结构
 

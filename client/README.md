@@ -175,6 +175,32 @@ auto-detects the backend. To pin it explicitly, pass `transport=`:
 | `localhost:50051` | `engine-grpc` |
 | `http://localhost:8000` | `triton-http` / `triton-grpc` |
 
+### Authentication and persistent WebSockets
+
+Pass `key` when a PaaS gateway requires Bearer authentication. Its default is
+`None`, which injects no credentials:
+
+```python
+client = TTSClient.connect(
+    "wss://tts.example/v1/ws",
+    key="your-key",
+)
+```
+
+`engine-websocket` retains completed physical connections and reuses them for
+later logical sessions; concurrent sessions use separate pooled connections.
+The session boundary is its `done`/`error` event, not socket closure. Against a
+legacy gateway without the persistent-protocol marker, the SDK safely discards
+the socket instead of pooling it. Engine-error connections are also discarded;
+only a successful/cancelled `done` explicitly marked reusable enters the pool.
+Idle connections are kept alive every 15 seconds; when keepalive is disabled,
+they are probed synchronously before reuse.
+Tune this with `reconnect_attempts`, `max_idle_connections`, and
+`keepalive_interval`. Automatic reconnects cover idle connections and new
+session setup only. Once text has been submitted, an interrupted active session
+is not replayed because that could duplicate audio. Call `client.close()` when
+finished, or use `TTSClient` as a context manager.
+
 ## Examples
 
 Runnable scripts in [`examples/`](examples/) — start an endpoint first, then:

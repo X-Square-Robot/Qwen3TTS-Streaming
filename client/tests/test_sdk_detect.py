@@ -66,7 +66,7 @@ def test_ws_scheme_short_circuit(monkeypatch):
     calls = []
 
     def fake_probe(url, *, timeout, connect_timeout, headers):
-        calls.append((url, timeout, connect_timeout))
+        calls.append((url, timeout, connect_timeout, headers))
 
     monkeypatch.setattr("qwen3tts.detect._probe_engine_websocket", fake_probe)
     detected = detect_transport(
@@ -75,9 +75,17 @@ def test_ws_scheme_short_circuit(monkeypatch):
         model_name=None,
         timeout=2.0,
         connect_timeout=0.5,
+        headers={"Authorization": "Bearer secret"},
     )
     assert detected.transport == TRANSPORT_ENGINE_WEBSOCKET
-    assert calls == [("ws://example.test/v1/ws", 2.0, 0.5)]
+    assert calls == [
+        (
+            "ws://example.test/v1/ws",
+            2.0,
+            0.5,
+            {"Authorization": "Bearer secret"},
+        )
+    ]
 
 
 def test_websocket_probe_retries_short_receive_timeouts(monkeypatch):
@@ -140,12 +148,33 @@ def test_http_scheme_prefers_standalone_capabilities(monkeypatch):
         timeout=2.0,
     )
     assert detected.transport == TRANSPORT_ENGINE_WEBSOCKET
-    assert detected.resolved_endpoint == "http://example.test:50052/v1/ws"
+    assert detected.resolved_endpoint == "ws://example.test:50052/v1/ws"
+
+
+def test_https_capabilities_resolves_secure_websocket(monkeypatch):
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"loaded_model_type": "custom_voice", "variant": "custom-1.7b"}
+
+    monkeypatch.setattr("qwen3tts.detect.requests.get", lambda *args, **kwargs: _Resp())
+    detected = detect_transport(
+        "https://example.test/tts",
+        transport="auto",
+        model_name=None,
+        timeout=2.0,
+    )
+
+    assert detected.resolved_endpoint == "wss://example.test/tts/v1/ws"
 
 
 def test_host_port_prefers_engine_grpc(monkeypatch):
-    def fake_engine_grpc(endpoint, *, timeout):
+    calls = []
+
+    def fake_engine_grpc(endpoint, *, timeout, headers, metadata):
         assert endpoint == "host.test:50051"
+        calls.append((headers, metadata))
 
     monkeypatch.setattr("qwen3tts.detect._probe_engine_grpc", fake_engine_grpc)
     monkeypatch.setattr(
@@ -157,15 +186,23 @@ def test_host_port_prefers_engine_grpc(monkeypatch):
         transport="auto",
         model_name=None,
         timeout=2.0,
+        headers={"Authorization": "Bearer secret"},
+        metadata=(("authorization", "Bearer secret"),),
     )
     assert detected.transport == TRANSPORT_ENGINE_GRPC
+    assert calls == [
+        (
+            {"Authorization": "Bearer secret"},
+            (("authorization", "Bearer secret"),),
+        )
+    ]
 
 
 def test_host_without_port_expands_candidates(monkeypatch):
     seen = []
 
     def fake_engine_ws(url, *, timeout, connect_timeout, headers):
-        seen.append(url)
+        seen.append((url, headers))
 
     monkeypatch.setattr("qwen3tts.detect._probe_engine_websocket", fake_engine_ws)
     detected = detect_transport(
@@ -173,6 +210,85 @@ def test_host_without_port_expands_candidates(monkeypatch):
         transport="auto",
         model_name=None,
         timeout=2.0,
+        headers={"Authorization": "Bearer secret"},
     )
     assert detected.transport == TRANSPORT_ENGINE_WEBSOCKET
-    assert seen == ["ws://host.test:50052/v1/ws"]
+    assert seen == [
+        (
+            "ws://host.test:50052/v1/ws",
+            {"Authorization": "Bearer secret"},
+        )
+    ]
+
+
+def test_bare_http_probe_forwards_headers(monkeypatch):
+    seen = []
+
+    def fake_http(
+        base_url,
+        *,
+        timeout,
+        headers,
+        report,
+        model_name,
+        model_version,
+    ):
+        seen.append((base_url, headers))
+        return type(
+            "Detected",
+            (),
+            {
+                "transport": TRANSPORT_TRITON_HTTP,
+                "resolved_endpoint": base_url,
+            },
+        )()
+
+    monkeypatch.setattr(detect_module, "_detect_http_url", fake_http)
+    detected = detect_transport(
+        "host.test:8000",
+        transport="auto",
+        model_name=None,
+        timeout=2.0,
+        headers={"Authorization": "Bearer secret"},
+    )
+
+    assert detected.transport == TRANSPORT_TRITON_HTTP
+    assert seen == [
+        (
+            "http://host.test:8000",
+            {"Authorization": "Bearer secret"},
+        )
+    ]
+
+
+def test_bare_triton_grpc_probe_forwards_auth(monkeypatch):
+    seen = []
+
+    def fake_triton_grpc(
+        endpoint,
+        *,
+        timeout,
+        model_name,
+        headers,
+        metadata,
+    ):
+        seen.append((endpoint, headers, metadata))
+
+    monkeypatch.setattr(detect_module, "_probe_triton_grpc", fake_triton_grpc)
+    detected = detect_transport(
+        "host.test:8001",
+        transport="auto",
+        model_name=None,
+        timeout=2.0,
+        headers={"Authorization": "Bearer secret"},
+        metadata=(("authorization", "Bearer secret"),),
+    )
+
+    assert detected.transport == TRANSPORT_TRITON_GRPC
+    assert seen == [
+        (
+            "host.test:8001",
+            {"Authorization": "Bearer secret"},
+            (("authorization", "Bearer secret"),),
+        )
+    ]

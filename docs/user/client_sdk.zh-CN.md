@@ -133,6 +133,36 @@ client = TTSClient.connect(
 )
 ```
 
+### PaaS 鉴权与连接复用
+
+如果 PaaS 网关通过 Bearer Header 鉴权，传入 `key` 即可。`key=None`（默认值）
+表示 SDK 不添加鉴权 Header；engine 本身不校验该 Header：
+
+```python
+client = TTSClient.connect(
+    "wss://tts.example/v1/ws",
+    key="your-key",  # Authorization: Bearer your-key
+)
+```
+
+同一 `engine-websocket` 物理连接会串行承载多个逻辑 session；并发 session 会各自
+租用连接池中的连接。默认设置如下：
+
+- `reconnect_attempts=1`：建立新物理连接或发送首个 `start` 失败时重试一次；
+- `max_idle_connections=8`：最多保留 8 条空闲连接；
+- `keepalive_interval=15.0`：每 15 秒在空闲连接上探活，设为 `0` 可关闭。
+
+逻辑 session 以终态 `done`/`error` 事件为边界，而不是以 WebSocket 关闭为边界。
+支持长连接的 gateway 只会在可安全复用的成功/取消 `done` 中标记
+`websocket_connection_reusable=true`。engine error 会关闭并重连；旧 gateway 若没有
+该标识，SDK 同样会丢弃 socket 并安全退化为重新建连。
+
+后台保活（或关闭保活时的复用前探活）如果发现连接已被网关回收，SDK 会自动建立
+新连接。已经提交文本或收到
+音频的活动 session 断线后则返回明确的 `error`，不会透明重放；当前协议没有文本确认、
+音频确认和 resume token，盲目恢复可能生成重复音频。客户端使用完毕后应调用
+`client.close()`，推荐使用上下文管理器统一释放连接池。
+
 ## 统一流式接口
 
 ```python
@@ -148,7 +178,7 @@ session = client.open_stream(
 
 session.send_text("你好，")
 session.send_text("这是统一流式协议。")
-session.end()
+session.stop()  # 与兼容接口 session.end() 等价：停止输入并排空音频
 
 for message in session.iter_messages():
     print(type(message).__name__, getattr(message, "meta", {}))

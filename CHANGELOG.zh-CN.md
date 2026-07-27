@@ -9,6 +9,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- standalone WebSocket 现在支持在同一物理连接上串行运行多个逻辑 TTS 会话；SDK
+  提供并发连接池、空闲保活、僵尸连接探测以及新会话建连失败重试，并新增与
+  `end()` 等价的 `stop()`；可复用 `done` 能力标识使新旧版本混部时可安全退化为逐
+  session 重连，engine error 连接不会进入池。
+- `TTSClient.connect()` 新增 `key=None`：非 `None` 时自动为 HTTP/WebSocket
+  添加 `Authorization: Bearer <key>`，并为 gRPC 添加小写 `authorization`
+  metadata。鉴权仍由部署平台负责，engine 不校验 Header。
+
 ### Fixed
 
 - 将引擎 WebSocket 握手预算（`connect_timeout`）与连接建立后的请求接收空闲预算

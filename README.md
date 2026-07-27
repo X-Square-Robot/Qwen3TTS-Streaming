@@ -366,10 +366,14 @@ The standalone engine supports both gRPC and WebSocket. Example WebSocket contro
 ```json
 {"type":"start","session_id":"demo","config":{"task_type":"custom_voice","speaker":"Serena"}}
 {"type":"text","text":"你好，世界。"}
-{"type":"end"}
+{"type":"stop"}
 ```
 
-The server returns JSON event frames (protocol events, text tokens, boundaries, completion) and binary frames (PCM audio chunks, whose format is declared by the start/event metadata).
+`stop` gracefully ends input and drains audio (`end` remains an alias); `cancel`
+aborts the active session. The server returns JSON event frames and binary PCM
+frames. A `done`/`error` event—not socket closure—is the logical session
+boundary. After a successful or cancelled `done`, the same WebSocket can accept
+another `start`; an engine `error` closes it so the next session reconnects.
 
 ## Project Structure
 

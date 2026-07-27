@@ -15,6 +15,7 @@ from qwen3tts_protocol import (
     StreamEvent,
 )
 
+from .._internal.auth import grpc_metadata_as_headers, normalize_grpc_metadata
 from .._internal.utils import (
     build_bytes_result,
     capabilities_from_payload,
@@ -47,21 +48,29 @@ class TritonGrpcAdapter:
         model_version: str = "1",
         timeout: float,
         metadata=None,
+        headers=None,
     ) -> None:
         self.endpoint = endpoint
         self.model_name = model_name
         self.model_version = model_version
         self.timeout = timeout
-        self.metadata = metadata
+        self.metadata = normalize_grpc_metadata(metadata, headers)
+        self.headers = grpc_metadata_as_headers(self.metadata)
 
     def get_capabilities(self) -> Capabilities:
         np, grpcclient = _require_triton()
         client = grpcclient.InferenceServerClient(url=self.endpoint)
-        if not client.is_server_live():
+        if not client.is_server_live(headers=self.headers, client_timeout=self.timeout):
             raise RuntimeError(f"triton gRPC server is not live at {self.endpoint}")
-        if not client.is_server_ready():
+        if not client.is_server_ready(
+            headers=self.headers, client_timeout=self.timeout
+        ):
             raise RuntimeError(f"triton gRPC server is not ready at {self.endpoint}")
-        if self.model_name and not client.is_model_ready(self.model_name):
+        if self.model_name and not client.is_model_ready(
+            self.model_name,
+            headers=self.headers,
+            client_timeout=self.timeout,
+        ):
             raise RuntimeError(f"triton model {self.model_name!r} is not ready")
         payload = {"action": "capabilities"}
         req_input = grpcclient.InferInput("request", [1], "BYTES")
@@ -103,7 +112,7 @@ class TritonGrpcAdapter:
             if final:
                 done.set()
 
-        client.start_stream(callback=callback)
+        client.start_stream(callback=callback, headers=self.headers)
         try:
             client.async_stream_infer(
                 model_name=self.model_name,
@@ -301,7 +310,7 @@ class TritonGrpcStreamSession(BaseStreamSession):
             if is_final or event_type in {"done", "error"}:
                 done.set()
 
-        client.start_stream(callback=callback)
+        client.start_stream(callback=callback, headers=self._adapter.headers)
         try:
             while True:
                 request_payload = self._send_queue.get()

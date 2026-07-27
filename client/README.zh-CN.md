@@ -170,6 +170,27 @@ result = await client.synthesize_bytes("你好。", request=SynthesisConfig(task
 | `localhost:50051` | `engine-grpc` |
 | `http://localhost:8000` | `triton-http` / `triton-grpc` |
 
+### 鉴权与 WebSocket 长连接
+
+PaaS 网关使用 Bearer 鉴权时直接传 `key`；默认 `None` 表示不注入鉴权：
+
+```python
+client = TTSClient.connect(
+    "wss://tts.example/v1/ws",
+    key="your-key",
+)
+```
+
+`engine-websocket` 会保留并复用已经完成会话的物理连接；并发会话使用连接池中的
+不同连接。session 以 `done`/`error` 事件为边界，而不是以 socket 关闭为边界；若旧
+gateway 没有长连接协议标识，SDK 会安全丢弃而不复用该 socket。engine error 的连接
+同样会被丢弃；只有明确标记可复用的成功/取消 `done` 才进入池。默认每 15 秒在空闲
+连接上做一次轻量保活；关闭保活时则在复用前探测
+僵尸连接。
+可通过 `reconnect_attempts`、`max_idle_connections` 和 `keepalive_interval`
+调整。自动重连只覆盖空闲连接和新会话建连；活动会话已经提交文本后不会透明重放，
+以免产生重复音频。使用完客户端后调用 `client.close()`，或使用上下文管理器。
+
 ## 示例
 
 可运行脚本位于 [`examples/`](examples/) —— 请先启动一个端点，然后：

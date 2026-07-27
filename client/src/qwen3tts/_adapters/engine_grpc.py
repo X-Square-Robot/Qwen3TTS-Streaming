@@ -13,6 +13,7 @@ from qwen3tts_protocol import (
     StreamEvent,
 )
 
+from .._internal.auth import normalize_grpc_metadata
 from .._internal.utils import (
     build_bytes_result,
     capabilities_from_payload,
@@ -55,8 +56,8 @@ class EngineGrpcAdapter:
     ) -> None:
         self.endpoint = endpoint
         self.timeout = timeout
-        self.metadata = metadata
-        self.headers = headers or {}
+        self.metadata = normalize_grpc_metadata(metadata, headers)
+        self.headers = dict(headers or {})
         self._channel_lock = threading.Lock()
         self._grpc = None
         self._grpc_channel = None
@@ -85,7 +86,9 @@ class EngineGrpcAdapter:
         grpc, channel = self._channel()
         stub = tts_pb2_grpc.TTSServiceStub(channel)
         response = stub.GetCapabilities(
-            tts_pb2.GetCapabilitiesRequest(), timeout=self.timeout
+            tts_pb2.GetCapabilitiesRequest(),
+            timeout=self.timeout,
+            metadata=self.metadata,
         )
         return capabilities_from_payload(_capabilities_message_to_dict(response))
 
@@ -102,7 +105,11 @@ class EngineGrpcAdapter:
         audio_format = request.config.audio
         events: list[StreamEvent] = []
         warnings: list[str] = []
-        for response in stub.SynthesizeOnce(rpc_request, timeout=self.timeout):
+        for response in stub.SynthesizeOnce(
+            rpc_request,
+            timeout=self.timeout,
+            metadata=self.metadata,
+        ):
             which = response.WhichOneof("response")
             if which == "audio":
                 audio_parts.append(bytes(response.audio.pcm_data))
@@ -153,7 +160,9 @@ class EngineGrpcStreamSession(BaseStreamSession):
         self._start_request = start_request
         self._request_queue: queue.Queue[object] = queue.Queue()
         self._stream = self._stub.SynthesizeStream(
-            self._request_iter(), timeout=adapter.timeout
+            self._request_iter(),
+            timeout=adapter.timeout,
+            metadata=adapter.metadata,
         )
         self._reader = threading.Thread(
             target=self._reader_loop,

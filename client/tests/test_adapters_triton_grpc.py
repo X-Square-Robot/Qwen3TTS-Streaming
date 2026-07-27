@@ -28,11 +28,14 @@ class _FakeClient:
     """Fires the stream callback once per infer with a *final* audio chunk and
     no end event — the exact shape that used to hang the consumer."""
 
+    seen_headers: list[dict] = []
+
     def __init__(self, url):
         self._cb = None
 
-    def start_stream(self, callback):
+    def start_stream(self, callback, headers=None):
         self._cb = callback
+        self.seen_headers.append(dict(headers or {}))
 
     def async_stream_infer(self, **kwargs):
         if self._cb is not None:
@@ -43,6 +46,7 @@ class _FakeClient:
 
 
 def test_is_final_without_end_event_does_not_hang(monkeypatch):
+    _FakeClient.seen_headers.clear()
     fake_grpcclient = types.SimpleNamespace(
         InferenceServerClient=lambda url: _FakeClient(url),
         InferInput=lambda *a, **k: types.SimpleNamespace(
@@ -65,7 +69,12 @@ def test_is_final_without_end_event_does_not_hang(monkeypatch):
         tg, "_decode_audio_bytes_field", lambda value, payload: b"\x00\x00\x00\x00"
     )
 
-    adapter = tg.TritonGrpcAdapter("localhost:8001", model_name="m", timeout=2.0)
+    adapter = tg.TritonGrpcAdapter(
+        "localhost:8001",
+        model_name="m",
+        timeout=2.0,
+        metadata=(("Authorization", "Bearer secret"),),
+    )
     session = tg.TritonGrpcStreamSession(
         adapter,
         SessionStartRequest(
@@ -87,3 +96,63 @@ def test_is_final_without_end_event_does_not_hang(monkeypatch):
     assert not drainer.is_alive(), "iter_messages() hung — no terminal emitted"
     assert any(isinstance(m, AudioChunk) for m in collected)
     assert any(isinstance(m, StreamEvent) and m.type == "done" for m in collected)
+    assert _FakeClient.seen_headers == [{"authorization": "Bearer secret"}]
+
+
+def test_capabilities_forwards_auth_to_health_and_stream(monkeypatch):
+    instances = []
+
+    class _CapabilitiesClient:
+        def __init__(self, url):
+            self.calls = []
+            self._cb = None
+            instances.append(self)
+
+        def is_server_live(self, *, headers, client_timeout):
+            self.calls.append(("live", headers, client_timeout))
+            return True
+
+        def is_server_ready(self, *, headers, client_timeout):
+            self.calls.append(("ready", headers, client_timeout))
+            return True
+
+        def is_model_ready(self, model_name, *, headers, client_timeout):
+            self.calls.append(("model", headers, client_timeout))
+            return True
+
+        def start_stream(self, callback, headers=None):
+            self.calls.append(("stream", headers, None))
+            self._cb = callback
+
+        def async_stream_infer(self, **kwargs):
+            self._cb(
+                error=RuntimeError('CAPABILITIES:{"loaded_model_type":"custom_voice"}')
+            )
+
+        def stop_stream(self):
+            pass
+
+    fake_grpcclient = types.SimpleNamespace(
+        InferenceServerClient=_CapabilitiesClient,
+        InferInput=lambda *a, **k: types.SimpleNamespace(
+            set_data_from_numpy=lambda *a, **k: None
+        ),
+        InferRequestedOutput=lambda name: name,
+    )
+    monkeypatch.setattr(tg, "_require_triton", lambda: (np, fake_grpcclient))
+    adapter = tg.TritonGrpcAdapter(
+        "localhost:8001",
+        model_name="m",
+        timeout=2.0,
+        metadata=(("Authorization", "Bearer secret"),),
+    )
+
+    adapter.get_capabilities()
+
+    expected = {"authorization": "Bearer secret"}
+    assert instances[0].calls == [
+        ("live", expected, 2.0),
+        ("ready", expected, 2.0),
+        ("model", expected, 2.0),
+        ("stream", expected, None),
+    ]

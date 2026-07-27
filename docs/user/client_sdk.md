@@ -139,6 +139,42 @@ client = TTSClient.connect(
 )
 ```
 
+### PaaS authentication and connection reuse
+
+When a PaaS gateway requires a Bearer header, pass `key`. Its default of
+`None` means that the SDK injects no credentials; the engine itself does not
+validate this header:
+
+```python
+client = TTSClient.connect(
+    "wss://tts.example/v1/ws",
+    key="your-key",  # Authorization: Bearer your-key
+)
+```
+
+One physical `engine-websocket` connection carries multiple logical sessions
+serially; concurrent sessions lease separate pooled connections. Defaults are:
+
+- `reconnect_attempts=1`: retry a new physical connection or failed initial
+  `start` write once;
+- `max_idle_connections=8`: retain at most eight idle connections;
+- `keepalive_interval=15.0`: probe idle connections every 15 seconds; use `0`
+  to disable it.
+
+The logical boundary is the terminal `done`/`error` event, not WebSocket
+closure. A persistent gateway marks a safely reusable successful/cancelled
+`done` with `websocket_connection_reusable=true`. Engine errors are closed and
+reconnected; if an older gateway omits the marker, the SDK likewise discards
+the socket and safely falls back to reconnecting.
+
+If background keepalive (or the synchronous probe used when keepalive is
+disabled) finds that a gateway reaped an idle socket, the SDK opens a
+replacement automatically. A disconnect after text or audio has entered an
+active session produces an explicit `error` and is not replayed: the current
+protocol has no text/audio acknowledgement or resume token, and blind recovery
+could duplicate audio. Call `client.close()` when finished, preferably through
+the context manager.
+
 ## Unified Streaming Interface
 
 ```python
@@ -154,7 +190,7 @@ session = client.open_stream(
 
 session.send_text("你好，")
 session.send_text("这是统一流式协议。")
-session.end()
+session.stop()  # same as compatibility API session.end(): stop input and drain audio
 
 for message in session.iter_messages():
     print(type(message).__name__, getattr(message, "meta", {}))
