@@ -54,3 +54,15 @@ class DependencyMissingError(TransportNotSupportedError):
 
 class StreamClosedError(TTSClientError):
     """Raised when a stream session is already closed."""
+
+
+class ConnectionPoolError(TTSClientError):
+    """Base error for bounded websocket connection-pool admission."""
+
+
+class PoolSaturatedError(ConnectionPoolError):
+    """Raised when the websocket pool's bounded wait queue is full."""
+
+
+class PoolAcquireTimeoutError(ConnectionPoolError, TimeoutError):
+    """Raised when no websocket lease becomes available before its deadline."""

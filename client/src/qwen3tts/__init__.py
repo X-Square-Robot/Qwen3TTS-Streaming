@@ -46,8 +46,11 @@ from qwen3tts_protocol import (
 from .async_client import AsyncTTSClient
 from .client import TTSClient
 from .exceptions import (
+    ConnectionPoolError,
     DependencyMissingError,
     EngineVersionMismatchError,
+    PoolAcquireTimeoutError,
+    PoolSaturatedError,
     ProtocolError,
     ProtocolVersionMismatchError,
     StreamClosedError,
@@ -64,10 +67,13 @@ __all__ = (
     "AudioFormat",
     "BytesResult",
     "Capabilities",
+    "ConnectionPoolError",
     "DependencyMissingError",
     "DetectedTransport",
     "EngineVersionMismatchError",
     "OutputPolicy",
+    "PoolAcquireTimeoutError",
+    "PoolSaturatedError",
     "ProtocolError",
     "ProtocolVersionMismatchError",
     "RealtimeAudioStream",

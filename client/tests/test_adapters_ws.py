@@ -25,7 +25,13 @@ from qwen3tts._adapters.engine_websocket import (
 from qwen3tts._internal.raw_websocket import RawWebSocketError
 from qwen3tts._session import BaseStreamSession
 from qwen3tts.constants import TRANSPORT_ENGINE_WEBSOCKET
-from qwen3tts.exceptions import StreamClosedError
+from qwen3tts.exceptions import (
+    EngineVersionMismatchError,
+    PoolAcquireTimeoutError,
+    PoolSaturatedError,
+    ProtocolVersionMismatchError,
+    StreamClosedError,
+)
 
 
 class FakeRawWebSocketConnection:
@@ -90,6 +96,41 @@ class TestEngineWebSocketAdapter:
     def test_transport_name(self):
         adapter = EngineWebSocketAdapter("ws://localhost:50052/v1/ws", timeout=5.0)
         assert adapter.transport_name == TRANSPORT_ENGINE_WEBSOCKET
+
+    def test_bounded_pool_defaults_and_disabled_lifetime_aliases(self):
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=5.0,
+            idle_ttl=0,
+            max_lifetime=0,
+        )
+
+        assert adapter.max_connections == 32
+        assert adapter.max_idle_connections == 8
+        assert adapter.max_pending_acquires == 256
+        assert adapter.acquire_timeout == 30.0
+        assert adapter.idle_ttl is None
+        assert adapter.max_lifetime is None
+        assert adapter.keepalive_jitter == 0.2
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"max_connections": 0}, "max_connections"),
+            (
+                {"max_connections": 2, "max_idle_connections": 3},
+                "max_idle_connections",
+            ),
+            ({"max_pending_acquires": -1}, "max_pending_acquires"),
+            ({"acquire_timeout": -1}, "acquire_timeout"),
+            ({"idle_ttl": -1}, "idle_ttl"),
+            ({"max_lifetime": float("inf")}, "max_lifetime"),
+            ({"keepalive_jitter": 1.0}, "keepalive_jitter"),
+        ],
+    )
+    def test_rejects_invalid_pool_configuration(self, kwargs, message):
+        with pytest.raises(ValueError, match=message):
+            EngineWebSocketAdapter("ws://localhost:50052/v1/ws", timeout=5.0, **kwargs)
 
     def test_get_capabilities(self, monkeypatch):
         caps_response = {
@@ -159,6 +200,41 @@ class TestEngineWebSocketAdapter:
         assert closed[0]
         assert adapter._idle_connections == []
 
+    def test_get_capabilities_uses_per_call_timeout(self, monkeypatch):
+        fake_conn = FakeRawWebSocketConnection()
+        timeouts = []
+
+        def settimeout(value):
+            timeouts.append(value)
+            fake_conn._timeout = value
+
+        fake_conn.settimeout = settimeout
+        monkeypatch.setattr(_ew, "ws_connect", _make_ws_connect(fake_conn))
+        monkeypatch.setattr(_ew, "ws_send_json", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            _ew,
+            "ws_recv_frame",
+            _make_ws_recv_frame(
+                [
+                    {
+                        "type": "capabilities",
+                        "capabilities": {"variant": "standalone"},
+                    }
+                ]
+            ),
+        )
+        monkeypatch.setattr(_ew, "ws_close", lambda _conn: None)
+
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=120.0,
+            connect_timeout=5.0,
+            reconnect_attempts=0,
+        )
+        adapter.get_capabilities(timeout=2.5)
+
+        assert timeouts[0] == 2.5
+
     def test_connect_timeout_is_distinct_from_request_idle_timeout(self, monkeypatch):
         caps_response = {
             "type": "capabilities",
@@ -207,6 +283,130 @@ class TestEngineWebSocketAdapter:
         )
 
         assert adapter.connect_timeout == 17.0
+
+    def test_prewarm_establishes_target_connections_concurrently(self, monkeypatch):
+        connections: list[PoolFakeWebSocketConnection] = []
+        barrier = threading.Barrier(3)
+        state_lock = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def connect(_url, *, timeout, headers=None):
+            nonlocal active, max_active
+            conn = PoolFakeWebSocketConnection()
+            with state_lock:
+                connections.append(conn)
+                active += 1
+                max_active = max(max_active, active)
+            barrier.wait(timeout=2.0)
+            with state_lock:
+                active -= 1
+            return conn
+
+        def send(conn, payload):
+            assert payload == {"type": "get_capabilities"}
+            conn.responses.put(
+                {
+                    "type": "capabilities",
+                    "websocket_connection_reusable": True,
+                    "capabilities": {"variant": "standalone"},
+                }
+            )
+
+        def recv(conn):
+            response = conn.responses.get_nowait()
+            return 0x1, json.dumps(response).encode("utf-8")
+
+        monkeypatch.setattr(_ew, "ws_connect", connect)
+        monkeypatch.setattr(_ew, "ws_send_json", send)
+        monkeypatch.setattr(_ew, "ws_recv_frame", recv)
+        monkeypatch.setattr(_ew, "ws_close", lambda conn: conn.close())
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=120.0,
+            connect_timeout=0.75,
+            reconnect_attempts=0,
+            max_idle_connections=3,
+            keepalive_interval=0,
+        )
+
+        idle_count = adapter.prewarm(3, timeout=0.5)
+
+        assert idle_count == 3
+        assert max_active == 3
+        assert set(adapter._idle_connections) == set(connections)
+        assert adapter._connections == set(connections)
+        assert adapter.prewarm(10) == 3
+        assert len(connections) == 3
+
+    def test_prewarm_keeps_partial_success_and_reports_shortfall(self, monkeypatch):
+        connections: list[PoolFakeWebSocketConnection] = []
+        state_lock = threading.Lock()
+
+        def connect(_url, *, timeout, headers=None):
+            conn = PoolFakeWebSocketConnection()
+            with state_lock:
+                conn.reusable = not connections
+                connections.append(conn)
+            return conn
+
+        def send(conn, payload):
+            response = {
+                "type": "capabilities",
+                "capabilities": {"variant": "standalone"},
+            }
+            if conn.reusable:
+                response["websocket_connection_reusable"] = True
+            conn.responses.put(response)
+
+        def recv(conn):
+            response = conn.responses.get_nowait()
+            return 0x1, json.dumps(response).encode("utf-8")
+
+        monkeypatch.setattr(_ew, "ws_connect", connect)
+        monkeypatch.setattr(_ew, "ws_send_json", send)
+        monkeypatch.setattr(_ew, "ws_recv_frame", recv)
+        monkeypatch.setattr(_ew, "ws_close", lambda conn: conn.close())
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            reconnect_attempts=0,
+            max_idle_connections=2,
+            keepalive_interval=0,
+        )
+
+        with pytest.raises(RuntimeError, match=r"reached 1/2") as excinfo:
+            adapter.prewarm(2)
+
+        assert "websocket_connection_reusable=true" in str(excinfo.value)
+        assert adapter._idle_connections == [connections[0]]
+        assert not connections[0].closed
+        assert connections[1].closed
+
+    @pytest.mark.parametrize(
+        "error_type",
+        [ProtocolVersionMismatchError, EngineVersionMismatchError],
+    )
+    def test_prewarm_preserves_version_mismatch_error(self, monkeypatch, error_type):
+        conn = FakeRawWebSocketConnection()
+        monkeypatch.setattr(_ew, "ws_connect", _make_ws_connect(conn))
+        monkeypatch.setattr(_ew, "ws_close", lambda raw: raw.close())
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            reconnect_attempts=0,
+            keepalive_interval=0,
+        )
+
+        def fail_version_check(_conn, *, timeout=None):
+            raise error_type("version mismatch")
+
+        monkeypatch.setattr(adapter, "_request_capabilities", fail_version_check)
+
+        with pytest.raises(error_type, match="version mismatch"):
+            adapter.prewarm(1)
+
+        assert conn.closed
 
     def test_get_capabilities_retries_short_receive_timeouts(self, monkeypatch):
         fake_conn = FakeRawWebSocketConnection()
@@ -421,7 +621,7 @@ class TestEngineWebSocketAdapter:
                         },
                     }
                 )
-            elif message_type in {"end", "stop"}:
+            elif message_type in {"end", "stop", "cancel"}:
                 conn.responses.put(
                     {
                         "type": "event",
@@ -452,7 +652,7 @@ class TestEngineWebSocketAdapter:
             reconnect_attempts=0,
             keepalive_interval=0,
         )
-        for index in range(2):
+        for index in range(3):
             session = adapter.open_stream(
                 SessionStartRequest(
                     session_id=f"reuse-{index}",
@@ -462,12 +662,19 @@ class TestEngineWebSocketAdapter:
             session.send_text("hello")
             if index == 0:
                 session.end()
+            elif index == 1:
+                session.cancel(reason="interrupt")
             else:
                 session.stop()
             assert [event.type for event in session.iter_messages()] == [
                 "start",
                 "done",
             ]
+            # A relay's delayed hard-close fallback may fire after the cancel
+            # terminal has already returned this socket to the pool.  It must
+            # be transport-idempotent and leave the pooled socket reusable.
+            if index == 1:
+                session.close(reason="cancel fallback")
 
         assert len(connections) == 1
         assert [payload["type"] for _conn, payload in sent] == [
@@ -477,9 +684,14 @@ class TestEngineWebSocketAdapter:
             "get_capabilities",
             "start",
             "text",
+            "cancel",
+            "get_capabilities",
+            "start",
+            "text",
             "stop",
         ]
         assert send_timeouts[4] == ("start", 0.75)
+        assert send_timeouts[3] == ("get_capabilities", 0.75)
         assert not connections[0].closed
         adapter.close()
         assert connections[0].closed
@@ -781,6 +993,397 @@ class TestEngineWebSocketAdapter:
         thread.join(timeout=1.0)
         assert not thread.is_alive()
         assert closed == [conn]
+
+    def test_keepalive_probe_uses_connect_timeout(self, monkeypatch):
+        conn = FakeRawWebSocketConnection()
+        seen_timeouts = []
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=120.0,
+            connect_timeout=1.25,
+            keepalive_interval=0,
+        )
+        adapter._connections.add(conn)
+        adapter._idle_connections.append(conn)
+
+        def capabilities(_conn, *, timeout=None):
+            seen_timeouts.append(timeout)
+            return Capabilities(), True
+
+        monkeypatch.setattr(adapter, "_request_capabilities", capabilities)
+        monkeypatch.setattr(_ew, "ws_close", lambda raw: raw.close())
+
+        adapter._keepalive_once(threading.Event())
+
+        assert seen_timeouts == [1.25]
+        assert adapter._idle_connections == [conn]
+
+    def test_pool_bounds_connecting_active_and_idle_connections(self, monkeypatch):
+        connections = []
+        active = 0
+        max_active = 0
+        state_lock = threading.Lock()
+        start = threading.Barrier(13)
+        release = threading.Event()
+        errors = []
+
+        def connect(_url, *, timeout, headers=None):
+            conn = FakeRawWebSocketConnection()
+            with state_lock:
+                connections.append(conn)
+            return conn
+
+        monkeypatch.setattr(_ew, "ws_connect", connect)
+        monkeypatch.setattr(_ew, "ws_close", lambda conn: conn.close())
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            reconnect_attempts=0,
+            max_connections=3,
+            max_idle_connections=3,
+            max_pending_acquires=12,
+            acquire_timeout=1.0,
+            keepalive_interval=0,
+        )
+
+        def lease():
+            nonlocal active, max_active
+            try:
+                start.wait(timeout=1.0)
+                conn, _reused = adapter._checkout_connection()
+                with state_lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                assert release.wait(timeout=1.0)
+                with state_lock:
+                    active -= 1
+                adapter._release_connection(conn)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=lease) for _ in range(12)]
+        for thread in threads:
+            thread.start()
+        start.wait(timeout=1.0)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            with state_lock:
+                if active == 3:
+                    break
+            time.sleep(0.005)
+        release.set()
+        for thread in threads:
+            thread.join(timeout=2.0)
+
+        assert errors == []
+        assert all(not thread.is_alive() for thread in threads)
+        assert len(connections) == 3
+        assert max_active == 3
+        assert adapter._connecting == 0
+        assert len(adapter._connections) == 3
+        assert len(adapter._idle_connections) == 3
+
+    def test_connecting_handshake_consumes_the_only_pool_slot(self, monkeypatch):
+        connect_entered = threading.Event()
+        allow_connect = threading.Event()
+        first_conn = FakeRawWebSocketConnection()
+        connect_calls = 0
+
+        def connect(*_args, **_kwargs):
+            nonlocal connect_calls
+            connect_calls += 1
+            connect_entered.set()
+            assert allow_connect.wait(timeout=1.0)
+            return first_conn
+
+        monkeypatch.setattr(_ew, "ws_connect", connect)
+        monkeypatch.setattr(_ew, "ws_close", lambda conn: conn.close())
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            reconnect_attempts=0,
+            max_connections=1,
+            max_idle_connections=1,
+            acquire_timeout=0.03,
+            keepalive_interval=0,
+        )
+        leased = []
+
+        def first_acquire():
+            conn, _ = adapter._checkout_connection()
+            leased.append(conn)
+
+        connector = threading.Thread(target=first_acquire)
+        connector.start()
+        assert connect_entered.wait(timeout=1.0)
+        with pytest.raises(PoolAcquireTimeoutError):
+            adapter._checkout_connection()
+
+        assert adapter._connecting == 1
+        assert adapter._connections == set()
+        assert connect_calls == 1
+        allow_connect.set()
+        connector.join(timeout=1.0)
+        assert leased == [first_conn]
+        assert adapter._connecting == 0
+        adapter._release_connection(first_conn)
+
+    def test_pool_queue_is_bounded_and_times_out(self, monkeypatch):
+        monkeypatch.setattr(
+            _ew,
+            "ws_connect",
+            lambda *_args, **_kwargs: FakeRawWebSocketConnection(),
+        )
+        monkeypatch.setattr(_ew, "ws_close", lambda conn: conn.close())
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            reconnect_attempts=0,
+            max_connections=1,
+            max_idle_connections=1,
+            max_pending_acquires=1,
+            acquire_timeout=0.05,
+            keepalive_interval=0,
+        )
+        held, _ = adapter._checkout_connection()
+        waiter_error = []
+
+        def wait_for_lease():
+            try:
+                adapter._checkout_connection()
+            except Exception as exc:
+                waiter_error.append(exc)
+
+        waiter = threading.Thread(target=wait_for_lease)
+        waiter.start()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            with adapter._pool_lock:
+                if len(adapter._acquire_waiters) == 1:
+                    break
+            time.sleep(0.005)
+
+        with pytest.raises(PoolSaturatedError, match="max_pending_acquires=1"):
+            adapter._checkout_connection()
+
+        waiter.join(timeout=1.0)
+        assert len(waiter_error) == 1
+        assert isinstance(waiter_error[0], PoolAcquireTimeoutError)
+        adapter._release_connection(held)
+
+    def test_pool_waiters_receive_released_connection_in_fifo_order(self, monkeypatch):
+        created = []
+
+        def connect(*_args, **_kwargs):
+            conn = FakeRawWebSocketConnection()
+            created.append(conn)
+            return conn
+
+        monkeypatch.setattr(_ew, "ws_connect", connect)
+        monkeypatch.setattr(_ew, "ws_close", lambda conn: conn.close())
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            reconnect_attempts=0,
+            max_connections=1,
+            max_idle_connections=0,
+            max_pending_acquires=3,
+            acquire_timeout=1.0,
+            keepalive_interval=0,
+        )
+        held, _ = adapter._checkout_connection()
+        order = []
+
+        def lease(index):
+            conn, _ = adapter._checkout_connection()
+            order.append(index)
+            adapter._release_connection(conn)
+
+        threads = []
+        for index in range(3):
+            thread = threading.Thread(target=lease, args=(index,))
+            thread.start()
+            threads.append(thread)
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                with adapter._pool_lock:
+                    if len(adapter._acquire_waiters) == index + 1:
+                        break
+                time.sleep(0.005)
+
+        adapter._release_connection(held)
+        for thread in threads:
+            thread.join(timeout=1.0)
+
+        assert order == [0, 1, 2]
+        assert len(created) == 1
+        assert created[0].closed
+
+    def test_close_wakes_all_pool_waiters(self, monkeypatch):
+        monkeypatch.setattr(
+            _ew,
+            "ws_connect",
+            lambda *_args, **_kwargs: FakeRawWebSocketConnection(),
+        )
+        monkeypatch.setattr(_ew, "ws_close", lambda conn: conn.close())
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            reconnect_attempts=0,
+            max_connections=1,
+            max_idle_connections=1,
+            max_pending_acquires=2,
+            acquire_timeout=None,
+            keepalive_interval=0,
+        )
+        adapter._checkout_connection()
+        errors = []
+
+        def wait_for_lease():
+            try:
+                adapter._checkout_connection()
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=wait_for_lease) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            with adapter._pool_lock:
+                if len(adapter._acquire_waiters) == 2:
+                    break
+            time.sleep(0.005)
+
+        adapter.close()
+        for thread in threads:
+            thread.join(timeout=1.0)
+
+        assert len(errors) == 2
+        assert all(isinstance(error, StreamClosedError) for error in errors)
+        assert all(not thread.is_alive() for thread in threads)
+
+    def test_idle_ttl_and_max_lifetime_retire_only_idle_or_released_connections(
+        self, monkeypatch
+    ):
+        connections = []
+
+        def connect(*_args, **_kwargs):
+            conn = FakeRawWebSocketConnection()
+            connections.append(conn)
+            return conn
+
+        monkeypatch.setattr(_ew, "ws_connect", connect)
+        monkeypatch.setattr(_ew, "ws_close", lambda conn: conn.close())
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            reconnect_attempts=0,
+            max_connections=1,
+            max_idle_connections=1,
+            idle_ttl=1.0,
+            max_lifetime=2.0,
+            keepalive_interval=0,
+        )
+        old, _ = adapter._checkout_connection()
+        adapter._release_connection(old)
+        adapter._connection_idle_since[old] = time.monotonic() - 1.1
+
+        replacement, reused = adapter._checkout_connection()
+
+        assert not reused
+        assert old.closed
+        assert replacement is connections[1]
+        # Active leases live past max_lifetime; retirement happens at release,
+        # never asynchronously in the middle of a synthesis.
+        adapter._connection_created_at[replacement] = time.monotonic() - 2.1
+        assert not replacement.closed
+        adapter._release_connection(replacement)
+        assert replacement.closed
+        assert adapter._connections == set()
+
+    def test_prewarm_adds_only_missing_physical_connections(self, monkeypatch):
+        existing = PoolFakeWebSocketConnection()
+        created = []
+
+        def connect(*_args, **_kwargs):
+            conn = PoolFakeWebSocketConnection()
+            created.append(conn)
+            return conn
+
+        def send(conn, payload):
+            conn.responses.put(
+                {
+                    "type": "capabilities",
+                    "websocket_connection_reusable": True,
+                    "capabilities": {"variant": "standalone"},
+                }
+            )
+
+        def recv(conn):
+            return 0x1, json.dumps(conn.responses.get_nowait()).encode("utf-8")
+
+        monkeypatch.setattr(_ew, "ws_connect", connect)
+        monkeypatch.setattr(_ew, "ws_send_json", send)
+        monkeypatch.setattr(_ew, "ws_recv_frame", recv)
+        monkeypatch.setattr(_ew, "ws_close", lambda conn: conn.close())
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            reconnect_attempts=0,
+            max_connections=4,
+            max_idle_connections=4,
+            keepalive_interval=0,
+        )
+        adapter._connections.add(existing)
+        adapter._connection_created_at[existing] = time.monotonic()
+        adapter._idle_connections.append(existing)
+        adapter._connection_idle_since[existing] = time.monotonic()
+
+        assert adapter.prewarm(4, timeout=0.5) == 4
+        assert len(created) == 3
+        assert existing in adapter._idle_connections
+        assert len(adapter._connections) == 4
+
+    def test_keepalive_jitter_and_probe_preserve_idle_age(self, monkeypatch):
+        conn = FakeRawWebSocketConnection()
+        stop = threading.Event()
+        delays = []
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            connect_timeout=0.1,
+            keepalive_interval=0.01,
+            keepalive_jitter=0.2,
+            idle_ttl=10.0,
+        )
+        adapter._connections.add(conn)
+        adapter._connection_created_at[conn] = time.monotonic()
+        adapter._idle_connections.append(conn)
+        original_idle_since = time.monotonic() - 3.0
+        adapter._connection_idle_since[conn] = original_idle_since
+        monkeypatch.setattr(
+            adapter,
+            "_request_capabilities",
+            lambda *_args, **_kwargs: (Capabilities(), True),
+        )
+        monkeypatch.setattr(
+            _ew.random,
+            "uniform",
+            lambda lower, upper: delays.append((lower, upper)) or lower,
+        )
+
+        def probe_once(_stop, *, probe=True):
+            EngineWebSocketAdapter._keepalive_once(adapter, _stop, probe=probe)
+            stop.set()
+
+        monkeypatch.setattr(adapter, "_keepalive_once", probe_once)
+        EngineWebSocketAdapter._keepalive_worker(
+            weakref.ref(adapter), stop, 0.01, 0.2, True
+        )
+
+        assert delays[0] == pytest.approx((0.008, 0.012))
+        assert adapter._connection_idle_since[conn] == original_idle_since
 
 
 class TestConnectionClosedWithoutTerminal:

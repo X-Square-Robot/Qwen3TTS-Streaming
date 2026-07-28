@@ -214,6 +214,9 @@ class _ReusableStubEngine:
         self.callbacks = {}
         self.cancel_calls = []
         self.started_sessions = []
+        self.started_client_sessions = []
+        self.internal_by_client = {}
+        self.client_by_internal = {}
 
     def describe_capabilities(self):
         return {
@@ -224,7 +227,11 @@ class _ReusableStubEngine:
     async def start_session(
         self, session_id, *, config, on_audio=None, on_done=None, on_event=None
     ):
+        client_session_id = config.timing.extra["_sampling_identity"]
         self.started_sessions.append(session_id)
+        self.started_client_sessions.append(client_session_id)
+        self.internal_by_client.setdefault(client_session_id, []).append(session_id)
+        self.client_by_internal[session_id] = client_session_id
         self.callbacks[session_id] = {
             "on_audio": on_audio,
             "on_done": on_done,
@@ -234,7 +241,12 @@ class _ReusableStubEngine:
 
     async def push_text_input(self, session_id, text):
         # One float32 sample; its bytes make cross-session leakage observable.
-        marker = b"\x00\x00\x80?" if session_id.endswith("2") else b"\x00\x00\x00?"
+        client_session_id = self.client_by_internal[session_id]
+        marker = (
+            b"\x00\x00\x80?"
+            if client_session_id.endswith("2")
+            else b"\x00\x00\x00?"
+        )
         await self.callbacks[session_id]["on_audio"](session_id, marker)
 
     async def mark_input_complete(self, session_id):
@@ -242,6 +254,9 @@ class _ReusableStubEngine:
 
     async def cancel(self, session_id):
         self.cancel_calls.append(session_id)
+
+    def internal_for(self, client_session_id, index=-1):
+        return self.internal_by_client[client_session_id][index]
 
 
 class _YieldingStubEngine(_ReusableStubEngine):
@@ -306,7 +321,9 @@ async def test_websocket_reuses_connection_for_serial_sessions_and_stop_alias():
             assert json.loads(second_start.data)["event"]["session_id"] == "serial-2"
             assert second_audio.type == aiohttp.WSMsgType.BINARY
             assert json.loads(second_done.data)["event"]["type"] == "done"
-            assert engine.started_sessions == ["serial-1", "serial-2"]
+            assert engine.started_client_sessions == ["serial-1", "serial-2"]
+            assert len(set(engine.started_sessions)) == 2
+            assert set(engine.started_sessions).isdisjoint({"serial-1", "serial-2"})
             assert engine.cancel_calls == []
 
             await ws.close()
@@ -409,13 +426,16 @@ async def test_cancel_emits_done_keeps_connection_and_isolates_old_queue():
                 terminal_event["meta"]["cancel_reason"] == "caller interrupted playback"
             )
             assert terminal_event["meta"]["websocket_connection_reusable"] == "true"
-            assert engine.cancel_calls == ["cancel-1"]
+            cancel_1_internal = engine.internal_for("cancel-1")
+            assert engine.cancel_calls == [cancel_1_internal]
             assert not ws.closed
 
             # Simulate an engine callback racing after cancellation. It still
             # targets cancel-1's detached queue and must never appear in the
             # next logical session on this connection.
-            await engine.callbacks["cancel-1"]["on_audio"]("cancel-1", b"\x00\x00\x10A")
+            await engine.callbacks[cancel_1_internal]["on_audio"](
+                cancel_1_internal, b"\x00\x00\x10A"
+            )
 
             await ws.send_json({"type": "start", "session_id": "cancel-2"})
             second_start = await ws.receive(timeout=1.0)
@@ -454,8 +474,9 @@ async def test_engine_error_terminal_closes_connection_without_reuse_marker():
             first_start = await ws.receive(timeout=1.0)
             assert json.loads(first_start.data)["event"]["type"] == "start"
 
-            await engine.callbacks["failed-1"]["on_done"](
-                "failed-1", {"error": "synthetic engine failure"}
+            failed_internal = engine.internal_for("failed-1")
+            await engine.callbacks[failed_internal]["on_done"](
+                failed_internal, {"error": "synthetic engine failure"}
             )
             failed = await ws.receive(timeout=1.0)
             failed_event = json.loads(failed.data)["event"]
@@ -495,8 +516,9 @@ async def test_engine_error_drops_already_queued_text_before_connection_close():
             # same event-loop turn. The client must see exactly the engine
             # error followed by close, never a second protocol error and never
             # a reusable marker.
-            await engine.callbacks["failed-race"]["on_done"](
-                "failed-race", {"error": "boom"}
+            failed_internal = engine.internal_for("failed-race")
+            await engine.callbacks[failed_internal]["on_done"](
+                failed_internal, {"error": "boom"}
             )
             await ws.send_json({"type": "text", "text": "too late"})
 
@@ -509,6 +531,84 @@ async def test_engine_error_drops_already_queued_text_before_connection_close():
                 aiohttp.WSMsgType.CLOSE,
                 aiohttp.WSMsgType.CLOSED,
             }
+
+
+@pytest.mark.asyncio
+async def test_same_client_session_id_on_two_websockets_is_engine_isolated():
+    aiohttp = pytest.importorskip("aiohttp")
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    engine = _ReusableStubEngine()
+    gateway = WebSocketGateway(engine)
+    app = web.Application()
+    app.router.add_get("/v1/ws", gateway.handle_websocket)
+
+    server = TestServer(app)
+    async with server:
+        client = TestClient(server)
+        async with client:
+            ws_a = await client.ws_connect("/v1/ws")
+            ws_b = await client.ws_connect("/v1/ws")
+
+            await ws_a.send_json({"type": "start", "session_id": "duplicate"})
+            await ws_b.send_json({"type": "start", "session_id": "duplicate"})
+            start_a = json.loads((await ws_a.receive(timeout=1.0)).data)["event"]
+            start_b = json.loads((await ws_b.receive(timeout=1.0)).data)["event"]
+
+            assert start_a["session_id"] == "duplicate"
+            assert start_b["session_id"] == "duplicate"
+            internal_a, internal_b = engine.internal_by_client["duplicate"]
+            assert internal_a != internal_b
+            assert "duplicate" not in {internal_a, internal_b}
+
+            await ws_a.send_json({"type": "cancel", "reason": "only a"})
+            cancelled = json.loads((await ws_a.receive(timeout=1.0)).data)["event"]
+            assert cancelled["session_id"] == "duplicate"
+            assert engine.cancel_calls == [internal_a]
+
+            # The second physical connection still owns a distinct engine
+            # execution even though its public correlation ID is identical.
+            await ws_b.send_json({"type": "text", "text": "still running"})
+            assert (await ws_b.receive(timeout=1.0)).type == aiohttp.WSMsgType.BINARY
+            await ws_b.send_json({"type": "stop"})
+            done_b = json.loads((await ws_b.receive(timeout=1.0)).data)["event"]
+            assert done_b["type"] == "done"
+            assert done_b["session_id"] == "duplicate"
+            assert engine.cancel_calls == [internal_a]
+
+            await ws_a.close()
+            await ws_b.close()
+
+
+@pytest.mark.asyncio
+async def test_websocket_generates_and_echoes_client_id_when_omitted():
+    aiohttp = pytest.importorskip("aiohttp")
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    engine = _ReusableStubEngine()
+    gateway = WebSocketGateway(engine)
+    app = web.Application()
+    app.router.add_get("/v1/ws", gateway.handle_websocket)
+
+    server = TestServer(app)
+    async with server:
+        client = TestClient(server)
+        async with client:
+            ws = await client.ws_connect("/v1/ws")
+            await ws.send_json({"type": "start"})
+            start = json.loads((await ws.receive(timeout=1.0)).data)["event"]
+
+            generated_client_id = start["session_id"]
+            assert generated_client_id
+            internal_id = engine.internal_for(generated_client_id)
+            assert generated_client_id != internal_id
+
+            await ws.send_json({"type": "cancel"})
+            done = json.loads((await ws.receive(timeout=1.0)).data)["event"]
+            assert done["session_id"] == generated_client_id
+            assert engine.cancel_calls == [internal_id]
 
 
 @pytest.mark.asyncio

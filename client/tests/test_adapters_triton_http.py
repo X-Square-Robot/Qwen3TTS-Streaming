@@ -52,6 +52,29 @@ class TestTritonHttpAdapter:
         assert "audio_chunk" in output_names
         assert "event_type" in output_names
 
+    def test_get_capabilities_uses_per_call_timeout(self, monkeypatch):
+        seen_timeouts = []
+
+        class FakeResponse:
+            status_code = 200
+            text = 'CAPABILITIES:{"loaded_model_type":"custom_voice"}'
+
+        def fake_post(url, json=None, timeout=None, headers=None):
+            seen_timeouts.append(timeout)
+            return FakeResponse()
+
+        monkeypatch.setattr("qwen3tts._adapters.triton_http.requests.post", fake_post)
+        adapter = TritonHttpAdapter(
+            "http://localhost:8000",
+            model_name="tts_orchestrator_http",
+            timeout=30.0,
+        )
+
+        capabilities = adapter.get_capabilities(timeout=1.25)
+
+        assert capabilities.loaded_model_type == "custom_voice"
+        assert seen_timeouts == [1.25]
+
     def test_synthesize_bytes(self, monkeypatch):
         caps_json = json.dumps({"loaded_model_type": "custom_voice"}).encode()
         audio_data = b"\x00\x01\x02\x03"

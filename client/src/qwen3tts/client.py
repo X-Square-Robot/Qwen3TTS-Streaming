@@ -25,6 +25,7 @@ from .constants import (
     TRANSPORT_TRITON_HTTP,
 )
 from .detect import detect_transport
+from .exceptions import TransportNotSupportedError
 
 
 class TTSClient:
@@ -46,13 +47,29 @@ class TTSClient:
         timeout: float = 30.0,
         connect_timeout: float | None = None,
         reconnect_attempts: int = 1,
+        max_connections: int = 32,
         max_idle_connections: int = 8,
+        max_pending_acquires: int = 256,
+        acquire_timeout: float | None = 30.0,
+        idle_ttl: float | None = None,
+        max_lifetime: float | None = None,
         keepalive_interval: float = 15.0,
+        keepalive_jitter: float = 0.2,
         key: str | None = None,
         headers: dict[str, str] | None = None,
         metadata=None,
         verify: bool = True,
     ):
+        """Connect to a TTS endpoint.
+
+        For ``engine-websocket``, physical connections are exclusive leases
+        from a bounded FIFO pool. Defaults allow 32 total connections, retain
+        eight idle connections, queue at most 256 acquires, and wait 30 seconds
+        for capacity. ``idle_ttl`` and ``max_lifetime`` are disabled by default;
+        either ``None`` or ``0`` disables them explicitly. Keepalive cycles use
+        20% timing jitter by default to avoid synchronized gateway probes.
+        """
+
         headers, metadata = apply_bearer_key(headers, metadata, key)
         detected = detect_transport(
             endpoint,
@@ -72,8 +89,14 @@ class TTSClient:
             timeout=timeout,
             connect_timeout=connect_timeout,
             reconnect_attempts=reconnect_attempts,
+            max_connections=max_connections,
             max_idle_connections=max_idle_connections,
+            max_pending_acquires=max_pending_acquires,
+            acquire_timeout=acquire_timeout,
+            idle_ttl=idle_ttl,
+            max_lifetime=max_lifetime,
             keepalive_interval=keepalive_interval,
+            keepalive_jitter=keepalive_jitter,
             headers=headers,
             metadata=metadata,
         )
@@ -93,8 +116,42 @@ class TTSClient:
             adapter.connect()
         return client
 
-    def get_capabilities(self):
-        return self._adapter.get_capabilities()
+    def get_capabilities(self, *, timeout: float | None = None):
+        """Return backend capabilities with an optional per-call timeout.
+
+        Omitting ``timeout`` deliberately keeps the historical no-keyword
+        adapter call.  That preserves compatibility with third-party adapters
+        and older test doubles whose ``get_capabilities`` method does not yet
+        accept a timeout override.
+        """
+
+        if timeout is None:
+            return self._adapter.get_capabilities()
+        return self._adapter.get_capabilities(timeout=timeout)
+
+    def prewarm(
+        self,
+        connections: int = 1,
+        *,
+        timeout: float | None = None,
+    ) -> int:
+        """Fill a supported transport's idle connection pool to ``connections``.
+
+        Websocket adapters establish the missing sockets concurrently and
+        return the actual idle pool size.  Other transports may not expose an
+        explicit connection pool and therefore reject this operation.
+        """
+
+        prewarm = getattr(self._adapter, "prewarm", None)
+        if not callable(prewarm):
+            raise TransportNotSupportedError(
+                f"transport {self.resolved_transport!r} does not support prewarm"
+            )
+        # Preserve compatibility with adapters that implemented prewarm before
+        # the optional per-call timeout keyword was added.
+        if timeout is None:
+            return prewarm(connections)
+        return prewarm(connections, timeout=timeout)
 
     def synthesize_bytes(
         self, text: str, *, request: SynthesisConfig | None = None
@@ -163,8 +220,14 @@ def _build_adapter(
     headers,
     metadata,
     reconnect_attempts: int = 1,
+    max_connections: int = 32,
     max_idle_connections: int = 8,
+    max_pending_acquires: int = 256,
+    acquire_timeout: float | None = 30.0,
+    idle_ttl: float | None = None,
+    max_lifetime: float | None = None,
     keepalive_interval: float = 15.0,
+    keepalive_jitter: float = 0.2,
 ):
     if transport == TRANSPORT_ENGINE_WEBSOCKET:
         return EngineWebSocketAdapter(
@@ -173,8 +236,14 @@ def _build_adapter(
             connect_timeout=connect_timeout,
             headers=headers,
             reconnect_attempts=reconnect_attempts,
+            max_connections=max_connections,
             max_idle_connections=max_idle_connections,
+            max_pending_acquires=max_pending_acquires,
+            acquire_timeout=acquire_timeout,
+            idle_ttl=idle_ttl,
+            max_lifetime=max_lifetime,
             keepalive_interval=keepalive_interval,
+            keepalive_jitter=keepalive_jitter,
         )
     if transport == TRANSPORT_ENGINE_GRPC:
         return EngineGrpcAdapter(

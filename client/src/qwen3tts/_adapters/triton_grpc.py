@@ -57,19 +57,24 @@ class TritonGrpcAdapter:
         self.metadata = normalize_grpc_metadata(metadata, headers)
         self.headers = grpc_metadata_as_headers(self.metadata)
 
-    def get_capabilities(self) -> Capabilities:
+    def get_capabilities(self, *, timeout: float | None = None) -> Capabilities:
+        effective_timeout = (
+            self.timeout if timeout is None else max(0.0, float(timeout))
+        )
         np, grpcclient = _require_triton()
         client = grpcclient.InferenceServerClient(url=self.endpoint)
-        if not client.is_server_live(headers=self.headers, client_timeout=self.timeout):
+        if not client.is_server_live(
+            headers=self.headers, client_timeout=effective_timeout
+        ):
             raise RuntimeError(f"triton gRPC server is not live at {self.endpoint}")
         if not client.is_server_ready(
-            headers=self.headers, client_timeout=self.timeout
+            headers=self.headers, client_timeout=effective_timeout
         ):
             raise RuntimeError(f"triton gRPC server is not ready at {self.endpoint}")
         if self.model_name and not client.is_model_ready(
             self.model_name,
             headers=self.headers,
-            client_timeout=self.timeout,
+            client_timeout=effective_timeout,
         ):
             raise RuntimeError(f"triton model {self.model_name!r} is not ready")
         payload = {"action": "capabilities"}
@@ -119,7 +124,7 @@ class TritonGrpcAdapter:
                 inputs=[req_input],
                 outputs=[audio_out, event_type_out, event_json_out, final_out],
             )
-            done.wait(self.timeout)
+            done.wait(effective_timeout)
         finally:
             client.stop_stream()
         if caps_holder:

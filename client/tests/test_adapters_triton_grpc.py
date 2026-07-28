@@ -147,12 +147,12 @@ def test_capabilities_forwards_auth_to_health_and_stream(monkeypatch):
         metadata=(("Authorization", "Bearer secret"),),
     )
 
-    adapter.get_capabilities()
+    adapter.get_capabilities(timeout=0.75)
 
     expected = {"authorization": "Bearer secret"}
     assert instances[0].calls == [
-        ("live", expected, 2.0),
-        ("ready", expected, 2.0),
-        ("model", expected, 2.0),
+        ("live", expected, 0.75),
+        ("ready", expected, 0.75),
+        ("model", expected, 0.75),
         ("stream", expected, None),
     ]

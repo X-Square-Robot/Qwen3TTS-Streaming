@@ -184,22 +184,46 @@ Pass `key` when a PaaS gateway requires Bearer authentication. Its default is
 client = TTSClient.connect(
     "wss://tts.example/v1/ws",
     key="your-key",
+    connect_timeout=5.0,
+    max_connections=32,
+    max_idle_connections=8,
+    max_pending_acquires=256,
+    acquire_timeout=30.0,
 )
+
+# Per-call capabilities timeout, then fill the pool to four idle sockets.
+caps = client.get_capabilities(timeout=5.0)
+idle_connections = client.prewarm(connections=4, timeout=5.0)
 ```
 
 `engine-websocket` retains completed physical connections and reuses them for
 later logical sessions; concurrent sessions use separate pooled connections.
+The `SessionStartRequest.session_id` is correlation data only. The gateway
+creates a private engine execution ID for every `start`, so equal client IDs on
+different requests cannot replace or cancel each other.
+`max_connections` bounds connecting, leased, keepalive-probed, and idle sockets.
+Once it is reached, callers enter a bounded FIFO queue. A full queue raises
+`PoolSaturatedError`; waiting longer than `acquire_timeout` raises
+`PoolAcquireTimeoutError`.
 The session boundary is its `done`/`error` event, not socket closure. Against a
 legacy gateway without the persistent-protocol marker, the SDK safely discards
 the socket instead of pooling it. Engine-error connections are also discarded;
 only a successful/cancelled `done` explicitly marked reusable enters the pool.
 Idle connections are kept alive every 15 seconds; when keepalive is disabled,
-they are probed synchronously before reuse.
-Tune this with `reconnect_attempts`, `max_idle_connections`, and
-`keepalive_interval`. Automatic reconnects cover idle connections and new
-session setup only. Once text has been submitted, an interrupted active session
-is not replayed because that could duplicate audio. Call `client.close()` when
-finished, or use `TTSClient` as a context manager.
+they are probed synchronously before reuse. `connect_timeout` bounds connection
+handshakes and these idle-socket probes, independently of the stream receive
+timeout. `prewarm()` fills only the missing pool capacity in parallel, caps its
+target at `max_idle_connections` and `max_connections`, and returns the actual
+idle count on success; its optional `timeout` bounds each capabilities
+round-trip. `idle_ttl` and `max_lifetime` are disabled by default (`None` or
+`0`); an over-age active connection is retired only after its session ends.
+`keepalive_jitter=0.2` spreads maintenance traffic across workers.
+Tune this with `reconnect_attempts`, `max_connections`,
+`max_idle_connections`, `max_pending_acquires`, `acquire_timeout`, and the
+connection-lifecycle settings. Automatic reconnects cover idle connections and new
+session setup only. A mid-stream disconnect is surfaced as an error and is never
+automatically replayed because that could duplicate audio. Call `client.close()`
+when finished, or use `TTSClient` as a context manager.
 
 ## Examples
 

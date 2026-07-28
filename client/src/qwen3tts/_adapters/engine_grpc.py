@@ -62,15 +62,18 @@ class EngineGrpcAdapter:
         self._grpc = None
         self._grpc_channel = None
 
-    def _channel(self):
+    def _channel(self, *, timeout: float | None = None):
         # Reused across calls/sessions: a gRPC channel already multiplexes many
         # streams over one HTTP/2 connection, so tearing it down after every
         # session paid a fresh TCP+HTTP/2 handshake for no reason.
+        effective_timeout = (
+            self.timeout if timeout is None else max(0.0, float(timeout))
+        )
         with self._channel_lock:
             if self._grpc_channel is None:
                 grpc = _require_grpc()
                 channel = grpc.insecure_channel(self.endpoint)
-                grpc.channel_ready_future(channel).result(timeout=self.timeout)
+                grpc.channel_ready_future(channel).result(timeout=effective_timeout)
                 self._grpc = grpc
                 self._grpc_channel = channel
             return self._grpc, self._grpc_channel
@@ -82,12 +85,15 @@ class EngineGrpcAdapter:
                 self._grpc_channel = None
                 self._grpc = None
 
-    def get_capabilities(self) -> Capabilities:
-        grpc, channel = self._channel()
+    def get_capabilities(self, *, timeout: float | None = None) -> Capabilities:
+        effective_timeout = (
+            self.timeout if timeout is None else max(0.0, float(timeout))
+        )
+        grpc, channel = self._channel(timeout=effective_timeout)
         stub = tts_pb2_grpc.TTSServiceStub(channel)
         response = stub.GetCapabilities(
             tts_pb2.GetCapabilitiesRequest(),
-            timeout=self.timeout,
+            timeout=effective_timeout,
             metadata=self.metadata,
         )
         return capabilities_from_payload(_capabilities_message_to_dict(response))

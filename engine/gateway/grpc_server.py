@@ -9,6 +9,9 @@ Protocol:
 
 Uses grpcio.aio for async compatibility with the engine's asyncio event loop.
 
+The protobuf ``session_id`` is a client correlation ID.  The gateway always
+uses a separate server-generated ID for engine state and routing.
+
 To regenerate proto stubs:
     python -m grpc_tools.protoc -I engine/gateway \
         --python_out=engine/gateway \
@@ -24,7 +27,6 @@ import asyncio
 import logging
 import os
 import time
-import uuid
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -58,6 +60,7 @@ from ..interface.vad import (
     create_vad_processor,
 )
 from . import tts_pb2, tts_pb2_grpc
+from .session_identity import GatewaySessionIdentity
 
 if TYPE_CHECKING:
     from ..server import TTSEngine
@@ -86,13 +89,16 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
 
     async def _create_session(
         self,
-        session_id: str | None,
+        identity: GatewaySessionIdentity,
         *,
         start_request: SessionStartRequest,
         audio_queue: asyncio.Queue,
-    ) -> str:
-        session_id = session_id or str(uuid.uuid4())
+    ) -> None:
+        client_session_id = identity.client_session_id
+        internal_session_id = identity.internal_session_id
+        start_request.session_id = client_session_id
         config = start_request.config
+        identity.bind_engine_config(config)
 
         # Create server timing accumulator for cross-thread observability
         timing_acc = ServerTimingAccumulator()
@@ -102,11 +108,12 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
         timing_acc.text_input_mode = config.input_mode.value
 
         LifecycleLogger.emit(
-            session_id=session_id,
+            session_id=internal_session_id,
             phase="request.accepted",
             request_id=config.timing.request_id or None,
             turn_id=config.timing.turn_id or None,
             transport="grpc",
+            client_session_id=client_session_id,
             client_request_ts_ms=config.timing.client_request_ts_ms or None,
         )
 
@@ -128,9 +135,10 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             # context (answers "为什么裁了这段"). No-op unless recording enabled.
             for tr in vad_processor.drain_transitions():
                 LifecycleLogger.emit(
-                    session_id=session_id,
+                    session_id=internal_session_id,
                     phase="vad_transition",
                     request_id=config.timing.request_id or None,
+                    client_session_id=client_session_id,
                     session_level=config.observability_level,
                     min_level=obs.ObsLevel.DEBUG,
                     **tr,
@@ -151,9 +159,10 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                 if not first_effective_logged:
                     first_effective_logged = True
                     LifecycleLogger.emit(
-                        session_id=session_id,
+                        session_id=internal_session_id,
                         phase="output.audio.first_effective",
                         request_id=config.timing.request_id or None,
+                        client_session_id=client_session_id,
                         session_level=config.observability_level,
                     )
                 frame = pipeline.convert_audio_chunk(data)
@@ -182,9 +191,10 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             if not first_effective_logged:
                 first_effective_logged = True
                 LifecycleLogger.emit(
-                    session_id=session_id,
+                    session_id=internal_session_id,
                     phase="output.audio.first_effective",
                     request_id=config.timing.request_id or None,
+                    client_session_id=client_session_id,
                     session_level=config.observability_level,
                 )
 
@@ -205,7 +215,7 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                 (
                     "event",
                     _make_event_response_from_contract(
-                        build_forward_event(sid, event, start_request)
+                        build_forward_event(client_session_id, event, start_request)
                     ),
                 )
             )
@@ -233,13 +243,13 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                 (
                     "event",
                     _make_event_response_from_contract(
-                        build_done_event(sid, metrics, pipeline)
+                        build_done_event(client_session_id, metrics, pipeline)
                     ),
                 )
             )
 
         await self._engine.start_session(
-            session_id,
+            internal_session_id,
             config=config,
             on_audio=on_audio,
             on_done=on_done,
@@ -254,12 +264,15 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             (
                 "event",
                 _make_event_response_from_contract(
-                    build_start_event(session_id, start_request)
+                    build_start_event(client_session_id, start_request)
                 ),
             )
         )
-        logger.info("gRPC session started: %s", session_id)
-        return session_id
+        logger.info(
+            "gRPC session started: client=%s internal=%s",
+            client_session_id,
+            internal_session_id,
+        )
 
     async def _drain_available_audio(self, audio_queue: asyncio.Queue):
         pending: tuple | None = None
@@ -321,34 +334,46 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
 
     async def SynthesizeOnce(self, request, context):
         """Handle unary full-text requests with streamed audio output."""
-        session_id = None
+        identity = GatewaySessionIdentity.create(request.session_id)
+        client_session_id = identity.client_session_id
+        internal_session_id = identity.internal_session_id
         audio_queue: asyncio.Queue = asyncio.Queue(maxsize=_GRPC_AUDIO_QUEUE_MAXSIZE)
 
         try:
             start_request = _start_request_from_oneshot_request(request)
-            session_id = await self._create_session(
-                request.session_id,
+            await self._create_session(
+                identity,
                 start_request=start_request,
                 audio_queue=audio_queue,
             )
-            await self._engine.push_text_input(session_id, request.text)
-            await self._engine.mark_input_complete(session_id)
-            async for response in self._drain_until_done(session_id, audio_queue):
+            await self._engine.push_text_input(internal_session_id, request.text)
+            await self._engine.mark_input_complete(internal_session_id)
+            async for response in self._drain_until_done(
+                internal_session_id, audio_queue
+            ):
                 yield response
             return
         except asyncio.CancelledError:
-            logger.info("gRPC oneshot cancelled: %s", session_id)
+            logger.info(
+                "gRPC oneshot cancelled: client=%s internal=%s",
+                client_session_id,
+                internal_session_id,
+            )
         except Exception as e:
-            logger.error("gRPC oneshot error: %s: %s", session_id, e)
+            logger.error(
+                "gRPC oneshot error: client=%s internal=%s: %s",
+                client_session_id,
+                internal_session_id,
+                e,
+            )
             yield _make_event_response(
-                event_type="error", session_id=session_id or "", message=str(e)
+                event_type="error", session_id=client_session_id, message=str(e)
             )
         finally:
-            if session_id:
-                await self._engine.cancel(session_id)
+            await self._engine.cancel(internal_session_id)
 
         yield _make_event_response(
-            event_type="done", session_id=session_id or "", message="Stream ended"
+            event_type="done", session_id=client_session_id, message="Stream ended"
         )
 
     async def SynthesizeStream(self, request_iterator, context):
@@ -360,7 +385,8 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
           normalization/tokenization before the backend sees it.
         - ``EndRequest`` / legacy ``TextComplete`` signals no more transport input.
         """
-        session_id = None
+        client_session_id: str | None = None
+        internal_session_id: str | None = None
         audio_queue: asyncio.Queue = asyncio.Queue(maxsize=_GRPC_AUDIO_QUEUE_MAXSIZE)
         request_queue: asyncio.Queue = asyncio.Queue(maxsize=64)
         got_done = False
@@ -378,7 +404,7 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             while True:
                 if request_task is None and not input_eof:
                     request_task = asyncio.create_task(request_queue.get())
-                if audio_task is None and session_id and not got_cancel:
+                if audio_task is None and internal_session_id and not got_cancel:
                     audio_task = asyncio.create_task(audio_queue.get())
 
                 wait_set = {t for t in (request_task, audio_task) if t is not None}
@@ -420,26 +446,37 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
 
                     if kind == "eof":
                         input_eof = True
-                        if session_id and not got_done and not got_cancel:
-                            await self._engine.mark_input_complete(session_id)
+                        if internal_session_id and not got_done and not got_cancel:
+                            await self._engine.mark_input_complete(
+                                internal_session_id
+                            )
                             got_done = True
                     else:
                         request = payload
                         msg_type = request.WhichOneof("request")
 
                         if msg_type in {"start", "init"}:
+                            if internal_session_id is not None:
+                                raise ValueError(
+                                    "gRPC stream session has already been started"
+                                )
                             start_request = _start_request_from_stream_request(request)
                             start_req = (
                                 request.start if msg_type == "start" else request.init
                             )
-                            session_id = await self._create_session(
-                                start_req.session_id,
+                            identity = GatewaySessionIdentity.create(
+                                start_req.session_id
+                            )
+                            client_session_id = identity.client_session_id
+                            internal_session_id = identity.internal_session_id
+                            await self._create_session(
+                                identity,
                                 start_request=start_request,
                                 audio_queue=audio_queue,
                             )
 
                         elif msg_type == "text":
-                            if session_id:
+                            if internal_session_id:
                                 if (
                                     start_request is not None
                                     and request.text.client_timestamp_ms > 0
@@ -450,9 +487,10 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                                 if not first_text_received:
                                     first_text_received = True
                                     LifecycleLogger.emit(
-                                        session_id=session_id,
+                                        session_id=internal_session_id,
                                         phase="text.first_received",
                                         transport="grpc",
+                                        client_session_id=client_session_id,
                                         request_id=(
                                             start_request.timing.request_id
                                             if start_request
@@ -463,11 +501,11 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                                         or None,
                                     )
                                 await self._engine.push_text_input(
-                                    session_id, request.text.text
+                                    internal_session_id, request.text.text
                                 )
 
                         elif msg_type in {"end", "done"}:
-                            if session_id:
+                            if internal_session_id:
                                 if (
                                     start_request is not None
                                     and msg_type == "end"
@@ -476,12 +514,14 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                                     start_request.timing.client_end_ts_ms = int(
                                         request.end.client_timestamp_ms
                                     )
-                                await self._engine.mark_input_complete(session_id)
+                                await self._engine.mark_input_complete(
+                                    internal_session_id
+                                )
                             got_done = True
 
                         elif msg_type == "cancel":
-                            if session_id:
-                                await self._engine.cancel(session_id)
+                            if internal_session_id:
+                                await self._engine.cancel(internal_session_id)
                             got_cancel = True
                             # Stop reading further requests so the loop can end
                             # even if the client never half-closes the stream
@@ -498,11 +538,20 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                     break
 
         except asyncio.CancelledError:
-            logger.info("gRPC stream cancelled: %s", session_id)
+            logger.info(
+                "gRPC stream cancelled: client=%s internal=%s",
+                client_session_id,
+                internal_session_id,
+            )
         except Exception as e:
-            logger.error("gRPC stream error: %s: %s", session_id, e)
+            logger.error(
+                "gRPC stream error: client=%s internal=%s: %s",
+                client_session_id,
+                internal_session_id,
+                e,
+            )
             yield _make_event_response(
-                event_type="error", session_id=session_id or "", message=str(e)
+                event_type="error", session_id=client_session_id or "", message=str(e)
             )
         finally:
             for task in (request_task, audio_task, pump_task):
@@ -514,11 +563,13 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                         await task
                     except (asyncio.CancelledError, StopAsyncIteration):
                         pass
-            if session_id:
-                await self._engine.cancel(session_id)
+            if internal_session_id:
+                await self._engine.cancel(internal_session_id)
 
         yield _make_event_response(
-            event_type="done", session_id=session_id or "", message="Stream ended"
+            event_type="done",
+            session_id=client_session_id or "",
+            message="Stream ended",
         )
 
 

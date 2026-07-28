@@ -16,9 +16,14 @@ from qwen3tts.constants import (
 class _FakeAdapter:
     def __init__(self):
         self.start_requests = []
+        self.prewarm_requests = []
 
     def get_capabilities(self):
         return {"variant": "fake"}
+
+    def prewarm(self, connections):
+        self.prewarm_requests.append(connections)
+        return connections
 
     def synthesize_bytes(self, text: str, *, request):
         self.start_requests.append((text, request))
@@ -100,6 +105,64 @@ def test_open_stream_delegates_to_adapter():
     assert session.session_id == "sid"
 
 
+def test_get_capabilities_timeout_none_preserves_legacy_adapter_call():
+    client = TTSClient(
+        endpoint="fake",
+        adapter=_FakeAdapter(),
+        detected=type("D", (), {"transport": "fake", "probe_report": []})(),
+    )
+
+    assert client.get_capabilities(timeout=None) == {"variant": "fake"}
+
+
+def test_get_capabilities_forwards_explicit_timeout():
+    seen: list[float | None] = []
+
+    class _TimedAdapter(_FakeAdapter):
+        def get_capabilities(self, *, timeout=None):
+            seen.append(timeout)
+            return {"variant": "timed"}
+
+    client = TTSClient(
+        endpoint="fake",
+        adapter=_TimedAdapter(),
+        detected=type("D", (), {"transport": "fake", "probe_report": []})(),
+    )
+
+    assert client.get_capabilities(timeout=2.5) == {"variant": "timed"}
+    assert seen == [2.5]
+
+
+def test_prewarm_timeout_none_preserves_legacy_adapter_call():
+    adapter = _FakeAdapter()
+    client = TTSClient(
+        endpoint="fake",
+        adapter=adapter,
+        detected=type("D", (), {"transport": "fake", "probe_report": []})(),
+    )
+
+    assert client.prewarm(3, timeout=None) == 3
+    assert adapter.prewarm_requests == [3]
+
+
+def test_prewarm_forwards_explicit_timeout():
+    seen = []
+
+    class _TimedAdapter(_FakeAdapter):
+        def prewarm(self, connections, *, timeout=None):
+            seen.append((connections, timeout))
+            return connections
+
+    client = TTSClient(
+        endpoint="fake",
+        adapter=_TimedAdapter(),
+        detected=type("D", (), {"transport": "fake", "probe_report": []})(),
+    )
+
+    assert client.prewarm(4, timeout=2.5) == 4
+    assert seen == [(4, 2.5)]
+
+
 def test_build_websocket_adapter_forwards_connect_timeout():
     adapter = _build_adapter(
         TRANSPORT_ENGINE_WEBSOCKET,
@@ -109,8 +172,14 @@ def test_build_websocket_adapter_forwards_connect_timeout():
         timeout=120.0,
         connect_timeout=5.0,
         reconnect_attempts=3,
+        max_connections=12,
         max_idle_connections=4,
+        max_pending_acquires=40,
+        acquire_timeout=2.5,
+        idle_ttl=60.0,
+        max_lifetime=900.0,
         keepalive_interval=9.0,
+        keepalive_jitter=0.1,
         headers={"X-Test": "1"},
         metadata=None,
     )
@@ -118,8 +187,14 @@ def test_build_websocket_adapter_forwards_connect_timeout():
     assert adapter.timeout == 120.0
     assert adapter.connect_timeout == 5.0
     assert adapter.reconnect_attempts == 3
+    assert adapter.max_connections == 12
     assert adapter.max_idle_connections == 4
+    assert adapter.max_pending_acquires == 40
+    assert adapter.acquire_timeout == 2.5
+    assert adapter.idle_ttl == 60.0
+    assert adapter.max_lifetime == 900.0
     assert adapter.keepalive_interval == 9.0
+    assert adapter.keepalive_jitter == 0.1
     assert adapter.headers == {"X-Test": "1"}
 
 

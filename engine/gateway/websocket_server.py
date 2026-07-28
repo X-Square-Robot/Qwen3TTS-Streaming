@@ -20,6 +20,10 @@ Protocol:
 A connection carries at most one active synthesis session, but it may carry
 multiple sessions serially.  A session ``done``/``error`` event ends only that
 logical session; the websocket remains available for the next ``start``.
+
+The wire ``session_id`` is a client correlation ID.  Every logical request is
+mapped to a fresh server-generated engine session ID, so equal client IDs on
+different connections never share engine state.
 """
 
 from __future__ import annotations
@@ -30,7 +34,6 @@ import binascii
 import json
 import logging
 import os
-import uuid
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -61,6 +64,7 @@ from ..interface.vad import (
     create_vad_processor,
 )
 from .grpc_server import _build_vad_config, _inject_vad_metrics
+from .session_identity import GatewaySessionIdentity
 
 if TYPE_CHECKING:
     from ..server import HealthState, TTSEngine
@@ -102,7 +106,8 @@ class WebSocketGateway:
         ws = web.WebSocketResponse(heartbeat=_WEBSOCKET_HEARTBEAT_SEC)
         await ws.prepare(request)
 
-        session_id = None
+        client_session_id: str | None = None
+        internal_session_id: str | None = None
         # A fresh queue is allocated for every logical session.  Engine
         # callbacks can race with cancellation/completion; keeping their old
         # queue detached prevents a late callback from leaking audio/events
@@ -121,7 +126,8 @@ class WebSocketGateway:
         async def reset_session() -> None:
             """Release the current logical session without closing ``ws``."""
 
-            nonlocal session_id, start_request, outbound_queue, outbound_task
+            nonlocal client_session_id, internal_session_id
+            nonlocal start_request, outbound_queue, outbound_task
             nonlocal input_closed
             # Usually the queue-get task delivered the terminal itself. It can
             # still be pending when cancel sends its terminal directly.
@@ -132,7 +138,8 @@ class WebSocketGateway:
                 except asyncio.CancelledError:
                     pass
             outbound_task = None
-            session_id = None
+            client_session_id = None
+            internal_session_id = None
             input_closed = False
             start_request = None
             outbound_queue = None
@@ -165,7 +172,11 @@ class WebSocketGateway:
             while True:
                 if request_task is None and not connection_closed:
                     request_task = asyncio.create_task(request_queue.get())
-                if outbound_task is None and session_id and outbound_queue is not None:
+                if (
+                    outbound_task is None
+                    and internal_session_id
+                    and outbound_queue is not None
+                ):
                     outbound_task = asyncio.create_task(outbound_queue.get())
 
                 wait_set = {
@@ -231,7 +242,7 @@ class WebSocketGateway:
                             continue
 
                         if msg_type == "start":
-                            if session_id is not None:
+                            if internal_session_id is not None:
                                 raise ValueError(
                                     "websocket session has already been started"
                                 )
@@ -242,14 +253,19 @@ class WebSocketGateway:
                             outbound_queue = asyncio.Queue(
                                 maxsize=_WEBSOCKET_AUDIO_QUEUE_MAXSIZE
                             )
-                            session_id = await self._create_session(
-                                message.get("session_id"),
+                            identity = GatewaySessionIdentity.create(
+                                message.get("session_id")
+                            )
+                            client_session_id = identity.client_session_id
+                            internal_session_id = identity.internal_session_id
+                            await self._create_session(
+                                identity,
                                 start_request=start_request,
                                 outbound_queue=outbound_queue,
                             )
 
                         elif msg_type == "oneshot":
-                            if session_id is not None:
+                            if internal_session_id is not None:
                                 raise ValueError(
                                     "websocket session has already been started"
                                 )
@@ -263,8 +279,13 @@ class WebSocketGateway:
                             outbound_queue = asyncio.Queue(
                                 maxsize=_WEBSOCKET_AUDIO_QUEUE_MAXSIZE
                             )
-                            session_id = await self._create_session(
-                                message.get("session_id"),
+                            identity = GatewaySessionIdentity.create(
+                                message.get("session_id")
+                            )
+                            client_session_id = identity.client_session_id
+                            internal_session_id = identity.internal_session_id
+                            await self._create_session(
+                                identity,
                                 start_request=start_request,
                                 outbound_queue=outbound_queue,
                             )
@@ -275,11 +296,11 @@ class WebSocketGateway:
                                     "oneshot request requires non-empty 'text'"
                                 )
                             start_request.initial_text = text
-                            await self._engine.push_text_input(session_id, text)
-                            await self._engine.mark_input_complete(session_id)
+                            await self._engine.push_text_input(internal_session_id, text)
+                            await self._engine.mark_input_complete(internal_session_id)
 
                         elif msg_type == "text":
-                            if not session_id:
+                            if not internal_session_id:
                                 raise ValueError("received 'text' before 'start'")
                             if start_request is not None:
                                 client_ts_ms = _coerce_ws_int(
@@ -290,12 +311,12 @@ class WebSocketGateway:
                                         client_ts_ms
                                     )
                             await self._engine.push_text_input(
-                                session_id,
+                                internal_session_id,
                                 str(message.get("text", "") or ""),
                             )
 
                         elif msg_type in {"end", "stop"}:
-                            if not session_id:
+                            if not internal_session_id:
                                 raise ValueError(
                                     f"received '{msg_type}' before 'start'"
                                 )
@@ -306,11 +327,12 @@ class WebSocketGateway:
                                 if client_ts_ms > 0:
                                     start_request.timing.client_end_ts_ms = client_ts_ms
                             input_closed = True
-                            await self._engine.mark_input_complete(session_id)
+                            await self._engine.mark_input_complete(internal_session_id)
 
                         elif msg_type == "cancel":
-                            if session_id:
-                                cancelled_session_id = session_id
+                            if internal_session_id:
+                                cancelled_internal_session_id = internal_session_id
+                                cancelled_client_session_id = client_session_id or ""
                                 cancel_reason = str(message.get("reason", "") or "")
 
                                 # Stop a parked queue read before detaching the
@@ -329,11 +351,13 @@ class WebSocketGateway:
                                         pass
                                     outbound_task = None
 
-                                await self._engine.cancel(cancelled_session_id)
+                                await self._engine.cancel(
+                                    cancelled_internal_session_id
+                                )
                                 await ws.send_json(
                                     _make_event_frame(
                                         event_type="done",
-                                        session_id=cancelled_session_id,
+                                        session_id=cancelled_client_session_id,
                                         message=cancel_reason,
                                         meta={
                                             "terminal_reason": "cancelled",
@@ -356,14 +380,23 @@ class WebSocketGateway:
                     break
 
         except asyncio.CancelledError:
-            logger.info("WebSocket stream cancelled: %s", session_id)
+            logger.info(
+                "WebSocket stream cancelled: client=%s internal=%s",
+                client_session_id,
+                internal_session_id,
+            )
         except Exception as exc:
-            logger.error("WebSocket stream error: %s: %s", session_id, exc)
+            logger.error(
+                "WebSocket stream error: client=%s internal=%s: %s",
+                client_session_id,
+                internal_session_id,
+                exc,
+            )
             if not ws.closed:
                 await ws.send_json(
                     _make_event_frame(
                         event_type="error",
-                        session_id=session_id or "",
+                        session_id=client_session_id or "",
                         message=str(exc),
                     )
                 )
@@ -377,8 +410,8 @@ class WebSocketGateway:
                         await task
                     except asyncio.CancelledError:
                         pass
-            if session_id:
-                await self._engine.cancel(session_id)
+            if internal_session_id:
+                await self._engine.cancel(internal_session_id)
             if not ws.closed:
                 await ws.close()
 
@@ -386,13 +419,16 @@ class WebSocketGateway:
 
     async def _create_session(
         self,
-        session_id: str | None,
+        identity: GatewaySessionIdentity,
         *,
         start_request: SessionStartRequest,
         outbound_queue: asyncio.Queue,
-    ) -> str:
-        session_id = str(session_id or uuid.uuid4())
+    ) -> None:
+        client_session_id = identity.client_session_id
+        internal_session_id = identity.internal_session_id
+        start_request.session_id = client_session_id
         config = start_request.config
+        identity.bind_engine_config(config)
 
         # Create server timing accumulator for cross-thread observability
         import time as _time
@@ -404,11 +440,12 @@ class WebSocketGateway:
         timing_acc.text_input_mode = config.input_mode.value
 
         LifecycleLogger.emit(
-            session_id=session_id,
+            session_id=internal_session_id,
             phase="request.accepted",
             request_id=config.timing.request_id or None,
             turn_id=config.timing.turn_id or None,
             transport="websocket",
+            client_session_id=client_session_id,
             client_request_ts_ms=config.timing.client_request_ts_ms or None,
         )
 
@@ -458,7 +495,7 @@ class WebSocketGateway:
         async def on_event(sid: str, event: dict) -> None:
             await outbound_queue.put(
                 _make_event_frame_from_contract(
-                    build_forward_event(sid, event, start_request)
+                    build_forward_event(client_session_id, event, start_request)
                 )
             )
 
@@ -477,12 +514,12 @@ class WebSocketGateway:
             _inject_vad_metrics(vad_processor, pipeline, metrics)
             await outbound_queue.put(
                 _make_event_frame_from_contract(
-                    build_done_event(sid, metrics, pipeline)
+                    build_done_event(client_session_id, metrics, pipeline)
                 )
             )
 
         await self._engine.start_session(
-            session_id,
+            internal_session_id,
             config=config,
             on_audio=on_audio,
             on_done=on_done,
@@ -490,11 +527,14 @@ class WebSocketGateway:
         )
         await outbound_queue.put(
             _make_event_frame_from_contract(
-                build_start_event(session_id, start_request)
+                build_start_event(client_session_id, start_request)
             )
         )
-        logger.info("WebSocket session started: %s", session_id)
-        return session_id
+        logger.info(
+            "WebSocket session started: client=%s internal=%s",
+            client_session_id,
+            internal_session_id,
+        )
 
     async def _pump_messages(
         self,

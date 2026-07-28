@@ -2170,9 +2170,17 @@ class Executor:
         if slot.sampling_generator is not None:
             return slot.sampling_generator
 
-        identity = (
-            slot.session_id if slot.session_id is not None else f"slot:{slot.slot_id}"
-        )
+        if slot.sampling_identity is not None:
+            # Gateways use a private UUID as the engine registry key.  Keep
+            # sampling tied to the public logical request ID so that identity
+            # isolation does not silently change existing deterministic output.
+            identity = f"{slot.sampling_identity}:{slot.segment_idx}"
+        else:
+            identity = (
+                slot.session_id
+                if slot.session_id is not None
+                else f"slot:{slot.slot_id}"
+            )
         if slot.retry_idx > 0:
             # Rerun re-roll: salt the derivation so attempt N+1 samples a fresh
             # trajectory (same seed would replay the hallucination bit-exactly).

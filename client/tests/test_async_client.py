@@ -77,11 +77,59 @@ class TestAsyncTTSClient:
         async_client = AsyncTTSClient(sync_client)
 
         async def _run():
-            caps = await async_client.get_capabilities()
+            caps = await async_client.get_capabilities(timeout=None)
             return caps
 
         result = asyncio.get_event_loop().run_until_complete(_run())
         assert result == {"variant": "fake"}
+
+    def test_forwards_explicit_capabilities_timeout(self):
+        seen: list[float | None] = []
+        detected = type("D", (), {"transport": "fake", "probe_report": []})()
+
+        class _SyncClient:
+            endpoint = "fake"
+            resolved_transport = "fake"
+            probe_report = []
+            detected_transport = detected
+
+            def get_capabilities(self, *, timeout=None):
+                seen.append(timeout)
+                return {"variant": "timed"}
+
+        async_client = AsyncTTSClient(_SyncClient())
+
+        result = asyncio.get_event_loop().run_until_complete(
+            async_client.get_capabilities(timeout=1.75)
+        )
+
+        assert result == {"variant": "timed"}
+        assert seen == [1.75]
+
+    def test_forwards_prewarm_target_and_timeout(self):
+        seen = []
+        detected = type(
+            "D", (), {"transport": "engine-websocket", "probe_report": []}
+        )()
+
+        class _SyncClient:
+            endpoint = "ws://localhost:50052/v1/ws"
+            resolved_transport = "engine-websocket"
+            probe_report = []
+            detected_transport = detected
+
+            def prewarm(self, connections, *, timeout=None):
+                seen.append((connections, timeout))
+                return connections
+
+        async_client = AsyncTTSClient(_SyncClient())
+
+        result = asyncio.get_event_loop().run_until_complete(
+            async_client.prewarm(5, timeout=1.5)
+        )
+
+        assert result == 5
+        assert seen == [(5, 1.5)]
 
     def test_delegates_synthesize_bytes(self):
         fake_adapter = _FakeAdapter()

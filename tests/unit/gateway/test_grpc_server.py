@@ -518,6 +518,76 @@ def test_streaming_audio_response_includes_timing_meta():
     assert done_response.event.meta["client_end_ts_ms"] == "1710000000200"
 
 
+def test_concurrent_grpc_oneshots_with_same_client_id_use_distinct_engine_ids():
+    class _IsolationEngine:
+        def __init__(self):
+            self.callbacks = {}
+            self.configs = {}
+            self.started = []
+            self.pushed = []
+            self.cancelled = []
+            self.both_started = asyncio.Event()
+
+        async def start_session(
+            self, session_id, *, config, on_audio=None, on_done=None, on_event=None
+        ):
+            self.started.append(session_id)
+            self.configs[session_id] = config
+            self.callbacks[session_id] = on_done
+            if len(self.started) == 2:
+                self.both_started.set()
+            return session_id
+
+        async def push_text_input(self, session_id, text):
+            await asyncio.wait_for(self.both_started.wait(), timeout=1.0)
+            self.pushed.append((session_id, text))
+
+        async def mark_input_complete(self, session_id):
+            await self.callbacks[session_id](session_id, {})
+
+        async def cancel(self, session_id):
+            self.cancelled.append(session_id)
+
+    async def _run():
+        engine = _IsolationEngine()
+        servicer = TTSServicer(engine)
+        requests = [
+            tts_pb2.SynthesizeOnceRequest(
+                session_id="duplicate",
+                text=text,
+                config=tts_pb2.SessionConfig(task_type="custom_voice"),
+            )
+            for text in ("first", "second")
+        ]
+
+        async def collect(request):
+            return [
+                response
+                async for response in servicer.SynthesizeOnce(request, context=None)
+            ]
+
+        responses = await asyncio.gather(*(collect(request) for request in requests))
+        return engine, responses
+
+    engine, responses = asyncio.run(_run())
+
+    assert len(engine.started) == 2
+    assert len(set(engine.started)) == 2
+    assert "duplicate" not in set(engine.started)
+    assert {session_id for session_id, _ in engine.pushed} == set(engine.started)
+    assert set(engine.cancelled) == set(engine.started)
+    assert all(
+        config.timing.extra["_sampling_identity"] == "duplicate"
+        for config in engine.configs.values()
+    )
+    assert all(
+        response.event.session_id == "duplicate"
+        for stream in responses
+        for response in stream
+        if response.WhichOneof("response") == "event"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Audio chunk coalescing
 # ---------------------------------------------------------------------------

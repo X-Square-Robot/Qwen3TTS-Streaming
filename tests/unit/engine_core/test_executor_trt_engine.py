@@ -133,6 +133,22 @@ def test_stable_sampling_seed_is_repeatable_and_lane_specific():
     )
 
 
+def test_private_engine_id_preserves_public_session_sampling_seed():
+    legacy = _make_sampling_executor(seed=99)
+    legacy_slot = _make_sampling_slot(0, "public-request:0")
+    legacy._slot_sampling_generator(legacy_slot)
+
+    isolated = _make_sampling_executor(seed=99)
+    isolated_slot = _make_sampling_slot(0, "private-engine-uuid:0")
+    isolated_slot.sampling_identity = "public-request"
+    isolated._slot_sampling_generator(isolated_slot)
+
+    assert isolated_slot.sampling_seed == legacy_slot.sampling_seed
+    assert isolated_slot.sampling_seed == _stable_sampling_seed(
+        99, "public-request:0", 0
+    )
+
+
 def test_sampling_noise_is_independent_of_batch_membership():
     batched = _make_sampling_executor(seed=99)
     slot_a = _make_sampling_slot(0, "session-a:0")

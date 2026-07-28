@@ -142,26 +142,59 @@ client = TTSClient.connect(
 client = TTSClient.connect(
     "wss://tts.example/v1/ws",
     key="your-key",  # Authorization: Bearer your-key
+    connect_timeout=5.0,
+    max_connections=32,
+    max_idle_connections=8,
+    max_pending_acquires=256,
+    acquire_timeout=30.0,
 )
+
+# 只覆盖本次 capabilities 请求的等待时间。
+caps = client.get_capabilities(timeout=5.0)
+
+# 在开始接收流量前，把连接池填充到 4 条可复用空闲连接。
+idle_connections = client.prewarm(connections=4, timeout=5.0)
 ```
 
 同一 `engine-websocket` 物理连接会串行承载多个逻辑 session；并发 session 会各自
 租用连接池中的连接。默认设置如下：
 
+`SessionStartRequest.session_id` 只是客户端关联 ID，不再作为 engine registry key。
+WebSocket/gRPC 每次启动都会生成新的私有执行 ID，因此不同请求即使复用了同一个
+外部 ID，也不会互相替换或取消。需要跨多次合成关联一场长期通话时，可将
+`call_id` 放入 `TimingContext.extra`，无需长期占用某条连接。
+
 - `reconnect_attempts=1`：建立新物理连接或发送首个 `start` 失败时重试一次；
+- `max_connections=32`：严格限制建连中、已租用、探活中和空闲连接的总数；
 - `max_idle_connections=8`：最多保留 8 条空闲连接；
-- `keepalive_interval=15.0`：每 15 秒在空闲连接上探活，设为 `0` 可关闭。
+- `max_pending_acquires=256`：限制 FIFO 租约等待队列长度，队列满时立即抛出
+  `PoolSaturatedError`；
+- `acquire_timeout=30.0`：等待连接超过 30 秒时抛出
+  `PoolAcquireTimeoutError`；
+- `idle_ttl=None` / `max_lifetime=None`：默认不按连接年龄淘汰，`0` 也表示
+  关闭；活跃连接即使超龄，也只会在本次合成完成归还后退出；
+- `keepalive_interval=15.0`：每 15 秒在空闲连接上探活，设为 `0` 可关闭；
+- `keepalive_jitter=0.2`：将每次维护间隔随机分散 ±20%，避免集中探活。
+
+`TTSClient.prewarm(connections, timeout=...)` 中的 `connections` 表示期望的空闲连接
+总数，而不是本次新增数量。它会并行建立缺少的连接，将目标限制在
+`max_idle_connections` 和 `max_connections` 以内，并在成功时返回实际空闲连接数。可选的 `timeout`
+限制每次 capabilities 往返；连接握手仍使用 `connect_timeout`。
+`TTSClient.get_capabilities(timeout=...)` 同样提供单次调用的超时覆盖，且不会改变
+客户端配置的流式接收超时。
 
 逻辑 session 以终态 `done`/`error` 事件为边界，而不是以 WebSocket 关闭为边界。
 支持长连接的 gateway 只会在可安全复用的成功/取消 `done` 中标记
 `websocket_connection_reusable=true`。engine error 会关闭并重连；旧 gateway 若没有
 该标识，SDK 同样会丢弃 socket 并安全退化为重新建连。
 
-后台保活（或关闭保活时的复用前探活）如果发现连接已被网关回收，SDK 会自动建立
-新连接。已经提交文本或收到
-音频的活动 session 断线后则返回明确的 `error`，不会透明重放；当前协议没有文本确认、
-音频确认和 resume token，盲目恢复可能生成重复音频。客户端使用完毕后应调用
-`client.close()`，推荐使用上下文管理器统一释放连接池。
+后台保活（或关闭保活时的复用前探活）如果发现连接已被网关回收，SDK 会丢弃它，
+并在下一个 session 到来时自动建立新连接。这些空闲连接探活使用 `connect_timeout`，
+而不是可能更长的流式接收超时。
+已经提交文本或收到音频的活动 session 如果在流中断线，则返回明确的 `error`，且
+绝不会自动重放；当前协议没有文本确认、音频确认和 resume token，盲目恢复可能生成
+重复音频。客户端使用完毕后应调用 `client.close()`，推荐使用上下文管理器统一释放
+连接池。
 
 ## 统一流式接口
 

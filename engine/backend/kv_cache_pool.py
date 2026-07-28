@@ -130,6 +130,9 @@ class SlotKVState:
 
     # Per-slot sampling RNG.  Kept with the logical segment so batched
     # scheduling cannot change a lane's random sequence.
+    # ``sampling_identity`` is the stable logical request ID.  It may differ
+    # from ``session_id`` when a gateway uses a private execution UUID.
+    sampling_identity: Optional[str] = None
     sampling_seed: Optional[int] = None
     sampling_generator: Optional[torch.Generator] = None
 
@@ -310,6 +313,7 @@ class KVCachePool:
         slot.token_queue = []
         slot.pad_start_frame = -1
         slot.pad_consecutive_silence = 0
+        slot.sampling_identity = None
         slot.sampling_seed = None
         slot.sampling_generator = None
         slot.next_embed = None
@@ -350,6 +354,7 @@ class KVCachePool:
         slot.token_queue = []
         slot.pad_start_frame = -1
         slot.pad_consecutive_silence = 0
+        slot.sampling_identity = None
         slot.sampling_seed = None
         slot.sampling_generator = None
         slot.next_embed = None

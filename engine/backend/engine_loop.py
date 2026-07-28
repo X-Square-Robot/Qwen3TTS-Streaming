@@ -207,6 +207,18 @@ def _seg_key(session_id: str, segment_idx: int) -> str:
     return f"{session_id}:{segment_idx}"
 
 
+def _group_sampling_identity(group: EngineSessionGroup) -> str | None:
+    """Return a gateway-provided stable identity for deterministic sampling."""
+
+    config = group.request.session_config
+    if config is None:
+        return None
+    value = config.timing.extra.get("_sampling_identity")
+    if value in (None, ""):
+        return None
+    return str(value)
+
+
 # ---------------------------------------------------------------------------
 # Engine loop
 # ---------------------------------------------------------------------------
@@ -873,6 +885,7 @@ class EngineLoop:
                 break
             seg.slot = slot
             slot.segment_idx = int(seg.segment_idx)
+            slot.sampling_identity = _group_sampling_identity(group)
             slot.retry_idx = seg.retry_idx
             self._seg_by_slot[slot.slot_id] = seg
             self._mlfq.on_segment_created(seg.mlfq_meta)
@@ -1026,6 +1039,7 @@ class EngineLoop:
             return False
         best.slot = slot
         slot.segment_idx = int(best.segment_idx)
+        slot.sampling_identity = _group_sampling_identity(best_group)
         slot.retry_idx = best.retry_idx
         self._seg_by_slot[slot.slot_id] = best
         self._mlfq.on_segment_created(best.mlfq_meta)

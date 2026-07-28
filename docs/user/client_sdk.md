@@ -149,17 +149,52 @@ validate this header:
 client = TTSClient.connect(
     "wss://tts.example/v1/ws",
     key="your-key",  # Authorization: Bearer your-key
+    connect_timeout=5.0,
+    max_connections=32,
+    max_idle_connections=8,
+    max_pending_acquires=256,
+    acquire_timeout=30.0,
 )
+
+# Override the capabilities wait for this call only.
+caps = client.get_capabilities(timeout=5.0)
+
+# Fill the pool to four reusable idle sockets before serving traffic.
+idle_connections = client.prewarm(connections=4, timeout=5.0)
 ```
 
 One physical `engine-websocket` connection carries multiple logical sessions
 serially; concurrent sessions lease separate pooled connections. Defaults are:
 
+`SessionStartRequest.session_id` is a client correlation ID, not an engine
+registry key. Every WebSocket/gRPC start receives a fresh private execution ID,
+so concurrent requests that reuse the same public ID remain isolated. A
+long-lived business call can be correlated without pinning a connection by
+putting its `call_id` in `TimingContext.extra`.
+
 - `reconnect_attempts=1`: retry a new physical connection or failed initial
   `start` write once;
+- `max_connections=32`: hard limit across connecting, leased, keepalive-probed,
+  and idle sockets;
 - `max_idle_connections=8`: retain at most eight idle connections;
+- `max_pending_acquires=256`: bound the FIFO lease-wait queue; a full queue
+  fails immediately with `PoolSaturatedError`;
+- `acquire_timeout=30.0`: fail a queued lease with
+  `PoolAcquireTimeoutError` after 30 seconds;
+- `idle_ttl=None` / `max_lifetime=None`: disable age-based retirement; `0` is
+  equivalent, and an over-age active connection is retired only after return;
 - `keepalive_interval=15.0`: probe idle connections every 15 seconds; use `0`
-  to disable it.
+  to disable it;
+- `keepalive_jitter=0.2`: randomize each maintenance interval by ±20%.
+
+`TTSClient.prewarm(connections, timeout=...)` treats `connections` as the
+desired total idle capacity, not the number to add. It opens only the missing
+sockets in parallel, caps the target at `max_idle_connections` and
+`max_connections`, and returns the actual idle count on success. Its optional timeout bounds each capabilities
+round-trip; connection handshakes still use `connect_timeout`.
+`TTSClient.get_capabilities(timeout=...)` applies the same kind of per-call
+override when fetching capabilities without changing the client's configured
+stream timeout.
 
 The logical boundary is the terminal `done`/`error` event, not WebSocket
 closure. A persistent gateway marks a safely reusable successful/cancelled
@@ -168,12 +203,13 @@ reconnected; if an older gateway omits the marker, the SDK likewise discards
 the socket and safely falls back to reconnecting.
 
 If background keepalive (or the synchronous probe used when keepalive is
-disabled) finds that a gateway reaped an idle socket, the SDK opens a
-replacement automatically. A disconnect after text or audio has entered an
-active session produces an explicit `error` and is not replayed: the current
-protocol has no text/audio acknowledgement or resume token, and blind recovery
-could duplicate audio. Call `client.close()` when finished, preferably through
-the context manager.
+disabled) finds that a gateway reaped an idle socket, the SDK discards it and
+the next session opens a replacement automatically. Those idle-socket probes
+use `connect_timeout`, not the potentially much longer stream receive timeout. A mid-stream disconnect
+after text or audio has entered an active session produces an explicit `error`
+and is never automatically replayed: the current protocol has no text/audio
+acknowledgement or resume token, and blind recovery could duplicate audio. Call
+`client.close()` when finished, preferably through the context manager.
 
 ## Unified Streaming Interface
 

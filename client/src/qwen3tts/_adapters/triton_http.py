@@ -42,11 +42,17 @@ class TritonHttpAdapter:
         self.timeout = timeout
         self.headers = dict(headers or {})
 
-    def get_capabilities(self) -> Capabilities:
+    def get_capabilities(self, *, timeout: float | None = None) -> Capabilities:
+        effective_timeout = (
+            self.timeout if timeout is None else max(0.0, float(timeout))
+        )
         infer_url = self._infer_url()
         payload = self._infer_payload({"action": "capabilities"})
         response = requests.post(
-            infer_url, json=payload, timeout=self.timeout, headers=self.headers
+            infer_url,
+            json=payload,
+            timeout=effective_timeout,
+            headers=self.headers,
         )
         caps = _parse_capabilities_from_http_response(response)
         if caps is None:

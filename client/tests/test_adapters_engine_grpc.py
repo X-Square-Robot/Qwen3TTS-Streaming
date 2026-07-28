@@ -14,6 +14,7 @@ pytest.importorskip("grpc")
 import grpc
 from concurrent import futures
 
+import qwen3tts._adapters.engine_grpc as eg
 from qwen3tts._adapters.engine_grpc import EngineGrpcAdapter
 from qwen3tts._proto import tts_pb2, tts_pb2_grpc
 from qwen3tts_protocol import SessionStartRequest, SynthesisConfig
@@ -141,6 +142,44 @@ def test_close_releases_the_channel(fake_server):
 
     adapter.close()
     assert adapter._grpc_channel is None
+
+
+def test_capabilities_uses_per_call_timeout_for_channel_and_rpc(monkeypatch):
+    channel_timeouts = []
+    rpc_timeouts = []
+    channel = object()
+
+    class _ReadyFuture:
+        def result(self, *, timeout):
+            channel_timeouts.append(timeout)
+
+    class _FakeGrpc:
+        @staticmethod
+        def insecure_channel(endpoint):
+            assert endpoint == "engine.test:50051"
+            return channel
+
+        @staticmethod
+        def channel_ready_future(candidate):
+            assert candidate is channel
+            return _ReadyFuture()
+
+    class _Stub:
+        def GetCapabilities(self, request, *, timeout, metadata):
+            rpc_timeouts.append(timeout)
+            return tts_pb2.GetCapabilitiesResponse(variant="standalone")
+
+    monkeypatch.setattr(eg, "_require_grpc", lambda: _FakeGrpc)
+    monkeypatch.setattr(eg.tts_pb2_grpc, "TTSServiceStub", lambda candidate: _Stub())
+    adapter = EngineGrpcAdapter(
+        "engine.test:50051", timeout=30.0, metadata=None, headers=None
+    )
+
+    capabilities = adapter.get_capabilities(timeout=1.5)
+
+    assert capabilities.variant == "standalone"
+    assert channel_timeouts == [1.5]
+    assert rpc_timeouts == [1.5]
 
 
 def test_all_engine_grpc_rpcs_forward_lowercase_metadata(auth_server):

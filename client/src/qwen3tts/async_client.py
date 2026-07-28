@@ -19,8 +19,27 @@ class AsyncTTSClient:
         sync_client = await asyncio.to_thread(TTSClient.connect, endpoint, **kwargs)
         return cls(sync_client)
 
-    async def get_capabilities(self):
-        return await asyncio.to_thread(self._sync.get_capabilities)
+    async def get_capabilities(self, *, timeout: float | None = None):
+        if timeout is None:
+            return await asyncio.to_thread(self._sync.get_capabilities)
+        return await asyncio.to_thread(
+            self._sync.get_capabilities,
+            timeout=timeout,
+        )
+
+    async def prewarm(
+        self,
+        connections: int = 1,
+        *,
+        timeout: float | None = None,
+    ) -> int:
+        if timeout is None:
+            return await asyncio.to_thread(self._sync.prewarm, connections)
+        return await asyncio.to_thread(
+            self._sync.prewarm,
+            connections,
+            timeout=timeout,
+        )
 
     async def synthesize_bytes(self, text: str, *, request=None):
         return await asyncio.to_thread(
