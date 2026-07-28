@@ -198,10 +198,12 @@ This means the main problem introduced by "a very long presplit" is **queuing an
 
 For very long offline requests, future groups cannot keep reusing the initial split thresholds. As earlier segments complete, the EMA of the audio/text ratio keeps updating, so:
 
-- The active driver's thresholds refresh with the EMA
-- Newly launched offline groups must also recompute their thresholds based on the **latest EMA**
+- Each active driver's thresholds remain frozen from the moment that segment opens
+- Newly launched offline groups recompute and freeze their thresholds based on the **latest EMA**
 
-Otherwise, the latter half of the text would use stale thresholds for a long time, causing the grouping/segmentation strategy to gradually diverge from the actual decode behavior.
+Freezing avoids changing a segment's stopping rule midway when delayed feedback
+arrives. Recomputing at each later opening still prevents the latter half of a
+long request from using the initial estimate indefinitely.
 
 ### When to Introduce a Triton Shell
 

@@ -142,7 +142,9 @@ def test_token_mode_serial_segments_defers_session_done_until_buffer_drains():
             engine_inbox=inbox,
             tokenizer=_CharTokenizer(),
             max_sessions=2,
-            engine_max_decode_len=40,
+            # C=floor((48-12-8)/2)=14 and T1=10, so the two 10/11-token
+            # sentences form exactly two serial segments under the exact cap.
+            engine_max_decode_len=48,
             ema_ratio=2.0,
             max_concurrent_segments=1,
         )

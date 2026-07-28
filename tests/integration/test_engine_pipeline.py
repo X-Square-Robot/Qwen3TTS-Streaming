@@ -75,7 +75,10 @@ class TestSpliter:
 
         th = compute_thresholds(remaining_kv=500, ema_ratio=5.0)
         assert (
-            th.min_tokens_l1 < th.min_tokens_l2 < th.min_tokens_l3 < th.force_split_at
+            th.min_tokens_l1
+            <= th.min_tokens_l2
+            <= th.min_tokens_l3
+            <= th.force_split_at
         )
         assert th.min_tokens_l1 >= 1
         assert th.force_split_at <= 500
@@ -155,7 +158,8 @@ class TestSpliter:
         spliter = Spliter(engine_max_decode_len=100, ema_ratio=10.0, max_concurrent=2)
         th = spliter._make_thresholds()
 
-        tokens = [(i, f"tok{i}") for i in range(th.min_tokens_l1)]
+        # The triggering punctuation is included in the post-append length.
+        tokens = [(i, f"tok{i}") for i in range(th.min_tokens_l1 - 1)]
         tokens.append((999, "。"))
 
         actions = spliter.feed_tokens(tokens)

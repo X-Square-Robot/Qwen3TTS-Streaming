@@ -66,7 +66,7 @@ Across the three stages, **the only thing the frontend can control is the text t
 
 From this:
 
-- The driver's `force_split_at` triggers on `_token_count >= force_split_at` (`driver.py:178`), which can only be a **text-token count**—this is the control plane itself.
+- The driver's `force_split_at` triggers when the post-append length reaches the threshold (`_token_count + 1 >= force_split_at`), which can only be a **text-token count**—this is the control plane itself.
 - The real constraint (KV overflow) lives in the **audio-step** dimension, and the conversion depends entirely on `ema_ratio`.
 - The entire `t1/t2/t3/force` ladder is positioned by the same `ema_ratio` → **if the ratio is wrong, all four rungs shift together, and none of them can catch the fall**.
 
@@ -131,7 +131,12 @@ See [§4](#4-offline-segmentation-algorithm-hierarchical-packing). The product =
 
 ### 4.1 The True Culprit of Fragmentation: The Driver Re-Splits Interior L1s
 
-`compute_thresholds` (`driver.py:51-84`): `cap = remaining_kv / ema_ratio`, `t1=0.70cap, t2=0.80cap, t3=0.90cap, force=cap`. The driver's `_meets_split_threshold` (`driver.py:160`) is "split at the first point that meets the threshold," so an L1 is split as soon as `tc≥t1=0.7cap`.
+`compute_thresholds` derives
+`cap=floor((remaining_kv-safety_margin)/ema_ratio)` and sets
+`t1=ceil(0.70cap)`, `t2=ceil(0.80cap)`, `t3=ceil(0.90cap)`, and
+`force=cap`. The driver splits at the first eligible punctuation after the
+triggering token has been appended, so an L1 closes the segment as soon as the
+post-append length reaches `t1`.
 
 Key point: `_drive_group` feeds offline groups through an ordinary driver (`spliter.py:404`), which will FLUSH at the **first L1** inside the group where `tc≥t1` and return the remaining tokens to the queue (`spliter.py:427-445`). **So even if `pre_split` packs it into a long segment, the driver re-splits it back at 0.7cap** → fragmentation.
 

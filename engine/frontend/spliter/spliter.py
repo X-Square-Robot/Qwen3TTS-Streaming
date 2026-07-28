@@ -179,6 +179,7 @@ class Spliter:
         self._seg_group_key: dict[
             int, Optional[int]
         ] = {}  # segment_idx -> offline group id (None = streaming)
+        self._seg_ema_ratio: dict[int, float] = {}  # EMA snapshot at segment open
         self._group_next_local: dict[
             int, int
         ] = {}  # offline group id -> next local_idx
@@ -323,14 +324,16 @@ class Spliter:
                 self._flushing.add(idx)
                 flushed = True
                 if self._record_decisions:
-                    th = self._make_thresholds()
+                    th = self._drivers[idx].thresholds
                     self._split_decisions.append(
                         {
                             "obs": "driver_transition",
                             "path": "streaming_driver",
                             "segment_idx": idx,
                             "flush_type": r.type.name,
-                            "ema_ratio": round(self._ema_ratio, 2),
+                            "ema_ratio": round(
+                                self._seg_ema_ratio.get(idx, self._ema_ratio), 2
+                            ),
                             "thresholds": {
                                 "min_tokens_l1": th.min_tokens_l1,
                                 "force_split_at": th.force_split_at,
@@ -684,6 +687,7 @@ class Spliter:
                 force_split_at=cap,
             )
         idx, driver = self._create_driver(thresholds)
+        self._seg_ema_ratio[idx] = self._ema_ratio
         if key is None:
             # Streaming: each segment is its own group. Allocate from the shared
             # _next_group_idx (NOT segment_idx) so streaming and offline group ids
@@ -763,13 +767,17 @@ class Spliter:
         coerced = self._coerce_tokens(tokens)
         if not coerced:
             return []
-        # Online capacity from the live EMA ratio + KV budget, minus what the
-        # in-flight segment already holds: the gate couples the pipeline's
-        # in-flight state (consistent with Stage 0), so the question is whether
-        # the packet fits the *remaining* room, not an empty segment.
-        capacity = self._make_thresholds().force_split_at
+        # Route against the active segment's frozen capacity.  A delayed EMA
+        # update may change the capacity for future segments, but must not make
+        # this gate disagree with the already-open driver's hard limit.
         active = self._get_active_driver_idx()
-        occupied = self._drivers[active].token_count if active is not None else 0
+        if active is None:
+            capacity = self._make_thresholds().force_split_at
+            occupied = 0
+        else:
+            driver = self._drivers[active]
+            capacity = driver.thresholds.force_split_at
+            occupied = driver.token_count
         if len(coerced) > capacity - occupied:
             self._enqueue_presplit_groups(
                 coerced
@@ -806,6 +814,7 @@ class Spliter:
         self._drivers.pop(segment_idx, None)
         self._seg_coords.pop(segment_idx, None)
         self._seg_group_key.pop(segment_idx, None)
+        self._seg_ema_ratio.pop(segment_idx, None)
 
         return self._drive_events()
 
@@ -818,8 +827,8 @@ class Spliter:
     ) -> None:
         """Update EMA audio:text ratio from engine feedback.
 
-        After EMA update, refreshes thresholds for all active (non-flushing)
-        drivers so subsequent token classification uses the latest ratio.
+        Thresholds are frozen for every open segment.  The updated EMA is used
+        only by segments opened after this feedback arrives.
 
         Parameters
         ----------
@@ -860,33 +869,6 @@ class Spliter:
                 actual_text_tokens,
             )
 
-        if abs(self._ema_ratio - old_ratio) > 0.01:
-            self._refresh_active_thresholds()
-
-    def _refresh_active_thresholds(self) -> None:
-        """Recompute thresholds for all non-flushing active drivers.
-
-        Called after EMA ratio changes so that drivers currently
-        accumulating tokens use up-to-date split thresholds.
-        """
-        new_th = self._make_thresholds()
-        refreshed = 0
-        for idx, driver in self._drivers.items():
-            if idx in self._flushing:
-                continue
-            driver.thresholds = new_th
-            refreshed += 1
-        if refreshed:
-            logger.debug(
-                "Refreshed thresholds for %d active driver(s): "
-                "L1=%d L2=%d L3=%d force=%d",
-                refreshed,
-                new_th.min_tokens_l1,
-                new_th.min_tokens_l2,
-                new_th.min_tokens_l3,
-                new_th.force_split_at,
-            )
-
     # ------------------------------------------------------------------
     # Full reset
     # ------------------------------------------------------------------
@@ -900,6 +882,7 @@ class Spliter:
         self._next_segment_idx = 0
         self._seg_coords.clear()
         self._seg_group_key.clear()
+        self._seg_ema_ratio.clear()
         self._group_next_local.clear()
         self._flushing.clear()
         self._done.clear()

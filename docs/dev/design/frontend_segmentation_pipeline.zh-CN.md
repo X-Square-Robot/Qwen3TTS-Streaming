@@ -66,7 +66,7 @@
 
 由此：
 
-- driver 的 `force_split_at` 按 `_token_count >= force_split_at` 触发（`driver.py:178`），只能是**文本 token 计数**——这是控制面本身。
+- driver 在触发 token 加入后的长度达到阈值时强制切分（`_token_count + 1 >= force_split_at`），只能是**文本 token 计数**——这是控制面本身。
 - 真实约束（KV 溢出）在**音频 step** 维度，换算全靠 `ema_ratio`。
 - `t1/t2/t3/force` 整条阶梯被同一个 `ema_ratio` 定位 → **ratio 一错，四根 rung 一起平移，没有任何一根兜得住**。
 
@@ -131,7 +131,11 @@ emoji 与 auto 是**同一病根的两个症状**：本该有会话状态的阶�
 
 ### 4.1 碎片化真凶：driver 会复切内部 L1
 
-`compute_thresholds`（`driver.py:51-84`）：`cap = remaining_kv / ema_ratio`，`t1=0.70cap, t2=0.80cap, t3=0.90cap, force=cap`。driver `_meets_split_threshold`（`driver.py:160`）是"遇到首个达标点就切"，L1 在 `tc≥t1=0.7cap` 就切。
+`compute_thresholds` 使用
+`cap=floor((remaining_kv-safety_margin)/ema_ratio)`，并设置
+`t1=ceil(0.70cap)`、`t2=ceil(0.80cap)`、`t3=ceil(0.90cap)`、
+`force=cap`。driver 在触发 token 加入后检查阈值；达到 `t1` 后遇到的第一个
+L1 会关闭当前 segment。
 
 关键：`_drive_group` 给离线组喂的是普通 driver（`spliter.py:404`），它会在组内 `tc≥t1` 的**第一个 L1** FLUSH、把剩余 token 退回队列（`spliter.py:427-445`）。**所以即使 `pre_split` 打包成长 segment，driver 也会在 0.7cap 处复切回去** → 碎片化。
 

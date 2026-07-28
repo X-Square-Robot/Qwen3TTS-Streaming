@@ -14,7 +14,7 @@ value and document the diff in the commit. Specifically:
   * cross-packet emoji leak                                -> Step 5 (stateful Stage 0 filter)
 
 The signature case ``你好吗？明天天气不错，有没有什么想吃的？`` is the crux of the
-whole redesign: offline pre-split finds the global-optimal L1 cut, while the
+whole redesign: packet-local pre-split uses hierarchical latest-fit, while the
 streaming driver, lacking foresight, snaps to the L2 comma. Both are frozen here.
 """
 
@@ -59,16 +59,13 @@ def _summarize(actions):
     return segs
 
 
-def test_offline_set_full_text_finds_global_optimal_l1_cut():
-    """Offline pre-split keeps the long second sentence whole, cutting only at L1.
-
-    This is the global-optimal behavior the streaming driver cannot achieve.
-    """
+def test_offline_set_full_text_uses_hierarchical_latest_fit():
+    """Offline pre-split prefers the latest L1, then falls back to L2."""
     sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
     segs = _summarize(sp.set_full_text(_toks(SIGNATURE)))
 
-    # Bin-packing: "你好吗？" is one packed group; the over-capacity unit
-    # "明天天气不错，有没有什么想吃的？" (16 > cap 15) is cut at its latest L2 (，),
+    # The resource-derived cap is 8. Bin-packing first cuts at the latest L1
+    # ("你好吗？"), then cuts the next full buffer at its latest L2 (，),
     # leaving "有没有什么想吃的？" as a third group (pending under concurrency=2,
     # so not in this synchronous batch). The orphaned trailing "？" of the old
     # first-fit force-cut is gone.
@@ -91,7 +88,8 @@ def test_streaming_feed_once_snaps_to_l2_comma():
     # WILL CHANGE @ Step 3/5: auto + bin-packing + watermark should let the
     # streaming/auto path approach the offline cut instead of snapping to L2.
     """
-    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
+    # This fixture gives C=13, so the comma at token 11 reaches T2=11.
+    sp = Spliter(engine_max_decode_len=150, ema_ratio=10.0)
     segs = _summarize(sp.feed_tokens(_toks(SIGNATURE)))
 
     assert [(s["seg"], s["group"], s["text"]) for s in segs] == [
@@ -102,7 +100,7 @@ def test_streaming_feed_once_snaps_to_l2_comma():
 
 def test_streaming_token_by_token_matches_feed_once():
     """Feeding the signature one token per call yields the same segmentation."""
-    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
+    sp = Spliter(engine_max_decode_len=150, ema_ratio=10.0)
     acc = []
     for t in _toks(SIGNATURE):
         acc.extend(sp.feed_tokens([t]))
@@ -136,7 +134,8 @@ def test_concurrency_backpressure_gates_at_max_concurrent():
     (backend feedback) to free a slot, so a 4-sentence input emits 2 segments
     synchronously and leaves both drivers flushing.
     """
-    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0, max_concurrent=2)
+    # C=11 and T1=8, so each sentence-ending L1 remains an eligible cut.
+    sp = Spliter(engine_max_decode_len=130, ema_ratio=10.0, max_concurrent=2)
     text = "第一句话结束了。第二句话也结束了。第三句话同样结束了。第四句话最后结束。"
     acc = sp.feed_tokens(_toks(text))
     acc.extend(sp.input_done())
@@ -151,11 +150,11 @@ def test_concurrency_backpressure_gates_at_max_concurrent():
     assert sp._next_segment_idx == 2
 
 
-def test_auto_long_packet_engages_stage1_global_optimal():
+def test_auto_long_packet_engages_stage1_hierarchical_latest_fit():
     """Auto mode: a packet longer than one segment is pre-split with foresight,
-    yielding the SAME global-optimal L1 cut as offline set_full_text."""
+    yielding the same hierarchical latest-fit cuts as offline set_full_text."""
     sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
-    segs = _summarize(sp.feed_auto(_toks(SIGNATURE)))  # 20 tokens > force_split_at(15)
+    segs = _summarize(sp.feed_auto(_toks(SIGNATURE)))  # 20 tokens > C=8
 
     assert [(s["seg"], s["group"], s["text"]) for s in segs] == [
         (0, 0, "你好吗？"),
@@ -176,7 +175,7 @@ def test_auto_token_by_token_is_transparent_streaming():
     """Auto mode: each 1-token packet is small, so Stage 1 is transparent and
     the tokens stream/coalesce — identical to plain feed_tokens (incl. L2-snap,
     which is the irreducible no-foresight cost of a true token stream)."""
-    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
+    sp = Spliter(engine_max_decode_len=150, ema_ratio=10.0)
     acc = []
     for t in _toks(SIGNATURE):
         acc.extend(sp.feed_auto([t]))
@@ -192,7 +191,7 @@ def test_auto_token_by_token_is_transparent_streaming():
 def test_auto_short_packet_does_not_overfragment():
     """Auto mode: a short complete packet streams transparently (driver
     coalesces) rather than flushing a tiny segment per L1."""
-    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
+    sp = Spliter(engine_max_decode_len=150, ema_ratio=10.0)
     acc = sp.feed_auto(_toks("你好。"))
     acc.extend(sp.input_done())
     segs = _summarize(acc)
@@ -206,8 +205,8 @@ def test_auto_mixed_streaming_then_long_packet_no_group_collision():
     packet that engages Stage 1 (occupancy-aware gate) must yield distinct
     group ids — streaming and offline groups share one _next_group_idx
     namespace. Regression guard for the namespace-collision bug."""
-    sp = Spliter(engine_max_decode_len=100, ema_ratio=10.0)
-    a1 = sp.feed_auto(_toks("今天天气真的很不错"))  # 9 tok, no L1 → streams (group 0)
+    sp = Spliter(engine_max_decode_len=150, ema_ratio=10.0)
+    a1 = sp.feed_auto(_toks("今天天气真的很不错"))  # 9 tokens fit C=13
     a2 = sp.feed_auto(
         _toks("，我们出去玩吧。好不好呀？")
     )  # won't fit remaining room → Stage 1

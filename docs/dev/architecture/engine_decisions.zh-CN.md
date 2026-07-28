@@ -247,10 +247,11 @@ talker ~1.7B 模型，单 GPU（24GB+）开 2-4 实例可行，是性价比最�
 对于超长 offline 请求，未来 group 不能一直复用最初的切分阈值。随着前面 segment
 完成，audio/text ratio 的 EMA 会持续更新，因此：
 
-- active driver 的阈值会随 EMA 刷新
-- 新启动的 offline group 也必须基于**最新 EMA**重新计算阈值
+- 每个 active driver 从 segment 打开起冻结自己的阈值
+- 新启动的 offline group 基于**最新 EMA**重新计算并冻结阈值
 
-否则，后半段文本会长期使用过时阈值，导致分组/分句策略逐渐偏离真实 decode 行为。
+冻结可避免延迟反馈在 segment 中途改变停止规则；后续 segment 打开时重新计算，仍能避免
+超长请求的后半段一直沿用最初估计。
 
 ### 何时引入 Triton 壳
 

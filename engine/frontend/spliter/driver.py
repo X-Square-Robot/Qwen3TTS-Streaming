@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, List
@@ -36,7 +37,7 @@ class ActionResult:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class SplitThresholds:
     """Min text-token counts before split at punct tier + forced upper bound.
 
@@ -59,31 +60,41 @@ def compute_thresholds(
     l2_cap_ratio: float = 0.80,
     l3_cap_ratio: float = 0.90,
 ) -> SplitThresholds:
-    """Compute split thresholds from remaining KV budget and EMA ratio.
+    """Compute the frozen token thresholds for one segment.
 
-    ``cap`` scales with remaining KV and ~1/ema_ratio (text vs audio steps).
-    Tier mins are ``cap * lN_cap_ratio``, then clamped so
-    min_tokens_l1 < min_tokens_l2 < min_tokens_l3 < force_split_at.
+    ``remaining_kv`` is the KV budget after prefill.  ``safety_margin`` is
+    reserved before converting that budget to the predicted text-token
+    capacity ``cap``.  The punctuation thresholds are ceilings of their
+    configured capacity ratios, while ``force_split_at`` remains exactly
+    ``cap``; tier spacing must never enlarge the resource-derived capacity.
+
+    For small capacities two tiers may coincide.  That is intentional: the
+    punctuation preference still determines which boundary is chosen, while
+    the common hard capacity remains enforceable.
     """
-    remaining = max(1, remaining_kv - max(4, safety_margin // 4))
-    denom = max(1.0, ema_ratio)
-    cap = max(8, int(remaining / denom))
+    ratios = (l1_cap_ratio, l2_cap_ratio, l3_cap_ratio)
+    if not all(math.isfinite(ratio) for ratio in ratios):
+        raise ValueError("split capacity ratios must be finite")
+    if not 0.0 < ratios[0] <= ratios[1] <= ratios[2] <= 1.0:
+        raise ValueError("split capacity ratios must satisfy 0 < L1 <= L2 <= L3 <= 1")
+    if safety_margin < 0:
+        raise ValueError("safety_margin must be nonnegative")
+    if not math.isfinite(ema_ratio) or ema_ratio < 1.0:
+        raise ValueError("ema_ratio must be finite and at least 1.0")
 
-    t1 = max(6, int(cap * l1_cap_ratio))
-    t2 = max(t1 + 4, int(cap * l2_cap_ratio))
-    t3 = max(t2 + 4, int(cap * l3_cap_ratio))
-    t_force = max(t3 + 1, cap)
-
-    t_force = min(t_force, remaining - 2)
-    t3 = min(t3, t_force - 1)
-    t2 = min(t2, t3 - 1)
-    t1 = min(t1, t2 - 1)
+    usable_kv = remaining_kv - safety_margin
+    cap = math.floor(usable_kv / ema_ratio)
+    if cap < 1:
+        raise ValueError(
+            "remaining KV budget cannot accommodate one predicted text token "
+            "after the safety margin"
+        )
 
     return SplitThresholds(
-        min_tokens_l1=max(1, t1),
-        min_tokens_l2=max(2, t2),
-        min_tokens_l3=max(3, t3),
-        force_split_at=max(4, t_force),
+        min_tokens_l1=math.ceil(cap * l1_cap_ratio),
+        min_tokens_l2=math.ceil(cap * l2_cap_ratio),
+        min_tokens_l3=math.ceil(cap * l3_cap_ratio),
+        force_split_at=cap,
     )
 
 
@@ -94,14 +105,14 @@ def compute_thresholds(
 Three-tier punctuation threshold state machine
 ================================================
 
-The Driver uses 4 thresholds (min_tokens_l1 < … < force_split_at) computed
+The Driver uses 4 thresholds (min_tokens_l1 <= … <= force_split_at) computed
 from remaining KV budget and the EMA audio:text ratio.
 
-TEXT_INPUTING transitions on punctuation:
-  - token_count >= min_tokens_l1  AND  punct_level == 1 (L1)  → split
-  - token_count >= min_tokens_l2  AND  punct_level <= 2 (L2)  → split
-  - token_count >= min_tokens_l3  AND  punct_level <= 3 (L3)  → split
-  - token_count >= force_split_at (any token)                  → forced split
+Guards use the length *after* the triggering token is appended:
+  - next_count >= min_tokens_l1 AND punct_level == 1 (L1) → split
+  - next_count >= min_tokens_l2 AND punct_level == 2 (L2) → split
+  - next_count >= min_tokens_l3 AND punct_level == 3 (L3) → split
+  - next_count >= force_split_at (any token)              → forced split
 
 ```mermaid
 stateDiagram-v2
@@ -113,14 +124,15 @@ stateDiagram-v2
     IDLE --> PREFILL : start/normal/punct token / prefill()
     IDLE --> IDLE : end_token / ()
 
-    PREFILL --> TEXT_INPUTING : Always / ()
+    PREFILL --> PAD_TEXT_EOS : first token reaches a threshold / ()
+    PREFILL --> TEXT_INPUTING : otherwise / ()
 
     TEXT_INPUTING --> TEXT_INPUTING : unknown/START/start_token / ()
     TEXT_INPUTING --> PAD_TEXT_EOS : END signal / set_final()
     TEXT_INPUTING --> PAD_TEXT_NOP : end_token / decode()
-    TEXT_INPUTING --> PAD_TEXT_EOS : normal [>=force_split_at] / decode()
-    TEXT_INPUTING --> TEXT_INPUTING : normal [<force_split_at] / decode()
-    TEXT_INPUTING --> PAD_TEXT_EOS : punct [threshold met] / decode()
+    TEXT_INPUTING --> PAD_TEXT_EOS : normal [next_count>=force_split_at] / decode()
+    TEXT_INPUTING --> TEXT_INPUTING : normal [next_count<force_split_at] / decode()
+    TEXT_INPUTING --> PAD_TEXT_EOS : punct [next threshold met] / decode()
     TEXT_INPUTING --> TEXT_INPUTING : punct [threshold not met] / decode()
 
     PAD_TEXT_EOS --> PAD_TEXT_NOP : Always / ()
@@ -161,14 +173,13 @@ class StreamingDriver:
 
     # ---- internal punct logic ------------------------------------------
 
-    def _meets_split_threshold(self, e: SpliterEvent) -> bool:
-        tc = self._token_count
+    def _meets_split_threshold(self, e: SpliterEvent, token_count: int) -> bool:
         pl = e.punct_level
-        if pl == 1 and tc >= self.thresholds.min_tokens_l1:
+        if pl == 1 and token_count >= self.thresholds.min_tokens_l1:
             return True
-        if pl == 2 and tc >= self.thresholds.min_tokens_l2:
+        if pl == 2 and token_count >= self.thresholds.min_tokens_l2:
             return True
-        if pl == 3 and tc >= self.thresholds.min_tokens_l3:
+        if pl == 3 and token_count >= self.thresholds.min_tokens_l3:
             return True
         return False
 
@@ -181,20 +192,34 @@ class StreamingDriver:
     def _normal_overflow(self, e: SpliterEvent) -> bool:
         return (
             e.type == ET.NORMAL_TOKEN
-            and self._token_count >= self.thresholds.force_split_at
+            and self._token_count + 1 >= self.thresholds.force_split_at
         )
 
     def _normal_no_overflow(self, e: SpliterEvent) -> bool:
         return (
             e.type == ET.NORMAL_TOKEN
-            and self._token_count < self.thresholds.force_split_at
+            and self._token_count + 1 < self.thresholds.force_split_at
         )
 
     def _punct_should_split(self, e: SpliterEvent) -> bool:
-        return e.type == ET.PUNCTUATION_TOKEN and self._meets_split_threshold(e)
+        if e.type != ET.PUNCTUATION_TOKEN:
+            return False
+        next_count = self._token_count + 1
+        return (
+            next_count >= self.thresholds.force_split_at
+            or self._meets_split_threshold(e, next_count)
+        )
 
     def _punct_no_split(self, e: SpliterEvent) -> bool:
-        return e.type == ET.PUNCTUATION_TOKEN and not self._meets_split_threshold(e)
+        return e.type == ET.PUNCTUATION_TOKEN and not self._punct_should_split(e)
+
+    def _prefill_should_split(self, e: SpliterEvent) -> bool:
+        """Handle the C=1 and first-token punctuation edge cases."""
+        if self._token_count >= self.thresholds.force_split_at:
+            return True
+        return e.type == ET.PUNCTUATION_TOKEN and self._meets_split_threshold(
+            e, self._token_count
+        )
 
     def _check_final(self, _e: SpliterEvent) -> bool:
         return self._is_final
@@ -265,6 +290,12 @@ class StreamingDriver:
                 ),
             ],
             St.PREFILL: [
+                Rule(
+                    St.PAD_TEXT_EOS,
+                    guard=self._prefill_should_split,
+                    action=self._nop,
+                    name="prefill→pad_eos(threshold)",
+                ),
                 Rule(
                     St.TEXT_INPUTING,
                     guard=ALWAYS,
