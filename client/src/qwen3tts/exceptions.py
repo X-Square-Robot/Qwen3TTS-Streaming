@@ -56,6 +56,16 @@ class StreamClosedError(TTSClientError):
     """Raised when a stream session is already closed."""
 
 
+class StreamRecoveryError(StreamClosedError):
+    """Raised when an interrupted websocket stream cannot be resumed safely.
+
+    This is intentionally a :class:`StreamClosedError` subclass so existing
+    callers keep taking their established closed-stream path, while callers
+    that care about resumability can distinguish an exhausted/rejected resume
+    from an ordinary local close.
+    """
+
+
 class ConnectionPoolError(TTSClientError):
     """Base error for bounded websocket connection-pool admission."""
 

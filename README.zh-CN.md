@@ -379,6 +379,12 @@ session。服务端返回 JSON event frame 和 Binary PCM frame。逻辑 session
 接收 `start`。成功完成或取消产生的 `done` 可复用连接；engine `error` 会关闭连接，
 下一 session 重新建立。
 
+活动 WebSocket 流还支持有界的进程内断线恢复。SDK 发送带序号的文本并确认精确的
+输出 delivery；网络/代理瞬断后，它从连接池租用替换 socket，并从最后完整音频样本
+继续同一个 engine execution。它不会从头重启合成再猜测去重。恢复状态只存在于当前
+服务进程且会过期，因此 engine 重启会明确失败；多副本部署需要 sticky routing 或按
+token 的一致性路由。
+
 ## 项目结构
 
 ```text

@@ -82,6 +82,8 @@ class FrontendInterface:
         l1_split_cap_ratio: float = 0.70,
         l2_split_cap_ratio: float = 0.80,
         l3_split_cap_ratio: float = 0.90,
+        guarded_delivery_default: bool = True,
+        guarded_delivery_window_ms: int = 100,
     ):
         self._dispatcher = Dispatcher(engine_inbox)
         self._tokenizer = tokenizer
@@ -98,6 +100,10 @@ class FrontendInterface:
         self._l1_split_cap_ratio = l1_split_cap_ratio
         self._l2_split_cap_ratio = l2_split_cap_ratio
         self._l3_split_cap_ratio = l3_split_cap_ratio
+        self._guarded_delivery_default = bool(guarded_delivery_default)
+        self._guarded_delivery_window_ms = min(
+            max(float(guarded_delivery_window_ms), 100.0), 10_000.0
+        )
 
         self._sessions: Dict[str, Session] = {}
         self._consumer_tasks: Dict[str, asyncio.Task] = {}
@@ -334,24 +340,34 @@ class FrontendInterface:
         await self._dispatch_segment_actions(session, seg_actions)
         await self._dispatcher.maybe_send_session_tokens_done(session)
 
-    @staticmethod
-    def _guarded_hold_for(session: Session) -> Optional[DeliveryHoldWindow]:
-        """Build the guarded-delivery hold window when the session opted in.
+    def _guarded_hold_for(self, session: Session) -> Optional[DeliveryHoldWindow]:
+        """Build the guarded-delivery hold window for this session.
 
-        Opt-in rides the free-form ``output_policy.config`` map:
-        ``delivery: guarded`` enables it, ``delivery_window_ms`` sizes the
-        window (default 1500ms). Engine audio is float32 mono at
-        ENGINE_SAMPLE_RATE regardless of the client's output format (the
-        gateway converts downstream of this hold)."""
+        Guarded delivery follows the server default and can be overridden by
+        the free-form ``output_policy.config.delivery`` value (``guarded`` or
+        ``firehose``). ``delivery_window_ms`` controls allowed client lead.
+        It does not add an initial holdback: the first chunk is released at
+        once. As synthesis outruns playback, only the excess beyond the
+        estimated playhead plus this lead remains retractable server-side.
+        Engine audio is float32 mono at ENGINE_SAMPLE_RATE regardless of the
+        client's output format (the gateway converts downstream of this
+        hold)."""
         cfg = session.config.output_policy.config or {}
-        if str(cfg.get("delivery", "")).strip().lower() != "guarded":
+        default_mode = "guarded" if self._guarded_delivery_default else "firehose"
+        if str(cfg.get("delivery", default_mode)).strip().lower() != "guarded":
             return None
         try:
-            window_ms = float(cfg.get("delivery_window_ms", 1500) or 1500)
+            window_ms = float(
+                cfg.get("delivery_window_ms", self._guarded_delivery_window_ms)
+                or self._guarded_delivery_window_ms
+            )
         except (TypeError, ValueError):
-            window_ms = 1500.0
+            window_ms = self._guarded_delivery_window_ms
         window_ms = min(max(window_ms, 100.0), 10_000.0)
-        return DeliveryHoldWindow(window_ms / 1000.0, ENGINE_SAMPLE_RATE * 4)
+        return DeliveryHoldWindow(
+            window_ms / 1000.0,
+            ENGINE_SAMPLE_RATE * 4,
+        )
 
     async def _consume_results(
         self,
@@ -366,8 +382,9 @@ class FrontendInterface:
         batch_agg = {"segments": 0, "batched": 0, "solo": 0, "max_batch_size_seen": 0}
         final_text_parts: list[str] = []
 
-        # Guarded delivery (opt-in): post-reorder chunks pass through a hold
-        # window so hallucinated tails can still be discarded server-side.
+        # Guarded delivery (server-default, per-request override): post-reorder
+        # chunks pass through a hold window so hallucinated tails can still be
+        # discarded server-side.
         # One lock serializes every release→send path (queue consumer and
         # ticker), keeping chunk order intact.
         hold = self._guarded_hold_for(session)
@@ -410,7 +427,9 @@ class FrontendInterface:
             a ticker mid-send, keeping event/audio order intact."""
             async with hold_lock:
                 dropped = 0
-                if verdict["discard_bytes"] > 0:
+                if verdict["discard_all"]:
+                    dropped = hold.discard()
+                elif verdict["discard_bytes"] > 0:
                     dropped = hold.discard_tail(verdict["discard_bytes"])
                 flushed = hold.flush()
                 await _send_chunks(flushed)
@@ -438,8 +457,9 @@ class FrontendInterface:
         def _hold_verdict(seg_idx: int, metrics: dict) -> dict:
             eos_reason = str(metrics.get("eos_reason", ""))
             discard_bytes = 0
+            discard_all = bool(metrics.get("discard_all_audio", False))
             keep = -1
-            if eos_reason in ("loop_abort", "silence_abort"):
+            if eos_reason in ("loop_abort", "silence_abort", "length_abort"):
                 frame_bytes = ENGINE_SAMPLE_RATE * 4 * 80 // 1000
                 audio_steps = int(metrics.get("audio_steps", 0) or 0)
                 tail = int(metrics.get("abort_tail_frames", 0) or 0)
@@ -453,6 +473,7 @@ class FrontendInterface:
             return {
                 "eos_reason": eos_reason,
                 "discard_bytes": discard_bytes,
+                "discard_all": discard_all,
                 "keep_frames": keep,
                 "seg_idx": seg_idx,
             }

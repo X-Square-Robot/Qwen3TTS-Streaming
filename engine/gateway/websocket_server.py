@@ -34,6 +34,7 @@ import binascii
 import json
 import logging
 import os
+import uuid
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -65,6 +66,16 @@ from ..interface.vad import (
 )
 from .grpc_server import _build_vad_config, _inject_vad_metrics
 from .session_identity import GatewaySessionIdentity
+from .websocket_resume import (
+    ResumeAttachment,
+    ResumeDelivery,
+    ResumeFailure,
+    ResumeFence,
+    ResumeProtocolError,
+    ResumableSession,
+    ResumableSessionRegistry,
+    start_fingerprint,
+)
 
 if TYPE_CHECKING:
     from ..server import HealthState, TTSEngine
@@ -87,6 +98,14 @@ _WEBSOCKET_HEARTBEAT_SEC = float(
     os.environ.get("ENGINE_WEBSOCKET_HEARTBEAT_SEC", "30") or "30"
 )
 _WEBSOCKET_REUSABLE_META_KEY = "websocket_connection_reusable"
+_WEBSOCKET_RESUME_GRACE_SEC = float(
+    os.environ.get("ENGINE_WEBSOCKET_STREAM_RESUME_GRACE_SEC", "30") or "30"
+)
+_WEBSOCKET_RESUME_MAX_BUFFER_BYTES = int(
+    os.environ.get("ENGINE_WEBSOCKET_STREAM_RESUME_MAX_BUFFER_BYTES", "16777216")
+    or "16777216"
+)
+_SUPPORTED_WEBSOCKET_FEATURES = ["persistent_sessions_v1", "stream_resume_v1"]
 
 logger = logging.getLogger(__name__)
 
@@ -94,13 +113,38 @@ logger = logging.getLogger(__name__)
 class WebSocketGateway:
     """Bridge one websocket to a serial sequence of TTS engine sessions."""
 
-    def __init__(self, engine: TTSEngine):
+    def __init__(
+        self,
+        engine: TTSEngine,
+        *,
+        stream_resume_grace_seconds: float = _WEBSOCKET_RESUME_GRACE_SEC,
+        stream_resume_max_buffer_bytes: int = _WEBSOCKET_RESUME_MAX_BUFFER_BYTES,
+    ):
         self._engine = engine
+        self._resume_registry = ResumableSessionRegistry(
+            engine,
+            grace_seconds=stream_resume_grace_seconds,
+            max_buffer_bytes=stream_resume_max_buffer_bytes,
+        )
+
+    def _capabilities(self) -> dict[str, Any]:
+        capabilities = normalize_capabilities(self._engine.describe_capabilities())
+        capabilities["supported_websocket_features"] = list(
+            _SUPPORTED_WEBSOCKET_FEATURES
+        )
+        capabilities["stream_resume_grace_ms"] = int(
+            round(self._resume_registry.grace_seconds * 1000.0)
+        )
+        capabilities["stream_resume_max_buffer_bytes"] = (
+            self._resume_registry.max_buffer_bytes
+        )
+        return capabilities
 
     async def handle_capabilities(self, request):
-        return web.json_response(
-            normalize_capabilities(self._engine.describe_capabilities())
-        )
+        return web.json_response(self._capabilities())
+
+    async def close(self) -> None:
+        await self._resume_registry.close()
 
     async def handle_websocket(self, request):
         ws = web.WebSocketResponse(heartbeat=_WEBSOCKET_HEARTBEAT_SEC)
@@ -119,6 +163,8 @@ class WebSocketGateway:
         connection_closed = False
         input_closed = False
         start_request: SessionStartRequest | None = None
+        resume_session: ResumableSession | None = None
+        resume_attachment: ResumeAttachment | None = None
         request_task: asyncio.Task | None = None
         outbound_task: asyncio.Task | None = None
         pump_task = asyncio.create_task(self._pump_messages(ws, request_queue))
@@ -128,7 +174,7 @@ class WebSocketGateway:
 
             nonlocal client_session_id, internal_session_id
             nonlocal start_request, outbound_queue, outbound_task
-            nonlocal input_closed
+            nonlocal input_closed, resume_session, resume_attachment
             # Usually the queue-get task delivered the terminal itself. It can
             # still be pending when cancel sends its terminal directly.
             if outbound_task is not None and not outbound_task.done():
@@ -143,6 +189,8 @@ class WebSocketGateway:
             input_closed = False
             start_request = None
             outbound_queue = None
+            resume_session = None
+            resume_attachment = None
 
         async def send_outbound_frame(frame: dict[str, Any]) -> bool:
             """Send one queued frame; return true when it ends the session."""
@@ -167,6 +215,46 @@ class WebSocketGateway:
                 # prevents those old frames from contaminating a later session.
                 connection_closed = True
             return True
+
+        async def send_resume_delivery(delivery: ResumeDelivery) -> bool:
+            """Send one replayable delivery without changing its boundaries."""
+
+            nonlocal connection_closed
+            session = resume_session
+            attachment = resume_attachment
+            if session is None or attachment is None:
+                raise RuntimeError("resumable delivery has no websocket attachment")
+            if not await session.is_current_generation(attachment.generation):
+                connection_closed = True
+                return False
+
+            frame = delivery.frame
+            if frame.get("type") == "audio":
+                audio = frame["audio"]
+                await ws.send_json(
+                    {
+                        "type": "audio_header",
+                        "delivery_seq": delivery.delivery_seq,
+                        "start_sample": delivery.start_sample,
+                        "end_sample": delivery.end_sample,
+                        "audio": {
+                            "sample_rate": audio["sample_rate"],
+                            "encoding": audio["encoding"],
+                            "channels": audio["channels"],
+                            "meta": audio.get("meta") or {},
+                        },
+                    }
+                )
+                # The header and binary frame are one indivisible logical
+                # delivery. A transport failure between them is recovered by
+                # replaying this same sequence number on the next attachment.
+                await ws.send_bytes(audio["pcm_data"])
+            else:
+                event = frame.get("event", {})
+                if event.get("type") == "done" and session.input_closed:
+                    event.setdefault("meta", {})[_WEBSOCKET_REUSABLE_META_KEY] = "true"
+                await ws.send_json(frame)
+            return _is_terminal_frame(frame)
 
         try:
             while True:
@@ -195,26 +283,54 @@ class WebSocketGateway:
                 if outbound_task in done:
                     frame = outbound_task.result()
                     outbound_task = None
-                    # Capture the queue: a terminal frame resets the connection's
-                    # current queue, but coalescing this batch must stay bound to
-                    # the session that produced it.
-                    current_queue = outbound_queue
-                    if current_queue is None:  # defensive; no session owns frame
-                        raise RuntimeError("websocket outbound frame has no session")
-                    while True:
-                        leftover = None
-                        if frame.get("type") == "audio":
-                            frame, leftover = _coalesce_queued_audio_frames(
-                                frame, current_queue
+                    if resume_session is not None:
+                        if isinstance(frame, ResumeFence):
+                            connection_closed = True
+                            break
+                        if isinstance(frame, ResumeFailure):
+                            if not ws.closed:
+                                await ws.send_json(
+                                    {
+                                        "type": "resume_error",
+                                        "code": frame.code,
+                                        "message": frame.message,
+                                    }
+                                )
+                            connection_closed = True
+                            break
+                        if not isinstance(frame, ResumeDelivery):
+                            raise RuntimeError(
+                                "resumable websocket queue contained an invalid frame"
                             )
-                        if await send_outbound_frame(frame):
+                        await send_resume_delivery(frame)
+                        if connection_closed:
                             break
-                        if leftover is None:
-                            break
-                        frame = leftover
+                        # A resumable terminal remains in the registry until
+                        # terminal_ack, so it can be replayed if the physical
+                        # connection dies immediately after delivery.
+                    else:
+                        # Capture the queue: a terminal frame resets the connection's
+                        # current queue, but coalescing this batch must stay bound to
+                        # the session that produced it.
+                        current_queue = outbound_queue
+                        if current_queue is None:  # defensive; no session owns frame
+                            raise RuntimeError(
+                                "websocket outbound frame has no session"
+                            )
+                        while True:
+                            leftover = None
+                            if frame.get("type") == "audio":
+                                frame, leftover = _coalesce_queued_audio_frames(
+                                    frame, current_queue
+                                )
+                            if await send_outbound_frame(frame):
+                                break
+                            if leftover is None:
+                                break
+                            frame = leftover
 
-                    if connection_closed:
-                        break
+                        if connection_closed:
+                            break
 
                 if request_task in done:
                     kind, payload = request_task.result()
@@ -234,9 +350,7 @@ class WebSocketGateway:
                                 {
                                     "type": "capabilities",
                                     _WEBSOCKET_REUSABLE_META_KEY: True,
-                                    "capabilities": normalize_capabilities(
-                                        self._engine.describe_capabilities()
-                                    ),
+                                    "capabilities": self._capabilities(),
                                 }
                             )
                             continue
@@ -250,19 +364,86 @@ class WebSocketGateway:
                                 message,
                                 default_mode=InputMode.AUTO,
                             )
-                            outbound_queue = asyncio.Queue(
-                                maxsize=_WEBSOCKET_AUDIO_QUEUE_MAXSIZE
-                            )
                             identity = GatewaySessionIdentity.create(
                                 message.get("session_id")
                             )
-                            client_session_id = identity.client_session_id
-                            internal_session_id = identity.internal_session_id
-                            await self._create_session(
-                                identity,
-                                start_request=start_request,
-                                outbound_queue=outbound_queue,
+                            resume_spec = _resume_start_spec(message)
+                            if resume_spec is None:
+                                outbound_queue = asyncio.Queue(
+                                    maxsize=_WEBSOCKET_AUDIO_QUEUE_MAXSIZE
+                                )
+                                client_session_id = identity.client_session_id
+                                internal_session_id = identity.internal_session_id
+                                await self._create_session(
+                                    identity,
+                                    start_request=start_request,
+                                    outbound_queue=outbound_queue,
+                                )
+                            else:
+                                token, last_delivery_seq, audio_sample = resume_spec
+                                (
+                                    session,
+                                    created,
+                                ) = await self._resume_registry.claim_start(
+                                    token=token,
+                                    identity=identity,
+                                    start_request=start_request,
+                                    config_fingerprint=start_fingerprint(message),
+                                )
+                                if not created:
+                                    await session.wait_until_ready()
+                                    # The server-owned request and identities are
+                                    # authoritative for an idempotent start retry.
+                                    start_request = session.start_request
+                                attachment = await session.attach(
+                                    last_delivery_seq=last_delivery_seq,
+                                    audio_through_sample=audio_sample,
+                                )
+                                resume_session = session
+                                resume_attachment = attachment
+                                outbound_queue = attachment.queue
+                                client_session_id = session.client_session_id
+                                internal_session_id = session.internal_session_id
+                                input_closed = session.input_closed
+                                if created:
+                                    try:
+                                        await self._create_session(
+                                            session.identity,
+                                            start_request=start_request,
+                                            outbound_queue=session,
+                                        )
+                                    except BaseException as exc:
+                                        await self._resume_registry.fail_initialization(
+                                            session, exc
+                                        )
+                                        raise
+                                    else:
+                                        await session.mark_initialized()
+                                else:
+                                    await ws.send_json(await session.resume_info())
+
+                        elif msg_type == "resume":
+                            if internal_session_id is not None:
+                                raise ResumeProtocolError(
+                                    "websocket_session_active",
+                                    "websocket already has an active logical session",
+                                )
+                            token, last_delivery_seq, audio_sample = (
+                                _resume_request_spec(message)
                             )
+                            session = await self._resume_registry.find(token)
+                            attachment = await session.attach(
+                                last_delivery_seq=last_delivery_seq,
+                                audio_through_sample=audio_sample,
+                            )
+                            resume_session = session
+                            resume_attachment = attachment
+                            outbound_queue = attachment.queue
+                            start_request = session.start_request
+                            client_session_id = session.client_session_id
+                            internal_session_id = session.internal_session_id
+                            input_closed = session.input_closed
+                            await ws.send_json(await session.resume_info())
 
                         elif msg_type == "oneshot":
                             if internal_session_id is not None:
@@ -296,7 +477,9 @@ class WebSocketGateway:
                                     "oneshot request requires non-empty 'text'"
                                 )
                             start_request.initial_text = text
-                            await self._engine.push_text_input(internal_session_id, text)
+                            await self._engine.push_text_input(
+                                internal_session_id, text
+                            )
                             await self._engine.mark_input_complete(internal_session_id)
 
                         elif msg_type == "text":
@@ -310,10 +493,38 @@ class WebSocketGateway:
                                     start_request.timing.client_text_ts_ms = (
                                         client_ts_ms
                                     )
-                            await self._engine.push_text_input(
-                                internal_session_id,
-                                str(message.get("text", "") or ""),
-                            )
+                            text = str(message.get("text", "") or "")
+                            if resume_session is not None:
+                                if resume_attachment is None:
+                                    raise RuntimeError(
+                                        "resumable session has no attachment"
+                                    )
+                                seq_no = _required_nonnegative_ws_int(
+                                    message, "seq_no", positive=True
+                                )
+                                acked_seq, duplicate = await resume_session.accept_text(
+                                    resume_attachment.generation,
+                                    seq_no=seq_no,
+                                    text=text,
+                                    push=lambda: self._engine.push_text_input(
+                                        internal_session_id, text
+                                    ),
+                                )
+                                if await resume_session.is_current_generation(
+                                    resume_attachment.generation
+                                ):
+                                    await ws.send_json(
+                                        {
+                                            "type": "text_ack",
+                                            "through_seq": acked_seq,
+                                            "duplicate": duplicate,
+                                        }
+                                    )
+                            else:
+                                await self._engine.push_text_input(
+                                    internal_session_id,
+                                    text,
+                                )
 
                         elif msg_type in {"end", "stop"}:
                             if not internal_session_id:
@@ -326,14 +537,101 @@ class WebSocketGateway:
                                 )
                                 if client_ts_ms > 0:
                                     start_request.timing.client_end_ts_ms = client_ts_ms
-                            input_closed = True
-                            await self._engine.mark_input_complete(internal_session_id)
+                            if resume_session is not None:
+                                if resume_attachment is None:
+                                    raise RuntimeError(
+                                        "resumable session has no attachment"
+                                    )
+                                raw_final_seq = message.get("final_seq_no")
+                                final_seq_no = (
+                                    resume_session.acked_text_seq
+                                    if raw_final_seq is None
+                                    else _required_nonnegative_ws_int(
+                                        message, "final_seq_no", positive=False
+                                    )
+                                )
+                                (
+                                    accepted_final,
+                                    duplicate,
+                                ) = await resume_session.close_input(
+                                    resume_attachment.generation,
+                                    final_seq_no=final_seq_no,
+                                    close=lambda: self._engine.mark_input_complete(
+                                        internal_session_id
+                                    ),
+                                )
+                                input_closed = resume_session.input_closed
+                                if await resume_session.is_current_generation(
+                                    resume_attachment.generation
+                                ):
+                                    await ws.send_json(
+                                        {
+                                            "type": "input_ack",
+                                            "final_seq_no": accepted_final,
+                                            "acked_text_seq": resume_session.acked_text_seq,
+                                            "duplicate": duplicate,
+                                        }
+                                    )
+                            else:
+                                input_closed = True
+                                await self._engine.mark_input_complete(
+                                    internal_session_id
+                                )
+
+                        elif msg_type == "ack":
+                            if resume_session is None or resume_attachment is None:
+                                raise ResumeProtocolError(
+                                    "resume_not_enabled",
+                                    "delivery ACK is only valid for a resumable stream",
+                                )
+                            await resume_session.acknowledge(
+                                resume_attachment.generation,
+                                through_delivery_seq=_required_nonnegative_ws_int(
+                                    message,
+                                    "through_delivery_seq",
+                                    positive=False,
+                                ),
+                                audio_through_sample=_required_nonnegative_ws_int(
+                                    message,
+                                    "audio_through_sample",
+                                    positive=False,
+                                ),
+                            )
+
+                        elif msg_type == "terminal_ack":
+                            if resume_session is None or resume_attachment is None:
+                                raise ResumeProtocolError(
+                                    "resume_not_enabled",
+                                    "terminal_ack is only valid for a resumable stream",
+                                )
+                            await self._resume_registry.terminal_ack(
+                                resume_session,
+                                resume_attachment.generation,
+                                through_delivery_seq=_required_nonnegative_ws_int(
+                                    message,
+                                    "through_delivery_seq",
+                                    positive=False,
+                                ),
+                                audio_through_sample=_required_nonnegative_ws_int(
+                                    message,
+                                    "audio_through_sample",
+                                    positive=False,
+                                ),
+                            )
+                            await reset_session()
 
                         elif msg_type == "cancel":
                             if internal_session_id:
                                 cancelled_internal_session_id = internal_session_id
                                 cancelled_client_session_id = client_session_id or ""
                                 cancel_reason = str(message.get("reason", "") or "")
+
+                                if resume_session is not None:
+                                    await resume_session.publish_cancelled(
+                                        cancel_reason
+                                    )
+                                    input_closed = True
+                                    continue
 
                                 # Stop a parked queue read before detaching the
                                 # per-session queue.  Frames already sent before
@@ -351,9 +649,7 @@ class WebSocketGateway:
                                         pass
                                     outbound_task = None
 
-                                await self._engine.cancel(
-                                    cancelled_internal_session_id
-                                )
+                                await self._engine.cancel(cancelled_internal_session_id)
                                 await ws.send_json(
                                     _make_event_frame(
                                         event_type="done",
@@ -385,6 +681,21 @@ class WebSocketGateway:
                 client_session_id,
                 internal_session_id,
             )
+        except ResumeProtocolError as exc:
+            logger.warning(
+                "Resumable WebSocket protocol error: client=%s internal=%s code=%s",
+                client_session_id,
+                internal_session_id,
+                exc.code,
+            )
+            if not ws.closed:
+                await ws.send_json(
+                    {
+                        "type": "resume_error",
+                        "code": exc.code,
+                        "message": str(exc),
+                    }
+                )
         except Exception as exc:
             logger.error(
                 "WebSocket stream error: client=%s internal=%s: %s",
@@ -410,7 +721,9 @@ class WebSocketGateway:
                         await task
                     except asyncio.CancelledError:
                         pass
-            if internal_session_id:
+            if resume_session is not None and resume_attachment is not None:
+                await resume_session.detach(resume_attachment.generation)
+            elif internal_session_id:
                 await self._engine.cancel(internal_session_id)
             if not ws.closed:
                 await ws.close()
@@ -763,6 +1076,7 @@ async def serve(
         await stop_event.wait()
     finally:
         await runner.cleanup()
+        await gateway.close()
 
 
 def _session_config_from_ws_message(
@@ -852,6 +1166,88 @@ def _extract_ws_config_payload(message: dict[str, Any]) -> dict[str, Any]:
         if field not in merged and field in message:
             merged[field] = message[field]
     return merged
+
+
+def _resume_start_spec(message: dict[str, Any]) -> tuple[str, int, int] | None:
+    raw = message.get("resume")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ResumeProtocolError(
+            "invalid_resume_request", "start.resume must be an object"
+        )
+    if not _coerce_ws_bool(raw.get("enabled", False)):
+        return None
+    token = _validated_resume_token(raw.get("token"))
+    return (
+        token,
+        _mapping_nonnegative_int(raw, "last_delivery_seq", default=0),
+        _mapping_nonnegative_int(raw, "audio_through_sample", default=0),
+    )
+
+
+def _resume_request_spec(message: dict[str, Any]) -> tuple[str, int, int]:
+    token = _validated_resume_token(message.get("token"))
+    return (
+        token,
+        _required_nonnegative_ws_int(message, "last_delivery_seq", positive=False),
+        _required_nonnegative_ws_int(message, "audio_through_sample", positive=False),
+    )
+
+
+def _validated_resume_token(value: Any) -> str:
+    token = str(value or "").strip()
+    # UUID4 hex (the SDK spelling) and canonical UUID strings both carry a
+    # full 128-bit identifier while keeping registry keys small and bounded.
+    # Never include this capability secret in the error text or logs.
+    if not token or len(token) > 36:
+        raise ResumeProtocolError(
+            "invalid_resume_token", "resume token must be a 128-bit UUID"
+        )
+    try:
+        parsed = uuid.UUID(token)
+    except (ValueError, AttributeError) as exc:
+        raise ResumeProtocolError(
+            "invalid_resume_token", "resume token must be a 128-bit UUID"
+        ) from exc
+    if parsed.int == 0:
+        raise ResumeProtocolError(
+            "invalid_resume_token", "resume token must be a 128-bit UUID"
+        )
+    return parsed.hex
+
+
+def _mapping_nonnegative_int(
+    mapping: dict[str, Any], field: str, *, default: int
+) -> int:
+    if field not in mapping:
+        return default
+    try:
+        value = int(mapping[field])
+    except (TypeError, ValueError) as exc:
+        raise ResumeProtocolError(
+            "invalid_resume_cursor", f"{field} must be an integer"
+        ) from exc
+    if value < 0:
+        raise ResumeProtocolError(
+            "invalid_resume_cursor", f"{field} must be non-negative"
+        )
+    return value
+
+
+def _required_nonnegative_ws_int(
+    message: dict[str, Any], field: str, *, positive: bool
+) -> int:
+    if field not in message:
+        raise ResumeProtocolError(
+            "missing_protocol_field", f"resumable message requires '{field}'"
+        )
+    value = _mapping_nonnegative_int(message, field, default=0)
+    if positive and value <= 0:
+        raise ResumeProtocolError(
+            "invalid_text_sequence", f"{field} must be greater than zero"
+        )
+    return value
 
 
 def _optional_str(value: Any) -> str | None:

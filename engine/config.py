@@ -133,6 +133,12 @@ class ServerConfig:
     max_sessions: int = 128
     request_timeout_sec: float = 120.0
     warmup_rounds: int = 3
+    # Limit how far delivery may run ahead of the estimated playback head.
+    # This does not delay the first chunk; RTF > 1 builds a retractable tail
+    # only after synthesis gets ahead. Clients may explicitly request
+    # ``output_policy.config.delivery=firehose`` for legacy pass-through.
+    guarded_delivery_default: bool = True
+    guarded_delivery_window_ms: int = 100
     # Speakers to prewarm the prefix KV cache for at startup: for each, run one
     # real (discarded) synthesis so the speaker/config prefix is cached and the
     # first real request hits it (~50ms cold TTFT -> ~20ms warm). Empty = off.
@@ -172,6 +178,9 @@ class SchedulerConfig:
     # (0 = always abort). Reruns of the playhead segment are never attempted:
     # its audio already streamed.
     token_loop_max_retries: int = 1
+    # At max_seq_len, classify only clearly implausible audio:text ratios as
+    # runaways. Genuine long-text overflow keeps its historical semantics.
+    length_runaway_ratio: float = 10.0
 
 
 @dataclass

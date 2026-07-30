@@ -28,6 +28,8 @@ server:
   max_sessions: 128
   request_timeout_sec: 120.0
   warmup_rounds: 3               # dummy inferences at startup to warm TRT cache
+  guarded_delivery_default: true # first chunk is immediate; later excess stays retractable
+  guarded_delivery_window_ms: 100 # maximum audio lead ahead of the estimated playhead
   prewarm_speakers: []           # speakers to prewarm prefix KV cache at startup
                                  # (e.g. [Serena]); first real request per speaker
                                  # then hits cache (~20ms TTFT vs ~50ms cold). []=off
@@ -52,6 +54,8 @@ scheduler:
   # buffered behind an earlier live segment (transparent to the client).
   # 0 = always abort instead.
   token_loop_max_retries: 1
+  # At max_seq_len, only implausibly long audio is considered a runaway.
+  length_runaway_ratio: 10.0
 
 prefix_cache:
   enabled: true

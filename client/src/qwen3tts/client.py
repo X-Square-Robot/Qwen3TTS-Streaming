@@ -47,6 +47,10 @@ class TTSClient:
         timeout: float = 30.0,
         connect_timeout: float | None = None,
         reconnect_attempts: int = 1,
+        active_stream_resume: bool = True,
+        stream_resume_attempts: int = 2,
+        stream_resume_timeout: float = 10.0,
+        stream_resume_ack_interval: int = 8,
         max_connections: int = 32,
         max_idle_connections: int = 8,
         max_pending_acquires: int = 256,
@@ -65,9 +69,13 @@ class TTSClient:
         For ``engine-websocket``, physical connections are exclusive leases
         from a bounded FIFO pool. Defaults allow 32 total connections, retain
         eight idle connections, queue at most 256 acquires, and wait 30 seconds
-        for capacity. ``idle_ttl`` and ``max_lifetime`` are disabled by default;
-        either ``None`` or ``0`` disables them explicitly. Keepalive cycles use
-        20% timing jitter by default to avoid synchronized gateway probes.
+        for capacity. Active streams request resumable delivery by default and
+        make up to two bounded resume attempts after a transport failure. A
+        gateway that does not negotiate the delivery sidecar automatically
+        keeps the historical fail-fast behavior. ``idle_ttl`` and
+        ``max_lifetime`` are disabled by default; either ``None`` or ``0``
+        disables them explicitly. Keepalive cycles use 20% timing jitter by
+        default to avoid synchronized gateway probes.
         """
 
         headers, metadata = apply_bearer_key(headers, metadata, key)
@@ -89,6 +97,10 @@ class TTSClient:
             timeout=timeout,
             connect_timeout=connect_timeout,
             reconnect_attempts=reconnect_attempts,
+            active_stream_resume=active_stream_resume,
+            stream_resume_attempts=stream_resume_attempts,
+            stream_resume_timeout=stream_resume_timeout,
+            stream_resume_ack_interval=stream_resume_ack_interval,
             max_connections=max_connections,
             max_idle_connections=max_idle_connections,
             max_pending_acquires=max_pending_acquires,
@@ -220,6 +232,10 @@ def _build_adapter(
     headers,
     metadata,
     reconnect_attempts: int = 1,
+    active_stream_resume: bool = True,
+    stream_resume_attempts: int = 2,
+    stream_resume_timeout: float = 10.0,
+    stream_resume_ack_interval: int = 8,
     max_connections: int = 32,
     max_idle_connections: int = 8,
     max_pending_acquires: int = 256,
@@ -236,6 +252,10 @@ def _build_adapter(
             connect_timeout=connect_timeout,
             headers=headers,
             reconnect_attempts=reconnect_attempts,
+            active_stream_resume=active_stream_resume,
+            stream_resume_attempts=stream_resume_attempts,
+            stream_resume_timeout=stream_resume_timeout,
+            stream_resume_ack_interval=stream_resume_ack_interval,
             max_connections=max_connections,
             max_idle_connections=max_idle_connections,
             max_pending_acquires=max_pending_acquires,

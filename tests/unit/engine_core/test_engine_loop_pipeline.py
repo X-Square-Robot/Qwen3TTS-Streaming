@@ -391,7 +391,7 @@ class TestProcessStepOutput:
         output = StepOutput(
             slots=[slot],
             eos_flags=[False],
-            audio_chunks=[b"\x00\x01"],
+            audio_chunks=[b"\x00\x00\x80\x3f"],
             batch_talker_kv=None,
             batch_c2w_kv=None,
             split_c2w_conv=[[]],
@@ -415,6 +415,8 @@ class TestConfigNewFields:
         sc = ServerConfig()
         assert sc.warmup_rounds == 3
         assert sc.health_port == 8080
+        assert sc.guarded_delivery_default is True
+        assert sc.guarded_delivery_window_ms == 100
 
     def test_scheduler_config_has_timeout_and_pad_silence_thresholds(self):
         from engine.config import SchedulerConfig
@@ -423,6 +425,7 @@ class TestConfigNewFields:
         assert sc.session_timeout_sec == 300.0
         assert sc.pad_silence_peak_threshold == 5e-4
         assert sc.pad_silence_mean_abs_threshold == 2e-4
+        assert sc.length_runaway_ratio == 10.0
 
 
 class TestPadSilenceDetection:
@@ -1000,8 +1003,7 @@ class TestSegmentRetry:
         assert seg0.retry_idx == 0
         results = self._drain(loop, result_queue)
         assert any(
-            r.type == ResultType.SEGMENT_END
-            and r.metrics["eos_reason"] == "loop_abort"
+            r.type == ResultType.SEGMENT_END and r.metrics["eos_reason"] == "loop_abort"
             for r in results
         )
         loop.close()
@@ -1032,3 +1034,71 @@ class TestSegmentRetry:
         from engine.config import SchedulerConfig
 
         assert SchedulerConfig().token_loop_max_retries == 1
+
+    def test_wholly_silent_lookahead_retries(self, model_config):
+        engine_loop, loop, pool, result_queue = self._make_env(model_config)
+        self._add_segment(engine_loop, pool, 0)
+        seg1 = self._add_segment(engine_loop, pool, 1)
+        seg1.text_tokens_consumed = 5
+        seg1.audio_frames_seen = 8
+
+        engine_loop._handle_natural_eos(engine_loop._groups["s1"], seg1)
+
+        assert seg1.state == "pending_prefill"
+        results = self._drain(loop, result_queue)
+        retry = next(r for r in results if r.type == ResultType.SEGMENT_RETRY)
+        assert retry.metrics["retry_reason"] == "silence"
+        loop.close()
+
+    def test_wholly_silent_playhead_is_discarded(self, model_config):
+        engine_loop, loop, pool, result_queue = self._make_env(model_config)
+        seg0 = self._add_segment(engine_loop, pool, 0)
+        seg0.text_tokens_consumed = 5
+        seg0.audio_frames_seen = 8
+
+        engine_loop._handle_natural_eos(engine_loop._groups["s1"], seg0)
+
+        results = self._drain(loop, result_queue)
+        end = next(r for r in results if r.type == ResultType.SEGMENT_END)
+        assert end.metrics["eos_reason"] == "silent_audio_abort"
+        assert end.metrics["discard_all_audio"] is True
+        loop.close()
+
+    def test_invalid_pcm_lookahead_retries(self, model_config):
+        engine_loop, loop, pool, result_queue = self._make_env(model_config)
+        self._add_segment(engine_loop, pool, 0)
+        seg1 = self._add_segment(engine_loop, pool, 1)
+        bad = torch.tensor([float("nan")], dtype=torch.float32).numpy().tobytes()
+
+        output = StepOutput(
+            slots=[seg1.slot],
+            eos_flags=[False],
+            tokens=[1],
+            audio_chunks=[bad],
+            split_c2w_conv=[[]],
+            split_c2w_transconv=[[]],
+        )
+        engine_loop._process_step_output(output)
+
+        assert seg1.state == "pending_prefill"
+        results = self._drain(loop, result_queue)
+        retry = next(r for r in results if r.type == ResultType.SEGMENT_RETRY)
+        assert retry.metrics["retry_reason"] == "invalid_audio"
+        loop.close()
+
+    def test_length_runaway_at_kv_cap_retries(self, model_config):
+        engine_loop, loop, pool, result_queue = self._make_env(model_config)
+        earlier = self._add_segment(engine_loop, pool, 0, state="paused")
+        seg1 = self._add_segment(engine_loop, pool, 1)
+        seg1.text_tokens_consumed = 1
+        seg1.slot.past_len = model_config.max_seq_len
+        seg1.slot.frame_idx = model_config.max_seq_len
+
+        assert engine_loop._get_active_slots_mlfq() == []
+
+        assert earlier.state == "paused"
+        assert seg1.state == "pending_prefill"
+        results = self._drain(loop, result_queue)
+        retry = next(r for r in results if r.type == ResultType.SEGMENT_RETRY)
+        assert retry.metrics["retry_reason"] == "length"
+        loop.close()

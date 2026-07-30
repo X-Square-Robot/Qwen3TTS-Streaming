@@ -174,6 +174,12 @@ putting its `call_id` in `TimingContext.extra`.
 
 - `reconnect_attempts=1`: retry a new physical connection or failed initial
   `start` write once;
+- `active_stream_resume=True`: request safe in-process recovery for active
+  WebSocket streams when the gateway supports it;
+- `stream_resume_attempts=2` / `stream_resume_timeout=10.0`: use a separate,
+  bounded retry count and total deadline for an interrupted active stream;
+- `stream_resume_ack_interval=8`: cumulatively acknowledge every eight output
+  deliveries (terminal output is acknowledged immediately);
 - `max_connections=32`: hard limit across connecting, leased, keepalive-probed,
   and idle sockets;
 - `max_idle_connections=8`: retain at most eight idle connections;
@@ -205,10 +211,19 @@ the socket and safely falls back to reconnecting.
 If background keepalive (or the synchronous probe used when keepalive is
 disabled) finds that a gateway reaped an idle socket, the SDK discards it and
 the next session opens a replacement automatically. Those idle-socket probes
-use `connect_timeout`, not the potentially much longer stream receive timeout. A mid-stream disconnect
-after text or audio has entered an active session produces an explicit `error`
-and is never automatically replayed: the current protocol has no text/audio
-acknowledgement or resume token, and blind recovery could duplicate audio. Call
+use `connect_timeout`, not the potentially much longer stream receive timeout.
+
+For a resume-capable gateway, a mid-stream transport failure keeps the same
+engine execution alive during a bounded grace period. The SDK reconnects from
+its pool without calling `open_stream()` again, replays only text above the
+server's cumulative ACK, and resumes exact output records after its last
+delivery/sample cursor. A JSON `audio_header` and the immediately following raw
+PCM binary frame form one replayable delivery; the SDK advances the cursor only
+after the complete binary frame has entered its local message queue. It never
+falls back to re-synthesizing from the beginning. If the token/window expires,
+the server process restarted, a different replica receives the reconnect, or
+the retry budget is exhausted, the session emits one explicit `error`. Legacy
+gateways that do not negotiate the feature retain fail-fast behavior. Call
 `client.close()` when finished, preferably through the context manager.
 
 ## Unified Streaming Interface

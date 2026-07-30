@@ -8,6 +8,7 @@ import random
 import socket
 import threading
 import time
+import uuid
 import weakref
 
 from qwen3tts_protocol import (
@@ -32,6 +33,7 @@ from .._internal.raw_websocket import (
 from .._internal.utils import (
     build_bytes_result,
     capabilities_from_payload,
+    decode_audio_chunk,
     decode_stream_event,
     stream_text_chunk_to_mapping,
     synthesis_config_to_mapping,
@@ -45,6 +47,7 @@ from ..exceptions import (
     ProtocolError,
     ProtocolVersionMismatchError,
     StreamClosedError,
+    StreamRecoveryError,
 )
 
 _WEBSOCKET_REUSABLE_META_KEY = "websocket_connection_reusable"
@@ -107,6 +110,10 @@ class EngineWebSocketAdapter:
         connect_timeout: float | None = None,
         headers: dict[str, str] | None = None,
         reconnect_attempts: int = 1,
+        active_stream_resume: bool = True,
+        stream_resume_attempts: int = 2,
+        stream_resume_timeout: float = 10.0,
+        stream_resume_ack_interval: int = 8,
         max_connections: int = 32,
         max_idle_connections: int = 8,
         max_pending_acquires: int = 256,
@@ -129,6 +136,19 @@ class EngineWebSocketAdapter:
         # are therefore pooled and reused serially; concurrent sessions simply
         # check out different sockets from the pool.
         self.reconnect_attempts = max(0, int(reconnect_attempts))
+        self.active_stream_resume = bool(active_stream_resume)
+        self.stream_resume_attempts = int(stream_resume_attempts)
+        self.stream_resume_timeout = float(stream_resume_timeout)
+        self.stream_resume_ack_interval = int(stream_resume_ack_interval)
+        if self.stream_resume_attempts < 0:
+            raise ValueError("stream_resume_attempts must be non-negative")
+        if (
+            not math.isfinite(self.stream_resume_timeout)
+            or self.stream_resume_timeout <= 0
+        ):
+            raise ValueError("stream_resume_timeout must be a finite positive number")
+        if self.stream_resume_ack_interval <= 0:
+            raise ValueError("stream_resume_ack_interval must be greater than zero")
         self.max_connections = int(max_connections)
         self.max_idle_connections = int(max_idle_connections)
         self.max_pending_acquires = int(max_pending_acquires)
@@ -365,27 +385,54 @@ class EngineWebSocketAdapter:
         for conn in connections:
             ws_close(conn)
 
-    def _new_connection(self) -> RawWebSocketConnection:
+    def _new_connection(
+        self,
+        *,
+        connect_timeout: float | None = None,
+        reconnect_attempts: int | None = None,
+        deadline: float | None = None,
+        release_reservation_on_failure: bool = True,
+    ) -> RawWebSocketConnection:
         """Establish a socket for one capacity slot reserved by checkout."""
 
         last_error: BaseException | None = None
         reservation_released = False
+        handshake_timeout = (
+            self.connect_timeout
+            if connect_timeout is None
+            else max(0.001, float(connect_timeout))
+        )
+        attempts = (
+            self.reconnect_attempts
+            if reconnect_attempts is None
+            else max(0, int(reconnect_attempts))
+        )
         try:
-            for attempt in range(self.reconnect_attempts + 1):
+            for attempt in range(attempts + 1):
                 with self._pool_lock:
                     if self._closed:
                         raise StreamClosedError("websocket adapter is closed")
+                attempt_timeout = handshake_timeout
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("websocket connection deadline expired")
+                    attempt_timeout = min(attempt_timeout, remaining)
                 try:
                     conn = ws_connect(
                         self.endpoint,
-                        timeout=self.connect_timeout,
+                        timeout=attempt_timeout,
                         headers=self.headers,
                     )
                 except (OSError, RawWebSocketError) as exc:
                     last_error = exc
-                    if attempt >= self.reconnect_attempts:
+                    if attempt >= attempts:
                         raise
-                    time.sleep(min(0.2, 0.05 * (2**attempt)))
+                    delay = min(0.2, 0.05 * (2**attempt))
+                    if deadline is not None:
+                        delay = min(delay, max(0.0, deadline - time.monotonic()))
+                    if delay > 0:
+                        time.sleep(delay)
                     continue
 
                 created_at = time.monotonic()
@@ -403,18 +450,89 @@ class EngineWebSocketAdapter:
                     ws_close(conn)
                     raise StreamClosedError("websocket adapter closed during connect")
                 return conn
-        except BaseException:
+        except BaseException as exc:
             # Successful handshakes release the reservation in the block above.
             # Every other exit must do it here so a failed connect cannot leak
-            # capacity and permanently stall the FIFO queue.
+            # capacity and permanently stall the FIFO queue. Active recovery
+            # may retain the slot only for an expected dial failure and only
+            # while the adapter remains open; programmer errors and close races
+            # cannot be retried through that reservation safely.
             with self._pool_condition:
-                if not reservation_released:
+                retain_for_retry = (
+                    not release_reservation_on_failure
+                    and not self._closed
+                    and isinstance(exc, (OSError, RawWebSocketError))
+                )
+                if not reservation_released and not retain_for_retry:
                     self._connecting -= 1
                     reservation_released = True
                 self._pool_condition.notify_all()
             raise
         assert last_error is not None  # pragma: no cover - loop always returns/raises
         raise last_error
+
+    def _replace_connection(
+        self,
+        conn: RawWebSocketConnection,
+        *,
+        connect_timeout: float,
+        deadline: float | None = None,
+        preserve_reservation_on_failure: bool = False,
+    ) -> RawWebSocketConnection:
+        """Atomically replace one active lease without releasing its pool slot.
+
+        Removing the failed socket and reserving its replacement happen under
+        the same pool lock. Consequently a resume never transiently exceeds
+        ``max_connections`` and a fresh waiter cannot steal the failed
+        session's capacity between those two operations.
+        """
+
+        with self._pool_condition:
+            if self._closed:
+                raise StreamClosedError("websocket adapter is closed")
+            if conn not in self._connections:
+                raise StreamRecoveryError(
+                    "interrupted websocket lease is no longer owned by the pool"
+                )
+            self._connections.remove(conn)
+            self._connection_created_at.pop(conn, None)
+            self._connection_idle_since.pop(conn, None)
+            try:
+                self._idle_connections.remove(conn)
+            except ValueError:
+                pass
+            # The old tracked socket becomes one in-flight replacement, so the
+            # total tracked + connecting count is unchanged while dialing.
+            self._connecting += 1
+            self._pool_condition.notify_all()
+        ws_close(conn)
+        return self._new_connection(
+            connect_timeout=connect_timeout,
+            reconnect_attempts=0,
+            deadline=deadline,
+            release_reservation_on_failure=not preserve_reservation_on_failure,
+        )
+
+    def _connect_reserved_replacement(
+        self,
+        *,
+        connect_timeout: float,
+        deadline: float,
+        preserve_reservation_on_failure: bool,
+    ) -> RawWebSocketConnection:
+        """Dial one socket using a replacement slot retained after a failure."""
+
+        return self._new_connection(
+            connect_timeout=connect_timeout,
+            reconnect_attempts=0,
+            deadline=deadline,
+            release_reservation_on_failure=not preserve_reservation_on_failure,
+        )
+
+    def _release_reserved_replacement(self) -> None:
+        with self._pool_condition:
+            self._connecting -= 1
+            self._pool_condition.notify_all()
 
     def _checkout_connection(
         self,
@@ -945,6 +1063,7 @@ class EngineWebSocketAdapter:
 
     def open_stream(self, start_request: SessionStartRequest):
         last_error: BaseException | None = None
+        resume_token = uuid.uuid4().hex if self.active_stream_resume else ""
         for attempt in range(self.reconnect_attempts + 1):
             conn = self._acquire_connection()
             try:
@@ -952,12 +1071,13 @@ class EngineWebSocketAdapter:
                     adapter=self,
                     start_request=start_request,
                     conn=conn,
+                    resume_token=resume_token,
                 )
             except (OSError, RawWebSocketError) as exc:
                 # No text has been submitted yet.  Retrying a failed initial
                 # start write on a fresh connection is safe; once the session
-                # object is returned, mid-stream replay is deliberately left
-                # to the caller because it could duplicate audio.
+                # object is returned, negotiated sessions use delivery/text
+                # cursors to resume safely; legacy gateways remain fail-fast.
                 last_error = exc
                 self._discard_connection(conn)
                 if attempt >= self.reconnect_attempts:
@@ -1035,6 +1155,7 @@ class EngineWebSocketStreamSession(BaseStreamSession):
         adapter: EngineWebSocketAdapter,
         start_request: SessionStartRequest,
         conn: RawWebSocketConnection,
+        resume_token: str = "",
     ) -> None:
         super().__init__(
             session_id=start_request.session_id, transport=adapter.transport_name
@@ -1046,16 +1167,42 @@ class EngineWebSocketStreamSession(BaseStreamSession):
         # caller can pass the send-open check, then the reader can return the
         # socket to the pool and a late send can corrupt the next session.
         self._transport_lock = threading.RLock()
+        self._transport_condition = threading.Condition(self._transport_lock)
         self._transport_finished = False
+        self._hard_closed = False
+        self._generation = 0
+        self._recovering = False
+        self._recovery_conn: RawWebSocketConnection | None = None
+        self._recovery_error: StreamRecoveryError | None = None
+        self._terminal_failure_published = False
+        self._active_stream_resume = bool(adapter.active_stream_resume and resume_token)
+        self._resume_supported: bool | None = (
+            None if self._active_stream_resume else False
+        )
+        self._resume_token = resume_token
+        self._next_text_seq = 1
+        self._text_journal: deque[tuple[int, dict]] = deque()
+        self._acked_text_seq = 0
+        self._input_closed = False
+        self._input_acked = False
+        self._stop_payload: dict | None = None
+        self._last_delivery_seq = 0
+        self._audio_through_sample = 0
+        self._deliveries_since_ack = 0
+        self._current_audio = AudioFormat()
+        self._pending_audio_header: dict | None = None
+        start_payload = {
+            "type": "start",
+            "session_id": start_request.session_id,
+            "config": synthesis_config_to_mapping(start_request.config),
+        }
+        if self._active_stream_resume:
+            start_payload["resume"] = {
+                "enabled": True,
+                "token": self._resume_token,
+            }
         try:
-            ws_send_json(
-                self._conn,
-                {
-                    "type": "start",
-                    "session_id": start_request.session_id,
-                    "config": synthesis_config_to_mapping(start_request.config),
-                },
-            )
+            ws_send_json(self._conn, start_payload)
         except BaseException:
             raise
         self._reader = threading.Thread(
@@ -1064,63 +1211,626 @@ class EngineWebSocketStreamSession(BaseStreamSession):
         self._reader.start()
 
     def _reader_loop(self) -> None:
-        terminal_seen = False
+        while True:
+            with self._transport_condition:
+                if self._transport_finished or self._hard_closed:
+                    return
+                while self._recovering:
+                    self._transport_condition.wait(timeout=0.1)
+                    if self._transport_finished or self._hard_closed:
+                        return
+                conn = self._conn
+                generation = self._generation
+            try:
+                opcode, payload = self._recv_next_frame(conn)
+                if opcode == 0x8:
+                    raise RawWebSocketError("connection closed without terminal event")
+                if self._handle_incoming_frame(
+                    conn=conn,
+                    generation=generation,
+                    opcode=opcode,
+                    payload=payload,
+                ):
+                    return
+            except (OSError, RawWebSocketError, TimeoutError) as exc:
+                if self._recover_connection(
+                    failed_conn=conn,
+                    failed_generation=generation,
+                    cause=exc,
+                ):
+                    continue
+                return
+            except Exception as exc:
+                # Invalid JSON, a delivery gap, or any other protocol failure
+                # is deterministic. Reconnecting cannot repair it and could
+                # conceal corrupted output, so fail exactly once.
+                self._fail_terminal(exc)
+                return
+
+    def _recv_next_frame(self, conn: RawWebSocketConnection) -> tuple[int, bytes]:
+        idle_deadline = time.perf_counter() + self._adapter.timeout
+        while time.perf_counter() < idle_deadline:
+            conn.settimeout(max(0.02, min(0.5, idle_deadline - time.perf_counter())))
+            try:
+                return ws_recv_frame(conn)
+            except socket.timeout:
+                continue
+        raise TimeoutError(f"websocket stream idle for {self._adapter.timeout:.0f}s")
+
+    def _handle_incoming_frame(
+        self,
+        *,
+        conn: RawWebSocketConnection,
+        generation: int,
+        opcode: int,
+        payload: bytes,
+    ) -> bool:
+        if opcode == 0x2:
+            return self._handle_audio_payload(
+                conn=conn,
+                generation=generation,
+                pcm_bytes=payload,
+            )
+        if opcode != 0x1:
+            return False
+        message = json.loads(payload.decode("utf-8"))
+        message_type = str(message.get("type", ""))
+        if message_type == "audio_header":
+            self._handle_audio_header(message, generation=generation)
+            return False
+        if message_type == "text_ack":
+            self._handle_text_ack(message)
+            return False
+        if message_type == "input_ack":
+            with self._transport_condition:
+                self._input_acked = True
+            return False
+        if message_type == "resume_error":
+            raise StreamRecoveryError(
+                str(message.get("message") or "server rejected stream resume")
+            )
+        if message_type != "event":
+            return False
+        return self._handle_event(
+            conn=conn,
+            generation=generation,
+            wrapper=message,
+        )
+
+    def _handle_audio_header(self, header: dict, *, generation: int) -> None:
+        delivery_seq = self._parse_delivery_seq(header)
+        with self._transport_condition:
+            if generation != self._generation or self._transport_finished:
+                return
+            self._resume_supported = True
+            if self._pending_audio_header is not None:
+                raise ProtocolError("audio_header was not followed by binary audio")
+            if delivery_seq > self._last_delivery_seq + 1:
+                raise ProtocolError(
+                    "websocket delivery gap: expected "
+                    f"{self._last_delivery_seq + 1}, got {delivery_seq}"
+                )
+            self._pending_audio_header = dict(header)
+
+    def _handle_audio_payload(
+        self,
+        *,
+        conn: RawWebSocketConnection,
+        generation: int,
+        pcm_bytes: bytes,
+    ) -> bool:
+        with self._transport_condition:
+            if generation != self._generation or self._transport_finished:
+                return False
+            header = self._pending_audio_header
+            self._pending_audio_header = None
+            if header is None:
+                if self._resume_supported is True:
+                    raise ProtocolError(
+                        "resumable audio binary frame is missing audio_header"
+                    )
+                # Legacy gateway: no delivery sidecar means active recovery is
+                # unsafe, but normal fail-fast streaming remains unchanged.
+                self._resume_supported = False
+                self._put_message(
+                    AudioChunk(
+                        pcm_bytes=pcm_bytes,
+                        audio=self._current_audio,
+                        meta={},
+                    )
+                )
+                return False
+
+            delivery_seq = self._parse_delivery_seq(header)
+            if delivery_seq <= self._last_delivery_seq:
+                # The server may replay a delivery whose ACK was lost. Consume
+                # its paired binary frame but never enqueue it twice.
+                return False
+            if delivery_seq != self._last_delivery_seq + 1:
+                raise ProtocolError(
+                    "websocket audio delivery gap: expected "
+                    f"{self._last_delivery_seq + 1}, got {delivery_seq}"
+                )
+
+            start_sample = int(header.get("start_sample", 0) or 0)
+            end_sample = int(header.get("end_sample", start_sample) or start_sample)
+            chunk = decode_audio_chunk(header, pcm_bytes)
+            if start_sample < self._audio_through_sample < end_sample:
+                chunk = self._trim_audio_overlap(
+                    chunk,
+                    samples=self._audio_through_sample - start_sample,
+                )
+                start_sample = self._audio_through_sample
+            if end_sample <= self._audio_through_sample:
+                self._last_delivery_seq = delivery_seq
+                self._maybe_ack_locked(conn, generation)
+                return False
+            if start_sample != self._audio_through_sample:
+                raise ProtocolError(
+                    "websocket audio sample gap: expected sample "
+                    f"{self._audio_through_sample}, got {start_sample}"
+                )
+
+            # Queue first, then advance both cursors. A reconnect can therefore
+            # never acknowledge audio that the caller could not consume.
+            self._put_message(chunk)
+            self._last_delivery_seq = delivery_seq
+            self._audio_through_sample = end_sample
+            self._maybe_ack_locked(conn, generation)
+        return False
+
+    def _handle_event(
+        self,
+        *,
+        conn: RawWebSocketConnection,
+        generation: int,
+        wrapper: dict,
+    ) -> bool:
+        event = decode_stream_event(wrapper.get("event") or {})
+        raw_delivery_seq = wrapper.get("delivery_seq")
+        with self._transport_condition:
+            if generation != self._generation or self._transport_finished:
+                return False
+            if raw_delivery_seq is None:
+                if self._resume_supported is True:
+                    raise ProtocolError("resumable event is missing delivery_seq")
+                self._resume_supported = False
+                delivery_seq = None
+            else:
+                self._resume_supported = True
+                delivery_seq = self._parse_delivery_seq(wrapper)
+                if delivery_seq <= self._last_delivery_seq:
+                    return False
+                if delivery_seq != self._last_delivery_seq + 1:
+                    raise ProtocolError(
+                        "websocket event delivery gap: expected "
+                        f"{self._last_delivery_seq + 1}, got {delivery_seq}"
+                    )
+            if event.audio is not None:
+                self._current_audio = event.audio
+            terminal = _is_terminal_message(event)
+            if terminal:
+                self._mark_send_closed()
+                # The terminal event is an observable handoff point: callers
+                # may start their next request as soon as they see it. ACK and
+                # release/discard the lease first so that immediate request can
+                # reuse this exact physical connection instead of opening one.
+                if delivery_seq is not None:
+                    self._last_delivery_seq = delivery_seq
+                    terminal_ack_sent = self._send_terminal_ack_locked(conn, generation)
+                else:
+                    terminal_ack_sent = True
+                self._finish_transport_locked(
+                    reusable=(
+                        terminal_ack_sent and _terminal_allows_connection_reuse(event)
+                    ),
+                    conn=conn,
+                )
+                self._put_message(event)
+                return True
+            self._put_message(event)
+            if delivery_seq is not None:
+                self._last_delivery_seq = delivery_seq
+                self._maybe_ack_locked(conn, generation)
+        return False
+
+    @staticmethod
+    def _parse_delivery_seq(payload: dict) -> int:
         try:
-            for message in _iter_conn_messages(
-                self._conn, timeout=self._adapter.timeout
+            value = int(payload.get("delivery_seq", 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise ProtocolError("delivery_seq must be an integer") from exc
+        if value <= 0:
+            raise ProtocolError("delivery_seq must be greater than zero")
+        return value
+
+    @staticmethod
+    def _trim_audio_overlap(chunk: AudioChunk, *, samples: int) -> AudioChunk:
+        bytes_per_sample = {
+            "pcm_f32": 4,
+            "pcm_s16le": 2,
+            "pcm_s16": 2,
+            "pcm_u8": 1,
+        }.get(chunk.audio.encoding.lower())
+        if bytes_per_sample is None:
+            raise ProtocolError(
+                "cannot trim overlapping resumed audio with encoding "
+                f"{chunk.audio.encoding!r}"
+            )
+        byte_offset = samples * max(1, chunk.audio.channels) * bytes_per_sample
+        if byte_offset > len(chunk.pcm_bytes):
+            raise ProtocolError("resumed audio overlap exceeds binary frame length")
+        return AudioChunk(
+            pcm_bytes=chunk.pcm_bytes[byte_offset:],
+            audio=chunk.audio,
+            chunk_index=chunk.chunk_index,
+            first_chunk=False,
+            final_chunk=chunk.final_chunk,
+            meta=dict(chunk.meta),
+        )
+
+    def _handle_text_ack(self, message: dict) -> None:
+        try:
+            through_seq = int(message.get("through_seq", 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise ProtocolError("text_ack through_seq must be an integer") from exc
+        with self._transport_condition:
+            highest_sent = self._next_text_seq - 1
+            if through_seq < self._acked_text_seq or through_seq > highest_sent:
+                raise ProtocolError(
+                    f"invalid text_ack through_seq={through_seq}, "
+                    f"sent_through={highest_sent}"
+                )
+            self._acked_text_seq = through_seq
+            while self._text_journal and self._text_journal[0][0] <= through_seq:
+                self._text_journal.popleft()
+
+    def _maybe_ack_locked(self, conn: RawWebSocketConnection, generation: int) -> None:
+        self._deliveries_since_ack += 1
+        if self._deliveries_since_ack < self._adapter.stream_resume_ack_interval:
+            return
+        self._send_delivery_ack_locked(conn, generation)
+
+    def _send_delivery_ack_locked(
+        self, conn: RawWebSocketConnection, generation: int
+    ) -> None:
+        if self._resume_supported is not True or generation != self._generation:
+            return
+        try:
+            conn.settimeout(self._adapter.connect_timeout)
+            ws_send_json(
+                conn,
+                {
+                    "type": "ack",
+                    "through_delivery_seq": self._last_delivery_seq,
+                    "audio_through_sample": self._audio_through_sample,
+                },
+            )
+        except (OSError, RawWebSocketError):
+            # The already-queued delivery cursor remains authoritative. The
+            # reader will observe the same broken transport and resume from it.
+            return
+        self._deliveries_since_ack = 0
+
+    def _send_terminal_ack_locked(
+        self, conn: RawWebSocketConnection, generation: int
+    ) -> bool:
+        if self._resume_supported is not True or generation != self._generation:
+            return True
+        try:
+            conn.settimeout(self._adapter.connect_timeout)
+            ws_send_json(
+                conn,
+                {
+                    "type": "terminal_ack",
+                    "through_delivery_seq": self._last_delivery_seq,
+                    "audio_through_sample": self._audio_through_sample,
+                },
+            )
+        except (OSError, RawWebSocketError):
+            # The terminal event will still be published locally, but this
+            # physical connection is not safe to reuse. Server-side retention
+            # expires the unacknowledged terminal record.
+            return False
+        return True
+
+    def _recover_connection(
+        self,
+        *,
+        failed_conn: RawWebSocketConnection,
+        failed_generation: int,
+        cause: BaseException,
+    ) -> bool:
+        """Resume one logical stream on a replacement physical connection."""
+
+        with self._transport_condition:
+            if self._transport_finished or self._hard_closed:
+                return False
+            if self._generation != failed_generation or self._conn is not failed_conn:
+                return True
+            if (
+                not self._active_stream_resume
+                or self._adapter.stream_resume_attempts <= 0
+                or self._resume_supported is False
             ):
-                if _is_terminal_message(message):
-                    terminal_seen = True
-                    with self._transport_lock:
-                        self._mark_send_closed()
-                        # Return the physical websocket before publishing the
-                        # terminal event. A consumer that immediately calls
-                        # close() after seeing done must not race and tear down
-                        # a healthy connection that is already reusable.
-                        self._finish_transport(
-                            reusable=_terminal_allows_connection_reuse(message)
-                        )
-                self._put_message(message)
-        except Exception as exc:
-            terminal_seen = True
-            self._finish_transport(reusable=False)
+                error = StreamRecoveryError(
+                    f"stream session {self.session_id} connection closed; "
+                    f"active stream resume was not negotiated: {cause}"
+                )
+                self._recovery_error = error
+                leader = False
+            elif self._recovering:
+                while self._recovering and not self._transport_finished:
+                    self._transport_condition.wait(timeout=0.1)
+                return (
+                    not self._transport_finished
+                    and self._generation != failed_generation
+                )
+            else:
+                self._recovering = True
+                # A header without its binary payload has not crossed the local
+                # delivery boundary. The replacement must replay both frames.
+                self._pending_audio_header = None
+                leader = True
+
+        if not leader:
+            self._fail_terminal(error)
+            return False
+
+        deadline = time.monotonic() + self._adapter.stream_resume_timeout
+        attempts = self._adapter.stream_resume_attempts
+        current: RawWebSocketConnection | None = failed_conn
+        replacement_reservation_held = False
+        last_error: BaseException = cause
+
+        for attempt in range(attempts):
+            with self._transport_condition:
+                if self._hard_closed or self._transport_finished:
+                    last_error = StreamClosedError(
+                        "stream closed while websocket recovery was in progress"
+                    )
+                    break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                last_error = TimeoutError("stream resume deadline expired")
+                break
+            replacement_completed = False
+            try:
+                if current is not None:
+                    new_conn = self._adapter._replace_connection(
+                        current,
+                        connect_timeout=remaining,
+                        deadline=deadline,
+                        preserve_reservation_on_failure=attempt + 1 < attempts,
+                    )
+                elif replacement_reservation_held:
+                    new_conn = self._adapter._connect_reserved_replacement(
+                        connect_timeout=remaining,
+                        deadline=deadline,
+                        preserve_reservation_on_failure=attempt + 1 < attempts,
+                    )
+                else:
+                    break
+                replacement_completed = True
+                replacement_reservation_held = False
+                current = new_conn
+                with self._transport_condition:
+                    if self._hard_closed or self._transport_finished:
+                        self._adapter._discard_connection(new_conn)
+                        current = None
+                        self._recovering = False
+                        self._transport_condition.notify_all()
+                        return False
+                    self._recovery_conn = new_conn
+                resumed = self._resume_on_connection(
+                    new_conn,
+                    deadline=deadline,
+                )
+                self._replay_unacked_input(
+                    new_conn,
+                    resumed=resumed,
+                    deadline=deadline,
+                )
+                with self._transport_condition:
+                    if self._hard_closed or self._transport_finished:
+                        self._adapter._discard_connection(new_conn)
+                        self._recovering = False
+                        self._transport_condition.notify_all()
+                        return False
+                    self._conn = new_conn
+                    self._recovery_conn = None
+                    self._generation += 1
+                    self._resume_supported = True
+                    self._pending_audio_header = None
+                    self._deliveries_since_ack = 0
+                    self._recovering = False
+                    self._recovery_error = None
+                    self._transport_condition.notify_all()
+                return True
+            except StreamRecoveryError as exc:
+                # A server resume_error is definitive (expired token, evicted
+                # buffer, protocol mismatch). Retrying it cannot be safe.
+                last_error = exc
+                break
+            except (OSError, RawWebSocketError, TimeoutError) as exc:
+                last_error = exc
+                # An exhausted atomic dial reservation has removed ``current``
+                # from the pool. Do not try to replace the same dead lease or
+                # let a normal waiter race for a newly released slot.
+                if not replacement_completed:
+                    current = None
+                    replacement_reservation_held = attempt + 1 < attempts
+                if attempt + 1 < attempts:
+                    time.sleep(min(0.2, 0.05 * (2**attempt)))
+                continue
+            except Exception as exc:
+                last_error = exc
+                break
+
+        with self._transport_condition:
+            self._recovery_conn = None
+        if replacement_reservation_held:
+            self._adapter._release_reserved_replacement()
+        elif current is not None:
+            self._adapter._discard_connection(current)
+        error = (
+            last_error
+            if isinstance(last_error, StreamRecoveryError)
+            else StreamRecoveryError(
+                f"stream session {self.session_id} resume failed after "
+                f"{attempts} attempt(s): {last_error}"
+            )
+        )
+        with self._transport_condition:
+            self._recovering = False
+            self._recovery_error = error
+            self._transport_condition.notify_all()
+        self._fail_terminal(error)
+        return False
+
+    def _resume_on_connection(
+        self,
+        conn: RawWebSocketConnection,
+        *,
+        deadline: float,
+    ) -> dict:
+        with self._transport_condition:
+            request = {
+                "type": "resume",
+                "token": self._resume_token,
+                "last_delivery_seq": self._last_delivery_seq,
+                "audio_through_sample": self._audio_through_sample,
+            }
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("stream resume deadline expired before request")
+        conn.settimeout(min(self._adapter.connect_timeout, remaining))
+        ws_send_json(conn, request)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("timed out waiting for resumed control")
+            conn.settimeout(max(0.02, min(0.2, remaining)))
+            try:
+                opcode, payload = ws_recv_frame(conn)
+            except socket.timeout:
+                continue
+            if opcode == 0x8:
+                raise RawWebSocketError("connection closed during stream resume")
+            if opcode != 0x1:
+                raise ProtocolError("server replayed data before resumed control")
+            message = json.loads(payload.decode("utf-8"))
+            message_type = str(message.get("type", ""))
+            if message_type == "resumed":
+                return message
+            if message_type == "resume_error":
+                code = str(message.get("code") or "resume_rejected")
+                detail = str(message.get("message") or "server rejected stream resume")
+                raise StreamRecoveryError(f"{code}: {detail}")
+            if message_type == "event":
+                event = decode_stream_event(message.get("event") or {})
+                if event.type == "error":
+                    raise StreamRecoveryError(
+                        event.message or "server rejected stream resume"
+                    )
+            raise ProtocolError(f"expected resumed control, got {message_type!r}")
+
+    def _replay_unacked_input(
+        self,
+        conn: RawWebSocketConnection,
+        *,
+        resumed: dict,
+        deadline: float,
+    ) -> None:
+        try:
+            acked_text_seq = int(resumed.get("acked_text_seq", 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise ProtocolError("resumed acked_text_seq must be an integer") from exc
+        with self._transport_condition:
+            highest_sent = self._next_text_seq - 1
+            if acked_text_seq < self._acked_text_seq or acked_text_seq > highest_sent:
+                raise ProtocolError(
+                    f"invalid resumed acked_text_seq={acked_text_seq}, "
+                    f"sent_through={highest_sent}"
+                )
+            self._acked_text_seq = acked_text_seq
+            while self._text_journal and self._text_journal[0][0] <= acked_text_seq:
+                self._text_journal.popleft()
+            pending_text = [dict(payload) for _seq, payload in self._text_journal]
+            server_input_closed = _is_truthy(resumed.get("input_closed", False))
+            self._input_acked = server_input_closed
+            stop_payload = (
+                dict(self._stop_payload)
+                if self._input_closed
+                and not server_input_closed
+                and self._stop_payload is not None
+                else None
+            )
+        for payload in pending_text:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("stream resume deadline expired replaying text")
+            conn.settimeout(min(self._adapter.connect_timeout, remaining))
+            ws_send_json(conn, payload)
+        if stop_payload is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("stream resume deadline expired replaying stop")
+            conn.settimeout(min(self._adapter.connect_timeout, remaining))
+            ws_send_json(conn, stop_payload)
+
+    def _fail_terminal(self, exc: BaseException) -> None:
+        with self._transport_condition:
+            if self._terminal_failure_published:
+                return
+            self._terminal_failure_published = True
+            self._mark_send_closed()
+            self._recovery_error = (
+                exc
+                if isinstance(exc, StreamRecoveryError)
+                else StreamRecoveryError(str(exc))
+            )
+            self._finish_transport_locked(reusable=False, conn=self._conn)
             self._put_message(
                 StreamEvent(
                     type="error",
                     session_id=self.session_id,
-                    message=str(exc),
+                    message=str(self._recovery_error),
                 )
             )
-        finally:
-            if not terminal_seen:
-                self._finish_transport(reusable=False)
-                # Clean reader exit without done/error — e.g. the gateway
-                # closed the connection mid-redeploy (close frame, opcode
-                # 0x8). Without a terminal event the queue sentinel is never
-                # enqueued and iter_messages() blocks forever, permanently
-                # pinning the caller's thread (this starved a relay worker
-                # pool in production). Surface it as an error so callers can
-                # log and run their error path.
-                self._put_message(
-                    StreamEvent(
-                        type="error",
-                        session_id=self.session_id,
-                        message="connection closed without terminal event",
-                    )
-                )
-            # Last-resort unblock: idempotent, and covers any exit path the
-            # branches above might miss.
-            self._close_message_queue()
+
+    def _finish_transport_locked(
+        self,
+        *,
+        reusable: bool,
+        conn: RawWebSocketConnection,
+    ) -> None:
+        if self._transport_finished:
+            return
+        self._transport_finished = True
+        self._recovering = False
+        self._transport_condition.notify_all()
+        if reusable:
+            self._adapter._release_connection(conn)
+        else:
+            self._adapter._discard_connection(conn)
 
     def _finish_transport(self, *, reusable: bool) -> None:
-        with self._transport_lock:
-            if self._transport_finished:
-                return
-            self._transport_finished = True
-        if reusable:
-            self._adapter._release_connection(self._conn)
-        else:
-            self._adapter._discard_connection(self._conn)
+        # Keep this wrapper tolerant of lightweight test/subclass sessions that
+        # predate the resumable state fields.
+        condition = getattr(self, "_transport_condition", None)
+        if condition is None:
+            with self._transport_lock:
+                if self._transport_finished:
+                    return
+                self._transport_finished = True
+            if reusable:
+                self._adapter._release_connection(self._conn)
+            else:
+                self._adapter._discard_connection(self._conn)
+            return
+        with condition:
+            self._finish_transport_locked(reusable=reusable, conn=self._conn)
 
     def send_text(
         self,
@@ -1129,14 +1839,55 @@ class EngineWebSocketStreamSession(BaseStreamSession):
         seq_no: int | None = None,
         client_timestamp_ms: int | None = None,
     ) -> None:
-        chunk = StreamTextChunk(
-            text=text,
-            seq_no=int(seq_no or 0),
-            client_timestamp_ms=int(client_timestamp_ms or 0),
+        if not getattr(self, "_active_stream_resume", False):
+            chunk = StreamTextChunk(
+                text=text,
+                seq_no=int(seq_no or 0),
+                client_timestamp_ms=int(client_timestamp_ms or 0),
+            )
+            payload = {"type": "text"}
+            payload.update(stream_text_chunk_to_mapping(chunk))
+            self._send_or_close(payload)
+            return
+
+        with self._transport_condition:
+            self._wait_until_sendable_locked()
+            self._check_send_open()
+            assigned_seq = self._next_text_seq if seq_no is None else int(seq_no)
+            if assigned_seq != self._next_text_seq:
+                raise ValueError(
+                    f"text seq_no must be contiguous: expected "
+                    f"{self._next_text_seq}, got {assigned_seq}"
+                )
+            chunk = StreamTextChunk(
+                text=text,
+                seq_no=assigned_seq,
+                client_timestamp_ms=int(client_timestamp_ms or 0),
+            )
+            payload = {"type": "text"}
+            payload.update(stream_text_chunk_to_mapping(chunk))
+            self._next_text_seq += 1
+            # Journal before the write: a send error is ambiguous, so the
+            # server's contiguous seq/ACK contract decides whether to dedupe it.
+            self._text_journal.append((assigned_seq, dict(payload)))
+            conn = self._conn
+            generation = self._generation
+            try:
+                conn.settimeout(self._adapter.connect_timeout)
+                ws_send_json(conn, payload)
+                return
+            except (OSError, RawWebSocketError) as exc:
+                send_error = exc
+        if self._recover_connection(
+            failed_conn=conn,
+            failed_generation=generation,
+            cause=send_error,
+        ):
+            return
+        error = self._recovery_error or StreamRecoveryError(
+            f"stream session {self.session_id} could not resume after send failure"
         )
-        payload = {"type": "text"}
-        payload.update(stream_text_chunk_to_mapping(chunk))
-        self._send_or_close(payload)
+        raise error from send_error
 
     def end(self, *, client_timestamp_ms: int | None = None) -> None:
         self._finish_input("end", client_timestamp_ms=client_timestamp_ms)
@@ -1155,7 +1906,34 @@ class EngineWebSocketStreamSession(BaseStreamSession):
         payload = {"type": message_type}
         if client_timestamp_ms is not None:
             payload["client_timestamp_ms"] = int(client_timestamp_ms)
-        self._send_or_close(payload, close_send=True)
+        if not getattr(self, "_active_stream_resume", False):
+            self._send_or_close(payload, close_send=True)
+            return
+        with self._transport_condition:
+            self._wait_until_sendable_locked()
+            self._check_send_open()
+            payload["final_seq_no"] = self._next_text_seq - 1
+            self._input_closed = True
+            self._stop_payload = dict(payload)
+            self._mark_send_closed()
+            conn = self._conn
+            generation = self._generation
+            try:
+                conn.settimeout(self._adapter.connect_timeout)
+                ws_send_json(conn, payload)
+                return
+            except (OSError, RawWebSocketError) as exc:
+                send_error = exc
+        if self._recover_connection(
+            failed_conn=conn,
+            failed_generation=generation,
+            cause=send_error,
+        ):
+            return
+        error = self._recovery_error or StreamRecoveryError(
+            f"stream session {self.session_id} could not resume while stopping"
+        )
+        raise error from send_error
 
     def cancel(self, reason: str = "") -> None:
         request = StreamCancelRequest(reason=reason)
@@ -1163,11 +1941,13 @@ class EngineWebSocketStreamSession(BaseStreamSession):
             self._send_or_close(
                 {"type": "cancel", "reason": request.reason},
                 close_send=True,
+                allow_recovery=False,
             )
-        except StreamClosedError:
+        except StreamClosedError as exc:
             # Best-effort: a dead connection already achieves what cancel
             # wanted (the server tears the session down on disconnect).
-            pass
+            if getattr(self, "_transport_condition", None) is not None:
+                self._fail_terminal(exc)
 
     def close(self, reason: str = "client closed") -> None:
         """Cancel and force-close the websocket from any caller thread.
@@ -1177,6 +1957,30 @@ class EngineWebSocketStreamSession(BaseStreamSession):
         unblock both the SDK reader and ``iter_messages()`` without reaching
         into ``session._conn`` or importing private websocket helpers.
         """
+        condition = getattr(self, "_transport_condition", None)
+        if condition is not None:
+            recovery_conn = None
+            with condition:
+                if self._recovering:
+                    self._hard_closed = True
+                    self._mark_send_closed()
+                    recovery_conn = self._recovery_conn
+                    self._transport_condition.notify_all()
+                    # Recovery owns any replacement socket that is currently
+                    # dialing and will discard it before attachment. Close the
+                    # local queue immediately instead of waiting for an in-band
+                    # cancel on a connection already known to be dead.
+                    recovering = True
+                else:
+                    recovering = False
+            if recovering:
+                try:
+                    self._finish_transport(reusable=False)
+                    if recovery_conn is not None:
+                        self._adapter._discard_connection(recovery_conn)
+                finally:
+                    self._close_message_queue()
+                return
         try:
             super().close(reason=reason)
         finally:
@@ -1186,7 +1990,25 @@ class EngineWebSocketStreamSession(BaseStreamSession):
             # a blocked reader is interrupted immediately.
             self._finish_transport(reusable=False)
 
-    def _send_or_close(self, payload: dict, *, close_send: bool = False) -> None:
+    def _wait_until_sendable_locked(self) -> None:
+        while (
+            self._recovering and not self._transport_finished and not self._hard_closed
+        ):
+            self._transport_condition.wait(timeout=0.1)
+        if self._recovery_error is not None:
+            raise self._recovery_error
+        if self._hard_closed or self._transport_finished:
+            raise StreamClosedError(
+                f"stream session {self.session_id} is already closed"
+            )
+
+    def _send_or_close(
+        self,
+        payload: dict,
+        *,
+        close_send: bool = False,
+        allow_recovery: bool = True,
+    ) -> None:
         """Send a control/text payload, mapping a dead connection to
         ``StreamClosedError``.
 
@@ -1196,16 +2018,34 @@ class EngineWebSocketStreamSession(BaseStreamSession):
         handlers cover both.  The terminal error event still arrives through
         the reader path.
         """
-        with self._transport_lock:
+        condition = getattr(self, "_transport_condition", None)
+        lock = condition if condition is not None else self._transport_lock
+        with lock:
+            if condition is not None:
+                self._wait_until_sendable_locked()
             self._check_send_open()
             if close_send:
                 self._mark_send_closed()
             try:
                 self._conn.settimeout(self._adapter.connect_timeout)
                 ws_send_json(self._conn, payload)
+                return
             except (OSError, RawWebSocketError) as exc:
-                self._mark_send_closed()
-                self._finish_transport(reusable=False)
-                raise StreamClosedError(
+                send_error = exc
+                error = StreamClosedError(
                     f"stream session {self.session_id} connection closed while sending"
-                ) from exc
+                )
+                if condition is not None and allow_recovery:
+                    conn = self._conn
+                    generation = self._generation
+                else:
+                    self._mark_send_closed()
+                    self._finish_transport(reusable=False)
+                    raise error from exc
+        if self._recover_connection(
+            failed_conn=conn,
+            failed_generation=generation,
+            cause=send_error,
+        ):
+            return
+        raise (self._recovery_error or error) from send_error

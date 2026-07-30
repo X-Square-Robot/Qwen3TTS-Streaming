@@ -165,6 +165,12 @@ WebSocket/gRPC 每次启动都会生成新的私有执行 ID，因此不同请�
 `call_id` 放入 `TimingContext.extra`，无需长期占用某条连接。
 
 - `reconnect_attempts=1`：建立新物理连接或发送首个 `start` 失败时重试一次；
+- `active_stream_resume=True`：gateway 支持时，为活动 WebSocket 流请求安全的
+  进程内断线恢复；
+- `stream_resume_attempts=2` / `stream_resume_timeout=10.0`：为活动流使用独立且
+  有界的重试次数与恢复总时限；
+- `stream_resume_ack_interval=8`：每 8 个输出 delivery 发送累计 ACK，终态立即
+  确认；
 - `max_connections=32`：严格限制建连中、已租用、探活中和空闲连接的总数；
 - `max_idle_connections=8`：最多保留 8 条空闲连接；
 - `max_pending_acquires=256`：限制 FIFO 租约等待队列长度，队列满时立即抛出
@@ -191,10 +197,15 @@ WebSocket/gRPC 每次启动都会生成新的私有执行 ID，因此不同请�
 后台保活（或关闭保活时的复用前探活）如果发现连接已被网关回收，SDK 会丢弃它，
 并在下一个 session 到来时自动建立新连接。这些空闲连接探活使用 `connect_timeout`，
 而不是可能更长的流式接收超时。
-已经提交文本或收到音频的活动 session 如果在流中断线，则返回明确的 `error`，且
-绝不会自动重放；当前协议没有文本确认、音频确认和 resume token，盲目恢复可能生成
-重复音频。客户端使用完毕后应调用 `client.close()`，推荐使用上下文管理器统一释放
-连接池。
+
+对于支持恢复的 gateway，活动流传输断开后，服务端会在有界 grace 内保留同一个
+engine execution。SDK 在连接池内替换坏连接，不会再次调用 `open_stream()`；它只
+补发高于服务端累计 ACK 的文本，并从最后确认的 delivery/sample 游标之后补收输出。
+一个 JSON `audio_header` 与紧随其后的裸 PCM binary 组成一条可回放 delivery；只有
+完整 binary 已进入本地消息队列后，SDK 才推进游标。因此它绝不会退化成“从头重合成
+再猜测去重”。token/窗口过期、服务进程重启、重连被路由到另一副本或恢复预算耗尽
+时，会只产生一个明确的 `error`。未声明该能力的旧 gateway 保持快速失败行为。
+客户端使用完毕后应调用 `client.close()`，推荐使用上下文管理器统一释放连接池。
 
 ## 统一流式接口
 

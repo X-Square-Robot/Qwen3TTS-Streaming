@@ -187,9 +187,16 @@ gateway 没有长连接协议标识，SDK 会安全丢弃而不复用该 socket�
 同样会被丢弃；只有明确标记可复用的成功/取消 `done` 才进入池。默认每 15 秒在空闲
 连接上做一次轻量保活；关闭保活时则在复用前探测
 僵尸连接。
-可通过 `reconnect_attempts`、`max_idle_connections` 和 `keepalive_interval`
-调整。自动重连只覆盖空闲连接和新会话建连；活动会话已经提交文本后不会透明重放，
-以免产生重复音频。使用完客户端后调用 `client.close()`，或使用上下文管理器。
+`reconnect_attempts` 只控制初始建连；活动流使用独立恢复预算。默认
+`active_stream_resume=True`、`stream_resume_attempts=2`、
+`stream_resume_timeout=10.0`、`stream_resume_ack_interval=8`。
+
+当 gateway 声明支持恢复时，瞬时断联不会重启逻辑 engine session。文本通过累计序号
+ACK 去重，输出从已确认的 delivery/sample 游标继续，因此 SDK 不会从头重新合成，也
+不会把同一段音频重复放入消息队列。恢复受服务端声明的 grace 与回放窗口约束；token
+过期、重试耗尽、协议缺口、服务进程重启或新连接被路由到另一副本都会明确失败。旧
+gateway 会自动保持原先的快速失败行为。使用完客户端后调用 `client.close()`，或使用
+上下文管理器。
 
 ## 示例
 
@@ -215,7 +222,7 @@ help(qwen3tts)` 或阅读 `qwen3tts.__all__`。主要名称：
 - **实时：** `RealtimeAudioStream`、`TimedAudio`
 - **异常：** `TTSClientError` 及其子类（`TransportNotSupportedError`、
   `TransportProbeError`、`ProtocolError`、`DependencyMissingError`、
-  `StreamClosedError`）
+  `StreamClosedError`、`StreamRecoveryError`）
 
 可选的延迟 / 计时诊断位于一个独立的子模块中，正常使用时并不需要：
 

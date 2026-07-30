@@ -112,6 +112,8 @@ class EngineSegment:
         "loop_token",
         "loop_run",
         "retry_idx",
+        "audio_frames_seen",
+        "audible_frame_seen",
         "dequeued_at",
         "prefill_started_at",
         "prefill_completed_at",
@@ -149,6 +151,11 @@ class EngineSegment:
         self.loop_run: int = 0
         # Rerun attempt count (0 = first attempt); salts the sampling seed.
         self.retry_idx: int = 0
+        # Conservative output-health state. It deliberately distinguishes only
+        # invalid PCM and an entire attempt with no audible frame; arbitrary
+        # noise/semantic mismatch requires a stronger external classifier.
+        self.audio_frames_seen: int = 0
+        self.audible_frame_seen: bool = False
         self.dequeued_at: Optional[float] = None
         self.prefill_started_at: Optional[float] = None
         self.prefill_completed_at: Optional[float] = None
@@ -246,6 +253,7 @@ class EngineLoop:
         pad_silence_mean_abs_threshold: float = 2e-4,
         token_loop_abort_frames: int = 4,
         token_loop_max_retries: int = 1,
+        length_runaway_ratio: float = 10.0,
         max_slots_per_session: int = 2,
     ):
         self._inbox = engine_inbox
@@ -261,6 +269,7 @@ class EngineLoop:
         self._pad_silence_mean_abs_threshold = float(pad_silence_mean_abs_threshold)
         self._token_loop_abort_frames = max(0, int(token_loop_abort_frames))
         self._token_loop_max_retries = max(0, int(token_loop_max_retries))
+        self._length_runaway_ratio = max(1.0, float(length_runaway_ratio))
         self._max_slots_per_session = max(1, int(max_slots_per_session))
 
         self._groups: Dict[str, EngineSessionGroup] = {}
@@ -789,18 +798,14 @@ class EngineLoop:
             seg.prefix_probe_key = self._prefill_builder.compute_cache_key(
                 task_type,
                 req_cfg.language if req_cfg is not None else "auto",
-                req_cfg.speaker
-                if req_cfg is not None
-                else group.request.speaker_key,
+                req_cfg.speaker if req_cfg is not None else group.request.speaker_key,
                 req_cfg.instruct if req_cfg is not None else None,
                 (
                     list(req_cfg.instruct_spec.token_ids)
                     if req_cfg is not None and req_cfg.instruct_spec is not None
                     else None
                 ),
-                spk_embedding=(
-                    req_cfg.spk_embedding if req_cfg is not None else None
-                ),
+                spk_embedding=(req_cfg.spk_embedding if req_cfg is not None else None),
             )
         return self._prefix_cache.contains(seg.prefix_probe_key)
 
@@ -1401,6 +1406,16 @@ class EngineLoop:
         )
 
         if prefill_audio and len(prefill_audio) > 0:
+            if self._record_audio_health(seg, prefill_audio) == "invalid":
+                if self._try_segment_retry(group, seg, reason="invalid_audio"):
+                    return
+                self._handle_segment_eos(
+                    group,
+                    seg,
+                    eos_reason="invalid_audio_abort",
+                    discard_all_audio=not seg.audible_frame_seen,
+                )
+                return
             self._send_result(
                 group,
                 EngineResult(
@@ -1411,7 +1426,7 @@ class EngineLoop:
                 ),
             )
         if prefill_eos:
-            self._handle_segment_eos(group, seg)
+            self._handle_natural_eos(group, seg)
             return
         logger.debug(
             "Prefill done: %s seg=%d prio=%s (slot=%d, past_len=%d, "
@@ -1648,6 +1663,34 @@ class EngineLoop:
                 candidates.append(seg)
 
         for group, seg in evict_pairs:
+            audio_steps = (
+                seg.slot.frame_idx - seg.decode_start_frame
+                if seg.slot is not None
+                else 0
+            )
+            text_tokens = max(1, seg.text_tokens_consumed)
+            ratio = audio_steps / text_tokens
+            if ratio >= self._length_runaway_ratio:
+                if self._try_segment_retry(group, seg, reason="length"):
+                    continue
+                expected_frames = int(self._length_runaway_ratio * text_tokens)
+                logger.warning(
+                    "Segment hit max_seq_len as length runaway: %s seg=%d "
+                    "audio=%d text=%d ratio=%.2f",
+                    seg.session_id,
+                    seg.segment_idx,
+                    audio_steps,
+                    seg.text_tokens_consumed,
+                    ratio,
+                )
+                self._handle_segment_eos(
+                    group,
+                    seg,
+                    eos_reason="length_abort",
+                    abort_tail_frames=max(1, audio_steps - expected_frames),
+                    discard_all_audio=not seg.audible_frame_seen,
+                )
+                continue
             logger.warning(
                 "Segment hit max_seq_len (%d): %s seg=%d, forcing EOS (overflow)",
                 max_seq,
@@ -1736,9 +1779,7 @@ class EngineLoop:
         finally:
             batch, self._result_batch = self._result_batch, None
             if batch:
-                self._async_loop.call_soon_threadsafe(
-                    self._deliver_result_batch, batch
-                )
+                self._async_loop.call_soon_threadsafe(self._deliver_result_batch, batch)
 
     def _process_step_output_inner(self, output: StepOutput) -> None:
         kv_pool = self._executor.kv_pool
@@ -1924,9 +1965,27 @@ class EngineLoop:
             )
 
             if output.eos_flags[i]:
-                self._handle_segment_eos(group, seg)
+                self._handle_natural_eos(group, seg)
             else:
                 audio = output.audio_chunks[i]
+
+                if audio is not None and len(audio) > 0:
+                    if self._record_audio_health(seg, audio) == "invalid":
+                        if self._try_segment_retry(group, seg, reason="invalid_audio"):
+                            continue
+                        logger.warning(
+                            "Invalid PCM abort: %s seg=%d frame=%d",
+                            seg.session_id,
+                            seg.segment_idx,
+                            slot.frame_idx,
+                        )
+                        self._handle_segment_eos(
+                            group,
+                            seg,
+                            eos_reason="invalid_audio_abort",
+                            discard_all_audio=not seg.audible_frame_seen,
+                        )
+                        continue
 
                 # --- Token loop guard ---
                 # Hallucination runaways lock codebook-0 onto one token for
@@ -1983,6 +2042,7 @@ class EngineLoop:
                                 seg,
                                 eos_reason="loop_abort",
                                 abort_tail_frames=seg.loop_run,
+                                discard_all_audio=not seg.audible_frame_seen,
                             )
                             continue
 
@@ -1999,12 +2059,13 @@ class EngineLoop:
                         remaining_kv = max(0, max_seq - slot.past_len)
                         silence_limit = self._dynamic_silence_limit(remaining_kv)
                         if slot.pad_consecutive_silence > silence_limit:
-                            # No rerun here (unlike the loop guard): silence
-                            # abort usually means the sentence finished and
-                            # only the pad tail degenerated — discarding a
-                            # complete, likely-good synthesis to re-roll the
-                            # seed would trade a trimmed silent tail for a
-                            # fresh hallucination risk.
+                            # Rerun only an attempt that has never produced an
+                            # audible frame. Once speech was heard, this is the
+                            # ordinary silent pad tail and should just be cut.
+                            if not seg.audible_frame_seen and self._try_segment_retry(
+                                group, seg, reason="silence"
+                            ):
+                                continue
                             logger.info(
                                 "Silence abort: %s seg=%d silence=%d limit=%d "
                                 "pad=%d remaining_kv=%d",
@@ -2036,13 +2097,21 @@ class EngineLoop:
                             # silent run. The loop-abort path differs: its
                             # faded trigger frame IS sent, so it reports the
                             # full run.
+                            wholly_silent = not seg.audible_frame_seen
                             self._handle_segment_eos(
                                 group,
                                 seg,
-                                eos_reason="silence_abort",
-                                abort_tail_frames=max(
-                                    0, slot.pad_consecutive_silence - 1
+                                eos_reason=(
+                                    "silent_audio_abort"
+                                    if wholly_silent
+                                    else "silence_abort"
                                 ),
+                                abort_tail_frames=(
+                                    0
+                                    if wholly_silent
+                                    else max(0, slot.pad_consecutive_silence - 1)
+                                ),
+                                discard_all_audio=wholly_silent,
                             )
                             continue
 
@@ -2139,8 +2208,7 @@ class EngineLoop:
         """
         if output.batch_c2w_conv is not None:
             conv = [
-                t[i : i + 1] if t is not None else None
-                for t in output.batch_c2w_conv
+                t[i : i + 1] if t is not None else None for t in output.batch_c2w_conv
             ]
             transconv = [
                 t[i : i + 1] if t is not None else None
@@ -2148,9 +2216,7 @@ class EngineLoop:
             ]
             return conv, transconv
         conv = output.split_c2w_conv[i] if output.split_c2w_conv else []
-        transconv = (
-            output.split_c2w_transconv[i] if output.split_c2w_transconv else []
-        )
+        transconv = output.split_c2w_transconv[i] if output.split_c2w_transconv else []
         return conv, transconv
 
     @staticmethod
@@ -2169,6 +2235,46 @@ class EngineLoop:
             return 3
         return 1
 
+    def _classify_audio_chunk(self, audio: bytes) -> str:
+        """Return ``audible``, ``silence`` or ``invalid`` for engine f32 PCM."""
+        if not audio or len(audio) % 4:
+            return "invalid"
+        audio_np = np.frombuffer(audio, dtype=np.float32)
+        if audio_np.size == 0 or not np.isfinite(audio_np).all():
+            return "invalid"
+        abs_audio = np.abs(audio_np)
+        peak = float(abs_audio.max(initial=0.0))
+        mean_abs = float(abs_audio.mean())
+        if (
+            peak <= self._pad_silence_peak_threshold
+            and mean_abs <= self._pad_silence_mean_abs_threshold
+        ):
+            return "silence"
+        return "audible"
+
+    def _record_audio_health(self, seg: EngineSegment, audio: bytes) -> str:
+        health = self._classify_audio_chunk(audio)
+        seg.audio_frames_seen += 1
+        if health == "audible":
+            seg.audible_frame_seen = True
+        return health
+
+    def _handle_natural_eos(
+        self, group: EngineSessionGroup, seg: EngineSegment
+    ) -> None:
+        """Finish codec EOS, rerolling a wholly silent attempt when safe."""
+        if seg.text_tokens_consumed > 0 and not seg.audible_frame_seen:
+            if self._try_segment_retry(group, seg, reason="silence"):
+                return
+            self._handle_segment_eos(
+                group,
+                seg,
+                eos_reason="silent_audio_abort",
+                discard_all_audio=True,
+            )
+            return
+        self._handle_segment_eos(group, seg)
+
     def _is_pad_silence(self, audio: bytes) -> bool:
         """Detect near-silent pad-phase audio frames.
 
@@ -2178,16 +2284,7 @@ class EngineLoop:
         repeated near-silence without clipping normal quiet speech too
         aggressively.
         """
-        audio_np = np.frombuffer(audio, dtype=np.float32)
-        if audio_np.size == 0:
-            return False
-        abs_audio = np.abs(audio_np)
-        peak = float(abs_audio.max(initial=0.0))
-        mean_abs = float(abs_audio.mean())
-        return (
-            peak <= self._pad_silence_peak_threshold
-            and mean_abs <= self._pad_silence_mean_abs_threshold
-        )
+        return self._classify_audio_chunk(audio) == "silence"
 
     def _try_segment_retry(
         self,
@@ -2229,6 +2326,8 @@ class EngineLoop:
         seg.first_raw_audio_sent = False
         seg.eos_trailing_added = False
         seg.decode_start_frame = 0
+        seg.audio_frames_seen = 0
+        seg.audible_frame_seen = False
         seg.cache_hit = False
         seg.cache_tokens_reused = 0
         seg.prefill_started_at = None
@@ -2281,6 +2380,7 @@ class EngineLoop:
         overflow: bool = False,
         eos_reason: Optional[str] = None,
         abort_tail_frames: int = 0,
+        discard_all_audio: bool = False,
     ) -> None:
         """Handle EOS for one segment.
 
@@ -2328,9 +2428,14 @@ class EngineLoop:
             "batched": batched,
             "batch_size_seen": seg.max_decode_batch,
             "cache_hit": seg.cache_hit,
+            "retry_idx": seg.retry_idx,
+            "audio_frames_seen": seg.audio_frames_seen,
+            "audible_frame_seen": seg.audible_frame_seen,
         }
         if abort_tail_frames > 0:
             metrics["abort_tail_frames"] = int(abort_tail_frames)
+        if discard_all_audio:
+            metrics["discard_all_audio"] = True
 
         seg.state = "done"
         self._release_segment_slot(seg)
@@ -2355,6 +2460,9 @@ class EngineLoop:
             batched=batched,
             batch_size_seen=seg.max_decode_batch,
             cache_hit=seg.cache_hit,
+            retry_idx=seg.retry_idx,
+            audio_frames_seen=seg.audio_frames_seen,
+            audible_frame_seen=seg.audible_frame_seen,
         )
         logger.info(
             "Segment EOS: %s seg=%d reason=%s audio_steps=%d text_tokens=%d "
@@ -2377,7 +2485,7 @@ class EngineLoop:
             anomaly: list[str] = []
             if eos_reason == "kv_overflow" or audio_steps >= max_seq - 1:
                 anomaly.append("hit_kv_cap")
-            if eos_reason == "silence_abort":
+            if eos_reason in ("silence_abort", "silent_audio_abort"):
                 anomaly.append("silence_aborted")
             if eos_reason != "codec_eos":
                 anomaly.append("no_codec_eos")

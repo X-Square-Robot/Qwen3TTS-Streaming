@@ -1,4 +1,4 @@
-"""Confidence-gated delivery window ("guarded delivery").
+"""Playhead-relative delivery window ("guarded delivery").
 
 The engine synthesizes ~2x faster than realtime, so under plain firehose
 delivery a hallucinated tail reaches the client long before playback gets
@@ -6,12 +6,15 @@ there — and once sent it cannot be recalled. This window keeps the
 synthesized-ahead excess inside the server, where segment verdicts can still
 act on it:
 
+- the first audio chunk is released immediately; there is no initial
+  confirmation delay;
 - while a segment is in flight, release only up to (wall time elapsed since
-  the first release + ``window_sec``) worth of audio; hold the rest;
+  the first release + ``window_sec``) worth of audio;
 - codec EOS validates the tail → ``flush()`` everything held (burst; the
   final chunk leaves at the same instant firehose would have emitted it,
   because the held frames were synthesized before EOS anyway);
-- loop/silence abort → the held tail is hallucination garbage; ``discard()``.
+- loop/silence abort → discard the condemned portion that is still held and
+  release any older valid held audio.
 
 The playhead estimate needs no client feedback: a client cannot play faster
 than wall clock from the first byte it received, so elapsed time

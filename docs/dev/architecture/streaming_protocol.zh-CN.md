@@ -101,6 +101,20 @@ session。`stop` 与兼容接口 `end` 都表示停止输入并排空输出，`c
 `event.meta.websocket_connection_reusable="true"`。engine error 会关闭连接；缺少该
 标识时，新 SDK 会安全退化为重新建连。
 
+WebSocket capabilities 还会声明 `stream_resume_v1`。客户端通过在
+`start.resume` 中加入自己生成的高熵 token 显式启用；该 token 与公开
+`session_id`、私有 engine execution ID 相互独立。启用后，每条输出事件携带累计
+`delivery_seq`；每个裸 PCM binary 前都有一个使用同一序号并记录绝对样本边界的
+`audio_header`。文本使用严格递增的 `seq_no` 和累计 `text_ack`：相同序号与内容的
+重复输入幂等，内容冲突或序号缺口属于协议错误。`stop` 携带最终文本序号并同样幂等。
+
+传输异常断开后，新 WebSocket 携 token 和最后完整接收的 delivery/sample 游标请求
+恢复。进程内 registry 会 fence 旧 attachment、保留同一个 engine session，并只回放
+更新的记录。回放日志受字节上限约束，并在服务端声明的 grace 后过期；超限或过期会
+明确失败，不会静默丢输出或从头重启合成。该机制只恢复网络/代理断联，不能跨 engine
+进程或 GPU 重启；多副本部署还需要 sticky routing 或按 token 的一致性路由，使重连
+回到持有状态的实例。
+
 ### 能力查询
 
 在打开合成会话之前，客户端可以调用 `GetCapabilities`。
@@ -118,6 +132,9 @@ session。`stop` 与兼容接口 `end` 都表示停止输入并排空输出，`c
   `ref_codec_reason`
 - 接口契约元数据：
   `protocol_version`、
+  `supported_websocket_features`、
+  `stream_resume_grace_ms`、
+  `stream_resume_max_buffer_bytes`、
   `supported_output_policy_features`、
   `supported_vad_strategies`、
   `supported_timing_fields`

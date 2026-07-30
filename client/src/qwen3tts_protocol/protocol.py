@@ -36,10 +36,9 @@ SUPPORTED_OUTPUT_POLICY_FEATURES = frozenset(
         "chunk_ms",
         "packet_format",
         "emit_text_events",
-        # Guarded delivery: output_policy.config {"delivery": "guarded",
-        # "delivery_window_ms": "1500"} — server holds synthesized-ahead audio
-        # in a playhead-relative window so hallucinated tails are discarded
-        # server-side instead of reaching the client.
+        # Guarded delivery is server-default. Clients can tune the lead with
+        # output_policy.config["delivery_window_ms"] or explicitly request
+        # legacy pass-through with {"delivery": "firehose"}.
         "guarded_delivery",
         # Legacy fields (backward compatibility)
         "request_context",

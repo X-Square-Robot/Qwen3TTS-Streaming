@@ -103,6 +103,25 @@ closure. Persistent gateways add
 successful/cancelled `done` events. Engine errors close the connection; an
 absent marker tells a new SDK to fall back safely to a new connection.
 
+WebSocket capabilities also advertise `stream_resume_v1`. A client opts in by
+adding a high-entropy, client-generated token to `start.resume`; this token is
+independent of the public `session_id` and the private engine execution ID. For
+an opted-in session, each output event has a cumulative `delivery_seq`, while
+each raw PCM binary frame is preceded by an `audio_header` carrying the same
+sequence plus absolute sample bounds. Text uses strictly increasing `seq_no`
+values and cumulative `text_ack`; repeated equal sequence/content pairs are
+idempotent, while conflicts and gaps are protocol errors. `stop` carries the
+final text sequence and is also idempotent.
+
+After an abnormal transport close, a new WebSocket sends the token and its last
+complete delivery/sample cursor. The process-local registry fences the old
+attachment, preserves the same engine session, and replays only newer records.
+The replay log is byte-bounded and expires after the advertised grace period;
+failure is explicit rather than silently dropping output or restarting
+synthesis. This recovers network/proxy disconnects only. Engine process/GPU
+restarts require a new synthesis, and multi-replica deployments need sticky or
+token-consistent routing so reconnects reach the instance that owns the state.
+
 ### Capability Query
 
 Before opening a synthesis session, the client can call `GetCapabilities`.
@@ -120,6 +139,9 @@ This returns the contract the standalone engine has loaded:
   `ref_codec_reason`
 - Interface contract metadata:
   `protocol_version`,
+  `supported_websocket_features`,
+  `stream_resume_grace_ms`,
+  `stream_resume_max_buffer_bytes`,
   `supported_output_policy_features`,
   `supported_vad_strategies`,
   `supported_timing_fields`

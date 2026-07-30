@@ -29,7 +29,7 @@
 
 当前流式模式仍可能出现：
 
-- 幻觉：生成用户没有输入的内容。**该风险强依赖 checkpoint,而本项目不发布模型权重**——我们测过的一个 checkpoint 在 ~10-18% 的采样种子上跑飞（永不吐 EOS），另一个在同一组确定性种子上实测 0/100（方法论见 `docs/dev/investigation/streaming_hallucination.zh-CN.md`）。无论你使用什么权重,在完成自己 checkpoint 的验证之前,都应把流式幻觉当作现实风险对待；引擎的 runaway 防御（512 步上限、token 循环守卫 `scheduler.token_loop_abort_frames`、幻觉 lookahead 段换种子无感重跑 `scheduler.token_loop_max_retries`、VAD 裁剪）始终开启。流式客户端还可选择开启守护交付（`output_policy.config: {"delivery": "guarded"}`）：服务端把超前合成的音频压在一个随播放头移动的窗口内，被判定为幻觉的尾部在发出之前即被丢弃。
+- 幻觉：生成用户没有输入的内容。**该风险强依赖 checkpoint,而本项目不发布模型权重**——我们测过的一个 checkpoint 在 ~10-18% 的采样种子上跑飞（永不吐 EOS），另一个在同一组确定性种子上实测 0/100（方法论见 `docs/dev/investigation/streaming_hallucination.zh-CN.md`）。无论你使用什么权重,在完成自己 checkpoint 的验证之前,都应把流式幻觉当作现实风险对待。引擎默认启用 token 循环守卫、lookahead 段换种子重跑、全静音/非法 PCM 防御、异常长度防御和守护交付；守护交付会立即发送首包，之后只保留超出“估算播放头 + 少量客户端提前量”的合成音频，坏尾只有在仍留在服务端时才能撤销。可通过 `output_policy.config: {"delivery": "firehose"}` 显式恢复旧的直通行为。VAD 仍是独立的可选输出过滤器，默认关闭；这些保守防御也不能判断语音内容是否与文本语义一致。
 - 重复：局部词、短语或音频片段重复。
 - 漏读：跳过部分输入文本。
 - 插入：在停顿或跨 segment 时插入额外字词。

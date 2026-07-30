@@ -31,6 +31,7 @@ from qwen3tts.exceptions import (
     PoolSaturatedError,
     ProtocolVersionMismatchError,
     StreamClosedError,
+    StreamRecoveryError,
 )
 
 
@@ -54,6 +55,13 @@ class PoolFakeWebSocketConnection(FakeRawWebSocketConnection):
         super().__init__()
         self.responses: queue.Queue[dict] = queue.Queue()
         self.dead = False
+
+
+class RecoveryFakeWebSocketConnection(FakeRawWebSocketConnection):
+    def __init__(self, name: str):
+        super().__init__()
+        self.name = name
+        self.frames: queue.Queue[object] = queue.Queue()
 
 
 def _make_ws_connect(fake_conn):
@@ -131,6 +139,70 @@ class TestEngineWebSocketAdapter:
     def test_rejects_invalid_pool_configuration(self, kwargs, message):
         with pytest.raises(ValueError, match=message):
             EngineWebSocketAdapter("ws://localhost:50052/v1/ws", timeout=5.0, **kwargs)
+
+    def test_unexpected_replacement_dial_error_releases_reserved_slot(
+        self, monkeypatch
+    ):
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            reconnect_attempts=0,
+            max_connections=1,
+            max_idle_connections=1,
+            keepalive_interval=0,
+        )
+        old = FakeRawWebSocketConnection()
+        adapter._connections.add(old)
+        monkeypatch.setattr(_ew, "ws_close", lambda conn: conn.close())
+
+        def unexpected_dial(*_args, **_kwargs):
+            raise ValueError("unexpected websocket constructor failure")
+
+        monkeypatch.setattr(_ew, "ws_connect", unexpected_dial)
+
+        with pytest.raises(ValueError, match="constructor failure"):
+            adapter._replace_connection(
+                old,
+                connect_timeout=0.1,
+                preserve_reservation_on_failure=True,
+            )
+
+        assert old.closed
+        assert adapter._connecting == 0
+        assert adapter._connections == set()
+
+    def test_adapter_close_during_replacement_releases_reserved_slot_once(
+        self, monkeypatch
+    ):
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            reconnect_attempts=0,
+            max_connections=1,
+            max_idle_connections=1,
+            keepalive_interval=0,
+        )
+        old = FakeRawWebSocketConnection()
+        adapter._connections.add(old)
+        monkeypatch.setattr(_ew, "ws_close", lambda conn: conn.close())
+
+        def close_during_dial(*_args, **_kwargs):
+            adapter.close()
+            raise RawWebSocketError("dial interrupted by adapter close")
+
+        monkeypatch.setattr(_ew, "ws_connect", close_during_dial)
+
+        with pytest.raises(RawWebSocketError, match="adapter close"):
+            adapter._replace_connection(
+                old,
+                connect_timeout=0.1,
+                preserve_reservation_on_failure=True,
+            )
+
+        assert old.closed
+        assert adapter._closed
+        assert adapter._connecting == 0
+        assert adapter._connections == set()
 
     def test_get_capabilities(self, monkeypatch):
         caps_response = {
@@ -1476,6 +1548,421 @@ class TestConnectionClosedWithoutTerminal:
             raise AssertionError("expected ProtocolError on truncated stream")
         except ProtocolError as exc:
             assert "without terminal event" in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Active stream resume
+# ---------------------------------------------------------------------------
+
+
+class TestActiveStreamResume:
+    @staticmethod
+    def _recv(conn: RecoveryFakeWebSocketConnection):
+        try:
+            item = conn.frames.get(timeout=min(0.02, conn._timeout))
+        except queue.Empty as exc:
+            raise socket.timeout("not ready") from exc
+        if item == "__close__":
+            return 0x8, b""
+        if isinstance(item, bytes):
+            return 0x2, item
+        return 0x1, json.dumps(item).encode("utf-8")
+
+    def test_reader_disconnect_resumes_without_duplicate_audio_and_replays_stop(
+        self, monkeypatch
+    ):
+        connections: list[RecoveryFakeWebSocketConnection] = []
+        sent: list[tuple[str, dict]] = []
+        pool_sizes: list[int] = []
+        adapter: EngineWebSocketAdapter
+
+        def connect(_url, *, timeout, headers=None):
+            pool_sizes.append(len(adapter._connections) + adapter._connecting)
+            conn = RecoveryFakeWebSocketConnection(f"conn-{len(connections) + 1}")
+            connections.append(conn)
+            return conn
+
+        def send(conn: RecoveryFakeWebSocketConnection, payload):
+            sent.append((conn.name, dict(payload)))
+            message_type = payload["type"]
+            if conn.name == "conn-1" and message_type == "start":
+                conn.frames.put(
+                    {
+                        "type": "event",
+                        "delivery_seq": 1,
+                        "event": {"type": "start", "session_id": "resume-1"},
+                    }
+                )
+            elif conn.name == "conn-1" and message_type == "text":
+                if payload["seq_no"] == 1:
+                    conn.frames.put({"type": "text_ack", "through_seq": 1})
+            elif conn.name == "conn-1" and message_type == "stop":
+                conn.frames.put(
+                    {
+                        "type": "audio_header",
+                        "delivery_seq": 2,
+                        "start_sample": 0,
+                        "end_sample": 2,
+                        "audio": {
+                            "encoding": "pcm_f32",
+                            "sample_rate": 24000,
+                            "channels": 1,
+                        },
+                    }
+                )
+                conn.frames.put(b"A" * 8)
+                conn.frames.put("__close__")
+            elif conn.name == "conn-2" and message_type == "resume":
+                conn.frames.put(
+                    {
+                        "type": "resumed",
+                        "acked_text_seq": 1,
+                        "input_closed": False,
+                    }
+                )
+            elif conn.name == "conn-2" and message_type == "text":
+                conn.frames.put({"type": "text_ack", "through_seq": 2})
+            elif conn.name == "conn-2" and message_type == "stop":
+                # ACK loss can make the server replay delivery 2. The client
+                # consumes its paired binary frame but must not enqueue it.
+                conn.frames.put(
+                    {
+                        "type": "audio_header",
+                        "delivery_seq": 2,
+                        "start_sample": 0,
+                        "end_sample": 2,
+                        "audio": {"encoding": "pcm_f32"},
+                    }
+                )
+                conn.frames.put(b"A" * 8)
+                conn.frames.put(
+                    {
+                        "type": "audio_header",
+                        "delivery_seq": 3,
+                        "start_sample": 2,
+                        "end_sample": 4,
+                        "audio": {"encoding": "pcm_f32"},
+                    }
+                )
+                conn.frames.put(b"B" * 8)
+                conn.frames.put(
+                    {
+                        "type": "event",
+                        "delivery_seq": 4,
+                        "event": {
+                            "type": "done",
+                            "session_id": "resume-1",
+                            "meta": {"websocket_connection_reusable": "true"},
+                        },
+                    }
+                )
+
+        monkeypatch.setattr(_ew, "ws_connect", connect)
+        monkeypatch.setattr(_ew, "ws_send_json", send)
+        monkeypatch.setattr(_ew, "ws_recv_frame", self._recv)
+        monkeypatch.setattr(_ew, "ws_close", lambda conn: setattr(conn, "closed", True))
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            connect_timeout=0.2,
+            reconnect_attempts=0,
+            max_connections=1,
+            max_idle_connections=1,
+            keepalive_interval=0,
+            stream_resume_attempts=2,
+            stream_resume_timeout=1.0,
+            stream_resume_ack_interval=8,
+        )
+
+        session = adapter.open_stream(
+            SessionStartRequest(session_id="resume-1", config=SynthesisConfig())
+        )
+        session.send_text("你好")
+        session.send_text("世界")
+        session.stop()
+        messages = list(session.iter_messages())
+
+        assert [message.type for message in messages if hasattr(message, "type")] == [
+            "start",
+            "done",
+        ]
+        audio = [
+            message.pcm_bytes for message in messages if hasattr(message, "pcm_bytes")
+        ]
+        assert audio == [b"A" * 8, b"B" * 8]
+        assert len(connections) == 2
+        assert max(pool_sizes) <= 1
+
+        start_payload = next(payload for name, payload in sent if name == "conn-1")
+        token = start_payload["resume"]["token"]
+        assert token
+        resume_payload = next(
+            payload
+            for name, payload in sent
+            if name == "conn-2" and payload["type"] == "resume"
+        )
+        assert resume_payload == {
+            "type": "resume",
+            "token": token,
+            "last_delivery_seq": 2,
+            "audio_through_sample": 2,
+        }
+        replayed_text = [
+            payload
+            for name, payload in sent
+            if name == "conn-2" and payload["type"] == "text"
+        ]
+        assert [payload["seq_no"] for payload in replayed_text] == [2]
+        replayed_stop = next(
+            payload
+            for name, payload in sent
+            if name == "conn-2" and payload["type"] == "stop"
+        )
+        assert replayed_stop["final_seq_no"] == 2
+        assert any(payload["type"] == "terminal_ack" for _name, payload in sent)
+
+    def test_resume_dial_exhaustion_publishes_one_terminal_error_and_releases_slot(
+        self, monkeypatch
+    ):
+        first = RecoveryFakeWebSocketConnection("initial")
+        connect_calls = 0
+
+        def connect(_url, *, timeout, headers=None):
+            nonlocal connect_calls
+            connect_calls += 1
+            if connect_calls == 1:
+                return first
+            raise RawWebSocketError("gateway unavailable")
+
+        def send(conn, payload):
+            if payload["type"] == "start":
+                conn.frames.put(
+                    {
+                        "type": "event",
+                        "delivery_seq": 1,
+                        "event": {"type": "start", "session_id": "resume-fail"},
+                    }
+                )
+            elif payload["type"] == "stop":
+                conn.frames.put("__close__")
+
+        monkeypatch.setattr(_ew, "ws_connect", connect)
+        monkeypatch.setattr(_ew, "ws_send_json", send)
+        monkeypatch.setattr(_ew, "ws_recv_frame", self._recv)
+        monkeypatch.setattr(_ew, "ws_close", lambda conn: setattr(conn, "closed", True))
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            connect_timeout=0.05,
+            reconnect_attempts=0,
+            max_connections=1,
+            max_idle_connections=0,
+            keepalive_interval=0,
+            stream_resume_attempts=2,
+            stream_resume_timeout=0.5,
+        )
+        session = adapter.open_stream(
+            SessionStartRequest(session_id="resume-fail", config=SynthesisConfig())
+        )
+        session.stop()
+        messages = list(session.iter_messages())
+
+        assert [message.type for message in messages] == ["start", "error"]
+        assert "gateway unavailable" in messages[-1].message
+        assert connect_calls == 3  # initial + two atomic resume dial attempts
+        assert adapter._connecting == 0
+        assert adapter._connections == set()
+        assert isinstance(session._recovery_error, StreamRecoveryError)
+
+    def test_failed_terminal_ack_discards_physical_connection(self, monkeypatch):
+        conn = RecoveryFakeWebSocketConnection("terminal-ack")
+
+        def send(_conn, payload):
+            if payload["type"] == "start":
+                conn.frames.put(
+                    {
+                        "type": "event",
+                        "delivery_seq": 1,
+                        "event": {"type": "start", "session_id": "terminal"},
+                    }
+                )
+            elif payload["type"] == "stop":
+                conn.frames.put(
+                    {
+                        "type": "event",
+                        "delivery_seq": 2,
+                        "event": {
+                            "type": "done",
+                            "session_id": "terminal",
+                            "meta": {"websocket_connection_reusable": "true"},
+                        },
+                    }
+                )
+            elif payload["type"] == "terminal_ack":
+                raise RawWebSocketError("ack write failed")
+
+        monkeypatch.setattr(_ew, "ws_connect", _make_ws_connect(conn))
+        monkeypatch.setattr(_ew, "ws_send_json", send)
+        monkeypatch.setattr(_ew, "ws_recv_frame", self._recv)
+        monkeypatch.setattr(_ew, "ws_close", lambda raw: raw.close())
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            reconnect_attempts=0,
+            keepalive_interval=0,
+        )
+        session = adapter.open_stream(
+            SessionStartRequest(session_id="terminal", config=SynthesisConfig())
+        )
+        session.stop()
+
+        assert [message.type for message in session.iter_messages()] == [
+            "start",
+            "done",
+        ]
+        assert conn.closed
+        assert adapter._idle_connections == []
+
+    def test_close_interrupts_resume_handshake_and_releases_replacement(
+        self, monkeypatch
+    ):
+        connections: list[RecoveryFakeWebSocketConnection] = []
+        resume_sent = threading.Event()
+
+        def connect(_url, *, timeout, headers=None):
+            conn = RecoveryFakeWebSocketConnection(f"close-{len(connections) + 1}")
+            connections.append(conn)
+            return conn
+
+        def send(conn, payload):
+            if payload["type"] == "start":
+                conn.frames.put(
+                    {
+                        "type": "event",
+                        "delivery_seq": 1,
+                        "event": {"type": "start", "session_id": "close-resume"},
+                    }
+                )
+            elif conn.name == "close-1" and payload["type"] == "stop":
+                conn.frames.put("__close__")
+            elif payload["type"] == "resume":
+                resume_sent.set()
+
+        def recv(conn):
+            if conn.closed:
+                raise RawWebSocketError("closed by local hard stop")
+            return self._recv(conn)
+
+        monkeypatch.setattr(_ew, "ws_connect", connect)
+        monkeypatch.setattr(_ew, "ws_send_json", send)
+        monkeypatch.setattr(_ew, "ws_recv_frame", recv)
+        monkeypatch.setattr(_ew, "ws_close", lambda raw: raw.close())
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            reconnect_attempts=0,
+            max_connections=1,
+            max_idle_connections=1,
+            keepalive_interval=0,
+            stream_resume_attempts=2,
+            stream_resume_timeout=2.0,
+        )
+        session = adapter.open_stream(
+            SessionStartRequest(session_id="close-resume", config=SynthesisConfig())
+        )
+        session.stop()
+        assert resume_sent.wait(timeout=1.0)
+
+        started = time.monotonic()
+        session.close(reason="caller shutdown")
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.2
+        session._reader.join(timeout=1.0)
+        assert not session._reader.is_alive()
+        assert len(connections) == 2
+        assert connections[1].closed
+        assert adapter._connecting == 0
+        assert adapter._connections == set()
+
+    def test_terminal_is_not_visible_until_connection_is_reusable(self, monkeypatch):
+        connections: list[RecoveryFakeWebSocketConnection] = []
+
+        def connect(_url, *, timeout, headers=None):
+            conn = RecoveryFakeWebSocketConnection(f"serial-{len(connections) + 1}")
+            connections.append(conn)
+            return conn
+
+        def send(conn, payload):
+            if payload["type"] == "start":
+                conn.frames.put(
+                    {
+                        "type": "event",
+                        "delivery_seq": 1,
+                        "event": {
+                            "type": "start",
+                            "session_id": payload["session_id"],
+                        },
+                    }
+                )
+            elif payload["type"] == "stop":
+                conn.frames.put(
+                    {
+                        "type": "event",
+                        "delivery_seq": 2,
+                        "event": {
+                            "type": "done",
+                            "session_id": "serial",
+                            "meta": {"websocket_connection_reusable": "true"},
+                        },
+                    }
+                )
+
+        monkeypatch.setattr(_ew, "ws_connect", connect)
+        monkeypatch.setattr(_ew, "ws_send_json", send)
+        monkeypatch.setattr(_ew, "ws_recv_frame", self._recv)
+        monkeypatch.setattr(_ew, "ws_close", lambda raw: raw.close())
+        adapter = EngineWebSocketAdapter(
+            "ws://localhost:50052/v1/ws",
+            timeout=1.0,
+            reconnect_attempts=0,
+            max_connections=2,
+            max_idle_connections=2,
+        )
+        first = adapter.open_stream(
+            SessionStartRequest(session_id="serial-1", config=SynthesisConfig())
+        )
+        terminal_published = threading.Event()
+        unblock_publish = threading.Event()
+        original_put = first._put_message
+
+        def blocking_put(message):
+            original_put(message)
+            if getattr(message, "type", "") == "done":
+                terminal_published.set()
+                unblock_publish.wait(timeout=1.0)
+
+        first._put_message = blocking_put
+        first.stop()
+        assert terminal_published.wait(timeout=1.0)
+
+        # The first reader is deliberately paused inside terminal publication.
+        # Its socket must nevertheless already be back in the idle pool.
+        second = adapter.open_stream(
+            SessionStartRequest(session_id="serial-2", config=SynthesisConfig())
+        )
+        assert len(connections) == 1
+
+        unblock_publish.set()
+        second.stop()
+        assert [message.type for message in second.iter_messages()] == [
+            "start",
+            "done",
+        ]
+        assert [message.type for message in first.iter_messages()] == [
+            "start",
+            "done",
+        ]
 
 
 # ---------------------------------------------------------------------------

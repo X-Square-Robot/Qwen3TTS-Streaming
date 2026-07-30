@@ -301,6 +301,8 @@ class TTSEngine:
             l1_split_cap_ratio=sc.l1_split_cap_ratio,
             l2_split_cap_ratio=sc.l2_split_cap_ratio,
             l3_split_cap_ratio=sc.l3_split_cap_ratio,
+            guarded_delivery_default=self._cfg.server.guarded_delivery_default,
+            guarded_delivery_window_ms=self._cfg.server.guarded_delivery_window_ms,
         )
         prefill_builder = None
         if self._weights_dir:
@@ -388,6 +390,7 @@ class TTSEngine:
             pad_silence_mean_abs_threshold=sched.pad_silence_mean_abs_threshold,
             token_loop_abort_frames=sched.token_loop_abort_frames,
             token_loop_max_retries=sched.token_loop_max_retries,
+            length_runaway_ratio=sched.length_runaway_ratio,
             max_slots_per_session=self._cfg.spliter.max_concurrent_segments,
         )
         self._engine_loop.start()
@@ -1318,7 +1321,9 @@ def main():
         if cfg.paths.model_package_dir
         else None
     )
-    code_from_package = package_dir is not None and engine_code_dir.parent == package_dir
+    code_from_package = (
+        package_dir is not None and engine_code_dir.parent == package_dir
+    )
     logger.info(
         "Engine code source: %s (%s)",
         engine_code_dir,
@@ -1755,9 +1760,7 @@ class HealthServerThread:
                 else:
                     body = b'{"error": "not found"}'
                     code = 404
-                reason = {200: "OK", 404: "Not Found", 503: "Service Unavailable"}[
-                    code
-                ]
+                reason = {200: "OK", 404: "Not Found", 503: "Service Unavailable"}[code]
                 head = (
                     f"HTTP/1.1 {code} {reason}\r\n"
                     "Content-Type: application/json\r\n"

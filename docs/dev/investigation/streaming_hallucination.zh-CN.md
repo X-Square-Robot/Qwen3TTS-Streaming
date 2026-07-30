@@ -875,7 +875,7 @@ temperature=0.9, repetition_penalty=1.05, subtalker_dosample=True。eos_token_id
 
 ## 2026-07-02：0701 重训 checkpoint 修好了——已在生产 bf16 引擎上验证
 
-研究员重训了模型（`/home/train/tts/qwen3-tts/trained/zehan/0701_trained_model`），结论是没有幻觉了。用同一套方法、同一组确定性种子复核。
+研究员重训了模型（`internal-0701 checkpoint`），结论是没有幻觉了。用同一套方法、同一组确定性种子复核。
 
 > **重要**：`workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice` 软链现已指向 `0701_trained_model`（此前是 `0601_trained_model`，即坏的那版）。上文所有 `0601` 的数据都是这个自训 0601 checkpoint。
 
@@ -940,3 +940,12 @@ cp=fp32 这个缓解措施（Finding #15 时代引入）在 0701 重训之后从
 
 - **段重跑**（`scheduler.token_loop_max_retries`，默认 1）：守卫（或 pad 静音中止）在 *lookahead* 段上触发时——该段音频还整段缓冲在前端 reorder 里、前面还有在跑的段——引擎丢弃缓冲的这次尝试（内部 `SEGMENT_RETRY` 结果 → `AudioReorder.discard`），把段重置回 `pending_prefill`，用加盐种子重跑（blake2b 推导**仅在 N>0 时**追加 `retry:N`，retry-0 种子与全部冻结 halluprobe id 逐位不变）。失败尝试不发 SEGMENT_END；客户端只会听到第 N+1 次尝试。播放头段永不重跑——音频已流出。
 - **守护交付**（opt-in，`output_policy.config: {"delivery": "guarded", "delivery_window_ms": "1500"}`）：reorder 之后的音频过一个随播放头移动的持有窗口（`engine/frontend/hold_window.py`）。确认的音频仍然全速 burst：codec EOS 时持有尾部整体放行（最后一个 chunk 的离开时刻与 firehose 相同），loop/silence abort 则丢弃被判定的尾部——SEGMENT_END metrics 里的 `abort_tail_frames`（循环/静音连跑）加上超出 EMA 预期句长的部分——并放行更早的持有音频（那是播放窗口还没走到的合法语音）。实测（halluprobe-0111，RTX 5090 约 6× 实时）：firehose 交付全部 158 帧；guarded 保留 154 帧、恰好丢弃 4 帧循环，其余字节流一致。abort 段同时被排除出 spliter 的 audio:text EMA（幻觉膨胀的比例曾拉偏后续切分预算）。
+
+### 2026-07-28：守护交付默认开启并补齐保守音频健康防御
+
+- 守护交付改为服务端默认开启（默认 client lead 100ms）；显式请求 `delivery=firehose` 才走旧直通路径。
+- 不再设置固定确认帧或首段可听门控：首个音频包立即发送。RTF > 1 时合成随后会跑到墙钟播放进度前面，只有这部分超前量在服务端积累为可撤销尾部。
+- 整次尝试全静音时，lookahead 段换种子重跑；播放头段只能丢弃仍在超前缓冲中的音频。为保证最小首响，已发送的初始音频有意不提供撤销能力。
+- NaN/Inf/非 f32 对齐 PCM 立即中止并在安全时重跑。
+- 命中 KV 上限且 audio:text 比例达到 `scheduler.length_runaway_ratio` 时按 runaway 处理；普通长文本 overflow 保留原行为。
+- 这些规则仍不能识别“语音清晰但内容与文本无关”或一般随机噪声；后者需要经验证的音频分类器，前者需要 ASR/对齐模型。

@@ -220,10 +220,20 @@ round-trip. `idle_ttl` and `max_lifetime` are disabled by default (`None` or
 `keepalive_jitter=0.2` spreads maintenance traffic across workers.
 Tune this with `reconnect_attempts`, `max_connections`,
 `max_idle_connections`, `max_pending_acquires`, `acquire_timeout`, and the
-connection-lifecycle settings. Automatic reconnects cover idle connections and new
-session setup only. A mid-stream disconnect is surfaced as an error and is never
-automatically replayed because that could duplicate audio. Call `client.close()`
-when finished, or use `TTSClient` as a context manager.
+connection-lifecycle settings. `reconnect_attempts` covers initial connection
+setup; active streams have a separate recovery budget. By default,
+`active_stream_resume=True`, `stream_resume_attempts=2`,
+`stream_resume_timeout=10.0`, and `stream_resume_ack_interval=8`.
+
+On a resume-capable gateway, a transient disconnect keeps the same logical
+engine session alive. Text is de-duplicated with cumulative sequence ACKs and
+output is resumed from an acknowledged delivery/sample cursor, so the SDK does
+not re-synthesize from the beginning or enqueue audio twice. Recovery is
+bounded by the gateway's advertised grace period and replay window. Expired
+tokens, exhausted retries, protocol gaps, server restarts, and routing to a
+different replica fail explicitly. A legacy gateway automatically retains the
+historical fail-fast behavior. Call `client.close()` when finished, or use
+`TTSClient` as a context manager.
 
 ## Examples
 

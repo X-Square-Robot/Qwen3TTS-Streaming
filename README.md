@@ -375,6 +375,14 @@ frames. A `done`/`error` event—not socket closure—is the logical session
 boundary. After a successful or cancelled `done`, the same WebSocket can accept
 another `start`; an engine `error` closes it so the next session reconnects.
 
+Active WebSocket streams also support bounded in-process resume. The SDK sends
+sequenced text and acknowledges exact output deliveries; after a transient
+network/proxy disconnect it leases a replacement socket and continues the same
+engine execution from its last complete audio sample. It never restarts the
+synthesis and guesses at de-duplication. Resume state is process-local and
+expires, so engine restarts fail explicitly and multi-replica deployments need
+sticky or token-consistent routing.
+
 ## Project Structure
 
 ```text

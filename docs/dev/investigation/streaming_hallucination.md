@@ -780,7 +780,7 @@ Reproduction scripts (all under `workspace/`, gitignored): `halluc_probe.py`, `c
 
 ## 2026-07-02: The 0701 Retrained Checkpoint Fixes It — Verified Through the Production bf16 Engine
 
-A researcher retrained the model (`/home/train/tts/qwen3-tts/trained/zehan/0701_trained_model`) and reported no hallucination. Verified with the same methodology on the same deterministic seeds.
+A researcher retrained the model (`internal-0701 checkpoint`) and reported no hallucination. Verified with the same methodology on the same deterministic seeds.
 
 > **Important**: the `workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice` symlink now points to `0701_trained_model` (previously `0601_trained_model`, the broken one). Every `0601` rate in the tables above is that self-trained 0601 checkpoint.
 
@@ -845,3 +845,12 @@ Two escalations landed on top of the guard, closing the repair loop server-side 
 
 - **Segment rerun** (`scheduler.token_loop_max_retries`, default 1): when the guard (or the pad-silence abort) fires on a *lookahead* segment — one whose audio is still fully buffered behind an earlier live segment in the frontend reorder — the engine discards the buffered attempt (internal `SEGMENT_RETRY` result → `AudioReorder.discard`), resets the segment to `pending_prefill`, and reruns it with a salted sampling seed (`retry:N` appended to the blake2b derivation **only when N>0**, so retry-0 seeds and every frozen halluprobe id stay bit-identical). No SEGMENT_END is emitted for the failed attempt; the client only ever hears attempt N+1. The playhead segment never reruns — its audio already streamed.
 - **Guarded delivery** (opt-in, `output_policy.config: {"delivery": "guarded", "delivery_window_ms": "1500"}`): post-reorder audio passes a playhead-relative hold window (`engine/frontend/hold_window.py`). Confirmed audio still bursts at full speed: codec EOS flushes the held tail (final chunk leaves at the same instant firehose would emit it), while loop/silence aborts drop the condemned tail — `abort_tail_frames` from SEGMENT_END metrics (the loop/silence run) plus anything beyond the EMA-expected sentence end — and flush the older held audio, which is legitimate speech the playback window had not reached. Live check (halluprobe-0111, RTX 5090 ≈6× realtime): firehose delivered all 158 frames; guarded kept 154, discarded exactly the 4-frame loop run, byte-stream otherwise identical. Aborted segments are also excluded from the spliter's audio:text EMA (hallucination-inflated ratios skewed later split budgets).
+
+### 2026-07-28: guarded delivery defaults on with conservative audio-health defenses
+
+- Guarded delivery is now enabled by the server by default with 100ms client lead; `delivery=firehose` explicitly restores legacy pass-through.
+- There is no fixed confirmation horizon or initial audible gate: the first audio chunk is released immediately. With RTF > 1, synthesis then outruns wall-clock playback and only that excess accumulates as a retractable server-side tail.
+- A wholly silent lookahead attempt is reseeded and rerun. For a playhead attempt, only audio that is still in the synthesized-ahead hold can be discarded; already delivered initial audio is intentionally not recoverable in order to preserve minimum TTFT.
+- NaN, Inf, and non-f32-aligned PCM abort immediately and rerun when safe.
+- KV-cap termination is treated as a runaway only when its audio:text ratio reaches `scheduler.length_runaway_ratio`; genuine long-text overflow keeps the prior behavior.
+- These conservative rules still do not recognize clear but semantically unrelated speech or general random noise. Those require a validated audio classifier and ASR/alignment respectively.
