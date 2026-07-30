@@ -24,6 +24,7 @@
 | [VAD Design Goals](design/vad_design_goals.md) | VAD (Voice Activity Detection) design goals and rationale |
 | [Observability Goals](design/observability_goals.md) | Observability and metrics design goals |
 | [Real-Time Audio Streaming](design/realtime_audio.md) | Real-time audio streaming design goals |
+| [Incremental Text Normalization and Soft Drain](design/incremental_text_normalization_and_soft_drain.md) | Monotonic text commitment, ambiguity handling, WAIT/HOLD, Soft Drain, and state rollover design |
 
 ## Investigation Reports
 

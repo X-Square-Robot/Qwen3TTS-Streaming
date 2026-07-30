@@ -24,6 +24,7 @@
 | [VAD 设计目标](design/vad_design_goals.zh-CN.md) | VAD（语音活动检测）设计目标与理由 |
 | [可观测性目标](design/observability_goals.zh-CN.md) | 可观测性和指标设计目标 |
 | [实时音频流](design/realtime_audio.zh-CN.md) | 实时音频流设计目标 |
+| [流式文本消歧与 Soft Drain](design/incremental_text_normalization_and_soft_drain.zh-CN.md) | 增量 TN、单调提交、WAIT/HOLD、Soft Drain 和状态继承设计 |
 
 ## 调查报告
 
