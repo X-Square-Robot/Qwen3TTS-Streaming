@@ -27,7 +27,66 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from typing import Callable, Iterable, List
+from typing import Callable, Iterable, List, Optional
+
+
+class PrefixGateGuardBypass:
+    """Coordinate prefix VAD with playhead-relative guarded delivery.
+
+    Guarded delivery normally paces raw engine audio against wall-clock
+    playback.  A downstream prefix VAD must instead inspect the leading raw
+    chunks at synthesis speed: those chunks are discarded and never advance
+    the client's playhead.  The frontend therefore bypasses the hold while
+    this gate is waiting for the first post-VAD chunk.  Once the gateway marks
+    that boundary, subsequent raw audio uses the normal hold window.
+
+    The first effective chunk itself remains immediate, matching guarded
+    delivery's existing first-chunk contract.  Only prefix chunks that cannot
+    reach the client bypass the retractable hold.
+    """
+
+    __slots__ = (
+        "_waiting_for_first_effective",
+        "_discard_pending",
+        "bypassed_audio_bytes",
+        "bypassed_chunks",
+        "first_effective_audio_bytes",
+    )
+
+    def __init__(
+        self,
+        discard_pending: Optional[Callable[[], None]] = None,
+    ) -> None:
+        self._waiting_for_first_effective = True
+        self._discard_pending = discard_pending
+        self.bypassed_audio_bytes = 0
+        self.bypassed_chunks = 0
+        self.first_effective_audio_bytes = 0
+
+    @property
+    def should_bypass(self) -> bool:
+        return self._waiting_for_first_effective
+
+    def record_bypass(self, audio_bytes: int) -> None:
+        if not self._waiting_for_first_effective or audio_bytes <= 0:
+            return
+        self.bypassed_chunks += 1
+        self.bypassed_audio_bytes += int(audio_bytes)
+
+    def mark_first_effective(self, audio_bytes: int = 0) -> None:
+        self.first_effective_audio_bytes = max(0, int(audio_bytes))
+        self._waiting_for_first_effective = False
+
+    def discard_pending(self) -> None:
+        """Drop downstream VAD state at a condemned segment boundary.
+
+        The bridge remains open or closed as-is: it only coordinates the
+        session's *first* effective chunk.  The callback clears uncommitted
+        VAD frames so an aborted segment cannot complete an onset candidate
+        with samples from the next segment.
+        """
+        if self._discard_pending is not None:
+            self._discard_pending()
 
 
 class DeliveryHoldWindow:
@@ -77,6 +136,21 @@ class DeliveryHoldWindow:
             if chunk:
                 self._held.append(chunk)
                 self._held_bytes += len(chunk)
+
+    def record_external_release(self, audio_bytes: int) -> None:
+        """Account for the immediate first effective chunk.
+
+        Prefix-gated raw input bypasses this hold, but the first effective
+        chunk produced from it does reach the client. Prime both the playback
+        clock and released-byte budget with that exact native-f32 byte count so
+        the normal lead window does not grant an extra engine chunk.
+        """
+        audio_bytes = max(0, int(audio_bytes))
+        if audio_bytes <= 0:
+            return
+        if self._clock_start is None:
+            self._clock_start = self._time()
+        self._released_bytes += audio_bytes
 
     def release_due(self) -> List[bytes]:
         """Release chunks the client's playback window is entitled to."""
@@ -133,4 +207,4 @@ class DeliveryHoldWindow:
         return dropped
 
 
-__all__ = ("DeliveryHoldWindow",)
+__all__ = ("DeliveryHoldWindow", "PrefixGateGuardBypass")

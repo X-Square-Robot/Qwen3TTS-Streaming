@@ -10,6 +10,7 @@
 import asyncio
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from engine.core.session import Session, SegmentOrderMeta
@@ -19,9 +20,10 @@ from engine.core.types import (
     ResultType,
     SessionConfig,
 )
-from engine.frontend.hold_window import DeliveryHoldWindow
+from engine.frontend.hold_window import DeliveryHoldWindow, PrefixGateGuardBypass
 from engine.frontend.interface import FrontendInterface
 from engine.frontend.spliter.reorder import AudioReorder
+from engine.interface.vad import EnergyVADProcessor, TTSVADConfig, VADMode
 
 
 class TestReorderDiscard:
@@ -106,6 +108,18 @@ class TestDeliveryHoldWindow:
 
         clock.now += 0.05
         win.push([b"c" * 10])
+        assert win.release_due() == []
+        assert win.held_chunks == 1
+
+    def test_external_first_effective_chunk_consumes_lead_budget(self):
+        # 8 bytes = 80 ms, window = 100 ms. The post-VAD first chunk was sent
+        # immediately outside the hold and must count toward this budget.
+        win, _ = self._window(window_sec=0.1, bps=100.0)
+        win.record_external_release(8)
+
+        win.push([b"a" * 8])
+        assert win.release_due() == [b"a" * 8]
+        win.push([b"b" * 8])
         assert win.release_due() == []
         assert win.held_chunks == 1
 
@@ -223,20 +237,35 @@ def _guarded_session():
 ONE_SEC_CHUNK = 24000 * 4  # 1s of f32 mono engine audio
 
 
-def _run_consume(session, results, events=None, interface=None, callback_order=None):
+def _run_consume(
+    session,
+    results,
+    events=None,
+    interface=None,
+    callback_order=None,
+    audio_observer=None,
+    event_observer=None,
+    raise_on_done=False,
+):
     delivered = []
     done_meta = {}
 
     async def on_audio(session_id, chunk):
         delivered.append(chunk)
+        if audio_observer is not None:
+            audio_observer(session_id, chunk, delivered)
 
     async def on_done(session_id, meta):
         done_meta.update(meta)
         if callback_order is not None:
             callback_order.append("done")
+        if raise_on_done:
+            raise RuntimeError("downstream done delivery failed")
 
     async def on_event(session_id, event):
         events.append(event)
+        if event_observer is not None:
+            event_observer(session_id, event, delivered)
 
     async def main():
         for r in results:
@@ -295,6 +324,127 @@ FRAME_BYTES = 24000 * 4 * 80 // 1000  # one 80ms engine frame = 7680 bytes
 
 
 class TestConsumeResultsGuarded:
+    def test_prefix_vad_ttft_tracks_synthesis_speed_not_playback_speed(self):
+        session = _guarded_session()
+        vad = EnergyVADProcessor(
+            TTSVADConfig(
+                mode=VADMode.ENERGY,
+                chunk_ms=16,
+                begin_threshold=0.5,
+                begin_count=2,
+                end_count=100,
+                start_margin_ms=0,
+            ),
+            sample_rate=24000,
+        )
+        vad._score_frame = lambda frame: float(np.any(frame))
+        gate = PrefixGateGuardBypass(vad.discard_pending)
+        session.config.timing.extra["_prefix_gate_guard_bypass"] = gate
+        first_effective_after_raw_ms = None
+
+        # Five 80ms silent chunks = the observed 400ms prefix. At 2.5x RTF,
+        # raw chunks arrive every 32ms; the following tone chunk should reach
+        # downstream VAD at 160ms, not after ~400ms of playhead pacing.
+        samples_per_chunk = 24000 * 80 // 1000
+        silence = np.zeros(samples_per_chunk, dtype=np.float32).tobytes()
+        tone = np.ones(samples_per_chunk, dtype=np.float32).tobytes()
+        chunks = [silence] * 5 + [tone] * 3
+
+        def observe_audio(_sid, chunk, _delivered):
+            nonlocal first_effective_after_raw_ms
+            raw_index = gate.bypassed_chunks - 1
+            synthetic_arrival_ms = raw_index * (80.0 / 2.5)
+            raw = np.frombuffer(chunk, dtype=np.float32)
+            pcm16 = (np.clip(raw, -1.0, 1.0) * 32767.0).astype(np.int16)
+            filtered = vad.process_chunk(pcm16)
+            if filtered.size > 0 and gate.should_bypass:
+                gate.mark_first_effective(filtered.size * 4)
+                first_effective_after_raw_ms = synthetic_arrival_ms
+
+        results = [
+            EngineResult(
+                type=ResultType.AUDIO_CHUNK,
+                session_id="s1",
+                segment_idx=0,
+                audio_bytes=chunk,
+            )
+            for chunk in chunks
+        ] + [
+            _seg_end(0, "codec_eos", len(chunks)),
+            EngineResult(type=ResultType.SESSION_DONE, session_id="s1"),
+        ]
+
+        _run_consume(session, results, audio_observer=observe_audio)
+
+        assert gate.bypassed_chunks == 6
+        assert first_effective_after_raw_ms == pytest.approx(160.0)
+        assert first_effective_after_raw_ms < 200.0
+
+    def test_prefix_vad_inspects_raw_chunks_before_playhead_pacing(self):
+        session = _guarded_session()
+        gate = PrefixGateGuardBypass()
+        session.config.timing.extra["_prefix_gate_guard_bypass"] = gate
+        event_delivery_counts = []
+
+        def observe_audio(_sid, _chunk, delivered):
+            # Model a prefix VAD that needs five 80 ms engine chunks before it
+            # can expose the first effective audio. At a frozen wall clock the
+            # 100 ms hold would otherwise feed it only two chunks.
+            if len(delivered) == 5:
+                gate.mark_first_effective(FRAME_BYTES)
+
+        def observe_event(_sid, event, delivered):
+            if event.get("type") == "warning":
+                event_delivery_counts.append(len(delivered))
+
+        chunks = [bytes([marker]) * FRAME_BYTES for marker in range(1, 9)]
+        results = [
+            EngineResult(
+                type=ResultType.AUDIO_CHUNK,
+                session_id="s1",
+                segment_idx=0,
+                audio_bytes=chunk,
+            )
+            for chunk in chunks
+        ]
+        results.extend(
+            [
+                EngineResult(
+                    type=ResultType.WARNING,
+                    session_id="s1",
+                    warning_msg="checkpoint",
+                ),
+                EngineResult(
+                    type=ResultType.SEGMENT_END,
+                    session_id="s1",
+                    segment_idx=0,
+                    metrics={
+                        "audio_steps": 8,
+                        "text_tokens": 2,
+                        "overflow": False,
+                        "eos_reason": "codec_eos",
+                    },
+                ),
+                EngineResult(type=ResultType.SESSION_DONE, session_id="s1"),
+            ]
+        )
+
+        delivered, _ = _run_consume(
+            session,
+            results,
+            events=[],
+            audio_observer=observe_audio,
+            event_observer=observe_event,
+        )
+
+        assert gate.bypassed_chunks == 5
+        assert gate.bypassed_audio_bytes == 5 * FRAME_BYTES
+        # The fifth (first-effective) chunk primes the hold's released-byte
+        # budget. Only one additional 80 ms chunk fits the 100 ms lead; later
+        # chunks remain retractable until codec EOS.
+        assert event_delivery_counts == [6]
+        assert delivered == chunks
+
     def test_session_summary_runs_after_output_policy_finalization(self):
         session = _guarded_session()
         callback_order = []
@@ -309,6 +459,25 @@ class TestConsumeResultsGuarded:
             interface=interface,
             callback_order=callback_order,
         )
+
+        assert callback_order == ["done", "summary"]
+
+    def test_session_summary_survives_downstream_done_failure(self):
+        session = _guarded_session()
+        callback_order = []
+        interface = _fake_interface_self()
+        interface._emit_session_summary = lambda *args, **kwargs: callback_order.append(
+            "summary"
+        )
+
+        with pytest.raises(RuntimeError, match="downstream done delivery failed"):
+            _run_consume(
+                session,
+                _single_segment_results("codec_eos"),
+                interface=interface,
+                callback_order=callback_order,
+                raise_on_done=True,
+            )
 
         assert callback_order == ["done", "summary"]
 
@@ -556,6 +725,30 @@ class TestConsumeResultsOutOfOrder:
         ]
         delivered, _ = _run_consume(session, results)
         assert delivered == [c0a * (FRAME_BYTES * 12), c1a * (FRAME_BYTES * 12)]
+
+    def test_abort_resets_downstream_vad_before_chained_segment_drain(self):
+        session = _two_segment_session()
+        order = []
+        gate = PrefixGateGuardBypass(lambda: order.append("vad_reset"))
+        session.config.timing.extra["_prefix_gate_guard_bypass"] = gate
+        results = [
+            _chunk(0, b"\x01", frames=1),
+            _chunk(1, b"\x02", frames=1),
+            _seg_end(1, "codec_eos", 1),
+            # An abort without an explicit tail count is still a hard VAD
+            # boundary; pending onset state must not cross it.
+            _seg_end(0, "loop_abort", 1),
+            EngineResult(type=ResultType.SESSION_DONE, session_id="s1"),
+        ]
+
+        def observe_audio(_sid, chunk, _delivered):
+            order.append(f"audio_{chunk[0]}")
+
+        _run_consume(session, results, audio_observer=observe_audio)
+
+        # seg1 was buffered by reorder.  The abort callback must clear the
+        # downstream VAD candidate from seg0 before seg1 is delivered.
+        assert order == ["audio_1", "vad_reset", "audio_2"]
 
     def test_lookahead_abort_discards_its_own_tail_at_drain_time(self):
         # seg1 (lookahead) aborts first: its garbage sits in the reorder, not

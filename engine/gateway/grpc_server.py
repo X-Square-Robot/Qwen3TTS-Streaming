@@ -59,6 +59,7 @@ from ..interface.vad import (
     VADMode,
     create_vad_processor,
 )
+from ..frontend.hold_window import PrefixGateGuardBypass
 from . import tts_pb2, tts_pb2_grpc
 from .session_identity import GatewaySessionIdentity
 
@@ -146,13 +147,38 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
 
         first_effective_logged = False
         vad_enabled = vad_processor.config.enabled
+        prefix_gate_guard_bypass = (
+            PrefixGateGuardBypass(vad_processor.discard_pending)
+            if vad_enabled
+            else None
+        )
+        if prefix_gate_guard_bypass is not None:
+            # Internal shared state: the frontend bypasses playhead pacing only
+            # while this gateway-owned VAD is still consuming the prefix.
+            config.timing.extra["_prefix_gate_guard_bypass"] = prefix_gate_guard_bypass
 
-        def log_first_effective_audio() -> None:
+        def snapshot_prefix_bypass() -> tuple[int, float]:
+            if prefix_gate_guard_bypass is None:
+                return 0, 0.0
+            bypass_chunks = prefix_gate_guard_bypass.bypassed_chunks
+            bypass_audio_ms = (
+                prefix_gate_guard_bypass.bypassed_audio_bytes
+                / (ENGINE_SAMPLE_RATE * 4)
+                * 1000.0
+            )
+            timing_acc.guarded_delivery_prefix_bypass_chunks = bypass_chunks
+            timing_acc.guarded_delivery_prefix_bypass_audio_ms = bypass_audio_ms
+            return bypass_chunks, bypass_audio_ms
+
+        def log_first_effective_audio(audio_bytes: int) -> None:
             """Emit the first audible-output boundary with VAD context once."""
             nonlocal first_effective_logged
             if first_effective_logged:
                 return
             first_effective_logged = True
+            if prefix_gate_guard_bypass is not None:
+                prefix_gate_guard_bypass.mark_first_effective(audio_bytes)
+            bypass_chunks, bypass_audio_ms = snapshot_prefix_bypass()
             vad_metrics = vad_processor.metrics
             prefix_trimmed_ms = (
                 vad_metrics.prefix_trimmed_samples / ENGINE_SAMPLE_RATE * 1000.0
@@ -178,6 +204,8 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                 first_raw_to_first_effective_audio_ms=(
                     round(gating_ms, 3) if gating_ms is not None else None
                 ),
+                guarded_delivery_prefix_bypass_chunks=bypass_chunks,
+                guarded_delivery_prefix_bypass_audio_ms=round(bypass_audio_ms, 3),
             )
 
         async def on_audio(sid, data):
@@ -189,7 +217,7 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                 if not data:
                     return
                 frame = pipeline.convert_audio_chunk(data)
-                log_first_effective_audio()
+                log_first_effective_audio(len(data))
                 await audio_queue.put(
                     (
                         "audio",
@@ -217,7 +245,7 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             filtered_bytes = filtered_f32.tobytes()
 
             frame = pipeline.convert_audio_chunk(filtered_bytes)
-            log_first_effective_audio()
+            log_first_effective_audio(len(filtered_bytes))
             await audio_queue.put(
                 (
                     "audio",
@@ -242,7 +270,7 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                 final_f32 = final_int16.astype(np.float32) / 32767.0
                 final_bytes = final_f32.tobytes()
                 frame = pipeline.convert_audio_chunk(final_bytes)
-                log_first_effective_audio()
+                log_first_effective_audio(len(final_bytes))
                 await audio_queue.put(
                     (
                         "audio",
@@ -253,6 +281,9 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                 )
 
             _drain_vad_transitions()
+            # All-silence sessions never cross the first-effective boundary,
+            # so snapshot the bypass counters unconditionally at completion.
+            snapshot_prefix_bypass()
             # Inject VAD observability into metrics
             _inject_vad_metrics(vad_processor, pipeline, metrics)
             await audio_queue.put(
@@ -463,9 +494,7 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                     if kind == "eof":
                         input_eof = True
                         if internal_session_id and not got_done and not got_cancel:
-                            await self._engine.mark_input_complete(
-                                internal_session_id
-                            )
+                            await self._engine.mark_input_complete(internal_session_id)
                             got_done = True
                     else:
                         request = payload
@@ -1139,12 +1168,35 @@ def _build_vad_config(session_config: SessionConfig) -> TTSVADConfig:
     if not vad.enabled or vad.strategy == "disabled":
         return TTSVADConfig(mode=VADMode.DISABLED)
 
-    mode_str = vad.strategy.strip().lower()
+    mode_str = str(vad.strategy or "disabled").strip().lower()
+    if mode_str == "prefix_trim":
+        # ``prefix_trim`` is a protocol-level legacy policy name rather than
+        # a processor implementation. Honor its declared implementation when
+        # possible and use the built-in energy gate as the compatible default.
+        implementation = str(vad.implementation or "").strip().lower()
+        mode_str = (
+            implementation if implementation in {"energy", "tenvad"} else "energy"
+        )
     try:
         mode = VADMode(mode_str)
     except ValueError:
         logger.warning("Unsupported VAD strategy '%s', disabling VAD", mode_str)
         return TTSVADConfig(mode=VADMode.DISABLED)
+
+    extra_config = {}
+    for key, cast in (
+        ("preemphasis", float),
+        ("tenvad_hop_size", int),
+        ("tenvad_threshold", float),
+    ):
+        if key not in vad.config:
+            continue
+        try:
+            # gRPC carries VADPolicy.config as a string map, while WebSocket
+            # JSON commonly supplies native numbers. Normalize both here.
+            extra_config[key] = cast(vad.config[key])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid VAD config {key}={vad.config[key]!r}") from exc
 
     return TTSVADConfig(
         mode=mode,
@@ -1154,12 +1206,7 @@ def _build_vad_config(session_config: SessionConfig) -> TTSVADConfig:
         end_threshold=vad.end_threshold,
         end_count=vad.end_count,
         start_margin_ms=vad.start_margin_ms,
-        # Pass through any extra config from the config dict
-        **{
-            k: v
-            for k, v in vad.config.items()
-            if k in ("preemphasis", "tenvad_hop_size", "tenvad_threshold")
-        },
+        **extra_config,
     )
 
 
@@ -1188,6 +1235,8 @@ def _inject_vad_metrics(
     metrics["vad_begin_count"] = str(m.begin_trigger_count)
     metrics["vad_end_count"] = str(m.end_trigger_count)
 
-    # Record prefix trim in OutputPipeline for first-effective-audio tracking
-    if m.first_effective_audio_found and m.prefix_trimmed_samples > 0:
+    # Prefix removal is a result even when the entire stream is silent and no
+    # effective chunk exists.  Do not hide an all-silence discard behind the
+    # first-effective condition.
+    if m.prefix_trimmed_samples > 0:
         pipeline.record_prefix_trim(m.prefix_trimmed_samples, sr)

@@ -229,25 +229,28 @@ class TTSVADProcessor(ABC):
             self._input_buffer = np.empty((0,), dtype=np.int16)
             return result
 
-        # Process remaining partial frame (pad with zeros)
+        # Process remaining partial frame (pad only for scoring).  The state
+        # machine receives the real sample count so padding is never emitted or
+        # included in trim metrics.
         if self._input_buffer.size > 0:
+            valid_samples = self._input_buffer.size
             padded = np.zeros(self._frame_samples, dtype=np.int16)
-            padded[: self._input_buffer.size] = self._input_buffer
-            self._metrics.original_audio_samples += self._input_buffer.size
-            self._process_frame(padded)
+            padded[:valid_samples] = self._input_buffer
+            self._metrics.original_audio_samples += valid_samples
+            self._process_frame(padded, valid_samples=valid_samples)
             self._input_buffer = np.empty((0,), dtype=np.int16)
 
         # Flush: emit everything pending regardless of state
         if self._state == VADState.SILENCE:
-            # We were in silence — the margin buffer has audio that was held back.
-            # On flush, if we never entered speech, discard it (it was leading silence).
-            # If we had entered speech at some point, the margin was already consumed.
-            self._metrics.prefix_trimmed_samples += self._margin_buffer.size
+            # The stream ended before this lookback could accompany a confirmed
+            # onset. Discard it as prefix silence before the first speech, or as
+            # tail silence after speech has already been emitted.
+            self._record_trimmed_samples(self._margin_buffer.size)
             self._margin_buffer = np.empty((0,), dtype=np.int16)
             # Candidate onset frames that never confirmed as speech are discarded
             # too (an unconfirmed begin run at end-of-stream).
             for candidate in self._begin_buffer:
-                self._metrics.prefix_trimmed_samples += candidate.size
+                self._record_trimmed_samples(candidate.size)
             self._begin_buffer = []
         else:
             # In speech state — emit all pending
@@ -263,8 +266,34 @@ class TTSVADProcessor(ABC):
         self._begin_buffer = []
         return result
 
+    def discard_pending(self) -> None:
+        """Discard uncommitted audio at a condemned segment boundary.
+
+        Unlike :meth:`reset`, this preserves cumulative metrics.  Complete
+        frames in the margin/onset buffers were already counted as original
+        input, while a partial input frame was not; finalize each exactly once
+        before clearing the streaming and detector state.  This prevents an
+        onset candidate from one aborted segment being completed by the next
+        segment without erasing the trim evidence from observability.
+        """
+        if self._input_buffer.size > 0:
+            self._metrics.original_audio_samples += self._input_buffer.size
+            self._record_trimmed_samples(self._input_buffer.size)
+        self._record_trimmed_samples(self._margin_buffer.size)
+        for candidate in self._begin_buffer:
+            self._record_trimmed_samples(candidate.size)
+
+        self._clear_stream_state()
+        self._reset_detector_state()
+
     def reset(self) -> None:
         """Reset all state for reuse."""
+        self._clear_stream_state()
+        self._metrics = VADMetrics()
+        self._reset_detector_state()
+
+    def _clear_stream_state(self) -> None:
+        """Clear stream buffers/counters without touching accumulated metrics."""
         self._state = VADState.SILENCE
         self._input_buffer = np.empty((0,), dtype=np.int16)
         self._margin_buffer = np.empty((0,), dtype=np.int16)
@@ -272,7 +301,9 @@ class TTSVADProcessor(ABC):
         self._begin_buffer = []
         self._begin_counter = 0
         self._end_counter = 0
-        self._metrics = VADMetrics()
+
+    def _reset_detector_state(self) -> None:
+        """Reset subclass-specific streaming detector state."""
 
     # ------------------------------------------------------------------
     # Frame-level processing (subclass implements scoring)
@@ -287,28 +318,34 @@ class TTSVADProcessor(ABC):
         """
         ...
 
-    def _process_frame(self, frame_int16: np.ndarray) -> None:
+    def _process_frame(
+        self, frame_int16: np.ndarray, valid_samples: Optional[int] = None
+    ) -> None:
         """Core VAD state machine for one frame."""
         score = self._score_frame(frame_int16)
         cfg = self._config
+        audio = (
+            frame_int16
+            if valid_samples is None
+            else frame_int16[: max(0, min(valid_samples, frame_int16.size))]
+        )
 
         if self._state == VADState.SILENCE:
             # Check for begin
             if score >= cfg.begin_threshold:
                 self._begin_counter += 1
                 # Hold this candidate onset frame uncapped (see _begin_buffer).
-                self._begin_buffer.append(frame_int16.copy())
+                self._begin_buffer.append(audio.copy())
             else:
                 # A below-threshold frame breaks the run: the candidate frames
                 # were not speech after all → demote them to lookback silence
-                # (capped) and count as trimmed, like any other silence.
+                # (capped). Samples are counted as trimmed only when evicted
+                # from lookback, because retained margin may still be emitted.
                 for candidate in self._begin_buffer:
                     self._update_margin_buffer(candidate)
-                    self._metrics.prefix_trimmed_samples += candidate.size
                 self._begin_buffer = []
                 self._begin_counter = 0
-                self._update_margin_buffer(frame_int16)
-                self._metrics.prefix_trimmed_samples += frame_int16.size
+                self._update_margin_buffer(audio)
 
             if self._begin_counter >= cfg.begin_count:
                 # Begin triggered!
@@ -364,24 +401,42 @@ class TTSVADProcessor(ABC):
                             "trigger_count": self._metrics.end_trigger_count,
                         }
                     )
-                # The end_count frames that triggered end are discarded
-                # (they were below end_threshold = noise/silence)
-                self._metrics.tail_trimmed_samples += frame_int16.size
+                # Discard the frame that crosses the end-count threshold. The
+                # preceding low-score frames were already emitted as speech.
+                self._record_trimmed_samples(audio.size)
                 # Start fresh margin buffer
                 self._margin_buffer = np.empty((0,), dtype=np.int16)
             else:
                 # Still speech — emit
-                self._emit_buffer.append(frame_int16.copy())
-                self._metrics.effective_audio_samples += frame_int16.size
+                self._emit_buffer.append(audio.copy())
+                self._metrics.effective_audio_samples += audio.size
+
+    def _record_trimmed_samples(self, sample_count: int) -> None:
+        """Classify samples once their final disposition is known.
+
+        Silence before the first confirmed onset is prefix trim.  Once any
+        effective audio has been found, discarded samples belong to the tail
+        (including gaps after an end transition).
+        """
+        if sample_count <= 0:
+            return
+        if self._metrics.first_effective_audio_found:
+            self._metrics.tail_trimmed_samples += sample_count
+        else:
+            self._metrics.prefix_trimmed_samples += sample_count
 
     def _update_margin_buffer(self, frame_int16: np.ndarray) -> None:
-        """Add frame to margin buffer, evicting oldest if over capacity."""
+        """Add audio to lookback and account only samples actually evicted."""
+        if frame_int16.size == 0:
+            return
         if self._margin_samples <= 0:
+            self._record_trimmed_samples(frame_int16.size)
             return
         self._margin_buffer = np.concatenate((self._margin_buffer, frame_int16))
         if self._margin_buffer.size > self._margin_samples:
             excess = self._margin_buffer.size - self._margin_samples
             self._margin_buffer = self._margin_buffer[excess:]
+            self._record_trimmed_samples(excess)
 
     def _drain_emit_buffer(self) -> np.ndarray:
         """Concatenate and return all pending emit audio."""
@@ -458,8 +513,7 @@ class EnergyVADProcessor(TTSVADProcessor):
         score = (db + 80.0) / 80.0
         return max(0.0, min(1.0, score))
 
-    def reset(self) -> None:
-        super().reset()
+    def _reset_detector_state(self) -> None:
         self._prev_sample = 0.0
 
 
@@ -565,8 +619,7 @@ class TenVADProcessor(TTSVADProcessor):
         result = np.interp(dst_x, src_x, src)
         return np.clip(result, -32768, 32767).astype(np.int16)
 
-    def reset(self) -> None:
-        super().reset()
+    def _reset_detector_state(self) -> None:
         self._downsample_buffer = np.empty((0,), dtype=np.int16)
         # Recreate TenVad instance (it has internal state)
         if _TenVadClass is not None:

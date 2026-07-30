@@ -13,6 +13,8 @@ import pytest
 
 from qwen3tts_protocol import (
     OutputPolicy,
+    SessionStartRequest,
+    SynthesisConfig,
     VADPolicy,
     parse_output_policy,
     serialize_output_policy,
@@ -124,3 +126,36 @@ class TestEngineGrpcVadMapping:
 
         proto = _output_policy_to_proto(OutputPolicy())  # default strategy = disabled
         assert "begin_threshold" not in dict(proto.vad_policy.config)
+
+
+class TestTritonGrpcVadMapping:
+    def test_stream_request_preserves_complete_vad_tuning(self):
+        from qwen3tts._adapters.triton_grpc import _build_stream_request
+
+        policy = OutputPolicy(
+            vad=VADPolicy(
+                enabled=True,
+                strategy="tenvad",
+                implementation="onnx",
+                config={"tenvad_threshold": 0.73},
+                chunk_ms=8,
+                begin_threshold=0.91,
+                begin_count=3,
+                end_threshold=0.21,
+                end_count=47,
+                start_margin_ms=12,
+            ),
+            chunk_ms=40,
+            packet_format="raw_pcm",
+            emit_text_events=False,
+            config={"delivery": "guarded", "delivery_window_ms": "160"},
+        )
+        request = SessionStartRequest(
+            session_id="triton-grpc-vad",
+            config=SynthesisConfig(task_type="custom_voice"),
+            output_policy=policy,
+        )
+
+        payload = _build_stream_request("start", request)
+
+        assert payload["output_policy"] == serialize_output_policy(policy)

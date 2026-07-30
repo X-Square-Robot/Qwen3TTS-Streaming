@@ -66,7 +66,12 @@ from engine.core.types import (
     InputMode,
     SessionConfig,
 )
-from engine.interface import OutputPipeline, SessionStartRequest
+from engine.interface import (
+    OutputPipeline,
+    SessionStartRequest,
+    parse_output_policy,
+    to_core_output_policy,
+)
 from engine.runtime.fingerprint import (
     FingerprintCheckError,
     enforce_engine_fingerprint,
@@ -772,6 +777,9 @@ class TritonPythonModel:
         )
         audio = _parse_audio_config(req.get("audio"))
         _validate_triton_audio_config(audio)
+        output_policy = to_core_output_policy(
+            parse_output_policy(req.get("output_policy"))
+        )
         config = SessionConfig(
             task_type=task_type,
             language=str(req.get("language") or "auto"),
@@ -791,6 +799,7 @@ class TritonPythonModel:
             ),
             group_policy=_parse_group_policy(req.get("group_policy")),
             audio=audio,
+            output_policy=output_policy,
         )
         if not streaming:
             config.input_mode = InputMode.FULL_TEXT

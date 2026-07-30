@@ -33,7 +33,7 @@ from ..core.timing import ServerTimingAccumulator
 from ..text_normalization import strip_emoji, split_pending_emoji
 from ..interface.output import ENGINE_SAMPLE_RATE
 from .dispatcher import Dispatcher
-from .hold_window import DeliveryHoldWindow
+from .hold_window import DeliveryHoldWindow, PrefixGateGuardBypass
 from .spliter import Spliter
 from .spliter.driver import ActionType
 from .spliter.reorder import AudioReorder
@@ -390,6 +390,11 @@ class FrontendInterface:
         hold = self._guarded_hold_for(session)
         hold_lock = asyncio.Lock() if hold is not None else None
         hold_ticker: Optional[asyncio.Task] = None
+        prefix_gate_guard_bypass = session.config.timing.extra.get(
+            "_prefix_gate_guard_bypass"
+        )
+        if not isinstance(prefix_gate_guard_bypass, PrefixGateGuardBypass):
+            prefix_gate_guard_bypass = None
         # Guarded delivery bookkeeping: verdicts recorded at SEGMENT_END for
         # segments whose audio has NOT fully passed into the hold yet
         # (segments complete out of order; the verdict must be applied to the
@@ -411,9 +416,28 @@ class FrontendInterface:
             if hold is None:
                 await _send_chunks(chunks)
                 return
-            hold.push(chunks)
-            async with hold_lock:
-                await _send_chunks(hold.release_due())
+            # Prefix VAD lives downstream in the gateway.  Feeding its leading
+            # raw chunks through the playhead-paced hold makes 400 ms of
+            # silence cost roughly 400 ms wall time even when synthesis runs
+            # many times faster than realtime.  Let the VAD inspect only that
+            # prefix at engine speed; it drops those chunks, and the chunk that
+            # opens the gate is the same immediate first chunk guarded
+            # delivery has always promised.  Start normal pacing afterwards.
+            for chunk in chunks:
+                if (
+                    prefix_gate_guard_bypass is not None
+                    and prefix_gate_guard_bypass.should_bypass
+                ):
+                    prefix_gate_guard_bypass.record_bypass(len(chunk))
+                    await _send_chunks([chunk])
+                    if not prefix_gate_guard_bypass.should_bypass:
+                        hold.record_external_release(
+                            prefix_gate_guard_bypass.first_effective_audio_bytes
+                        )
+                    continue
+                hold.push([chunk])
+                async with hold_lock:
+                    await _send_chunks(hold.release_due())
 
         async def _settle_hold(verdict: dict) -> None:
             """Apply a segment's verdict to its audio, now fully in the hold.
@@ -425,6 +449,18 @@ class FrontendInterface:
             the playback window had not reached yet. The lock is taken even
             when there is nothing to send: it doubles as the barrier against
             a ticker mid-send, keeping event/audio order intact."""
+            # Raw chunks already passed into the downstream VAD cannot be
+            # removed by this upstream hold.  At an abort boundary, discard
+            # any VAD margin/onset/input state before a chained reorder drain
+            # feeds the next segment, otherwise candidates can straddle the
+            # two segments and leak condemned audio.
+            if prefix_gate_guard_bypass is not None and (
+                verdict["discard_all"]
+                or verdict["discard_bytes"] > 0
+                or str(verdict["eos_reason"]).endswith("_abort")
+            ):
+                prefix_gate_guard_bypass.discard_pending()
+
             async with hold_lock:
                 dropped = 0
                 if verdict["discard_all"]:
@@ -661,9 +697,7 @@ class FrontendInterface:
                             group_final=meta.group_final,
                         ):
                             if chunks:
-                                hold.push(chunks)
-                                async with hold_lock:
-                                    await _send_chunks(hold.release_due())
+                                await _deliver(chunks)
                             if fully_passed and key in hold_verdicts:
                                 await _settle_hold(hold_verdicts.pop(key))
 
@@ -693,7 +727,7 @@ class FrontendInterface:
                         if (
                             audio_steps > 0
                             and text_tokens > 0
-                            and eos_reason not in ("loop_abort", "silence_abort")
+                            and not eos_reason.endswith("_abort")
                         ):
                             session.spliter.update_ratio(
                                 audio_steps,
@@ -785,21 +819,24 @@ class FrontendInterface:
                         "".join(final_text_parts)
                     )
                     done_metrics["server_total_segments"] = str(session.segments_done)
-                    if on_done:
-                        await on_done(session.session_id, done_metrics)
-                    # Gateway on_done performs output-policy finalization (for
-                    # example VAD flush and prefix-trim accounting). Emit the
-                    # summary only afterwards so it observes those final values.
-                    self._emit_session_summary(session, batch_agg, final_text_parts)
-                    LifecycleLogger.emit(
-                        session_id=session.session_id,
-                        phase="session.completed",
-                        request_id=session.config.timing.request_id or None,
-                        turn_id=session.config.timing.turn_id or None,
-                        session_level=session.config.observability_level,
-                        total_segments=session.segments_done,
-                        total_audio_bytes=session.total_audio_bytes,
-                    )
+                    try:
+                        if on_done:
+                            await on_done(session.session_id, done_metrics)
+                    finally:
+                        # Gateway on_done performs output-policy finalization
+                        # (VAD flush and trim accounting). Emit afterwards so
+                        # the summary sees final values, but retain it even if
+                        # downstream delivery raises after partial finalization.
+                        self._emit_session_summary(session, batch_agg, final_text_parts)
+                        LifecycleLogger.emit(
+                            session_id=session.session_id,
+                            phase="session.completed",
+                            request_id=session.config.timing.request_id or None,
+                            turn_id=session.config.timing.turn_id or None,
+                            session_level=session.config.observability_level,
+                            total_segments=session.segments_done,
+                            total_audio_bytes=session.total_audio_bytes,
+                        )
                     break
 
                 elif result.type == ResultType.ERROR:
@@ -868,14 +905,19 @@ class FrontendInterface:
             **summary,
         )
         ttft = summary.get("ttft", {})
-        ttft_ms = ttft.get("create_to_first_raw_ms")
+        raw_ttft_ms = ttft.get("create_to_first_raw_ms")
+        effective_ttft_ms = ttft.get("create_to_first_effective_ms")
         infer_ms = summary.get("pipeline_ms", {}).get("inference_ms")
+        gating_ms = summary.get("pipeline_ms", {}).get("gating_ms")
         cache = summary.get("cache", {})
         logger.info(
-            'session=%s DONE ttft=%sms infer=%sms batch=%d/%d vad_trim=%sms cache=%s segs=%d "%s"',
+            "session=%s DONE ttft_raw=%sms ttft_effective=%sms infer=%sms "
+            'gating=%sms batch=%d/%d vad_trim=%sms cache=%s segs=%d "%s"',
             session.session_id,
-            ttft_ms,
+            raw_ttft_ms,
+            effective_ttft_ms,
             infer_ms,
+            gating_ms,
             batch_agg["batched"],
             batch_agg["segments"],
             summary.get("prefix_trimmed_ms", 0.0),
@@ -937,26 +979,6 @@ class FrontendInterface:
                     (session.prefill_completed_at - session.prefill_started_at) * 1000,
                     3,
                 )
-            if (
-                session.first_raw_audio_at is not None
-                and session.first_text_dequeued_at is not None
-            ):
-                summary["first_raw_to_first_effective_audio_ms"] = (
-                    0.0  # will be updated by output pipeline
-                )
-
-            # Emit session.completed lifecycle event
-            LifecycleLogger.emit(
-                session_id=session_id,
-                phase="session.completed",
-                request_id=session.config.timing.request_id or None,
-                turn_id=session.config.timing.turn_id or None,
-                # ``summary`` carries its own "session_id" key (used by the
-                # human-readable log below); drop it here so it doesn't collide
-                # with the explicit session_id= argument.
-                **{k: v for k, v in summary.items() if k != "session_id"},
-            )
-
             # Also log a human-readable summary
             latency = session.session_create_to_first_raw_audio_ms
             logger.info(

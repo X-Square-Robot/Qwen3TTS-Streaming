@@ -56,6 +56,8 @@ class ServerTimingAccumulator:
     prefix_trimmed_ms: float = 0.0
     vad_policy: str = "disabled"
     output_gating_mode: str = ""
+    guarded_delivery_prefix_bypass_chunks: int = 0
+    guarded_delivery_prefix_bypass_audio_ms: float = 0.0
 
     # -- Text observability --
     raw_first_text_preview: str = ""
@@ -94,8 +96,16 @@ class ServerTimingAccumulator:
             "dequeue_to_first_raw_ms": d(
                 self.first_text_dequeued_monotonic, self.first_raw_audio_monotonic
             ),
+            "dequeue_to_first_effective_ms": d(
+                self.first_text_dequeued_monotonic,
+                self.first_effective_audio_monotonic,
+            ),
             "create_to_first_raw_ms": d(
                 self.session_created_monotonic, self.first_raw_audio_monotonic
+            ),
+            "create_to_first_effective_ms": d(
+                self.session_created_monotonic,
+                self.first_effective_audio_monotonic,
             ),
         }
         pipeline = {
@@ -128,6 +138,13 @@ class ServerTimingAccumulator:
         }
         if self.total_audio_ms > 0:
             out["total_audio_ms"] = round(self.total_audio_ms, 1)
+        if self.guarded_delivery_prefix_bypass_chunks > 0:
+            out["guarded_delivery"] = {
+                "prefix_bypass_chunks": self.guarded_delivery_prefix_bypass_chunks,
+                "prefix_bypass_audio_ms": round(
+                    self.guarded_delivery_prefix_bypass_audio_ms, 2
+                ),
+            }
         return out
 
     def to_meta_dict(self) -> dict[str, str]:
@@ -233,6 +250,13 @@ class ServerTimingAccumulator:
         meta["server_vad_policy"] = self.vad_policy
         if self.output_gating_mode:
             meta["server_output_gating_mode"] = self.output_gating_mode
+        if self.guarded_delivery_prefix_bypass_chunks > 0:
+            meta["server_guarded_delivery_prefix_bypass_chunks"] = str(
+                self.guarded_delivery_prefix_bypass_chunks
+            )
+            meta["server_guarded_delivery_prefix_bypass_audio_ms"] = (
+                f"{self.guarded_delivery_prefix_bypass_audio_ms:.3f}"
+            )
         meta["server_cache_hit"] = "true" if self.cache_hit else "false"
         if self.cache_tokens_reused > 0:
             meta["server_cache_tokens_reused"] = str(self.cache_tokens_reused)

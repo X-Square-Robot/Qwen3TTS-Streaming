@@ -64,6 +64,7 @@ from ..interface import (
 from ..interface.vad import (
     create_vad_processor,
 )
+from ..frontend.hold_window import PrefixGateGuardBypass
 from .grpc_server import _build_vad_config, _inject_vad_metrics
 from .session_identity import GatewaySessionIdentity
 from .websocket_resume import (
@@ -775,13 +776,38 @@ class WebSocketGateway:
 
         vad_enabled = vad_processor.config.enabled
         first_effective_logged = False
+        prefix_gate_guard_bypass = (
+            PrefixGateGuardBypass(vad_processor.discard_pending)
+            if vad_enabled
+            else None
+        )
+        if prefix_gate_guard_bypass is not None:
+            # Internal shared state: the frontend bypasses playhead pacing only
+            # while this gateway-owned VAD is still consuming the prefix.
+            config.timing.extra["_prefix_gate_guard_bypass"] = prefix_gate_guard_bypass
 
-        def log_first_effective_audio() -> None:
+        def snapshot_prefix_bypass() -> tuple[int, float]:
+            if prefix_gate_guard_bypass is None:
+                return 0, 0.0
+            bypass_chunks = prefix_gate_guard_bypass.bypassed_chunks
+            bypass_audio_ms = (
+                prefix_gate_guard_bypass.bypassed_audio_bytes
+                / (ENGINE_SAMPLE_RATE * 4)
+                * 1000.0
+            )
+            timing_acc.guarded_delivery_prefix_bypass_chunks = bypass_chunks
+            timing_acc.guarded_delivery_prefix_bypass_audio_ms = bypass_audio_ms
+            return bypass_chunks, bypass_audio_ms
+
+        def log_first_effective_audio(audio_bytes: int) -> None:
             """Emit the first audible-output boundary with VAD context once."""
             nonlocal first_effective_logged
             if first_effective_logged:
                 return
             first_effective_logged = True
+            if prefix_gate_guard_bypass is not None:
+                prefix_gate_guard_bypass.mark_first_effective(audio_bytes)
+            bypass_chunks, bypass_audio_ms = snapshot_prefix_bypass()
             vad_metrics = vad_processor.metrics
             prefix_trimmed_ms = (
                 vad_metrics.prefix_trimmed_samples / ENGINE_SAMPLE_RATE * 1000.0
@@ -807,6 +833,8 @@ class WebSocketGateway:
                 first_raw_to_first_effective_audio_ms=(
                     round(gating_ms, 3) if gating_ms is not None else None
                 ),
+                guarded_delivery_prefix_bypass_chunks=bypass_chunks,
+                guarded_delivery_prefix_bypass_audio_ms=round(bypass_audio_ms, 3),
             )
 
         async def on_audio(sid: str, data: bytes) -> None:
@@ -816,7 +844,7 @@ class WebSocketGateway:
                 if not data:
                     return
                 frame = pipeline.convert_audio_chunk(data)
-                log_first_effective_audio()
+                log_first_effective_audio(len(data))
                 await outbound_queue.put(
                     _make_audio_frame(frame.pcm_bytes, frame.audio, meta=frame.meta)
                 )
@@ -836,7 +864,7 @@ class WebSocketGateway:
             filtered_bytes = filtered_f32.tobytes()
 
             frame = pipeline.convert_audio_chunk(filtered_bytes)
-            log_first_effective_audio()
+            log_first_effective_audio(len(filtered_bytes))
             await outbound_queue.put(
                 _make_audio_frame(frame.pcm_bytes, frame.audio, meta=frame.meta)
             )
@@ -855,11 +883,14 @@ class WebSocketGateway:
                 final_f32 = final_int16.astype(np.float32) / 32767.0
                 final_bytes = final_f32.tobytes()
                 frame = pipeline.convert_audio_chunk(final_bytes)
-                log_first_effective_audio()
+                log_first_effective_audio(len(final_bytes))
                 await outbound_queue.put(
                     _make_audio_frame(frame.pcm_bytes, frame.audio, meta=frame.meta)
                 )
 
+            # All-silence sessions never cross the first-effective boundary,
+            # so snapshot the bypass counters unconditionally at completion.
+            snapshot_prefix_bypass()
             # Inject VAD observability into metrics
             _inject_vad_metrics(vad_processor, pipeline, metrics)
             await outbound_queue.put(

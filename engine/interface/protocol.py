@@ -52,20 +52,25 @@ def timing_context_json(timing: TimingContext) -> str:
 
 
 def to_core_output_policy(policy: OutputPolicy) -> OutputPolicyConfig:
+    # Protocol dataclasses already carry defaults. Preserve explicit numeric
+    # zeroes instead of applying those defaults a second time via ``or``.
+    def _value_or_default(value, default):
+        return default if value is None else value
+
     return OutputPolicyConfig(
         vad=VADConfig(
             enabled=bool(policy.vad.enabled),
             strategy=str(policy.vad.strategy or "disabled"),
             implementation=str(policy.vad.implementation or ""),
             config={str(k): v for k, v in dict(policy.vad.config or {}).items()},
-            chunk_ms=int(policy.vad.chunk_ms or 16),
-            begin_threshold=float(policy.vad.begin_threshold or 0.6),
-            begin_count=int(policy.vad.begin_count or 5),
-            end_threshold=float(policy.vad.end_threshold or 0.35),
-            end_count=int(policy.vad.end_count or 31),
-            start_margin_ms=int(policy.vad.start_margin_ms or 20),
+            chunk_ms=int(_value_or_default(policy.vad.chunk_ms, 16)),
+            begin_threshold=float(_value_or_default(policy.vad.begin_threshold, 0.6)),
+            begin_count=int(_value_or_default(policy.vad.begin_count, 5)),
+            end_threshold=float(_value_or_default(policy.vad.end_threshold, 0.35)),
+            end_count=int(_value_or_default(policy.vad.end_count, 31)),
+            start_margin_ms=int(_value_or_default(policy.vad.start_margin_ms, 20)),
         ),
-        chunk_ms=int(policy.chunk_ms or 0),
+        chunk_ms=int(_value_or_default(policy.chunk_ms, 0)),
         packet_format=str(policy.packet_format or "raw_pcm"),
         emit_text_events=bool(policy.emit_text_events),
         config={str(k): v for k, v in dict(policy.config or {}).items()},

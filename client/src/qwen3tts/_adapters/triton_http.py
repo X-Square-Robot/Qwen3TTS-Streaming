@@ -13,6 +13,7 @@ from qwen3tts_protocol import (
     Capabilities,
     SessionStartRequest,
     StreamEvent,
+    serialize_output_policy,
 )
 
 from .._internal.utils import (
@@ -132,20 +133,7 @@ class TritonHttpAdapter:
         payload["text"] = text
         payload["session_id"] = request.session_id
         if request.output_policy:
-            payload["output_policy"] = {
-                "vad_policy": {
-                    "enabled": bool(request.output_policy.vad.enabled),
-                    "strategy": str(request.output_policy.vad.strategy or "disabled"),
-                    "implementation": str(
-                        request.output_policy.vad.implementation or ""
-                    ),
-                    "config": dict(request.output_policy.vad.config or {}),
-                },
-                "chunk_ms": int(request.output_policy.chunk_ms or 0),
-                "packet_format": str(request.output_policy.packet_format or "raw_pcm"),
-                "emit_text_events": bool(request.output_policy.emit_text_events),
-                "config": dict(request.output_policy.config or {}),
-            }
+            payload["output_policy"] = serialize_output_policy(request.output_policy)
         if request.timing:
             payload["timing"] = {
                 "request_id": request.timing.request_id,

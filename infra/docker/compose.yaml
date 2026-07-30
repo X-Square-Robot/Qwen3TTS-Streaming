@@ -32,6 +32,7 @@ services:
       ENGINE_MAX_SESSIONS: ${ENGINE_MAX_SESSIONS:-128}
       ENGINE_MAX_SEQ_LEN: ${ENGINE_MAX_SEQ_LEN:-}
       PYTHONUNBUFFERED: "1"
+      TZ: Asia/Shanghai
     ports:
       - "${ENGINE_GRPC_PORT:-50051}:${ENGINE_GRPC_PORT:-50051}"
       - "${ENGINE_WEBSOCKET_PORT:-50052}:${ENGINE_WEBSOCKET_PORT:-50052}"
@@ -98,6 +99,7 @@ services:
       CUDA_VISIBLE_DEVICES: ${TRITON_GPU_DEVICE:-0}
       PYTORCH_CUDA_ALLOC_CONF: ${TRITON_PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
       PYTHONDONTWRITEBYTECODE: "1"
+      TZ: Asia/Shanghai
     command:
       - tritonserver
       - --model-repository=/models

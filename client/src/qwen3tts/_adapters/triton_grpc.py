@@ -13,6 +13,7 @@ from qwen3tts_protocol import (
     Capabilities,
     SessionStartRequest,
     StreamEvent,
+    serialize_output_policy,
 )
 
 from .._internal.auth import grpc_metadata_as_headers, normalize_grpc_metadata
@@ -364,22 +365,7 @@ def _build_stream_request(
     config["session_id"] = start_request.session_id
     config["action"] = "init" if action == "start" else action
     if start_request.output_policy:
-        config["output_policy"] = {
-            "vad_policy": {
-                "enabled": bool(start_request.output_policy.vad.enabled),
-                "strategy": str(start_request.output_policy.vad.strategy or "disabled"),
-                "implementation": str(
-                    start_request.output_policy.vad.implementation or ""
-                ),
-                "config": dict(start_request.output_policy.vad.config or {}),
-            },
-            "chunk_ms": int(start_request.output_policy.chunk_ms or 0),
-            "packet_format": str(
-                start_request.output_policy.packet_format or "raw_pcm"
-            ),
-            "emit_text_events": bool(start_request.output_policy.emit_text_events),
-            "config": dict(start_request.output_policy.config or {}),
-        }
+        config["output_policy"] = serialize_output_policy(start_request.output_policy)
     if start_request.timing:
         config["timing"] = {
             "request_id": start_request.timing.request_id,

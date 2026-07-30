@@ -289,20 +289,29 @@ def parse_output_policy(raw: Any) -> OutputPolicy:
     if not isinstance(raw, dict):
         return OutputPolicy()
     vad_raw = raw.get("vad_policy") or raw.get("vad") or {}
+
+    # ``or default`` is incorrect for numeric policy fields because zero is a
+    # meaningful value (for example ``start_margin_ms=0`` disables lookback
+    # and ``end_threshold=0.0`` is a valid threshold).  Treat only an omitted,
+    # explicit-null, or empty-string wire value as absent.
+    def _numeric_value(mapping: dict[str, Any], key: str, default: Any) -> Any:
+        value = mapping.get(key)
+        return default if value is None or value == "" else value
+
     return OutputPolicy(
         vad=VADPolicy(
             enabled=bool(vad_raw.get("enabled", False)),
             strategy=str(vad_raw.get("strategy", "disabled")),
             implementation=str(vad_raw.get("implementation", "")),
             config=dict(vad_raw.get("config") or {}),
-            chunk_ms=int(vad_raw.get("chunk_ms", 16) or 16),
-            begin_threshold=float(vad_raw.get("begin_threshold", 0.6) or 0.6),
-            begin_count=int(vad_raw.get("begin_count", 5) or 5),
-            end_threshold=float(vad_raw.get("end_threshold", 0.35) or 0.35),
-            end_count=int(vad_raw.get("end_count", 31) or 31),
-            start_margin_ms=int(vad_raw.get("start_margin_ms", 20) or 20),
+            chunk_ms=int(_numeric_value(vad_raw, "chunk_ms", 16)),
+            begin_threshold=float(_numeric_value(vad_raw, "begin_threshold", 0.6)),
+            begin_count=int(_numeric_value(vad_raw, "begin_count", 5)),
+            end_threshold=float(_numeric_value(vad_raw, "end_threshold", 0.35)),
+            end_count=int(_numeric_value(vad_raw, "end_count", 31)),
+            start_margin_ms=int(_numeric_value(vad_raw, "start_margin_ms", 20)),
         ),
-        chunk_ms=int(raw.get("chunk_ms", 0) or 0),
+        chunk_ms=int(_numeric_value(raw, "chunk_ms", 0)),
         packet_format=str(raw.get("packet_format", "raw_pcm")),
         emit_text_events=bool(raw.get("emit_text_events", True)),
         config=dict(raw.get("config") or {}),

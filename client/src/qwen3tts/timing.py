@@ -63,6 +63,8 @@ class ServerTimingReport:
     client_end_ts_ms: Optional[int] = None
 
     # -- Server-derived durations --
+    server_ttft_raw_ms: Optional[float] = None
+    server_ttft_effective_ms: Optional[float] = None
     server_session_create_to_first_raw_audio_ms: Optional[float] = None
     server_session_create_to_first_effective_audio_ms: Optional[float] = None
     server_first_text_enqueue_to_first_raw_audio_ms: Optional[float] = None
@@ -80,6 +82,8 @@ class ServerTimingReport:
     server_vad_policy: str = ""
     server_cache_hit: bool = False
     server_cache_tokens_reused: int = 0
+    server_guarded_delivery_prefix_bypass_chunks: int = 0
+    server_guarded_delivery_prefix_bypass_audio_ms: Optional[float] = None
 
     # -- Segment stats --
     server_total_segments: Optional[int] = None
@@ -134,6 +138,8 @@ class ServerTimingReport:
             client_text_ts_ms=_safe_int(meta.get("client_text_ts_ms")),
             client_end_ts_ms=_safe_int(meta.get("client_end_ts_ms")),
             # Server-derived durations
+            server_ttft_raw_ms=_safe_float(meta.get("server_ttft_raw_ms")),
+            server_ttft_effective_ms=_safe_float(meta.get("server_ttft_effective_ms")),
             server_session_create_to_first_raw_audio_ms=_safe_float(
                 meta.get("server_session_create_to_first_raw_audio_ms")
             ),
@@ -167,6 +173,13 @@ class ServerTimingReport:
             server_cache_hit=meta.get("server_cache_hit") == "true",
             server_cache_tokens_reused=_safe_int(meta.get("server_cache_tokens_reused"))
             or 0,
+            server_guarded_delivery_prefix_bypass_chunks=_safe_int(
+                meta.get("server_guarded_delivery_prefix_bypass_chunks")
+            )
+            or 0,
+            server_guarded_delivery_prefix_bypass_audio_ms=_safe_float(
+                meta.get("server_guarded_delivery_prefix_bypass_audio_ms")
+            ),
             # Segment stats
             server_total_segments=_safe_int(meta.get("server_total_segments")),
             server_total_audio_ms=_safe_float(meta.get("server_total_audio_ms")),
@@ -206,6 +219,8 @@ class ServerTimingReport:
     def summary(self) -> dict[str, float | int | bool | str | None]:
         """Return all computed metrics as a dict."""
         return {
+            "ttft_raw_ms": self.server_ttft_raw_ms,
+            "ttft_effective_ms": self.server_ttft_effective_ms,
             "session_create_to_first_raw_audio_ms": self.server_session_create_to_first_raw_audio_ms,
             "session_create_to_first_effective_audio_ms": self.server_session_create_to_first_effective_audio_ms,
             "first_text_enqueue_to_first_raw_audio_ms": self.server_first_text_enqueue_to_first_raw_audio_ms,
@@ -220,6 +235,8 @@ class ServerTimingReport:
             "prefix_trimmed_ms": self.server_prefix_trimmed_ms,
             "cache_hit": self.server_cache_hit,
             "cache_tokens_reused": self.server_cache_tokens_reused,
+            "guarded_delivery_prefix_bypass_chunks": self.server_guarded_delivery_prefix_bypass_chunks,
+            "guarded_delivery_prefix_bypass_audio_ms": self.server_guarded_delivery_prefix_bypass_audio_ms,
         }
 
     def explain_latency(self) -> str:
@@ -255,12 +272,6 @@ class ServerTimingReport:
                     self.server_first_raw_to_first_effective_audio_ms,
                 )
             )
-        if (
-            self.server_prefix_trimmed_ms is not None
-            and self.server_prefix_trimmed_ms > 0
-        ):
-            components.append(("Prefix trim", self.server_prefix_trimmed_ms))
-
         for name, ms in components:
             lines.append(f"  {name}: {ms:.1f}ms")
 
@@ -269,6 +280,29 @@ class ServerTimingReport:
             lines.append(f"  → Dominant: {dominant[0]} ({dominant[1]:.1f}ms)")
         else:
             lines.append("  (No detailed latency breakdown available)")
+
+        # Trimmed audio is content duration, not another elapsed-time stage.
+        # Reporting it as a latency component double-counts output gating and
+        # can falsely make a long silent prefix look like the dominant delay.
+        if (
+            self.server_prefix_trimmed_ms is not None
+            and self.server_prefix_trimmed_ms > 0
+        ):
+            lines.append(
+                "  Prefix audio removed: "
+                f"{self.server_prefix_trimmed_ms:.1f}ms "
+                "(content duration, not added latency)"
+            )
+        if (
+            self.server_guarded_delivery_prefix_bypass_chunks > 0
+            and self.server_guarded_delivery_prefix_bypass_audio_ms is not None
+        ):
+            lines.append(
+                "  Prefix VAD fast-path: "
+                f"{self.server_guarded_delivery_prefix_bypass_audio_ms:.1f}ms "
+                "raw audio inspected across "
+                f"{self.server_guarded_delivery_prefix_bypass_chunks} chunks"
+            )
 
         if self.server_total_latency_ms is not None:
             lines.append(f"  Total: {self.server_total_latency_ms:.1f}ms")

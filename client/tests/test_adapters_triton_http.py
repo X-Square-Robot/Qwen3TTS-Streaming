@@ -125,7 +125,21 @@ class TestTritonHttpAdapter:
             session_id="s-vad",
             config=SynthesisConfig(task_type="custom_voice"),
             output_policy=OutputPolicy(
-                vad=VADPolicy(enabled=True, strategy="tenvad", config={"k": "v"}),
+                vad=VADPolicy(
+                    enabled=True,
+                    strategy="tenvad",
+                    implementation="onnx",
+                    config={"tenvad_threshold": 0.73},
+                    chunk_ms=8,
+                    begin_threshold=0.91,
+                    begin_count=3,
+                    end_threshold=0.21,
+                    end_count=47,
+                    start_margin_ms=12,
+                ),
+                chunk_ms=40,
+                emit_text_events=False,
+                config={"delivery": "guarded", "delivery_window_ms": "160"},
             ),
         )
         payload = adapter._request_payload_for_text(start, "hello")
@@ -133,7 +147,20 @@ class TestTritonHttpAdapter:
         vad = payload["output_policy"]["vad_policy"]
         assert vad["strategy"] == "tenvad"
         assert vad["enabled"] is True
-        assert vad["config"] == {"k": "v"}
+        assert vad["implementation"] == "onnx"
+        assert vad["config"] == {"tenvad_threshold": 0.73}
+        assert vad["chunk_ms"] == 8
+        assert vad["begin_threshold"] == 0.91
+        assert vad["begin_count"] == 3
+        assert vad["end_threshold"] == 0.21
+        assert vad["end_count"] == 47
+        assert vad["start_margin_ms"] == 12
+        assert payload["output_policy"]["chunk_ms"] == 40
+        assert payload["output_policy"]["emit_text_events"] is False
+        assert payload["output_policy"]["config"] == {
+            "delivery": "guarded",
+            "delivery_window_ms": "160",
+        }
 
 
 class TestTritonHttpBufferedSession:

@@ -423,6 +423,100 @@ class TestVADObservability:
         assert proc.metrics.begin_trigger_count >= 2
         assert proc.metrics.end_trigger_count >= 1
 
+    def test_start_margin_is_effective_audio_not_prefix_trim(self):
+        cfg = TTSVADConfig(
+            mode=VADMode.ENERGY,
+            chunk_ms=16,
+            begin_threshold=0.5,
+            begin_count=1,
+            end_count=100,
+            start_margin_ms=32,
+        )
+        proc = EnergyVADProcessor(cfg, sample_rate=SAMPLE_RATE)
+        proc._score_frame = lambda frame: float(frame[0] != 0)
+
+        silence = np.zeros(5 * FRAME_SAMPLES, dtype=np.int16)
+        speech = np.ones(FRAME_SAMPLES, dtype=np.int16)
+        emitted = proc.process_chunk(np.concatenate((silence, speech)))
+
+        # Two lookback frames plus the onset frame are emitted. Only the three
+        # silence frames that fell out of lookback were actually trimmed.
+        assert emitted.size == 3 * FRAME_SAMPLES
+        m = proc.metrics
+        assert m.original_audio_samples == 6 * FRAME_SAMPLES
+        assert m.effective_audio_samples == 3 * FRAME_SAMPLES
+        assert m.prefix_trimmed_samples == 3 * FRAME_SAMPLES
+        assert m.tail_trimmed_samples == 0
+        assert (
+            m.original_audio_samples
+            == m.effective_audio_samples
+            + m.prefix_trimmed_samples
+            + m.tail_trimmed_samples
+        )
+
+    def test_all_silence_flush_is_exact_and_idempotent(self):
+        cfg = TTSVADConfig(
+            mode=VADMode.ENERGY,
+            chunk_ms=16,
+            begin_threshold=0.5,
+            begin_count=2,
+            start_margin_ms=20,
+        )
+        proc = EnergyVADProcessor(cfg, sample_rate=SAMPLE_RATE)
+        audio = _make_silence(83)  # includes a partial final frame
+
+        assert proc.process_chunk(audio).size == 0
+        assert proc.flush().size == 0
+        first_flush_metrics = vars(proc.metrics).copy()
+
+        m = proc.metrics
+        assert m.original_audio_samples == audio.size
+        assert m.effective_audio_samples == 0
+        assert m.prefix_trimmed_samples == audio.size
+        assert m.tail_trimmed_samples == 0
+        assert proc.flush().size == 0
+        assert vars(proc.metrics) == first_flush_metrics
+
+    def test_post_speech_trim_is_tail_and_metrics_conserve(self):
+        cfg = TTSVADConfig(
+            mode=VADMode.ENERGY,
+            chunk_ms=16,
+            begin_threshold=0.5,
+            begin_count=1,
+            end_threshold=0.5,
+            end_count=1,
+            start_margin_ms=16,
+        )
+        proc = EnergyVADProcessor(cfg, sample_rate=SAMPLE_RATE)
+        proc._score_frame = lambda frame: float(frame[0] != 0)
+
+        def frames(value, count):
+            return np.full(count * FRAME_SAMPLES, value, dtype=np.int16)
+
+        audio = np.concatenate(
+            (
+                frames(0, 3),
+                frames(1, 1),
+                frames(0, 1),  # triggers end and is discarded
+                frames(0, 3),
+                frames(1, 1),  # re-begin emits one-frame lookback margin
+            )
+        )
+
+        emitted = np.concatenate((proc.process_chunk(audio), proc.flush()))
+        m = proc.metrics
+        assert emitted.size == 4 * FRAME_SAMPLES
+        assert m.original_audio_samples == 9 * FRAME_SAMPLES
+        assert m.effective_audio_samples == 4 * FRAME_SAMPLES
+        assert m.prefix_trimmed_samples == 2 * FRAME_SAMPLES
+        assert m.tail_trimmed_samples == 3 * FRAME_SAMPLES
+        assert (
+            m.original_audio_samples
+            == m.effective_audio_samples
+            + m.prefix_trimmed_samples
+            + m.tail_trimmed_samples
+        )
+
 
 # ---------------------------------------------------------------------------
 # Reset
@@ -430,6 +524,85 @@ class TestVADObservability:
 
 
 class TestVADReset:
+    def test_discard_pending_breaks_cross_segment_onset_and_preserves_metrics(self):
+        cfg = TTSVADConfig(
+            mode=VADMode.ENERGY,
+            chunk_ms=16,
+            begin_threshold=0.5,
+            begin_count=2,
+            end_count=100,
+            start_margin_ms=0,
+        )
+        proc = EnergyVADProcessor(cfg, sample_rate=SAMPLE_RATE)
+        proc._score_frame = lambda frame: float(frame[0] != 0)
+        first_candidate = np.full(FRAME_SAMPLES, 1, dtype=np.int16)
+        second_segment = np.full(2 * FRAME_SAMPLES, 2, dtype=np.int16)
+
+        # Segment 0 aborts one frame short of a confirmed onset.
+        assert proc.process_chunk(first_candidate).size == 0
+        proc.discard_pending()
+        assert proc.state == VADState.SILENCE
+        assert proc.metrics.original_audio_samples == FRAME_SAMPLES
+        assert proc.metrics.prefix_trimmed_samples == FRAME_SAMPLES
+
+        # Segment 1 must establish its own two-frame onset.  The condemned
+        # marker from segment 0 is neither used to trigger nor emitted.
+        emitted = proc.process_chunk(second_segment)
+        assert emitted.size == 2 * FRAME_SAMPLES
+        assert set(int(x) for x in emitted) == {2}
+        m = proc.metrics
+        assert m.original_audio_samples == 3 * FRAME_SAMPLES
+        assert m.effective_audio_samples == 2 * FRAME_SAMPLES
+        assert m.prefix_trimmed_samples == FRAME_SAMPLES
+        assert (
+            m.original_audio_samples
+            == m.effective_audio_samples
+            + m.prefix_trimmed_samples
+            + m.tail_trimmed_samples
+        )
+
+    def test_discard_pending_accounts_partial_frame_exactly_once(self):
+        cfg = TTSVADConfig(mode=VADMode.ENERGY, chunk_ms=16)
+        proc = EnergyVADProcessor(cfg, sample_rate=SAMPLE_RATE)
+        partial = np.ones(FRAME_SAMPLES // 2, dtype=np.int16)
+
+        assert proc.process_chunk(partial).size == 0
+        proc.discard_pending()
+        first = vars(proc.metrics).copy()
+        proc.discard_pending()
+
+        assert proc.metrics.original_audio_samples == partial.size
+        assert proc.metrics.prefix_trimmed_samples == partial.size
+        assert vars(proc.metrics) == first
+
+    def test_discard_pending_after_speech_classifies_uncommitted_audio_as_tail(self):
+        cfg = TTSVADConfig(
+            mode=VADMode.ENERGY,
+            chunk_ms=16,
+            begin_threshold=0.5,
+            begin_count=2,
+            end_threshold=0.5,
+            end_count=1,
+            start_margin_ms=0,
+        )
+        proc = EnergyVADProcessor(cfg, sample_rate=SAMPLE_RATE)
+        proc._score_frame = lambda frame: float(frame[0] != 0)
+        speech = np.ones(2 * FRAME_SAMPLES, dtype=np.int16)
+        silence = np.zeros(FRAME_SAMPLES, dtype=np.int16)
+        next_candidate = np.full(FRAME_SAMPLES, 2, dtype=np.int16)
+
+        assert proc.process_chunk(speech).size == speech.size
+        assert proc.process_chunk(silence).size == 0
+        assert proc.process_chunk(next_candidate).size == 0
+        proc.discard_pending()
+
+        m = proc.metrics
+        assert m.first_effective_audio_found is True
+        assert m.prefix_trimmed_samples == 0
+        assert m.tail_trimmed_samples == 2 * FRAME_SAMPLES
+        assert m.original_audio_samples == 4 * FRAME_SAMPLES
+        assert m.effective_audio_samples == 2 * FRAME_SAMPLES
+
     def test_reset_clears_state(self):
         cfg = TTSVADConfig(
             mode=VADMode.ENERGY,

@@ -4,9 +4,21 @@ import asyncio
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-from engine.core.types import AudioConfig, AudioEncoding, GroupPolicy, InputMode
+from engine.core.timing import ServerTimingAccumulator
+from engine.core.types import (
+    AudioConfig,
+    AudioEncoding,
+    GroupPolicy,
+    InputMode,
+    OutputPolicyConfig,
+    SessionConfig,
+    VADConfig,
+)
+from engine.interface import OutputPipeline, SessionStartRequest, parse_output_policy
+from engine.interface.vad import EnergyVADProcessor, TTSVADConfig, VADMode
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "engine" / "gateway"))
@@ -14,6 +26,8 @@ sys.path.insert(0, str(REPO_ROOT / "engine" / "gateway"))
 from engine.gateway import tts_pb2
 from engine.gateway.grpc_server import (
     TTSServicer,
+    _build_vad_config,
+    _inject_vad_metrics,
     _make_capabilities_response,
     _start_request_from_oneshot_request,
     _start_request_from_stream_request,
@@ -21,6 +35,104 @@ from engine.gateway.grpc_server import (
     _session_config_from_stream_request,
     _validate_audio_config,
 )
+
+
+@pytest.mark.parametrize(
+    ("implementation", "expected_mode"),
+    [("", VADMode.ENERGY), ("energy", VADMode.ENERGY), ("tenvad", VADMode.TENVAD)],
+)
+def test_build_vad_config_maps_legacy_prefix_trim(implementation, expected_mode):
+    config = SessionConfig(
+        output_policy=OutputPolicyConfig(
+            vad=VADConfig(
+                enabled=True,
+                strategy="prefix_trim",
+                implementation=implementation,
+            )
+        )
+    )
+
+    assert _build_vad_config(config).mode == expected_mode
+
+
+def test_build_vad_config_normalizes_grpc_string_map_numbers():
+    config = SessionConfig(
+        output_policy=OutputPolicyConfig(
+            vad=VADConfig(
+                enabled=True,
+                strategy="energy",
+                config={
+                    "preemphasis": "0.5",
+                    "tenvad_hop_size": "128",
+                    "tenvad_threshold": "0.25",
+                },
+            )
+        )
+    )
+
+    built = _build_vad_config(config)
+    assert built.preemphasis == pytest.approx(0.5)
+    assert type(built.preemphasis) is float
+    assert built.tenvad_hop_size == 128
+    assert type(built.tenvad_hop_size) is int
+    assert built.tenvad_threshold == pytest.approx(0.25)
+    assert type(built.tenvad_threshold) is float
+
+
+def test_build_vad_config_rejects_invalid_numeric_extra():
+    config = SessionConfig(
+        output_policy=OutputPolicyConfig(
+            vad=VADConfig(
+                enabled=True,
+                strategy="energy",
+                config={"preemphasis": "not-a-number"},
+            )
+        )
+    )
+
+    with pytest.raises(ValueError, match="Invalid VAD config preemphasis"):
+        _build_vad_config(config)
+
+
+def test_all_silence_vad_reports_canonical_prefix_trim_without_effective_audio():
+    sample_rate = 24000
+    vad = EnergyVADProcessor(
+        TTSVADConfig(
+            mode=VADMode.ENERGY,
+            chunk_ms=10,
+            begin_threshold=0.5,
+            begin_count=2,
+            start_margin_ms=20,
+        ),
+        sample_rate=sample_rate,
+    )
+    silence = np.zeros(sample_rate * 2 // 5, dtype=np.int16)  # 400 ms
+    assert vad.process_chunk(silence).size == 0
+    assert vad.flush().size == 0
+
+    timing_acc = ServerTimingAccumulator()
+    cfg = SessionConfig(
+        audio=AudioConfig(sample_rate=sample_rate, encoding=AudioEncoding.PCM_F32)
+    )
+    pipeline = OutputPipeline(
+        SessionStartRequest(
+            session_id="all-silence",
+            config=cfg,
+            output_policy=parse_output_policy({}),
+        ),
+        timing_accumulator=timing_acc,
+    )
+    metrics = {}
+
+    _inject_vad_metrics(vad, pipeline, metrics)
+
+    assert metrics["vad_prefix_trimmed_ms"] == "400.000"
+    assert timing_acc.first_effective_audio_monotonic is None
+    assert timing_acc.prefix_trim_applied is True
+    assert timing_acc.prefix_trimmed_ms == 400.0
+    done_meta = pipeline.done_meta(metrics)
+    assert done_meta["server_prefix_trim_applied"] == "true"
+    assert done_meta["server_prefix_trimmed_ms"] == "400.000"
 
 
 def test_stream_request_start_maps_explicit_session_config():
@@ -648,9 +760,7 @@ def test_coalesce_stops_at_event_and_returns_it_as_leftover():
 def test_coalesce_does_not_absorb_chunk_with_diagnostic_meta():
     q: asyncio.Queue = asyncio.Queue()
     head = _audio_response(b"AA", meta=_std_meta(0))
-    special = _audio_response(
-        b"BB", meta={**_std_meta(1), "first_audio_chunk": "true"}
-    )
+    special = _audio_response(b"BB", meta={**_std_meta(1), "first_audio_chunk": "true"})
     q.put_nowait(("audio", special))
 
     merged, leftover = _coalesce_queued_audio(head, q)

@@ -7,6 +7,21 @@ from qwen3tts.timing import ServerTimingReport
 
 
 class TestServerTimingParse:
+    def test_parses_explicit_raw_and_effective_ttft(self):
+        report = ServerTimingReport.from_done_meta(
+            {
+                "server_ttft_raw_ms": "22.155",
+                "server_ttft_effective_ms": "172.500",
+                "server_guarded_delivery_prefix_bypass_chunks": "6",
+                "server_guarded_delivery_prefix_bypass_audio_ms": "480.0",
+            }
+        )
+        assert report.server_ttft_raw_ms == 22.155
+        assert report.server_ttft_effective_ms == 172.5
+        assert report.summary()["ttft_effective_ms"] == 172.5
+        assert report.server_guarded_delivery_prefix_bypass_chunks == 6
+        assert report.server_guarded_delivery_prefix_bypass_audio_ms == 480.0
+
     def test_session_created_prefers_monotonic_key(self):
         # The real session-created timestamp is emitted under *_monotonic; the
         # *_epoch_ms key carries the coarse request-received approximation.
@@ -33,6 +48,22 @@ class TestServerTimingParse:
         )
         assert report.client_request_to_server_first_audio_ms == 1000
         assert report.client_request_to_server_first_raw_audio_ms == 900
+
+    def test_prefix_trim_duration_is_not_double_counted_as_latency(self):
+        report = ServerTimingReport(
+            server_engine_prefill_ms=20.0,
+            server_first_raw_to_first_effective_audio_ms=150.0,
+            server_prefix_trimmed_ms=400.0,
+            server_guarded_delivery_prefix_bypass_chunks=5,
+            server_guarded_delivery_prefix_bypass_audio_ms=400.0,
+        )
+
+        explanation = report.explain_latency()
+
+        assert "Dominant: Output gating (raw→effective) (150.0ms)" in explanation
+        assert "Prefix audio removed: 400.0ms (content duration" in explanation
+        assert "Prefix VAD fast-path: 400.0ms raw audio inspected" in explanation
+        assert "Dominant: Prefix trim" not in explanation
 
 
 class TestRegressionCheck:

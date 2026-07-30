@@ -64,6 +64,40 @@ def test_output_policy_and_timing_round_trip_preserves_fields():
     assert core_timing.turn_id == "turn-1"
 
 
+def test_output_policy_round_trip_preserves_explicit_zero_vad_values():
+    output_policy = parse_output_policy(
+        {
+            "vad_policy": {
+                "enabled": True,
+                "strategy": "energy",
+                "chunk_ms": 0,
+                "begin_threshold": 0.0,
+                "begin_count": 0,
+                "end_threshold": 0.0,
+                "end_count": 0,
+                "start_margin_ms": 0,
+            },
+            "chunk_ms": 0,
+        }
+    )
+
+    serialized = serialize_output_policy(output_policy)
+    core_policy = to_core_output_policy(output_policy)
+
+    for field in (
+        "chunk_ms",
+        "begin_threshold",
+        "begin_count",
+        "end_threshold",
+        "end_count",
+        "start_margin_ms",
+    ):
+        assert getattr(output_policy.vad, field) == 0
+        assert serialized["vad_policy"][field] == 0
+        assert getattr(core_policy.vad, field) == 0
+    assert core_policy.chunk_ms == 0
+
+
 def test_default_vad_policy_is_disabled_and_noop_contract_only():
     policy = parse_output_policy({})
     timing = parse_timing_context({})
@@ -126,6 +160,7 @@ def test_output_pipeline_emits_server_timing_contract():
 
 def test_output_pipeline_updates_accumulator_with_effective_audio_and_prefix_trim():
     timing_acc = ServerTimingAccumulator()
+    timing_acc.session_created_monotonic = time.monotonic() - 0.2
     timing_acc.first_raw_audio_monotonic = time.monotonic() - 0.1
     cfg = SessionConfig(
         audio=AudioConfig(sample_rate=24000, encoding=AudioEncoding.PCM_F32)
@@ -140,12 +175,22 @@ def test_output_pipeline_updates_accumulator_with_effective_audio_and_prefix_tri
 
     pipeline.convert_audio_chunk(bytes([0, 0, 0, 0]))
     pipeline.record_prefix_trim(9600, 24000)
+    timing_acc.guarded_delivery_prefix_bypass_chunks = 6
+    timing_acc.guarded_delivery_prefix_bypass_audio_ms = 480.0
 
     summary = timing_acc.summary_dict()
     assert timing_acc.first_effective_audio_monotonic is not None
     assert summary["pipeline_ms"]["gating_ms"] > 0
     assert summary["prefix_trim_applied"] is True
     assert summary["prefix_trimmed_ms"] == 400.0
+    assert summary["ttft"]["create_to_first_effective_ms"] >= summary["ttft"].get(
+        "create_to_first_raw_ms", 0
+    )
+    assert summary["guarded_delivery"]["prefix_bypass_chunks"] == 6
+    assert summary["guarded_delivery"]["prefix_bypass_audio_ms"] == 480.0
+    done_meta = pipeline.done_meta()
+    assert done_meta["server_guarded_delivery_prefix_bypass_chunks"] == "6"
+    assert done_meta["server_guarded_delivery_prefix_bypass_audio_ms"] == "480.000"
 
 
 def test_normalize_capabilities_adds_interface_contract_fields():
@@ -155,6 +200,12 @@ def test_normalize_capabilities_adds_interface_contract_fields():
     assert "vad_policy" in caps["supported_output_policy_features"]
     assert "prefix_trim" in caps["supported_vad_strategies"]
     assert "server_ttft_ms" in caps["supported_timing_fields"]
+    assert "server_ttft_raw_ms" in caps["supported_timing_fields"]
+    assert "server_ttft_effective_ms" in caps["supported_timing_fields"]
+    assert (
+        "server_first_raw_to_first_effective_audio_ms"
+        in caps["supported_timing_fields"]
+    )
 
 
 def test_server_timing_emits_distinct_session_created_keys():

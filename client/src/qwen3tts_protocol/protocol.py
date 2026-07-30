@@ -55,8 +55,23 @@ SUPPORTED_TIMING_FIELDS = frozenset(
         "client_end_ts_ms",
         # Server-side timing fields (backward compatibility)
         "server_ttft_ms",
+        "server_ttft_raw_ms",
+        "server_ttft_effective_ms",
         "server_first_audio_epoch_ms",
+        "server_first_raw_audio_epoch_ms",
+        "server_first_effective_audio_epoch_ms",
         "server_session_create_to_first_raw_audio_ms",
+        "server_session_create_to_first_effective_audio_ms",
+        "server_first_text_enqueue_to_first_raw_audio_ms",
+        "server_first_text_enqueue_to_first_effective_audio_ms",
+        "server_first_text_dequeue_to_first_raw_audio_ms",
+        "server_first_text_dequeue_to_first_effective_audio_ms",
+        "server_first_raw_to_first_effective_audio_ms",
+        "server_engine_queue_wait_ms",
+        "server_engine_prefill_ms",
+        "server_prefix_trimmed_ms",
+        "server_guarded_delivery_prefix_bypass_chunks",
+        "server_guarded_delivery_prefix_bypass_audio_ms",
     }
 )
 
