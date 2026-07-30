@@ -79,6 +79,9 @@ class OutputPipeline:
         self._prefix_trim_applied = True
         self._prefix_trimmed_samples = trimmed_samples
         self._prefix_trimmed_ms = (trimmed_samples / sample_rate) * 1000.0
+        if self._timing_accumulator is not None:
+            self._timing_accumulator.prefix_trim_applied = True
+            self._timing_accumulator.prefix_trimmed_ms = self._prefix_trimmed_ms
 
     def convert_audio_chunk(self, pcm_bytes: bytes) -> AudioFrame:
         audio = np.frombuffer(pcm_bytes, dtype=np.float32)
@@ -103,20 +106,37 @@ class OutputPipeline:
         }
         if first_chunk:
             # Raw audio = audio arriving from engine, before any output gating.
-            # Effective audio = audio after gating (same as raw when no gating).
-            self._first_raw_audio_epoch_ms = now_epoch_ms
-            self._first_raw_audio_monotonic = now_monotonic
+            # The gateway calls this conversion only after output gating, so
+            # recover the true raw timestamp from the shared accumulator when
+            # available instead of incorrectly equating raw with effective.
+            raw_monotonic = getattr(
+                self._timing_accumulator, "first_raw_audio_monotonic", None
+            )
+            if raw_monotonic is None:
+                raw_monotonic = now_monotonic
+            self._first_raw_audio_monotonic = raw_monotonic
+            if self._timing_accumulator is not None:
+                self._first_raw_audio_epoch_ms = (
+                    self._timing_accumulator.monotonic_to_epoch_ms(raw_monotonic)
+                )
+            else:
+                self._first_raw_audio_epoch_ms = now_epoch_ms
             self._first_effective_audio_epoch_ms = now_epoch_ms
             self._first_effective_audio_monotonic = now_monotonic
+            if self._timing_accumulator is not None:
+                self._timing_accumulator.first_effective_audio_monotonic = now_monotonic
 
             meta["first_audio_chunk"] = "true"
 
             # Semantic metric names (canonical)
-            raw_ttft = (now_monotonic - self._request_received_monotonic) * 1000.0
+            raw_ttft = (raw_monotonic - self._request_received_monotonic) * 1000.0
+            effective_ttft = (now_monotonic - self._request_received_monotonic) * 1000.0
             meta["server_ttft_raw_ms"] = f"{raw_ttft:.3f}"
-            meta["server_ttft_effective_ms"] = f"{raw_ttft:.3f}"
+            meta["server_ttft_effective_ms"] = f"{effective_ttft:.3f}"
             meta["server_session_create_to_first_raw_audio_ms"] = f"{raw_ttft:.3f}"
-            meta["server_first_raw_audio_epoch_ms"] = str(now_epoch_ms)
+            meta["server_first_raw_audio_epoch_ms"] = str(
+                self._first_raw_audio_epoch_ms
+            )
             meta["server_first_effective_audio_epoch_ms"] = str(now_epoch_ms)
 
             # Deprecated aliases (same value, matches old behavior)
@@ -146,10 +166,20 @@ class OutputPipeline:
             meta["server_first_raw_audio_epoch_ms"] = str(
                 self._first_raw_audio_epoch_ms
             )
+        if self._first_raw_audio_monotonic is not None:
+            raw_ttft_ms = (
+                self._first_raw_audio_monotonic - self._request_received_monotonic
+            ) * 1000.0
+            meta["server_ttft_raw_ms"] = f"{raw_ttft_ms:.3f}"
         if self._first_effective_audio_epoch_ms is not None:
             meta["server_first_effective_audio_epoch_ms"] = str(
                 self._first_effective_audio_epoch_ms
             )
+        if self._first_effective_audio_monotonic is not None:
+            effective_ttft_ms = (
+                self._first_effective_audio_monotonic - self._request_received_monotonic
+            ) * 1000.0
+            meta["server_ttft_effective_ms"] = f"{effective_ttft_ms:.3f}"
 
         # Derived raw-to-effective latency (gating delay)
         if (

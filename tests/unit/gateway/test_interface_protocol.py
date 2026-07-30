@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import time
 
+from engine.core.timing import ServerTimingAccumulator
 from engine.core.types import AudioConfig, AudioEncoding, SessionConfig
 from engine.interface import (
     OutputPipeline,
@@ -120,6 +122,30 @@ def test_output_pipeline_emits_server_timing_contract():
     assert done["meta"]["turn_id"] == "turn-2"
     assert done["meta"]["client_request_ts_ms"] == "1710000000000"
     assert done["meta"]["audio_chunk_count"] == "1"
+
+
+def test_output_pipeline_updates_accumulator_with_effective_audio_and_prefix_trim():
+    timing_acc = ServerTimingAccumulator()
+    timing_acc.first_raw_audio_monotonic = time.monotonic() - 0.1
+    cfg = SessionConfig(
+        audio=AudioConfig(sample_rate=24000, encoding=AudioEncoding.PCM_F32)
+    )
+    start = SessionStartRequest(
+        session_id="sid-vad",
+        config=cfg,
+        output_policy=parse_output_policy({}),
+        timing=parse_timing_context({}),
+    )
+    pipeline = OutputPipeline(start, timing_accumulator=timing_acc)
+
+    pipeline.convert_audio_chunk(bytes([0, 0, 0, 0]))
+    pipeline.record_prefix_trim(9600, 24000)
+
+    summary = timing_acc.summary_dict()
+    assert timing_acc.first_effective_audio_monotonic is not None
+    assert summary["pipeline_ms"]["gating_ms"] > 0
+    assert summary["prefix_trim_applied"] is True
+    assert summary["prefix_trimmed_ms"] == 400.0
 
 
 def test_normalize_capabilities_adds_interface_contract_fields():

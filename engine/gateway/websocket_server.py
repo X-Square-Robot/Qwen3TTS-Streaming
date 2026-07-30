@@ -774,6 +774,40 @@ class WebSocketGateway:
         vad_processor = create_vad_processor(vad_config, sample_rate=ENGINE_SAMPLE_RATE)
 
         vad_enabled = vad_processor.config.enabled
+        first_effective_logged = False
+
+        def log_first_effective_audio() -> None:
+            """Emit the first audible-output boundary with VAD context once."""
+            nonlocal first_effective_logged
+            if first_effective_logged:
+                return
+            first_effective_logged = True
+            vad_metrics = vad_processor.metrics
+            prefix_trimmed_ms = (
+                vad_metrics.prefix_trimmed_samples / ENGINE_SAMPLE_RATE * 1000.0
+            )
+            gating_ms = None
+            if (
+                timing_acc.first_raw_audio_monotonic is not None
+                and timing_acc.first_effective_audio_monotonic is not None
+            ):
+                gating_ms = (
+                    timing_acc.first_effective_audio_monotonic
+                    - timing_acc.first_raw_audio_monotonic
+                ) * 1000.0
+            LifecycleLogger.emit(
+                session_id=internal_session_id,
+                phase="output.audio.first_effective",
+                request_id=config.timing.request_id or None,
+                client_session_id=client_session_id,
+                session_level=config.observability_level,
+                vad_policy=vad_processor.config.mode.value,
+                prefix_trim_applied=prefix_trimmed_ms > 0.0,
+                prefix_trimmed_ms=round(prefix_trimmed_ms, 3),
+                first_raw_to_first_effective_audio_ms=(
+                    round(gating_ms, 3) if gating_ms is not None else None
+                ),
+            )
 
         async def on_audio(sid: str, data: bytes) -> None:
             if not vad_enabled:
@@ -782,6 +816,7 @@ class WebSocketGateway:
                 if not data:
                     return
                 frame = pipeline.convert_audio_chunk(data)
+                log_first_effective_audio()
                 await outbound_queue.put(
                     _make_audio_frame(frame.pcm_bytes, frame.audio, meta=frame.meta)
                 )
@@ -801,6 +836,7 @@ class WebSocketGateway:
             filtered_bytes = filtered_f32.tobytes()
 
             frame = pipeline.convert_audio_chunk(filtered_bytes)
+            log_first_effective_audio()
             await outbound_queue.put(
                 _make_audio_frame(frame.pcm_bytes, frame.audio, meta=frame.meta)
             )
@@ -819,6 +855,7 @@ class WebSocketGateway:
                 final_f32 = final_int16.astype(np.float32) / 32767.0
                 final_bytes = final_f32.tobytes()
                 frame = pipeline.convert_audio_chunk(final_bytes)
+                log_first_effective_audio()
                 await outbound_queue.put(
                     _make_audio_frame(frame.pcm_bytes, frame.audio, meta=frame.meta)
                 )

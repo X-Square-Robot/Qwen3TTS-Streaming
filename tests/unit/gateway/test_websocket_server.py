@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 import uuid
 
+import numpy as np
 import pytest
 
 from engine.core.types import AudioEncoding, GroupPolicy, InputMode
@@ -204,6 +206,103 @@ async def test_websocket_gateway_streams_audio_and_events_when_aiohttp_available
             assert third_event["type"] == "done"
             assert third_event["meta"]["timing_contract"] == "server_monotonic_v1"
             assert third_event["meta"]["audio_chunk_count"] == "1"
+
+            await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_websocket_logs_first_effective_audio_with_prefix_trim(
+    monkeypatch,
+):
+    aiohttp = pytest.importorskip("aiohttp")
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    lifecycle_events = []
+    monkeypatch.setattr(
+        "engine.gateway.websocket_server.LifecycleLogger.emit",
+        lambda **fields: lifecycle_events.append(fields),
+    )
+
+    class _VadStubEngine:
+        async def start_session(
+            self, session_id, *, config, on_audio=None, on_done=None, on_event=None
+        ):
+            self._on_audio = on_audio
+            self._on_done = on_done
+            self._timing_acc = config.timing.extra["_server_timing_accumulator"]
+            return session_id
+
+        async def push_text_input(self, session_id, text):
+            self._timing_acc.first_raw_audio_monotonic = time.monotonic()
+            silence = np.zeros(9600, dtype=np.float32)  # 400 ms @ 24 kHz
+            samples = np.arange(2400, dtype=np.float32)
+            tone = (0.5 * np.sin(2.0 * np.pi * 440.0 * samples / 24000.0)).astype(
+                np.float32
+            )
+            await self._on_audio(session_id, np.concatenate((silence, tone)).tobytes())
+
+        async def mark_input_complete(self, session_id):
+            await self._on_done(session_id, {})
+
+        async def cancel(self, session_id):
+            return None
+
+    gateway = WebSocketGateway(_VadStubEngine())
+    app = web.Application()
+    app.router.add_get("/v1/ws", gateway.handle_websocket)
+
+    server = TestServer(app)
+    async with server:
+        client = TestClient(server)
+        async with client:
+            ws = await client.ws_connect("/v1/ws")
+            await ws.send_json(
+                {
+                    "type": "start",
+                    "session_id": "sid-vad",
+                    "config": {
+                        "task_type": "custom_voice",
+                        "output_policy": {
+                            "vad_policy": {
+                                "enabled": True,
+                                "strategy": "energy",
+                                "implementation": "energy",
+                                "chunk_ms": 10,
+                                "begin_threshold": 0.1,
+                                "begin_count": 2,
+                                "start_margin_ms": 20,
+                            }
+                        },
+                    },
+                }
+            )
+            await ws.send_json({"type": "text", "text": "你好"})
+            await ws.send_json({"type": "end"})
+
+            received_done = None
+            for _ in range(5):
+                message = await ws.receive(timeout=0.5)
+                if message.type == aiohttp.WSMsgType.TEXT:
+                    event = json.loads(message.data)["event"]
+                    if event["type"] == "done":
+                        received_done = event
+                        break
+
+            first_effective = next(
+                event
+                for event in lifecycle_events
+                if event.get("phase") == "output.audio.first_effective"
+            )
+            assert first_effective["vad_policy"] == "energy"
+            assert first_effective["prefix_trim_applied"] is True
+            assert first_effective["prefix_trimmed_ms"] > 0
+            assert first_effective["first_raw_to_first_effective_audio_ms"] >= 0
+            assert received_done is not None
+            assert received_done["meta"]["server_prefix_trim_applied"] == "true"
+            assert float(received_done["meta"]["server_ttft_effective_ms"]) > float(
+                received_done["meta"]["server_ttft_raw_ms"]
+            )
 
             await ws.close()
 

@@ -223,7 +223,7 @@ def _guarded_session():
 ONE_SEC_CHUNK = 24000 * 4  # 1s of f32 mono engine audio
 
 
-def _run_consume(session, results, events=None, interface=None):
+def _run_consume(session, results, events=None, interface=None, callback_order=None):
     delivered = []
     done_meta = {}
 
@@ -232,6 +232,8 @@ def _run_consume(session, results, events=None, interface=None):
 
     async def on_done(session_id, meta):
         done_meta.update(meta)
+        if callback_order is not None:
+            callback_order.append("done")
 
     async def on_event(session_id, event):
         events.append(event)
@@ -293,6 +295,23 @@ FRAME_BYTES = 24000 * 4 * 80 // 1000  # one 80ms engine frame = 7680 bytes
 
 
 class TestConsumeResultsGuarded:
+    def test_session_summary_runs_after_output_policy_finalization(self):
+        session = _guarded_session()
+        callback_order = []
+        interface = _fake_interface_self()
+        interface._emit_session_summary = lambda *args, **kwargs: callback_order.append(
+            "summary"
+        )
+
+        _run_consume(
+            session,
+            _single_segment_results("codec_eos"),
+            interface=interface,
+            callback_order=callback_order,
+        )
+
+        assert callback_order == ["done", "summary"]
+
     def test_loop_abort_discards_condemned_tail_and_skips_ema(self):
         session = _guarded_session()
         # 25 frames total, last 15 condemned -> discard covers the held chunk

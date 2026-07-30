@@ -775,16 +775,6 @@ class FrontendInterface:
                         async with hold_lock:
                             await _send_chunks(hold.flush())
                     session.state = SessionState.DONE
-                    self._emit_session_summary(session, batch_agg, final_text_parts)
-                    LifecycleLogger.emit(
-                        session_id=session.session_id,
-                        phase="session.completed",
-                        request_id=session.config.timing.request_id or None,
-                        turn_id=session.config.timing.turn_id or None,
-                        session_level=session.config.observability_level,
-                        total_segments=session.segments_done,
-                        total_audio_bytes=session.total_audio_bytes,
-                    )
                     # Surface the L1 batch / text facts to the client protocol
                     # (done_meta merges these), enabling L0 client self-analysis.
                     done_metrics = dict(result.metrics or {})
@@ -797,6 +787,19 @@ class FrontendInterface:
                     done_metrics["server_total_segments"] = str(session.segments_done)
                     if on_done:
                         await on_done(session.session_id, done_metrics)
+                    # Gateway on_done performs output-policy finalization (for
+                    # example VAD flush and prefix-trim accounting). Emit the
+                    # summary only afterwards so it observes those final values.
+                    self._emit_session_summary(session, batch_agg, final_text_parts)
+                    LifecycleLogger.emit(
+                        session_id=session.session_id,
+                        phase="session.completed",
+                        request_id=session.config.timing.request_id or None,
+                        turn_id=session.config.timing.turn_id or None,
+                        session_level=session.config.observability_level,
+                        total_segments=session.segments_done,
+                        total_audio_bytes=session.total_audio_bytes,
+                    )
                     break
 
                 elif result.type == ResultType.ERROR:
