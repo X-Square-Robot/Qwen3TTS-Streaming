@@ -64,6 +64,21 @@ class TestEnvOverrides:
             _apply_env_overrides(raw)
         assert raw["server"]["health_probe_mode"] == "alive"
 
+    def test_applies_token_loop_guard_overrides(self):
+        raw: dict = {}
+        env = {
+            "ENGINE_SCHEDULER_TOKEN_LOOP_SUSPECT_FRAMES": "5",
+            "ENGINE_SCHEDULER_TOKEN_LOOP_ABORT_FRAMES": "12",
+            "ENGINE_SCHEDULER_TOKEN_LOOP_MIN_AUDIO_TEXT_RATIO": "2.5",
+            "ENGINE_SCHEDULER_TOKEN_LOOP_EMERGENCY_ABORT_FRAMES": "24",
+        }
+        with _patch_env(env):
+            _apply_env_overrides(raw)
+        assert raw["scheduler"]["token_loop_suspect_frames"] == 5
+        assert raw["scheduler"]["token_loop_abort_frames"] == 12
+        assert raw["scheduler"]["token_loop_min_audio_text_ratio"] == 2.5
+        assert raw["scheduler"]["token_loop_emergency_abort_frames"] == 24
+
     def test_applies_multiword_section_overrides(self):
         raw: dict = {}
         env = {

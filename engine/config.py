@@ -166,12 +166,25 @@ class SchedulerConfig:
     # Pad-phase near-silence detection thresholds.
     pad_silence_peak_threshold: float = 5e-4
     pad_silence_mean_abs_threshold: float = 2e-4
-    # Token loop guard: abort a segment when codebook-0 emits the same token
-    # for this many consecutive decode steps (0 = disabled). Hallucination
-    # runaways lock codebook-0 onto one token for 10-39 frames, while normal
-    # speech never exceeds 3 consecutive repeats (500-session sweep,
-    # 2026-07-16); 4 gave 93.2% recall with zero false aborts there.
-    token_loop_abort_frames: int = 4
+    # Token loop guard, stage 1: report a suspect run when codebook-0 emits the
+    # same token for this many consecutive decode steps. A suspect is telemetry
+    # only; generation continues so short, naturally recovering runs are not
+    # truncated (0 = disable suspect/recovery telemetry).
+    token_loop_suspect_frames: int = 4
+    # Token loop guard, stage 2: retry/abort only when the same codebook-0 run
+    # persists to this confirmation threshold (0 = disable the whole guard).
+    # The original 4-frame threshold was calibrated on one text/speaker and
+    # produced a confirmed false abort on a different long-form request. True
+    # loops in the original sweep persisted for 10-39 frames, hence 10 here.
+    token_loop_abort_frames: int = 10
+    # Require generation to have progressed this far relative to consumed text
+    # before the confirmed run can retry/abort. This prevents ordinary early
+    # pronunciation holds from becoming terminal verdicts. 0 disables the
+    # progress gate (legacy behavior).
+    token_loop_min_audio_text_ratio: float = 2.0
+    # Unconditional safety cap for a persistent run while input/progress is not
+    # ready (for example a stalled token stream). 0 disables this fallback.
+    token_loop_emergency_abort_frames: int = 20
     # When the guard (or pad-silence abort) fires on a segment whose audio is
     # still fully buffered behind an earlier live segment, rerun it with a
     # reseeded sampling stream instead of aborting, up to this many attempts

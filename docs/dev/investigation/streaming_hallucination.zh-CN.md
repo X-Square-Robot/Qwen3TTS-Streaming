@@ -949,3 +949,30 @@ cp=fp32 这个缓解措施（Finding #15 时代引入）在 0701 重训之后从
 - NaN/Inf/非 f32 对齐 PCM 立即中止并在安全时重跑。
 - 命中 KV 上限且 audio:text 比例达到 `scheduler.length_runaway_ratio` 时按 runaway 处理；普通长文本 overflow 保留原行为。
 - 这些规则仍不能识别“语音清晰但内容与文本无关”或一般随机噪声；后者需要经验证的音频分类器，前者需要 ASR/对齐模型。
+
+### 2026-07-31：四连误杀复现与两阶段、进度门控守卫
+
+一个生产长文本 segment 在 codebook-0 上生成 `611×4` 后，第 5 帧立即恢复；旧守卫却
+在第 4 帧把 segment 终止。严格反事实重放中，guard=4 与 guard=0 的前 81 帧在完整
+16-codebook 和 WAV tensor 上逐元素一致；guard=0 的第 82 帧变为 `640`，最终第 230
+帧自然 codec EOS。另一条 frame=23 轨迹也在四连后立即恢复并自然结束。因此 N=4 在
+跨文本/跨长度分布上不是可靠终判。
+
+不能用“完整 16-codebook 相等”或 PCM 相似作为必要确认：历史真实循环中其余 15 路
+residual codebook 仍持续变化；895 个真实 loop 相邻对的 residual Hamming 均值为
+`14.85/15`，与误杀轨迹重叠。PCM 时域/频谱相似度也没有形成可用间隔。
+
+守卫改为低开销的多阶段判决：
+
+1. `token_loop_suspect_frames=4` 只记录 suspect；若 token 在终判前变化，记录 recovered，
+   不截断音频。
+2. `token_loop_abort_frames=10` 才进入确认；这是旧 500 席真实循环 `10–39` 帧的实测下界。
+3. 确认还要求输入完成且 `audio_steps/text_tokens >= 2.0`。两个误杀点分别为 `0.32` 和
+   `1.11`；冻结 500 席中 N=4 可检出的 69/74 坏例最小触发 ratio 为 `3.45`，所以该门
+   在冻结集上不损失原召回。
+4. 若输入或进度尚未 ready，但同一 token 持续到 20 帧，走 emergency retry/abort，避免
+   上游卡住时无限生成。
+
+segment metrics 现在包含 `loop_max_run`、`loop_suspect_count`、
+`loop_recovery_count` 和终判 `guard_mode`，用于线上量化候选恢复率并继续校准。一般性的
+非循环语义幻觉仍需 attention/codec reviewer 或 ASR 对齐信号，不能由本守卫覆盖。

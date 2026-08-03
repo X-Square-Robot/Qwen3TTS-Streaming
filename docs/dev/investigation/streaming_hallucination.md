@@ -854,3 +854,40 @@ Two escalations landed on top of the guard, closing the repair loop server-side 
 - NaN, Inf, and non-f32-aligned PCM abort immediately and rerun when safe.
 - KV-cap termination is treated as a runaway only when its audio:text ratio reaches `scheduler.length_runaway_ratio`; genuine long-text overflow keeps the prior behavior.
 - These conservative rules still do not recognize clear but semantically unrelated speech or general random noise. Those require a validated audio classifier and ASR/alignment respectively.
+
+### 2026-07-31: four-frame false abort and progress-gated hysteresis
+
+A production long-text segment emitted `611` on codebook-0 for four frames and
+recovered on the next frame, but the old guard terminated it at frame four. In
+a strict counterfactual replay, guard=4 and guard=0 were elementwise identical
+for the first 81 frames across all 16 codebooks and the WAV tensor. With the
+guard disabled, frame 82 changed to `640` and frame 230 emitted natural codec
+EOS. A second frame-23 trajectory likewise recovered immediately and ended
+naturally. N=4 is therefore not a reliable terminal verdict across texts and
+lengths.
+
+Requiring the full 16-codebook tuple or PCM to repeat is not a valid fix. The
+15 residual codebooks continue changing in real runaways: across 895 adjacent
+pairs inside historical true loops their mean residual Hamming distance is
+`14.85/15`, overlapping the false-abort trace. Time-domain and spectral PCM
+similarity overlap as well.
+
+The guard now uses low-cost staged evidence:
+
+1. `token_loop_suspect_frames=4` records a suspect only. A token change before
+   confirmation records a recovery and never truncates audio.
+2. `token_loop_abort_frames=10` is the confirmation threshold, matching the
+   observed 10–39-frame true-loop range in the original sweep.
+3. Confirmation also requires completed input and
+   `audio_steps/text_tokens >= 2.0`. The two false-abort points were at ratios
+   0.32 and 1.11; the earliest N=4 hit among the 69/74 detectable historical
+   bad cases was 3.45, so this gate preserves recall on the frozen set.
+4. A run that reaches 20 frames still takes the emergency retry/abort path even
+   while input or progress is not ready, preventing an upstream stall from
+   generating forever.
+
+Segment metrics now expose `loop_max_run`, `loop_suspect_count`,
+`loop_recovery_count`, and the terminal `guard_mode` for production
+calibration. General non-cyclic semantic hallucination still requires an
+attention/codec reviewer or ASR alignment signal and remains outside this
+guard's scope.

@@ -111,6 +111,9 @@ class EngineSegment:
         "first_raw_audio_sent",
         "loop_token",
         "loop_run",
+        "loop_max_run",
+        "loop_suspect_count",
+        "loop_recovery_count",
         "retry_idx",
         "audio_frames_seen",
         "audible_frame_seen",
@@ -145,10 +148,14 @@ class EngineSegment:
         self.pending_token_ids: list[int] = []
         self.eos_trailing_added: bool = False
         self.first_raw_audio_sent: bool = False
-        # Token loop guard state: last codebook-0 token and its consecutive
-        # run length (-1/0 = no run yet; token ids are always >= 0).
+        # Two-stage token-loop guard state. Short codebook-0 runs are suspects,
+        # not verdicts: only a run that reaches the confirmation threshold may
+        # retry/abort the segment.
         self.loop_token: int = -1
         self.loop_run: int = 0
+        self.loop_max_run: int = 0
+        self.loop_suspect_count: int = 0
+        self.loop_recovery_count: int = 0
         # Rerun attempt count (0 = first attempt); salts the sampling seed.
         self.retry_idx: int = 0
         # Conservative output-health state. It deliberately distinguishes only
@@ -251,7 +258,10 @@ class EngineLoop:
         min_pad_steps: int = 4,
         pad_silence_peak_threshold: float = 5e-4,
         pad_silence_mean_abs_threshold: float = 2e-4,
-        token_loop_abort_frames: int = 4,
+        token_loop_suspect_frames: int = 4,
+        token_loop_abort_frames: int = 10,
+        token_loop_min_audio_text_ratio: float = 2.0,
+        token_loop_emergency_abort_frames: int = 20,
         token_loop_max_retries: int = 1,
         length_runaway_ratio: float = 10.0,
         max_slots_per_session: int = 2,
@@ -268,6 +278,21 @@ class EngineLoop:
         self._pad_silence_peak_threshold = float(pad_silence_peak_threshold)
         self._pad_silence_mean_abs_threshold = float(pad_silence_mean_abs_threshold)
         self._token_loop_abort_frames = max(0, int(token_loop_abort_frames))
+        suspect_frames = max(0, int(token_loop_suspect_frames))
+        self._token_loop_suspect_frames = (
+            min(suspect_frames, self._token_loop_abort_frames)
+            if suspect_frames > 0 and self._token_loop_abort_frames > 0
+            else 0
+        )
+        self._token_loop_min_audio_text_ratio = max(
+            0.0, float(token_loop_min_audio_text_ratio)
+        )
+        emergency_frames = max(0, int(token_loop_emergency_abort_frames))
+        self._token_loop_emergency_abort_frames = (
+            max(emergency_frames, self._token_loop_abort_frames)
+            if emergency_frames > 0 and self._token_loop_abort_frames > 0
+            else 0
+        )
         self._token_loop_max_retries = max(0, int(token_loop_max_retries))
         self._length_runaway_ratio = max(1.0, float(length_runaway_ratio))
         self._max_slots_per_session = max(1, int(max_slots_per_session))
@@ -1987,31 +2012,173 @@ class EngineLoop:
                         )
                         continue
 
-                # --- Token loop guard ---
-                # Hallucination runaways lock codebook-0 onto one token for
-                # 10-39 consecutive frames; normal speech never exceeds 3
-                # (500-session sweep, 2026-07-16 — see
-                # docs/dev/investigation/streaming_hallucination.md). Abort
-                # once the run hits the threshold, fading the final frame so
-                # a mid-voice cut doesn't click.
+                # --- Two-stage token loop guard ---
+                # Codebook-0 is a useful semantic-loop symptom, but a short run
+                # is not a verdict. At the suspect threshold we only emit L2
+                # telemetry; a token change records a recovery. Retry/abort is
+                # reserved for a run that persists to the confirmation
+                # threshold. Requiring the full 16-codebook tuple to repeat is
+                # intentionally not used: the 15 residual codebooks keep
+                # changing in measured real runaways as well as normal speech.
                 if self._token_loop_abort_frames > 0 and i < len(output.tokens):
                     token = output.tokens[i]
                     if token is not None:
                         if token == seg.loop_token:
                             seg.loop_run += 1
                         else:
+                            recovered_token = seg.loop_token
+                            recovered_run = seg.loop_run
+                            if (
+                                self._token_loop_suspect_frames > 0
+                                and recovered_run >= self._token_loop_suspect_frames
+                            ):
+                                seg.loop_recovery_count += 1
+                                logger.debug(
+                                    "Loop recovered: %s seg=%d token=%d run=%d "
+                                    "frame=%d next_token=%d",
+                                    seg.session_id,
+                                    seg.segment_idx,
+                                    recovered_token,
+                                    recovered_run,
+                                    slot.frame_idx,
+                                    token,
+                                )
+                                session_level = self._session_obs_level(group)
+                                if obs.is_enabled(obs.ObsLevel.DEBUG, session_level):
+                                    LifecycleLogger.emit(
+                                        session_id=seg.session_id,
+                                        phase="loop_guard",
+                                        segment_idx=seg.segment_idx,
+                                        min_level=obs.ObsLevel.DEBUG,
+                                        session_level=session_level,
+                                        decision="loop_recovered",
+                                        token=recovered_token,
+                                        run=recovered_run,
+                                        frame_idx=slot.frame_idx,
+                                        next_token=token,
+                                        suspect_threshold=(
+                                            self._token_loop_suspect_frames
+                                        ),
+                                        abort_threshold=self._token_loop_abort_frames,
+                                    )
                             seg.loop_token = token
                             seg.loop_run = 1
-                        if seg.loop_run >= self._token_loop_abort_frames:
-                            if self._try_segment_retry(group, seg, reason="loop"):
-                                continue
-                            logger.info(
-                                "Loop abort: %s seg=%d token=%d run=%d frame=%d",
+                        seg.loop_max_run = max(seg.loop_max_run, seg.loop_run)
+                        if (
+                            self._token_loop_suspect_frames > 0
+                            and seg.loop_run == self._token_loop_suspect_frames
+                        ):
+                            seg.loop_suspect_count += 1
+                            logger.debug(
+                                "Loop suspect: %s seg=%d token=%d run=%d "
+                                "frame=%d abort_at=%d",
                                 seg.session_id,
                                 seg.segment_idx,
                                 token,
                                 seg.loop_run,
                                 slot.frame_idx,
+                                self._token_loop_abort_frames,
+                            )
+                            session_level = self._session_obs_level(group)
+                            if obs.is_enabled(obs.ObsLevel.DEBUG, session_level):
+                                LifecycleLogger.emit(
+                                    session_id=seg.session_id,
+                                    phase="loop_guard",
+                                    segment_idx=seg.segment_idx,
+                                    min_level=obs.ObsLevel.DEBUG,
+                                    session_level=session_level,
+                                    decision="loop_suspect",
+                                    token=token,
+                                    run=seg.loop_run,
+                                    frame_idx=slot.frame_idx,
+                                    suspect_threshold=(self._token_loop_suspect_frames),
+                                    abort_threshold=self._token_loop_abort_frames,
+                                )
+                        audio_steps = max(0, slot.frame_idx - seg.decode_start_frame)
+                        text_tokens = max(0, seg.text_tokens_consumed)
+                        audio_text_ratio = (
+                            audio_steps / text_tokens if text_tokens > 0 else 0.0
+                        )
+                        progress_ready = (
+                            self._token_loop_min_audio_text_ratio <= 0.0
+                            or (
+                                seg.input_complete
+                                and (
+                                    text_tokens == 0
+                                    or audio_text_ratio
+                                    >= self._token_loop_min_audio_text_ratio
+                                )
+                            )
+                        )
+                        confirmed = (
+                            seg.loop_run >= self._token_loop_abort_frames
+                            and progress_ready
+                        )
+                        emergency = (
+                            self._token_loop_emergency_abort_frames > 0
+                            and seg.loop_run >= self._token_loop_emergency_abort_frames
+                        )
+                        if (
+                            seg.loop_run == self._token_loop_abort_frames
+                            and not progress_ready
+                        ):
+                            logger.debug(
+                                "Loop deferred: %s seg=%d token=%d run=%d "
+                                "frame=%d input_complete=%s ratio=%.2f min_ratio=%.2f "
+                                "emergency_at=%d",
+                                seg.session_id,
+                                seg.segment_idx,
+                                token,
+                                seg.loop_run,
+                                slot.frame_idx,
+                                seg.input_complete,
+                                audio_text_ratio,
+                                self._token_loop_min_audio_text_ratio,
+                                self._token_loop_emergency_abort_frames,
+                            )
+                            session_level = self._session_obs_level(group)
+                            if obs.is_enabled(obs.ObsLevel.DEBUG, session_level):
+                                LifecycleLogger.emit(
+                                    session_id=seg.session_id,
+                                    phase="loop_guard",
+                                    segment_idx=seg.segment_idx,
+                                    min_level=obs.ObsLevel.DEBUG,
+                                    session_level=session_level,
+                                    decision="loop_deferred",
+                                    token=token,
+                                    run=seg.loop_run,
+                                    frame_idx=slot.frame_idx,
+                                    input_complete=seg.input_complete,
+                                    audio_text_ratio=round(audio_text_ratio, 3),
+                                    min_audio_text_ratio=(
+                                        self._token_loop_min_audio_text_ratio
+                                    ),
+                                    emergency_threshold=(
+                                        self._token_loop_emergency_abort_frames
+                                    ),
+                                )
+                        if confirmed or emergency:
+                            guard_mode = "progress" if confirmed else "emergency"
+                            if self._try_segment_retry(
+                                group,
+                                seg,
+                                reason="loop",
+                                guard_mode=guard_mode,
+                                guard_audio_text_ratio=audio_text_ratio,
+                            ):
+                                continue
+                            logger.info(
+                                "Loop abort: %s seg=%d token=%d run=%d frame=%d "
+                                "suspect_at=%d abort_at=%d mode=%s ratio=%.2f",
+                                seg.session_id,
+                                seg.segment_idx,
+                                token,
+                                seg.loop_run,
+                                slot.frame_idx,
+                                self._token_loop_suspect_frames,
+                                self._token_loop_abort_frames,
+                                guard_mode,
+                                audio_text_ratio,
                             )
                             # L2: why this segment got loop-aborted.
                             session_level = self._session_obs_level(group)
@@ -2026,6 +2193,19 @@ class EngineLoop:
                                     token=token,
                                     run=seg.loop_run,
                                     frame_idx=slot.frame_idx,
+                                    suspect_threshold=(self._token_loop_suspect_frames),
+                                    abort_threshold=self._token_loop_abort_frames,
+                                    suspect_count=seg.loop_suspect_count,
+                                    recovery_count=seg.loop_recovery_count,
+                                    guard_mode=guard_mode,
+                                    input_complete=seg.input_complete,
+                                    audio_text_ratio=round(audio_text_ratio, 3),
+                                    min_audio_text_ratio=(
+                                        self._token_loop_min_audio_text_ratio
+                                    ),
+                                    emergency_threshold=(
+                                        self._token_loop_emergency_abort_frames
+                                    ),
                                 )
                             if audio is not None and len(audio) > 0:
                                 self._send_result(
@@ -2043,6 +2223,7 @@ class EngineLoop:
                                 eos_reason="loop_abort",
                                 abort_tail_frames=seg.loop_run,
                                 discard_all_audio=not seg.audible_frame_seen,
+                                guard_mode=guard_mode,
                             )
                             continue
 
@@ -2292,6 +2473,8 @@ class EngineLoop:
         seg: EngineSegment,
         *,
         reason: str,
+        guard_mode: str = "",
+        guard_audio_text_ratio: float = 0.0,
     ) -> bool:
         """Reseed-and-rerun a hallucinated segment instead of aborting it.
 
@@ -2317,12 +2500,25 @@ class EngineLoop:
         if not earlier_live:
             return False
 
+        retry_loop_metrics = {}
+        if reason == "loop":
+            retry_loop_metrics = {
+                "guard_mode": guard_mode,
+                "guard_audio_text_ratio": round(guard_audio_text_ratio, 3),
+                "loop_max_run": seg.loop_max_run,
+                "loop_suspect_count": seg.loop_suspect_count,
+                "loop_recovery_count": seg.loop_recovery_count,
+            }
+
         seg.retry_idx += 1
         self._release_segment_slot(seg)
         seg.state = "pending_prefill"
         seg.prefill_plan = None
         seg.loop_token = -1
         seg.loop_run = 0
+        seg.loop_max_run = 0
+        seg.loop_suspect_count = 0
+        seg.loop_recovery_count = 0
         seg.first_raw_audio_sent = False
         seg.eos_trailing_added = False
         seg.decode_start_frame = 0
@@ -2340,7 +2536,11 @@ class EngineLoop:
                 type=ResultType.SEGMENT_RETRY,
                 session_id=seg.session_id,
                 segment_idx=seg.segment_idx,
-                metrics={"retry_idx": seg.retry_idx, "retry_reason": reason},
+                metrics={
+                    "retry_idx": seg.retry_idx,
+                    "retry_reason": reason,
+                    **retry_loop_metrics,
+                },
             ),
         )
         LifecycleLogger.emit(
@@ -2349,6 +2549,7 @@ class EngineLoop:
             segment_idx=seg.segment_idx,
             retry_idx=seg.retry_idx,
             retry_reason=reason,
+            **retry_loop_metrics,
         )
         logger.info(
             "Segment retry: %s seg=%d reason=%s attempt=%d",
@@ -2381,6 +2582,7 @@ class EngineLoop:
         eos_reason: Optional[str] = None,
         abort_tail_frames: int = 0,
         discard_all_audio: bool = False,
+        guard_mode: str = "",
     ) -> None:
         """Handle EOS for one segment.
 
@@ -2431,11 +2633,16 @@ class EngineLoop:
             "retry_idx": seg.retry_idx,
             "audio_frames_seen": seg.audio_frames_seen,
             "audible_frame_seen": seg.audible_frame_seen,
+            "loop_max_run": seg.loop_max_run,
+            "loop_suspect_count": seg.loop_suspect_count,
+            "loop_recovery_count": seg.loop_recovery_count,
         }
         if abort_tail_frames > 0:
             metrics["abort_tail_frames"] = int(abort_tail_frames)
         if discard_all_audio:
             metrics["discard_all_audio"] = True
+        if guard_mode:
+            metrics["guard_mode"] = guard_mode
 
         seg.state = "done"
         self._release_segment_slot(seg)
@@ -2463,6 +2670,9 @@ class EngineLoop:
             retry_idx=seg.retry_idx,
             audio_frames_seen=seg.audio_frames_seen,
             audible_frame_seen=seg.audible_frame_seen,
+            loop_max_run=seg.loop_max_run,
+            loop_suspect_count=seg.loop_suspect_count,
+            loop_recovery_count=seg.loop_recovery_count,
         )
         logger.info(
             "Segment EOS: %s seg=%d reason=%s audio_steps=%d text_tokens=%d "

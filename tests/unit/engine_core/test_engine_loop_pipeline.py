@@ -725,9 +725,16 @@ class TestPrefillBoundary:
 
 
 class TestTokenLoopGuard:
-    """Token loop guard: same codebook-0 token N consecutive steps → loop_abort."""
+    """Two-stage codebook-0 loop suspect/recovery/abort behavior."""
 
-    def _make_env(self, model_config, guard_frames):
+    def _make_env(
+        self,
+        model_config,
+        guard_frames,
+        suspect_frames=4,
+        min_audio_text_ratio=0.0,
+        emergency_frames=0,
+    ):
         inbox = queue.Queue()
         loop = asyncio.new_event_loop()
 
@@ -748,7 +755,10 @@ class TestTokenLoopGuard:
             async_loop=loop,
             executor=StubExecutor(),
             max_batch_size=4,
+            token_loop_suspect_frames=suspect_frames,
             token_loop_abort_frames=guard_frames,
+            token_loop_min_audio_text_ratio=min_audio_text_ratio,
+            token_loop_emergency_abort_frames=emergency_frames,
         )
 
         result_queue = queue.Queue()
@@ -834,6 +844,209 @@ class TestTokenLoopGuard:
         assert seg.loop_run == 1
         loop.close()
 
+    def test_production_611_four_run_is_suspect_then_recovers(self, model_config):
+        """Regression for the frame=81 false abort: 611x4 then 640 is valid."""
+        import numpy as np
+
+        engine_loop, loop, pool, seg, slot, result_queue = self._make_env(
+            model_config,
+            guard_frames=10,
+            suspect_frames=4,
+            min_audio_text_ratio=2.0,
+            emergency_frames=20,
+        )
+        audio = (np.ones(1920, dtype=np.float32) * 0.25).tobytes()
+        seg.input_complete = True
+        seg.text_tokens_consumed = 73
+        slot.frame_idx = 77
+
+        for token in (611, 611, 611, 611):
+            self._step(engine_loop, slot, token, audio)
+
+        assert seg.state == "active"
+        assert seg.loop_token == 611
+        assert seg.loop_run == 4
+        assert seg.loop_max_run == 4
+        assert seg.loop_suspect_count == 1
+        assert seg.loop_recovery_count == 0
+
+        self._step(engine_loop, slot, 640, audio)
+        assert seg.state == "active"
+        assert seg.loop_token == 640
+        assert seg.loop_run == 1
+        assert seg.loop_max_run == 4
+        assert seg.loop_suspect_count == 1
+        assert seg.loop_recovery_count == 1
+
+        results = self._drain(loop, result_queue)
+        assert sum(r.type == ResultType.AUDIO_CHUNK for r in results) == 5
+        assert not any(r.type == ResultType.SEGMENT_END for r in results)
+        loop.close()
+
+    def test_confirmed_run_waits_for_generation_progress(self, model_config):
+        import numpy as np
+
+        engine_loop, loop, pool, seg, slot, result_queue = self._make_env(
+            model_config,
+            guard_frames=10,
+            min_audio_text_ratio=2.0,
+            emergency_frames=20,
+        )
+        audio = (np.ones(1920, dtype=np.float32) * 0.25).tobytes()
+        seg.input_complete = True
+        seg.text_tokens_consumed = 73
+        slot.frame_idx = 77
+
+        for _ in range(10):
+            self._step(engine_loop, slot, 611, audio)
+        assert seg.state == "active"
+        assert seg.loop_run == 10
+
+        self._step(engine_loop, slot, 640, audio)
+        assert seg.state == "active"
+        assert seg.loop_recovery_count == 1
+        loop.close()
+
+    def test_confirmed_run_aborts_when_generation_progress_is_ready(self, model_config):
+        import numpy as np
+
+        engine_loop, loop, pool, seg, slot, result_queue = self._make_env(
+            model_config,
+            guard_frames=10,
+            min_audio_text_ratio=2.0,
+            emergency_frames=20,
+        )
+        audio = (np.ones(1920, dtype=np.float32) * 0.25).tobytes()
+        seg.input_complete = True
+        seg.text_tokens_consumed = 10
+        slot.frame_idx = 10
+
+        for _ in range(9):
+            self._step(engine_loop, slot, 611, audio)
+        assert seg.state == "active"
+
+        self._step(engine_loop, slot, 611, audio)
+        assert seg.state == "done"
+        results = self._drain(loop, result_queue)
+        end = next(r for r in results if r.type == ResultType.SEGMENT_END)
+        assert end.metrics["guard_mode"] == "progress"
+        assert end.metrics["audio_text_ratio"] == 2.0
+        loop.close()
+
+    def test_deferred_run_aborts_when_progress_later_becomes_ready(self, model_config):
+        import numpy as np
+
+        engine_loop, loop, pool, seg, slot, result_queue = self._make_env(
+            model_config,
+            guard_frames=10,
+            min_audio_text_ratio=2.0,
+            emergency_frames=30,
+        )
+        audio = (np.ones(1920, dtype=np.float32) * 0.25).tobytes()
+        seg.input_complete = True
+        seg.text_tokens_consumed = 10
+
+        for _ in range(10):
+            self._step(engine_loop, slot, 611, audio)
+        assert seg.state == "active"
+        assert seg.loop_run == 10
+
+        for _ in range(9):
+            self._step(engine_loop, slot, 611, audio)
+        assert seg.state == "active"
+
+        self._step(engine_loop, slot, 611, audio)
+        assert seg.state == "done"
+        results = self._drain(loop, result_queue)
+        end = next(r for r in results if r.type == ResultType.SEGMENT_END)
+        assert end.metrics["guard_mode"] == "progress"
+        assert end.metrics["audio_text_ratio"] == 2.0
+        loop.close()
+
+    def test_natural_eos_wins_after_a_deferred_loop_candidate(self, model_config):
+        import numpy as np
+
+        engine_loop, loop, pool, seg, slot, result_queue = self._make_env(
+            model_config,
+            guard_frames=10,
+            min_audio_text_ratio=2.0,
+            emergency_frames=20,
+        )
+        audio = (np.ones(1920, dtype=np.float32) * 0.25).tobytes()
+        seg.input_complete = True
+        seg.text_tokens_consumed = 73
+
+        for _ in range(10):
+            self._step(engine_loop, slot, 611, audio)
+        assert seg.state == "active"
+        assert seg.loop_run == 10
+
+        output = StepOutput(
+            slots=[slot],
+            eos_flags=[True],
+            tokens=[611],
+            audio_chunks=[audio],
+            split_c2w_conv=[[]],
+            split_c2w_transconv=[[]],
+        )
+        engine_loop._process_step_output(output)
+
+        assert seg.state == "done"
+        results = self._drain(loop, result_queue)
+        end = next(r for r in results if r.type == ResultType.SEGMENT_END)
+        assert end.metrics["eos_reason"] == "codec_eos"
+        assert "guard_mode" not in end.metrics
+        loop.close()
+
+    def test_emergency_run_aborts_without_completed_input(self, model_config):
+        import numpy as np
+
+        engine_loop, loop, pool, seg, slot, result_queue = self._make_env(
+            model_config,
+            guard_frames=10,
+            min_audio_text_ratio=2.0,
+            emergency_frames=20,
+        )
+        audio = (np.ones(1920, dtype=np.float32) * 0.25).tobytes()
+        seg.input_complete = False
+        seg.text_tokens_consumed = 73
+
+        for _ in range(19):
+            self._step(engine_loop, slot, 611, audio)
+        assert seg.state == "active"
+
+        self._step(engine_loop, slot, 611, audio)
+        assert seg.state == "done"
+        results = self._drain(loop, result_queue)
+        end = next(r for r in results if r.type == ResultType.SEGMENT_END)
+        assert end.metrics["guard_mode"] == "emergency"
+        assert end.metrics["audio_text_ratio"] == pytest.approx(0.27, abs=0.01)
+        loop.close()
+
+    def test_persistent_run_aborts_only_at_confirmation_threshold(self, model_config):
+        import numpy as np
+
+        engine_loop, loop, pool, seg, slot, result_queue = self._make_env(
+            model_config, guard_frames=10, suspect_frames=4
+        )
+        audio = (np.ones(1920, dtype=np.float32) * 0.25).tobytes()
+
+        for _ in range(9):
+            self._step(engine_loop, slot, 611, audio)
+        assert seg.state == "active"
+        assert seg.loop_suspect_count == 1
+        assert seg.loop_recovery_count == 0
+
+        self._step(engine_loop, slot, 611, audio)
+        assert seg.state == "done"
+        results = self._drain(loop, result_queue)
+        end = next(r for r in results if r.type == ResultType.SEGMENT_END)
+        assert end.metrics["eos_reason"] == "loop_abort"
+        assert end.metrics["loop_max_run"] == 10
+        assert end.metrics["loop_suspect_count"] == 1
+        assert end.metrics["loop_recovery_count"] == 0
+        loop.close()
+
     def test_guard_disabled_with_zero(self, model_config):
         engine_loop, loop, pool, seg, slot, result_queue = self._make_env(
             model_config, guard_frames=0
@@ -865,7 +1078,10 @@ class TestTokenLoopGuard:
         from engine.config import SchedulerConfig
 
         sc = SchedulerConfig()
-        assert sc.token_loop_abort_frames == 4
+        assert sc.token_loop_suspect_frames == 4
+        assert sc.token_loop_abort_frames == 10
+        assert sc.token_loop_min_audio_text_ratio == 2.0
+        assert sc.token_loop_emergency_abort_frames == 20
 
     def test_fade_out_chunk_is_linear(self):
         import numpy as np
@@ -904,6 +1120,8 @@ class TestSegmentRetry:
             executor=StubExecutor(),
             max_batch_size=4,
             token_loop_abort_frames=4,
+            token_loop_min_audio_text_ratio=0.0,
+            token_loop_emergency_abort_frames=0,
             token_loop_max_retries=max_retries,
         )
 

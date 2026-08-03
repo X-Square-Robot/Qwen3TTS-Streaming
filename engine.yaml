@@ -46,10 +46,19 @@ scheduler:
   max_idle_sec: 10.0         # evict slots idle longer than this
   max_queue_size: 256        # backpressure: reject new sessions beyond this
   session_timeout_sec: 300.0 # force-cancel sessions exceeding this duration
-  # Hallucination loop guard: abort a segment when codebook-0 repeats the
-  # same token this many consecutive decode steps (0 = off). Normal speech
-  # maxes out at 3 consecutive repeats; runaway loops run 10-39.
-  token_loop_abort_frames: 4
+  # Hallucination loop guard, stage 1: codebook-0 repeats at this threshold are
+  # observable suspects only. A short run that changes token is recorded as a
+  # recovery and is never truncated. 0 disables suspect/recovery telemetry.
+  token_loop_suspect_frames: 4
+  # Stage 2: retry/abort only after the same run persists to this threshold.
+  # 0 disables the whole token-loop guard. Historical true loops ran 10-39
+  # frames; a production false positive recovered immediately after frame 4.
+  token_loop_abort_frames: 10
+  # A confirmed run is terminal only after input completion and this minimum
+  # generated-audio/text-token ratio. 0 restores the legacy ungated behavior.
+  token_loop_min_audio_text_ratio: 2.0
+  # Unconditional safety cap if progress is not ready (0 = disabled).
+  token_loop_emergency_abort_frames: 20
   # Reseed-and-rerun a guarded-abort segment when its audio is still fully
   # buffered behind an earlier live segment (transparent to the client).
   # 0 = always abort instead.
