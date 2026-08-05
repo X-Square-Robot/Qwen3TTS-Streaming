@@ -13,7 +13,14 @@ services:
         ENGINE_VERSION: ${ENGINE_VERSION:-}
     container_name: ${ENGINE_CONTAINER_NAME:-qwen3-engine}
     working_dir: /app
-    command: ["/bin/bash", "/app/scripts/compose/engine-entrypoint.sh"]
+    command:
+      - python3
+      - /tmp/qwen3tts_rotating_log_runner.py
+      - --service
+      - engine
+      - --
+      - /bin/bash
+      - /app/scripts/compose/engine-entrypoint.sh
     environment:
       ENGINE_CONFIG: ${ENGINE_CONFIG:-/etc/qwen3-tts/engine.yaml}
       ENGINE_MODEL_REPOSITORY: /models
@@ -31,6 +38,10 @@ services:
       ENGINE_MAX_BATCH_SIZE: ${ENGINE_MAX_BATCH_SIZE:-128}
       ENGINE_MAX_SESSIONS: ${ENGINE_MAX_SESSIONS:-128}
       ENGINE_MAX_SEQ_LEN: ${ENGINE_MAX_SEQ_LEN:-}
+      QWEN_LOG_DIR: ${QWEN_LOG_DIR:-/var/log/qwen3tts}
+      QWEN_LOG_MAX_BYTES: ${QWEN_LOG_MAX_BYTES:-52428800}
+      QWEN_LOG_BACKUP_COUNT: ${QWEN_LOG_BACKUP_COUNT:-10}
+      QWEN_LOG_STDOUT: ${QWEN_LOG_STDOUT:-1}
       PYTHONUNBUFFERED: "1"
       TZ: Asia/Shanghai
     ports:
@@ -40,6 +51,7 @@ services:
     volumes:
       - ${MODEL_REPO_DIR:-../../workspace/model_repository}:/models:ro
       - ${ENGINE_CONFIG_FILE:-../../engine.yaml}:/etc/qwen3-tts/engine.yaml:ro
+      - ../../scripts/compose/rotating_log_runner.py:/tmp/qwen3tts_rotating_log_runner.py:ro
     gpus: all
     init: true
     shm_size: "4g"
@@ -99,8 +111,17 @@ services:
       CUDA_VISIBLE_DEVICES: ${TRITON_GPU_DEVICE:-0}
       PYTORCH_CUDA_ALLOC_CONF: ${TRITON_PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
       PYTHONDONTWRITEBYTECODE: "1"
+      QWEN_LOG_DIR: ${QWEN_LOG_DIR:-/var/log/qwen3tts}
+      QWEN_LOG_MAX_BYTES: ${QWEN_LOG_MAX_BYTES:-52428800}
+      QWEN_LOG_BACKUP_COUNT: ${QWEN_LOG_BACKUP_COUNT:-10}
+      QWEN_LOG_STDOUT: ${QWEN_LOG_STDOUT:-1}
       TZ: Asia/Shanghai
     command:
+      - python3
+      - /tmp/qwen3tts_rotating_log_runner.py
+      - --service
+      - triton
+      - --
       - tritonserver
       - --model-repository=/models
       - --strict-model-config=false
@@ -114,7 +135,9 @@ services:
       - "${TRITON_METRICS_PORT:-8002}:8002"
     volumes:
       - ${MODEL_REPO_DIR:-../../workspace/model_repository}:/models:ro
+      - ../../scripts/compose/rotating_log_runner.py:/tmp/qwen3tts_rotating_log_runner.py:ro
     gpus: all
+    init: true
     shm_size: "4g"
     restart: unless-stopped
     develop:
@@ -127,6 +150,8 @@ services:
             - "*.pyc"
         - action: restart
           path: ../../workspace/model_repository
+        - action: restart
+          path: ../../scripts/compose/rotating_log_runner.py
         - action: rebuild
           path: ../Dockerfile.triton
         - action: rebuild

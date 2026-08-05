@@ -32,6 +32,7 @@ _TRITON_REQUIRED_MODELS=(
 TRITON_GRPC_PORT="${TRITON_GRPC_PORT:-8001}"
 TRITON_HTTP_PORT="${TRITON_HTTP_PORT:-8000}"
 TRITON_METRICS_PORT="${TRITON_METRICS_PORT:-8002}"
+TRITON_CONTAINER_LOG_RUNNER="/tmp/qwen3tts_rotating_log_runner.py"
 
 # ---------------------------------------------------------------------------
 #  resolve_triton_deploy_image [driver_version]
@@ -860,7 +861,14 @@ build_triton_image() {
     local build_dir
     build_dir=$(mktemp -d)
     local dockerfile="$build_dir/Dockerfile"
+    local log_runner_src="$repo_root/scripts/compose/rotating_log_runner.py"
+    if [ ! -f "$log_runner_src" ]; then
+        rm -rf "$build_dir"
+        log_error "Container log runner not found: $log_runner_src"
+        return 1
+    fi
     mkdir -p "$build_dir/model_repository"
+    cp "$log_runner_src" "$build_dir/rotating_log_runner.py"
     if command -v rsync &>/dev/null; then
         rsync -a "$model_repo/" "$build_dir/model_repository/"
     else
@@ -875,6 +883,10 @@ ARG TENSORRT_PYTHON_VERSION
 ARG PYTORCH_CUDA_TAG
 
 ENV TRITON_PYTORCH_CUDA_TAG=\${PYTORCH_CUDA_TAG}
+ENV QWEN_LOG_DIR=/var/log/qwen3tts \
+    QWEN_LOG_MAX_BYTES=52428800 \
+    QWEN_LOG_BACKUP_COUNT=10 \
+    QWEN_LOG_STDOUT=1
 
 RUN python3 -m pip install --no-cache-dir \
     -i https://mirrors.bfsu.edu.cn/pypi/web/simple \
@@ -907,6 +919,9 @@ RUN python3 -m pip install --no-cache-dir \
     "tensorrt_cu13_libs==\${TENSORRT_PYTHON_VERSION}" \
     "tensorrt-cu13==\${TENSORRT_PYTHON_VERSION}"
 
+RUN install -d /opt/qwen3tts/bin /var/log/qwen3tts
+
+COPY rotating_log_runner.py /opt/qwen3tts/bin/rotating_log_runner.py
 COPY model_repository /models
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=6 \
@@ -914,8 +929,7 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=6 \
 
 EXPOSE 8000 8001 8002
 
-ENTRYPOINT ["tritonserver"]
-CMD ["--model-repository=/models", "--strict-model-config=false", "--disable-auto-complete-config", "--log-verbose=1"]
+CMD ["python3", "/opt/qwen3tts/bin/rotating_log_runner.py", "--service", "triton", "--", "tritonserver", "--model-repository=/models", "--strict-model-config=false", "--disable-auto-complete-config", "--log-verbose=1"]
 DOCKERFILE
 
     log_step "Building Triton deployment image: $image_tag"
@@ -983,6 +997,14 @@ triton_run() {
             || { log_error "Cannot determine Triton image"; return 1; }
     fi
 
+    local repo_root
+    repo_root="$(cd "${_LIB_DIR}/../../.." && pwd)"
+    local log_runner_host="$repo_root/scripts/compose/rotating_log_runner.py"
+    if [ ! -f "$log_runner_host" ]; then
+        log_error "Container log runner not found: $log_runner_host"
+        return 1
+    fi
+
     repo_dir="$(cd "$repo_dir" && pwd)"
 
     local container_name
@@ -1005,6 +1027,26 @@ triton_run() {
     local max_seq_len="${TRITON_MAX_SEQ_LEN:-${RUNTIME_MAX_SEQ_LEN:-512}}"
     local variant_label=""
     local type_label=""
+
+    # All deployment images retain NVIDIA's generic initialization entrypoint.
+    # The direct run path overrides CMD, so it explicitly invokes the wrapper.
+    local -a wrapped_prefix=(
+        python3 "$TRITON_CONTAINER_LOG_RUNNER"
+        --service triton
+        --
+    )
+    local -a triton_command=(tritonserver)
+    local -a triton_flags=(
+        --model-repository=/models
+        --log-verbose=1
+        --strict-model-config=false
+        --disable-auto-complete-config
+    )
+    local -a container_command=(
+        "${wrapped_prefix[@]}"
+        "${triton_command[@]}"
+        "${triton_flags[@]}"
+    )
     
     # Try to extract variant from config.pbtxt if available
     local config_file="$repo_dir/tts_orchestrator/config.pbtxt"
@@ -1021,7 +1063,9 @@ triton_run() {
         code2wav_bf16_env="-e OVERRIDE_CODE2WAV_BF16=1"
     fi
 
-    docker run -d --gpus "\"device=${gpu_device}\"" \
+    # The host bind keeps the direct path compatible with the raw NGC fallback,
+    # which predates the runner bundled into project-built deployment images.
+    docker run -d --init --gpus "\"device=${gpu_device}\"" \
         --name "$container_name" \
         --shm-size=1g \
         --ulimit memlock=-1 \
@@ -1029,20 +1073,22 @@ triton_run() {
         $code2wav_bf16_env \
         -e "MAX_BATCH_SLOTS=${max_batch_slots}" \
         -e "ENGINE_MAX_DECODE_LEN=${max_seq_len}" \
+        -e "QWEN_LOG_DIR=${QWEN_LOG_DIR:-/var/log/qwen3tts}" \
+        -e "QWEN_LOG_MAX_BYTES=${QWEN_LOG_MAX_BYTES:-52428800}" \
+        -e "QWEN_LOG_BACKUP_COUNT=${QWEN_LOG_BACKUP_COUNT:-10}" \
+        -e "QWEN_LOG_STDOUT=${QWEN_LOG_STDOUT:-1}" \
         -p "${TRITON_HTTP_PORT}:8000" \
         -p "${TRITON_GRPC_PORT}:8001" \
         -p "${TRITON_METRICS_PORT}:8002" \
         -v "$repo_dir:/models" \
+        -v "$log_runner_host:$TRITON_CONTAINER_LOG_RUNNER:ro" \
         "$@" \
         "$image" \
-        tritonserver \
-            --model-repository=/models \
-            --log-verbose=1 \
-            --strict-model-config=false \
-            --disable-auto-complete-config \
+        "${container_command[@]}" \
         || { log_error "Failed to start Triton container"; return 1; }
 
     log_info "Container started: $container_name"
+    log_info "  In-container logs: ${QWEN_LOG_DIR:-/var/log/qwen3tts}/triton.log"
     log_info "Waiting for server to be ready ..."
 }
 

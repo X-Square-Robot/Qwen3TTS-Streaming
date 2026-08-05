@@ -379,6 +379,41 @@ Triton default ports:
 - gRPC: `localhost:8001`
 - Metrics: `localhost:8002`
 
+### Logs inside the container
+
+Engine Docker and Triton keep rotating logs inside the container, independently
+of the Docker logging driver:
+
+- Engine Docker: `/var/log/qwen3tts/engine.log`
+- Triton: `/var/log/qwen3tts/triton.log`
+
+By default, each log rotates at 50 MiB and keeps 10 backup files. Configure the
+policy with these container environment variables:
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `QWEN_LOG_DIR` | `/var/log/qwen3tts` | Directory for log files. |
+| `QWEN_LOG_MAX_BYTES` | `52428800` | Maximum size of one log file in bytes. |
+| `QWEN_LOG_BACKUP_COUNT` | `10` | Number of rotated backup files to keep. |
+| `QWEN_LOG_STDOUT` | `1` | Also mirror the combined service output to container stdout; set to `0` to disable. |
+
+The stdout mirror is best-effort so a stalled logging driver or attached client
+cannot block inference. Use the files above as the complete retained history.
+
+After opening a shell in the container, inspect or package the logs with:
+
+```bash
+ls -lh "${QWEN_LOG_DIR:-/var/log/qwen3tts}"
+tail -n 1000 "${QWEN_LOG_DIR:-/var/log/qwen3tts}/engine.log"
+tail -n 1000 "${QWEN_LOG_DIR:-/var/log/qwen3tts}/triton.log"
+tar -C "${QWEN_LOG_DIR:-/var/log/qwen3tts}" \
+  -czf /tmp/qwen3tts-logs.tar.gz .
+```
+
+Only the log file for the selected gateway is present. Container-local logs are
+lost when the container is deleted; mount `QWEN_LOG_DIR` on persistent storage
+if logs must survive container replacement.
+
 ## WebUI
 
 Run locally:

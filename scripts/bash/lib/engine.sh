@@ -22,6 +22,7 @@ ENGINE_WEBSOCKET_PORT="${ENGINE_WEBSOCKET_PORT:-50052}"
 ENGINE_HEALTH_PORT="${ENGINE_HEALTH_PORT:-8080}"
 ENGINE_IMAGE="${ENGINE_IMAGE:-qwen3-engine:26.02}"
 ENGINE_CONTAINER_NAME="${ENGINE_CONTAINER_NAME:-qwen3-engine}"
+ENGINE_CONTAINER_LOG_RUNNER="/tmp/qwen3tts_rotating_log_runner.py"
 # Standalone engine: interpreter selection (Phase A conda env is not auto-activated for deploy).
 #   ENGINE_PYTHON        If set, must be an executable python with torch + deps.
 #   QWEN3_TTS_ENV_NAME   Conda env name to look up (default: qwen3-tts).
@@ -403,14 +404,16 @@ engine_docker_image_has_app() {
 
 # ---------------------------------------------------------------------------
 #  engine_docker_image_supports_model_package_engine <image_tag>
-#  Returns 0 if the image entrypoint is current: image-first code loading with
-#  the ENGINE_CODE_FROM_PACKAGE=1 emergency override, plus engine code new
-#  enough to parse the assembled package (EngineConfig.references).
+#  Returns 0 if the image runtime is current: image-first code loading with
+#  the ENGINE_CODE_FROM_PACKAGE=1 emergency override, the rotating log runner,
+#  plus engine code new enough to parse the assembled package
+#  (EngineConfig.references).
 # ---------------------------------------------------------------------------
 engine_docker_image_supports_model_package_engine() {
     local image="$1"
     docker run --rm --entrypoint "" "$image" sh -lc '
         grep -q "ENGINE_CODE_FROM_PACKAGE" /app/scripts/compose/engine-entrypoint.sh &&
+        test -f /opt/qwen3tts/bin/rotating_log_runner.py &&
         python3 - <<'"'"'PY'"'"'
 from engine.config import EngineConfig
 
@@ -557,6 +560,17 @@ engine_start_docker() {
     local max_seq_len=""
     local image="$ENGINE_IMAGE"
     local container_name="$ENGINE_CONTAINER_NAME"
+    local repo_root_abs
+    repo_root_abs=$(cd "$repo_root" && pwd) || {
+        log_error "Repository root not found: $repo_root"
+        return 1
+    }
+    local log_runner_host="$repo_root_abs/scripts/compose/rotating_log_runner.py"
+
+    if [ ! -f "$log_runner_host" ]; then
+        log_error "Container log runner not found: $log_runner_host"
+        return 1
+    fi
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -601,6 +615,9 @@ engine_start_docker() {
     log_info "  WS Port:      $ws_port"
 
     local -a run_cmd=(
+        python3 "$ENGINE_CONTAINER_LOG_RUNNER"
+        --service engine
+        --
         python3 -m engine.server
         --config /app/engine.yaml
         --model-package-dir "$model_package_container"
@@ -617,16 +634,21 @@ engine_start_docker() {
         -e "ENGINE_SCHEDULER_MAX_BATCH_SIZE=$max_batch"
         -e "ENGINE_SERVER_WEBSOCKET_PORT=$ws_port"
         -e "ENGINE_SERVER_HEALTH_PORT=$health_port"
+        -e "QWEN_LOG_DIR=${QWEN_LOG_DIR:-/var/log/qwen3tts}"
+        -e "QWEN_LOG_MAX_BYTES=${QWEN_LOG_MAX_BYTES:-52428800}"
+        -e "QWEN_LOG_BACKUP_COUNT=${QWEN_LOG_BACKUP_COUNT:-10}"
+        -e "QWEN_LOG_STDOUT=${QWEN_LOG_STDOUT:-1}"
     )
     if [[ -n "$max_seq_len" ]]; then
         env_args+=( -e "ENGINE_SCHEDULER_MAX_SEQ_LEN=$max_seq_len" )
     fi
 
-    docker run --gpus all -d \
+    docker run --gpus all -d --init \
         --name "$container_name" \
         -w "$model_package_container" \
         -e "PYTHONPATH=$model_package_container:/app" \
         -v "$model_repo_host:/models:ro" \
+        -v "$log_runner_host:$ENGINE_CONTAINER_LOG_RUNNER:ro" \
         -p "${port}:${port}" \
         -p "${ws_port}:${ws_port}" \
         -p "${health_port}:${health_port}" \
@@ -638,6 +660,7 @@ engine_start_docker() {
 
     log_info "Container started: $container_name"
     log_info "  Logs: docker logs -f $container_name"
+    log_info "  In-container logs: ${QWEN_LOG_DIR:-/var/log/qwen3tts}/engine.log"
 }
 
 # ---------------------------------------------------------------------------

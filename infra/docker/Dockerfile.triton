@@ -50,4 +50,16 @@ print(f'grpcio {grpc.__version__}, pyyaml {yaml.__version__}, numpy {numpy.__ver
 
 FROM triton-deps AS triton-runtime
 
+ENV QWEN_LOG_DIR=/var/log/qwen3tts \
+    QWEN_LOG_MAX_BYTES=52428800 \
+    QWEN_LOG_BACKUP_COUNT=10 \
+    QWEN_LOG_STDOUT=1
+
+RUN install -d /opt/qwen3tts/bin /var/log/qwen3tts
+
 COPY engine/ /opt/qwen3-tts/engine/
+COPY scripts/compose/rotating_log_runner.py /opt/qwen3tts/bin/rotating_log_runner.py
+
+# Preserve the NGC image's NVIDIA entrypoint and make a bare `docker run`
+# capture Triton plus Python-backend output into the in-container log ring.
+CMD ["python3", "/opt/qwen3tts/bin/rotating_log_runner.py", "--service", "triton", "--", "tritonserver", "--model-repository=/models", "--strict-model-config=false", "--log-verbose=0"]

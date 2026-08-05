@@ -115,6 +115,16 @@ FROM ${BASE_IMAGE}
 LABEL maintainer="Qwen3TTS-Streaming"
 LABEL description="Qwen3-TTS streaming TTS inference with Triton"
 
+ENV QWEN_LOG_DIR=/var/log/qwen3tts \
+    QWEN_LOG_MAX_BYTES=52428800 \
+    QWEN_LOG_BACKUP_COUNT=10 \
+    QWEN_LOG_STDOUT=1
+
+RUN install -d /opt/qwen3tts/bin /var/log/qwen3tts
+
+# In-container bounded log capture (stdout remains enabled by default).
+COPY scripts/compose/rotating_log_runner.py /opt/qwen3tts/bin/rotating_log_runner.py
+
 # Model repository
 COPY workspace/model_repository /models
 
@@ -124,8 +134,8 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=6 \
 
 EXPOSE 8000 8001 8002
 
-ENTRYPOINT ["tritonserver"]
-CMD ["--model-repository=/models", "--strict-model-config=false", "--log-verbose=1"]
+# Preserve the NVIDIA base image's initialization entrypoint.
+CMD ["python3", "/opt/qwen3tts/bin/rotating_log_runner.py", "--service", "triton", "--", "tritonserver", "--model-repository=/models", "--strict-model-config=false", "--log-verbose=1"]
 DOCKERFILE
 
     log_info "Generated: $dockerfile"

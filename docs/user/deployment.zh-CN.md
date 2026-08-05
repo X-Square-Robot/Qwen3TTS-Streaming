@@ -367,6 +367,40 @@ Triton 默认端口：
 - gRPC: `localhost:8001`
 - Metrics: `localhost:8002`
 
+### 容器内日志
+
+Engine Docker 和 Triton 会在容器内部保留轮转日志，不依赖 Docker logging
+driver：
+
+- Engine Docker：`/var/log/qwen3tts/engine.log`
+- Triton：`/var/log/qwen3tts/triton.log`
+
+默认每个日志文件达到 50 MiB 时轮转，并保留 10 份备份。可通过以下容器环境变量
+调整策略：
+
+| 变量 | 默认值 | 含义 |
+|------|--------|------|
+| `QWEN_LOG_DIR` | `/var/log/qwen3tts` | 日志文件目录。 |
+| `QWEN_LOG_MAX_BYTES` | `52428800` | 单个日志文件的最大字节数。 |
+| `QWEN_LOG_BACKUP_COUNT` | `10` | 保留的轮转备份文件数量。 |
+| `QWEN_LOG_STDOUT` | `1` | 同时将合并后的服务输出镜像到容器 stdout；设为 `0` 可关闭。 |
+
+stdout 镜像采用尽力而为策略，避免 logging driver 或 attach 客户端阻塞推理；需要
+完整历史时应以以上日志文件为准。
+
+进入容器 shell 后，可用以下命令查看或打包日志：
+
+```bash
+ls -lh "${QWEN_LOG_DIR:-/var/log/qwen3tts}"
+tail -n 1000 "${QWEN_LOG_DIR:-/var/log/qwen3tts}/engine.log"
+tail -n 1000 "${QWEN_LOG_DIR:-/var/log/qwen3tts}/triton.log"
+tar -C "${QWEN_LOG_DIR:-/var/log/qwen3tts}" \
+  -czf /tmp/qwen3tts-logs.tar.gz .
+```
+
+实际只会生成所选 gateway 对应的日志文件。容器删除后，容器内日志也会丢失；
+如果日志需要跨容器替换保留，请将 `QWEN_LOG_DIR` 挂载到持久化存储。
+
 ## WebUI
 
 本地运行：

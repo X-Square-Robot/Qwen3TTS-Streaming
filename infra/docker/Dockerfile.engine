@@ -53,15 +53,20 @@ FROM engine-deps AS engine-runtime
 # Surfaces in /health responses and `docker inspect` — the pairing key
 # between a deployed engine and its matching client SDK wheel.
 ARG ENGINE_VERSION=""
-ENV ENGINE_VERSION=${ENGINE_VERSION}
+ENV ENGINE_VERSION=${ENGINE_VERSION} \
+    QWEN_LOG_DIR=/var/log/qwen3tts \
+    QWEN_LOG_MAX_BYTES=52428800 \
+    QWEN_LOG_BACKUP_COUNT=10 \
+    QWEN_LOG_STDOUT=1
 LABEL org.opencontainers.image.version=${ENGINE_VERSION}
 
-RUN mkdir -p /etc/qwen3-tts
+RUN install -d /etc/qwen3-tts /opt/qwen3tts/bin /var/log/qwen3tts
 
 COPY engine.yaml /app/engine.yaml
 COPY engine.yaml /etc/qwen3-tts/engine.yaml
 COPY engine/ /app/engine/
 COPY scripts/compose/ /app/scripts/compose/
+COPY scripts/compose/rotating_log_runner.py /opt/qwen3tts/bin/rotating_log_runner.py
 # The engine imports the shared protocol dataclasses (engine/interface/*
 # → ``import qwen3tts_protocol``).  They ship in the qwen3-tts-client package
 # but are pure-stdlib, so vendor the package directly onto PYTHONPATH (=/app)
@@ -72,3 +77,8 @@ COPY client/src/qwen3tts_protocol/ /app/qwen3tts_protocol/
 # deployment always hands out the SDK version that matches it. The directory
 # is committed (with .gitkeep) so this COPY works even when no wheel is staged.
 COPY client/dist/ /app/sdk/
+
+# Keep the NVIDIA base image's ENTRYPOINT: it performs container/GPU runtime
+# initialization before executing this command.  Compose and the direct Docker
+# helpers pass the same wrapper explicitly when overriding CMD.
+CMD ["python3", "/opt/qwen3tts/bin/rotating_log_runner.py", "--service", "engine", "--", "/bin/bash", "/app/scripts/compose/engine-entrypoint.sh"]
