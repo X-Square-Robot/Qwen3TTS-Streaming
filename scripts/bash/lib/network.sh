@@ -18,7 +18,7 @@
 #    3. Results are cached for the script lifetime
 #
 #  Tuning env vars:
-#    GITHUB_MIRROR             mirror base URL  (default: gh-proxy.org)
+#    GITHUB_MIRROR             mirror base URL  (default: gh-proxy.com)
 #    GITHUB_SPEED_THRESHOLD_MS probe threshold   (default: 2000)
 #    HF_MIRROR                 mirror base URL  (default: hf-mirror.com)
 #    HF_SPEED_THRESHOLD_MS     probe threshold   (default: 2000)
@@ -71,7 +71,7 @@ _probe_url() {
 
 # ---- GitHub ---------------------------------------------------------------
 
-GITHUB_MIRROR="${GITHUB_MIRROR:-https://v6.gh-proxy.org}"
+GITHUB_MIRROR="${GITHUB_MIRROR:-https://gh-proxy.com}"
 
 # Cache: "direct" | "mirror" | "failed"
 _GITHUB_MODE_CACHE=""
