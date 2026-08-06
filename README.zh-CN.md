@@ -252,14 +252,17 @@ bash scripts/bash/autorun.sh all -m base-1.7b --gateway standalone --engine-mode
 
 独立 Python SDK 包，统一访问 engine 和 Triton 端点，支持 engine-websocket / engine-grpc / triton-grpc / triton-http 四种传输。默认 `transport="auto"` 自动探测端点。
 
-引擎与 SDK 版本一一配对（从同一个 git tag 发布；用
-`curl http://<engine-host>:<health-port>/health` 查引擎的 `"version"`）：
+引擎与 SDK 从同一个 git tag 配对发布。先从 `GET /v1/capabilities` 读取
+`engine_version`，再安装对应 GitHub 或 GitLab Release 中的 wheel：
 
 ```bash
-# 通道一 —— 从 Git 按引擎对应 tag 安装（extras：[grpc]/[triton]/[audio]/[all]）
-pip install "qwen3-tts-client[all] @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@v0.1.0#subdirectory=client"
+curl http://<engine-host>:<ws-port>/v1/capabilities
+# → {"engine_version": "v0.1.0", ...}
 
-# 通道二 —— 引擎自己分发的 wheel（永远是匹配版本）
+# 公共 GitHub Release（GitLab Release 提供同名文件）。
+pip install "qwen3-tts-client[all] @ https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases/download/v0.1.0/qwen3_tts_client-0.1.0-py3-none-any.whl"
+
+# 引擎分发的也是同一个已发布 wheel。
 curl http://<engine-host>:<health-port>/sdk/    # 先看列表，再：
 pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-none-any.whl
 
@@ -390,7 +393,7 @@ token 的一致性路由。
 ```text
 Qwen3TTS-Streaming/
 ├── engine/                     # 推理引擎：frontend/backend/gateway/core
-├── client/                     # 独立 Python SDK 包 (qwen3-tts-client，可从 Git 直接 pip 安装)
+├── client/                     # 独立 Python SDK 包（qwen3-tts-client，以 wheel 发布）
 │   ├── src/qwen3tts/           #   客户端实现与传输适配器
 │   └── src/qwen3tts_protocol/  #   共享协议层（单一真相源）
 ├── demo_api/                   # WebUI Demo API（依赖 client 包）

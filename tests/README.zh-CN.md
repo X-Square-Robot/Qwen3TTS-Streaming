@@ -6,6 +6,7 @@
 
 | Location | Purpose | How to run |
 | --- | --- | --- |
+| `client/tests/` | 独立 client SDK 测试，覆盖传输适配器及发布/版本守卫。 | `PYTHONPATH=client/src pytest client/tests -q` |
 | `tests/unit/` | 快速 pytest 单元测试。无需外部 serving 进程。 | `pytest tests/unit -q` |
 | `tests/integration/` | 针对导出产物、manifest、ONNX/TRT 配置生成以及本地构建输出的 pytest 集成检查。 | `pytest tests/integration -q` |
 | `tests/e2e/` | 针对运行中的 standalone 引擎或 Triton 服务的 pytest 端到端检查。当服务不可达时测试会自动跳过。 | `pytest tests/e2e -v -s` |
@@ -22,6 +23,7 @@
 
 ```bash
 pytest tests/unit tests/integration -q
+PYTHONPATH=client/src pytest client/tests -q
 ```
 
 运行 Triton E2E pytest 检查：

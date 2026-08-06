@@ -46,40 +46,80 @@ curl http://<engine-host>:<ws-port>/v1/capabilities
 `QWEN3TTS_SKIP_PROTOCOL_CHECK=1` 可把两者都降级为警告；或给 `connect()` 传
 `verify=False` 彻底跳过连接时的 capabilities 校验。
 
-### 通道一 —— 从 Git 安装（有仓库访问权限的开发者）
+### 通道一 —— GitHub/GitLab Release 与 GitLab Package Registry
 
-在 URL 中钉住引擎对应的 tag（包未发布 PyPI）：
-
-```bash
-pip install "qwen3-tts-client @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@v0.1.0#subdirectory=client"
-```
-
-走 SSH 时把 `https://github.com/` 换成 `ssh://git@github.com/`。可选
-extras 写在方括号里（`[grpc]` / `[triton]` / `[audio]` / `[all]`）：
+每个版本 tag 都会在两个代码托管平台生成 Release wheel。安装对应 Release，
+`pip` 不会再检出整个 monorepo：
 
 ```bash
-pip install "qwen3-tts-client[all] @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@v0.1.0#subdirectory=client"
+# GitHub
+pip install "qwen3-tts-client[all] @ https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases/download/v0.1.0/qwen3_tts_client-0.1.0-py3-none-any.whl"
+
+# GitLab（Release 中的 client-sdk 链接）
+pip install "qwen3-tts-client[all] @ https://<gitlab-project>/-/releases/v0.1.0/downloads/client-sdk/qwen3_tts_client-0.1.0-py3-none-any.whl"
 ```
 
-### 通道二 —— 交付 wheel（无需仓库访问权限）
+项目的 GitLab PyPI Registry 也提供同一个文件：
 
-每个引擎部署都在 health 端口的 `GET /sdk/` 提供从自己源码构建的 wheel ——
-从你连的引擎本体获取，配对不可能出错：
+```bash
+pip install \
+  --index-url "https://<gitlab-host>/api/v4/projects/<project-id>/packages/pypi/simple" \
+  "qwen3-tts-client[all]==0.1.0"
+```
+
+私有项目建议使用 PyPI Registry，并把个人 Token 或只读 Deploy Token 配在
+`.netrc`；不要把凭据写入会提交的 requirements 文件：
+
+```text
+machine <gitlab-host>
+login <deploy-token-username>
+password <deploy-token>
+```
+
+私有 Release 直链则需要按 GitLab 文档通过查询参数或 HTTP Header 提供个人
+Access Token，因此通常先下载文件再从本地安装更简单。如果 GitLab 管理员关闭了
+PyPI package forwarding，还需配置可信的依赖索引或预装 wheel 的第三方依赖。
+
+可选 extras 为 `[grpc]`、`[triton]`、`[audio]` 和 `[all]`。SDK 本体只有一个
+通用 wheel；`pip` 仍会从配置的包索引解析其声明的第三方依赖。
+
+### 通道二 —— 从运行中引擎获取同一 wheel
+
+每个正式引擎镜像都嵌入 tag 流水线已经发布的 wheel，并在 health 端口的
+`GET /sdk/` 提供：
 
 ```bash
 curl http://<engine-host>:<health-port>/sdk/      # 查看可用 wheel
 pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-none-any.whl
 ```
 
-独立交付的发版 wheel 在 tag 上构建：
+### 发版不变量
 
-```bash
-git tag v0.2.0
-bash scripts/bash/release_client_wheel.sh         # → client/dist/*.whl
-```
+向某个平台推送（或镜像同步）`vX.Y.Z`、`vX.Y.ZaN`、`vX.Y.ZbN` 或
+`vX.Y.ZrcN` tag 后，该平台的 `.gitlab-ci.yml` 或
+`.github/workflows/release.yml` 会独立执行同一套 build-once 约束：
 
-脚本会拒绝脏工作区和未打 tag 的提交，因此交付出去的 wheel 版本号总能
-精确对应它的源码。
+1. 只检出主仓库（GitLab 为 `GIT_SUBMODULE_STRATEGY=none`，GitHub 为
+   `submodules: false`）。
+2. 用 `release_client_wheel.sh` 构建且仅构建一个 wheel，并做安装烟测。
+3. GitLab 把 wheel 发布到 PyPI Package Registry；GitHub 把 wheel 上传到草稿
+   Release。这个持久对象成为该流水线后续步骤的唯一标准输入。
+4. 两边的镜像 job 都从各自标准发布位置下载 wheel、校验 SHA256，再把完全相同的
+   字节放入 `/app/sdk/`，分别推送到 GitLab Container Registry 与 GHCR。
+5. 镜像成功后，GitLab 幂等地创建或更新指向 Registry 对象的 Release 链接，
+   GitHub 则公开已验证的草稿 Release；两者都不链接会过期的 job artifact。
+
+引擎镜像 job 需要能运行 Docker 且有足够磁盘的 runner（TensorRT 基础镜像加 CUDA
+PyTorch 层建议至少预留 50 GB）。GitLab 的 Docker-in-Docker runner 必须开启
+privileged；GitHub 默认把该 job 派给 `self-hosted`，需要时可用仓库变量
+`RELEASE_IMAGE_RUNNER` 指定容量足够的 runner label；自托管 runner 需要提供
+Docker 与 GitHub CLI（`gh`）。若所选 NGC 基础镜像要求认证，还需配置受保护的
+`NGC_API_KEY` secret。应保护 `v*` tag 命名空间与发布
+environment，确保只有发布维护者能触发带发布凭据的 job。GHCR package 默认私有；
+若正式镜像要求匿名拉取，需要显式改为 public。
+
+`client/dist/` 保持为被忽略的本地/CI 暂存目录；wheel 二进制不提交进 Git。
+两个 tag CI 都不会调用会重新构建 wheel 的本地 `compose.sh` 路径。
 
 ### 本地检出（开发）
 

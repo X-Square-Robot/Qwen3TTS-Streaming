@@ -1,5 +1,11 @@
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
+# GitHub and GitLab both support tag releases. Pin the complete versioning
+# toolchain so each pipeline's one-and-only wheel build is repeatable.
+requires = [
+  "hatchling==1.31.0",
+  "hatch-vcs==0.5.0",
+  "setuptools-scm==10.2.0",
+]
 build-backend = "hatchling.build"
 
 [project]

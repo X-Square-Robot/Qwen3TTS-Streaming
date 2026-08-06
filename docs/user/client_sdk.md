@@ -48,41 +48,92 @@ release). Set `QWEN3TTS_SKIP_PROTOCOL_CHECK=1` to downgrade either to a warning
 for deliberate cross-version experiments, or pass `verify=False` to `connect()`
 to skip the connect-time capabilities check entirely.
 
-### Channel 1 — install from Git (developers with repo access)
+### Channel 1 — GitHub/GitLab Release and GitLab Package Registry
 
-Pin the engine's tag in the URL (the package is not published to PyPI):
-
-```bash
-pip install "qwen3-tts-client @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@v0.1.0#subdirectory=client"
-```
-
-Over SSH, swap `https://github.com/` for `ssh://git@github.com/`. Optional
-extras go inside the brackets (`[grpc]` / `[triton]` / `[audio]` / `[all]`):
+Each version tag creates a Release wheel on both forges. Install from the
+matching Release; `pip` downloads the wheel instead of cloning this monorepo:
 
 ```bash
-pip install "qwen3-tts-client[all] @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@v0.1.0#subdirectory=client"
+# GitHub
+pip install "qwen3-tts-client[all] @ https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases/download/v0.1.0/qwen3_tts_client-0.1.0-py3-none-any.whl"
+
+# GitLab (the Release's client-sdk link)
+pip install "qwen3-tts-client[all] @ https://<gitlab-project>/-/releases/v0.1.0/downloads/client-sdk/qwen3_tts_client-0.1.0-py3-none-any.whl"
 ```
 
-### Channel 2 — delivered wheel (no repo access needed)
+The identical file is exposed through the project's GitLab PyPI registry:
 
-Every engine deployment serves the wheel built from its own checkout at
-`GET /sdk/` on the health port — fetching from the engine you talk to makes a
-version mismatch impossible:
+```bash
+pip install \
+  --index-url "https://<gitlab-host>/api/v4/projects/<project-id>/packages/pypi/simple" \
+  "qwen3-tts-client[all]==0.1.0"
+```
+
+For a private project, prefer the PyPI registry and configure a personal or
+read-only deploy token in `.netrc`; do not put credentials in a committed
+requirements file:
+
+```text
+machine <gitlab-host>
+login <deploy-token-username>
+password <deploy-token>
+```
+
+A private Release direct link instead requires a personal access token via
+GitLab's documented query parameter or HTTP header, so it is usually simpler
+to download the file first and install it locally. If your GitLab administrator
+has disabled PyPI package forwarding, configure a trusted dependency index or
+pre-install the wheel's third-party dependencies as well.
+
+Optional extras are `[grpc]`, `[triton]`, `[audio]`, and `[all]`. The SDK is one
+universal wheel; `pip` still resolves its declared third-party dependencies
+from the configured package index.
+
+### Channel 2 — the same wheel from a running engine
+
+Every release engine image embeds the wheel already published by its tag
+pipeline and serves it at `GET /sdk/` on the health port:
 
 ```bash
 curl http://<engine-host>:<health-port>/sdk/      # list available wheels
 pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-none-any.whl
 ```
 
-Standalone release wheels are built on a tag:
+### Release invariant
 
-```bash
-git tag v0.2.0
-bash scripts/bash/release_client_wheel.sh         # → client/dist/*.whl
-```
+Pushing (or mirroring) a `vX.Y.Z`, `vX.Y.ZaN`, `vX.Y.ZbN`, or `vX.Y.ZrcN` tag
+to a forge starts that forge's `.gitlab-ci.yml` or
+`.github/workflows/release.yml`.
+Each pipeline independently enforces the same build-once contract:
 
-The script refuses a dirty tree or an untagged commit, so a delivered wheel's
-version always names the exact source it was built from.
+1. CI checks out only the main repository (`GIT_SUBMODULE_STRATEGY=none` on
+   GitLab and `submodules: false` on GitHub).
+2. `release_client_wheel.sh` builds exactly one wheel and smoke-tests it.
+3. GitLab publishes that wheel to its PyPI Package Registry; GitHub uploads its
+   wheel to a draft GitHub Release. This durable object becomes the canonical
+   input for the rest of that pipeline.
+4. Each image job downloads its forge's canonical wheel, verifies SHA256, and
+   embeds those exact bytes under `/app/sdk/` before pushing the engine image
+   to the GitLab Container Registry or GHCR.
+5. After the image succeeds, GitLab creates or updates an idempotent Release
+   link to its Registry object and GitHub publishes the verified draft Release.
+   Neither Release points at an expiring job artifact.
+
+The engine image job needs a Docker-capable runner with ample free disk (at
+least 50 GB is recommended for the TensorRT base plus CUDA PyTorch layers).
+GitLab's Docker-in-Docker runner must be privileged. GitHub defaults this job
+to `self-hosted`; set the repository variable `RELEASE_IMAGE_RUNNER` to the
+label of a suitably sized runner when needed; a self-hosted runner must provide
+Docker and GitHub CLI (`gh`). Set the protected `NGC_API_KEY` secret as well if
+the selected NGC base image requires authenticated access.
+Protect the `v*` tag namespace and release environment so only release
+maintainers can trigger jobs with publishing credentials. GHCR packages are
+private by default; make the package public explicitly if anonymous image pulls
+are part of the release contract.
+
+`client/dist/` remains an ignored local/CI staging directory. Wheel binaries
+are deliberately not committed to Git, and neither tag pipeline invokes the
+local `compose.sh` path that would rebuild them.
 
 ### Local checkout (development)
 

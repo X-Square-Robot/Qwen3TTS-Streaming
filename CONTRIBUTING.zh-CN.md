@@ -25,6 +25,9 @@ export PYTHONPATH=client/src
 # 单元测试（无需 GPU / Docker —— CI 跑这一档）
 PYTHONPATH=client/src pytest tests/unit -m "not gpu and not docker" -q
 
+# 独立 client SDK 测试套件
+PYTHONPATH=client/src pytest client/tests -q
+
 # 集成 / e2e（可能需要导出产物、GPU 或 Docker）
 pytest tests/integration -q
 ```
@@ -69,14 +72,18 @@ make proto-check  # 校验已同步（CI 会跑）
   `vX.Y.Zrc1`（打在 `beta`）。版本 tag 只打在 `dev` / `beta` / `main` ——
   **个人分支禁止打版本 tag**。
 - 个人分支不需要版本 tag：hatch-vcs 自动推导 `X.Y.Z.devN+g<hash>`，引擎
-  版本戳（`/health` 的 `version`）带 `git describe` 输出，都精确到 commit。
+  在版本化 capabilities 的 `engine_version` 中携带 `git describe` 输出，
+  两者都精确到 commit。
 - 工具链只认 `v[0-9]*` 形式的 tag（hatch-vcs `tag_regex` + `compose.sh` /
   `release_client_wheel.sh` 里的 `git describe --match`）。个人标记请用
   命名空间形式，如 `rime/some-checkpoint` —— 对版本推导完全不可见。
 
 **发版流程**：`dev` 收敛 → 合入 `beta` → 打 `vX.Y.Zb1` → 测试通过 →
-合入 `main` → 打 `vX.Y.Z` → `compose.sh build`（引擎镜像版本戳 + 烤入
-匹配 wheel 供 `/sdk/`）+ `release_client_wheel.sh`（交付 wheel）。
+合入 `main` → 打 `vX.Y.Z`。GitHub Actions 与 GitLab CI 都只检出顶层仓库
+（不拉子模块），各自构建唯一一份 wheel。GitHub 发布到 Release；GitLab 发布到
+PyPI Package Registry 并挂到 Release。随后各流水线按 SHA256 将自己的同一文件
+放进引擎镜像，分别推送 GHCR/GitLab Container Registry。每条发布流水线内都
+禁止手工再构建或上传第二份 wheel。
 
 ## 提交 PR
 

@@ -24,45 +24,46 @@ print(result.audio_format, len(result.audio_bytes))
   绑定正确的适配器，因此通常只需传入一个 URL。
 - **一次性、流式（streaming）和实时（realtime）** 三种模式。
 - **同步与异步** 客户端（`TTSClient` / `AsyncTTSClient`）。
-- **精简依赖** —— 核心安装仅需 `requests`；gRPC / Triton /
-  numpy 为可选附加项。
+- **精简依赖** —— 核心安装仅需 `requests` 和 `websocket-client`；
+  gRPC / Triton / numpy 为可选附加项。
 
 ## 安装
 
-引擎与 SDK **版本一一配对**：两者从同一个 git tag 发布，wheel 版本号由该
-tag 推导。先问引擎它是什么版本：
+引擎与 SDK 从同一个 git tag **版本一一配对**。先查询引擎正在运行的发布版本：
 
 ```bash
-curl http://<engine-host>:<health-port>/health    # → {"version": "v0.1.0", ...}
+curl http://<engine-host>:<ws-port>/v1/capabilities
+# → {"engine_version": "v0.1.0", ...}
 ```
 
-**通道一 —— 从 Git 直接安装**，指定引擎对应的 tag（未发布 PyPI）：
+**通道一 —— GitHub/GitLab Release。** 安装对应 tag 所附的 wheel；私有
+GitLab 项目需要配置凭据：
 
 ```bash
-pip install "qwen3-tts-client @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@v0.1.0#subdirectory=client"
+pip install "qwen3-tts-client[all] @ https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases/download/v0.1.0/qwen3_tts_client-0.1.0-py3-none-any.whl"
 ```
 
-走 SSH 时把 `https://github.com/` 换成 `ssh://git@github.com/`（保留
-`@<tag>#subdirectory=client` 后缀）。
+这条命令下载 wheel，不会检出 Git 仓库。GitLab 还可通过项目 PyPI 索引按
+`qwen3-tts-client==0.1.0` 安装同一文件。
 
-**通道二 —— 交付 wheel。** 每个引擎都在 health 端口的 `GET /sdk/` 提供
-与自己匹配的 wheel —— 连的是哪个引擎，拿到的就是配它的版本：
+**通道二 —— 从引擎获取。** 每个正式镜像都嵌入已发布的 wheel，并通过 health
+端口的 `GET /sdk/` 提供：
 
 ```bash
 curl http://<engine-host>:<health-port>/sdk/      # 查看 .whl 列表
 pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-none-any.whl
 ```
 
-发版 wheel 在 tag 上用 `bash scripts/bash/release_client_wheel.sh` 构建，
-产物在 `client/dist/`。
+两个代码托管平台的 tag 流水线都只构建一次 wheel：先发布，再按 SHA256 把同一
+文件下载进各自的引擎镜像。`client/dist/` 只是本地/CI 暂存目录，wheel 二进制不进 Git。
 
 从本地检出安装：`pip install ./client`（在仓库根目录执行）。装错配对会在
 连接时立即报 `ProtocolVersionMismatchError`（设
 `QWEN3TTS_SKIP_PROTOCOL_CHECK=1` 可降级为警告）。
 
-附加项，按你连接的对象 / 所需功能划分 —— 写在方括号里，如
-`"qwen3-tts-client[grpc] @ git+https://...#subdirectory=client"` 或
-`pip install "./client[grpc]"`：
+附加项按连接对象 / 所需功能划分。可写在 Release 直链引用中
+（`qwen3-tts-client[grpc] @ https://...whl`），或用于本地安装
+（`pip install "./client[grpc]"`）：
 
 | Extra | Pulls in | Use when |
 |-------|----------|----------|

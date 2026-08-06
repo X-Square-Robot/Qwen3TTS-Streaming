@@ -25,9 +25,10 @@ class ProtocolVersionMismatchError(TTSClientError):
     """Raised when the server speaks a different protocol generation.
 
     Engine and client SDK are version-paired: install the wheel the engine
-    serves at ``GET /sdk/`` on its health port, or the same git tag as the
-    deployed engine (``/health`` reports it in the ``version`` field). Set
-    ``QWEN3TTS_SKIP_PROTOCOL_CHECK=1`` to downgrade this error to a warning.
+    serves at ``GET /sdk/`` on its health port, or the matching wheel from the
+    GitHub/GitLab Release or Package Registry. The engine reports its release as
+    ``capabilities.engine_version``. Set ``QWEN3TTS_SKIP_PROTOCOL_CHECK=1`` to
+    downgrade this error to a warning.
     """
 
 
@@ -39,9 +40,9 @@ class EngineVersionMismatchError(TTSClientError):
     ``connect()`` reads the engine's release stamp from the ``engine_version``
     capability (the versioned capabilities surface, not ``/health``, which
     stays a pure liveness probe) and compares it against this package's
-    ``__version__``. Install the wheel the engine serves at ``GET /sdk/``, or
-    pass ``verify=False`` (or set ``QWEN3TTS_SKIP_PROTOCOL_CHECK=1``) to
-    override.
+    ``__version__``. Install the wheel the engine serves at ``GET /sdk/`` or
+    the matching GitHub/GitLab Release or Package Registry wheel. Pass
+    ``verify=False`` (or set ``QWEN3TTS_SKIP_PROTOCOL_CHECK=1``) to override.
 
     Distinct from :class:`ProtocolVersionMismatchError`, which flags a changed
     wire-protocol *generation* rather than a release skew.

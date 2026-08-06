@@ -8,8 +8,8 @@ endpoint argument (default: `ws://localhost:50052/v1/ws`).
 First start a Qwen3-TTS endpoint (see the repo README), then:
 
 ```bash
-# @tag = the engine's version (curl http://<engine>:<health-port>/health)
-pip install "qwen3-tts-client[all] @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@v0.1.0#subdirectory=client"
+# Use the wheel from the engine tag's GitHub or GitLab Release.
+pip install "qwen3-tts-client[all] @ https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases/download/v0.1.0/qwen3_tts_client-0.1.0-py3-none-any.whl"
 python quickstart.py                  # one-shot synthesis -> quickstart.wav
 python streaming.py                   # incremental text -> streaming.wav
 python realtime.py                    # wall-clock aligned frames (WebRTC/playback)

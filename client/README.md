@@ -26,47 +26,48 @@ print(result.audio_format, len(result.audio_bytes))
   binds the right adapter, so you usually just pass a URL.
 - **One-shot, streaming, and realtime** modes.
 - **Sync and async** clients (`TTSClient` / `AsyncTTSClient`).
-- **Slim dependencies** — the core install only needs `requests`; gRPC / Triton /
-  numpy are opt-in extras.
+- **Slim dependencies** — the core install only needs `requests` and
+  `websocket-client`; gRPC / Triton / numpy are opt-in extras.
 
 ## Install
 
-Engine and SDK are **version-paired**: both are released from the same git
-tag, and the wheel version is derived from that tag. First ask your engine
-which version it is:
+Engine and SDK are **version-paired** from the same git tag. First ask the
+engine which release it is running:
 
 ```bash
-curl http://<engine-host>:<health-port>/health    # → {"version": "v0.1.0", ...}
+curl http://<engine-host>:<ws-port>/v1/capabilities
+# → {"engine_version": "v0.1.0", ...}
 ```
 
-**Channel 1 — straight from Git**, at the engine's tag (not on PyPI):
+**Channel 1 — GitHub/GitLab Release.** Install the wheel attached to the
+matching tag (a private GitLab project requires credentials):
 
 ```bash
-pip install "qwen3-tts-client @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@v0.1.0#subdirectory=client"
+pip install "qwen3-tts-client[all] @ https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases/download/v0.1.0/qwen3_tts_client-0.1.0-py3-none-any.whl"
 ```
 
-Over SSH, swap `https://github.com/` for `ssh://git@github.com/` (keep the
-`@<tag>#subdirectory=client` suffix).
+This fetches the wheel, not a Git checkout. GitLab additionally exposes its
+wheel through the project PyPI index as `qwen3-tts-client==0.1.0`.
 
-**Channel 2 — a delivered wheel.** Every engine serves its own matching wheel
-at `GET /sdk/` on the health port — whatever engine you reach, the wheel it
-hands out fits it:
+**Channel 2 — from the engine.** Every release image embeds the already
+published wheel and serves it at `GET /sdk/` on the health port:
 
 ```bash
 curl http://<engine-host>:<health-port>/sdk/      # list the .whl
 pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-none-any.whl
 ```
 
-Release wheels are built on a tag with
-`bash scripts/bash/release_client_wheel.sh` → `client/dist/`.
+Each forge's tag pipeline builds its wheel once, publishes it, and downloads
+that same SHA256-verified file into its engine image. `client/dist/` is a
+local/CI staging directory; wheel binaries are not tracked in Git.
 
 From a local checkout: `pip install ./client` (repo root). A mispaired
 install fails fast at connect with `ProtocolVersionMismatchError`
 (set `QWEN3TTS_SKIP_PROTOCOL_CHECK=1` to downgrade it to a warning).
 
-Extras, by what you connect to / need — add them in the brackets, e.g.
-`"qwen3-tts-client[grpc] @ git+https://...#subdirectory=client"` or
-`pip install "./client[grpc]"`:
+Extras are selected by what you connect to / need. Add them to the Release
+direct reference (`qwen3-tts-client[grpc] @ https://...whl`) or a local install
+(`pip install "./client[grpc]"`):
 
 | Extra | Pulls in | Use when |
 |-------|----------|----------|

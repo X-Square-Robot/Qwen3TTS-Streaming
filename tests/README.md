@@ -6,6 +6,7 @@ This repository keeps test entry points deliberately separated:
 
 | Location | Purpose | How to run |
 | --- | --- | --- |
+| `client/tests/` | Standalone client SDK tests, including transport adapters and release/version guards. | `PYTHONPATH=client/src pytest client/tests -q` |
 | `tests/unit/` | Fast pytest unit tests. No external serving process required. | `pytest tests/unit -q` |
 | `tests/integration/` | Pytest integration checks for exported artifacts, manifests, ONNX/TRT config generation, and local build outputs. | `pytest tests/integration -q` |
 | `tests/e2e/` | Pytest end-to-end checks against a running standalone engine or Triton service. Tests auto-skip when the service is not reachable. | `pytest tests/e2e -v -s` |
@@ -22,6 +23,7 @@ Run the normal developer suite:
 
 ```bash
 pytest tests/unit tests/integration -q
+PYTHONPATH=client/src pytest client/tests -q
 ```
 
 Run Triton E2E pytest checks:

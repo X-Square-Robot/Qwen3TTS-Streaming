@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Version tags now run wheel-first GitHub and GitLab release pipelines: the
+  main repository is checked out without submodules, each forge builds one
+  client wheel, GitHub publishes it to its Release, and GitLab publishes it to
+  its PyPI Registry with a Release link. The SHA256-identical published file
+  is embedded in that forge's engine image.
 - Standalone WebSocket connections can now carry multiple logical TTS sessions
   serially. The SDK adds a concurrent connection pool, idle keepalive, stale
   connection probing, new-session reconnects, and a `stop()` alias for `end()`.

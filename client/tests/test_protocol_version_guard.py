@@ -32,6 +32,8 @@ def test_mismatch_raises_with_actionable_message():
     assert "tts-session-v99" in message
     assert PROTOCOL_VERSION in message
     assert "/sdk/" in message
+    assert "GitHub/GitLab Release or Package Registry" in message
+    assert "capabilities.engine_version" in message
 
 
 def test_env_escape_hatch_downgrades_to_warning(monkeypatch):

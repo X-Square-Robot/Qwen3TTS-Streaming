@@ -11,6 +11,10 @@
 
 ### Added
 
+- 版本 tag 现在触发 wheel-first GitHub/GitLab 发布流水线：只检出顶层仓库且不拉
+  子模块，每个平台各自只构建一份 client wheel；GitHub 发布到 Release，GitLab
+  发布到 PyPI Registry 并挂 Release 链接，再将该平台已发布、SHA256 完全相同的
+  文件嵌入对应引擎镜像。
 - standalone WebSocket 现在支持在同一物理连接上串行运行多个逻辑 TTS 会话；SDK
   提供并发连接池、空闲保活、僵尸连接探测以及新会话建连失败重试，并新增与
   `end()` 等价的 `stop()`；可复用 `done` 能力标识使新旧版本混部时可安全退化为逐

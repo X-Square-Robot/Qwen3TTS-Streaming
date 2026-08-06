@@ -745,7 +745,17 @@ stage_client_wheel() {
     mkdir -p "$dist_dir"
     rm -f "$dist_dir"/*.whl
     if python3 -m pip wheel --no-deps --wheel-dir "$dist_dir" "$REPO_ROOT/client" >/dev/null 2>&1; then
-        log_info "Client wheel staged for /sdk/: $(basename "$(ls "$dist_dir"/*.whl 2>/dev/null | head -1)")"
+        local wheel_file
+        wheel_file=$(find "$dist_dir" -maxdepth 1 -type f -name 'qwen3_tts_client-*.whl' -print -quit)
+        if [[ -z "$wheel_file" ]]; then
+            log_warn "Client wheel build reported success but produced no wheel; engine /sdk/ endpoint will be empty"
+            return 0
+        fi
+        export CLIENT_WHEEL_FILENAME
+        CLIENT_WHEEL_FILENAME=$(basename "$wheel_file")
+        export CLIENT_WHEEL_SHA256
+        CLIENT_WHEEL_SHA256=$(sha256sum "$wheel_file" | cut -d' ' -f1)
+        log_info "Client wheel staged for /sdk/: $CLIENT_WHEEL_FILENAME"
     else
         log_warn "Client wheel build failed; engine /sdk/ endpoint will be empty"
     fi

@@ -186,7 +186,8 @@ def check_protocol_version(server_version: Any) -> None:
         f"Server protocol version {server!r} does not match this SDK's "
         f"{PROTOCOL_VERSION!r}. Engine and client are version-paired: install "
         "the wheel this engine serves at GET /sdk/ on its health port, or the "
-        "SDK at the engine's git tag (see the 'version' field in /health). "
+        "matching GitHub/GitLab Release or Package Registry wheel (the engine reports "
+        "its release as capabilities.engine_version). "
         "Set QWEN3TTS_SKIP_PROTOCOL_CHECK=1 to proceed anyway."
     )
     if os.environ.get("QWEN3TTS_SKIP_PROTOCOL_CHECK", "") == "1":
@@ -239,8 +240,9 @@ def check_engine_version(server_version: Any) -> None:
         f"SDK/engine release mismatch: client qwen3-tts-client {__version__!r} "
         f"vs engine {str(server_version).strip()!r}. The engine image and client "
         f"wheel are released 1:1 from the same git tag — install the wheel this "
-        f"engine serves at GET /sdk/ (on its health port), or the SDK at the "
-        f"engine's tag. Set QWEN3TTS_SKIP_PROTOCOL_CHECK=1 to proceed anyway."
+        f"engine serves at GET /sdk/ (on its health port), or the matching "
+        f"GitHub/GitLab Release or Package Registry wheel. Set "
+        f"QWEN3TTS_SKIP_PROTOCOL_CHECK=1 to proceed anyway."
     )
     if (
         os.environ.get("QWEN3TTS_SKIP_PROTOCOL_CHECK", "") == "1"

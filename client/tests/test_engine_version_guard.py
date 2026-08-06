@@ -77,6 +77,7 @@ def test_confirmed_release_mismatch_raises_actionable(monkeypatch):
     msg = str(excinfo.value)
     assert "0.2.0" in msg and "0.3.0" in msg
     assert "/sdk/" in msg
+    assert "GitHub/GitLab Release or Package Registry" in msg
 
 
 def test_dev_build_either_side_only_warns(monkeypatch):

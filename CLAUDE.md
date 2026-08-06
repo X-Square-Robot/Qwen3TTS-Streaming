@@ -13,7 +13,7 @@ Qwen3TTS-Streaming 将官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运
 ```
 Qwen3TTS-Streaming/
 ├── engine/              # 推理引擎核心（frontend/backend/gateway/core/interface）
-├── client/              # 独立 Python SDK 包 (qwen3-tts-client，pip 从 Git 一步安装)
+├── client/              # 独立 Python SDK 包（qwen3-tts-client，以 wheel 发布）
 │   ├── src/qwen3tts/     # 客户端实现与传输适配器
 │   └── src/qwen3tts_protocol/   # 共享协议层（单一真相源）
 ├── demo_api/            # WebUI Demo API 后端（aiohttp）
@@ -122,7 +122,7 @@ python -m engine.server --config engine.yaml
 | 导出 ONNX | `bash scripts/bash/autorun.sh setup -m custom-1.7b` |
 | 编译 TRT | `bash scripts/bash/build_engines.sh --variant custom-1.7b` |
 | 跨机编译 | `bash scripts/bash/autorun.sh make-bundle -m custom-1.7b --target-profile target_profile.json` |
-| 发版 client wheel | `bash scripts/bash/release_client_wheel.sh`（须在干净 tag 上；版本号=tag，与引擎镜像配对） |
+| 发版 client wheel | 推送版本 tag；GitHub 发布到 Release，GitLab 发布到 PyPI Registry 并挂 Release 链接；各流水线只构建一次并将自己的同一 wheel 放进镜像 |
 | 导入编译产物 | `bash scripts/bash/autorun.sh import-artifact workspace/engine_artifact_bundle.tar.zst` |
 | 采集目标机信息 | `bash scripts/bash/autorun.sh probe-target --out target_profile.json` |
 
@@ -131,7 +131,7 @@ python -m engine.server --config engine.yaml
 - 分支单向晋升：`<用户名>`(个人开发) → `dev`(跨用户同步) → `beta`(只从 dev 合并) → `main`(只从 beta 合并)。紧急修复走 `hotfix/<topic>`：从 main 切出、合回 main 后**立即**同步回 dev（及在测的 beta）——这是唯一绕过 beta 进 main 的通道
 - 版本 tag 一律 `v`+PEP 440：稳定 `vX.Y.Z`（main）、beta `vX.Y.Zb1`/`vX.Y.Zrc1`（beta）；只打在 dev/beta/main，**个人分支禁止打版本 tag**（hatch-vcs 自动给 `X.Y.Z.devN+g<hash>`，引擎戳同理精确到 commit）
 - 工具链只认 `v[0-9]*` tag（client/pyproject.toml `tag_regex` + compose.sh / release_client_wheel.sh 的 `git describe --match`）；个人标记用 `rime/xxx` 命名空间，不参与版本推导
-- 发版：dev 收敛 → beta 打 `vX.Y.Zb1` 测试 → main 打 `vX.Y.Z` → `compose.sh build`（镜像版本戳+wheel 进 /sdk/）+ `release_client_wheel.sh`（交付 wheel）；引擎与 client wheel 从同一 tag 出、版本一一配对（详见 docs/user/client_sdk.md）
+- 发版：dev 收敛 → beta 打 `vX.Y.Zb1` 测试 → main 打 `vX.Y.Z` → GitHub/GitLab tag pipeline 均不拉子模块，各自只构建一次 wheel；GitHub 发布 Release，GitLab 发布 PyPI Registry 并挂 Release 链接，然后各自下载同一 SHA256 构建镜像；每条流水线内禁止二次构建发布 wheel（详见 docs/user/client_sdk.md）
 
 ## 重要约束
 

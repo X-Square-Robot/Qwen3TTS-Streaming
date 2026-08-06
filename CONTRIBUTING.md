@@ -25,6 +25,9 @@ export PYTHONPATH=client/src
 # Unit tests (no GPU / Docker required — this is the tier CI runs)
 PYTHONPATH=client/src pytest tests/unit -m "not gpu and not docker" -q
 
+# Standalone client SDK suite
+PYTHONPATH=client/src pytest client/tests -q
+
 # Integration / e2e (may require export artifacts, a GPU, or Docker)
 pytest tests/integration -q
 ```
@@ -71,16 +74,20 @@ wheel (see [docs/user/client_sdk.md](docs/user/client_sdk.md)):
   only — **never tag versions on personal branches**.
 - Personal branches need no version tags: hatch-vcs derives
   `X.Y.Z.devN+g<hash>` automatically and the engine stamp (`version` in
-  `/health`) carries `git describe`, both unique per commit.
+  versioned capabilities as `engine_version`) carries `git describe`, both
+  unique per commit.
 - The toolchain only recognizes `v[0-9]*` tags (hatch-vcs `tag_regex` +
   `git describe --match` in `compose.sh` / `release_client_wheel.sh`).
   Personal markers must use a namespace, e.g. `rime/some-checkpoint` —
   they are invisible to version derivation.
 
 **Release flow**: converge `dev` → merge to `beta` → tag `vX.Y.Zb1` → tests
-pass → merge to `main` → tag `vX.Y.Z` → `compose.sh build` (stamps the engine
-image and bakes the matching wheel for `/sdk/`) +
-`release_client_wheel.sh` (deliverable wheel).
+pass → merge to `main` → tag `vX.Y.Z`. GitHub Actions and GitLab CI each check
+out only the top-level repository (no submodules) and build one wheel. GitHub
+publishes it to its Release; GitLab publishes it to its PyPI Package Registry
+and links it from its Release. Each pipeline downloads its exact SHA256 into
+the engine image before publishing to GHCR or GitLab Container Registry. Do
+not build or upload a second wheel manually within either release pipeline.
 
 ## Submitting a PR
 

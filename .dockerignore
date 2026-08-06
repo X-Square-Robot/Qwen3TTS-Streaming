@@ -1,0 +1,27 @@
+.git
+.gitignore
+.gitlab-ci.yml
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/*.so
+*.log
+.DS_Store
+
+# Large runtime artifacts are mounted into containers.  The release wheel is
+# deliberately not excluded: tag CI downloads it into client/dist/ before the
+# engine image build.
+workspace/
+third_party/
+
+.venv/
+venv/
+env/
+.cache/
+
+.idea/
+.vscode/

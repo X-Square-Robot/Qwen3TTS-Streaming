@@ -252,14 +252,18 @@ You can also configure the reference library and reference cache in `engine.yaml
 
 A standalone Python SDK package that provides unified access to the engine and Triton endpoints, supporting four transports: engine-websocket / engine-grpc / triton-grpc / triton-http. The default `transport="auto"` auto-detects the endpoint.
 
-Engine and SDK are version-paired (released from the same git tag; ask the
-engine with `curl http://<engine-host>:<health-port>/health` → `"version"`):
+Engine and SDK are version-paired from the same git tag. Read
+`engine_version` from `GET /v1/capabilities`, then install that tag's wheel
+from the GitHub or GitLab Release:
 
 ```bash
-# Channel 1 — from Git, at the engine's tag (extras: [grpc]/[triton]/[audio]/[all])
-pip install "qwen3-tts-client[all] @ git+https://github.com/X-Square-Robot/Qwen3TTS-Streaming.git@v0.1.0#subdirectory=client"
+curl http://<engine-host>:<ws-port>/v1/capabilities
+# → {"engine_version": "v0.1.0", ...}
 
-# Channel 2 — the wheel the engine itself serves (always the matching version)
+# Public GitHub Release (the GitLab Release exposes the same filename).
+pip install "qwen3-tts-client[all] @ https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases/download/v0.1.0/qwen3_tts_client-0.1.0-py3-none-any.whl"
+
+# The engine serves the exact same published wheel.
 curl http://<engine-host>:<health-port>/sdk/    # list, then:
 pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-none-any.whl
 
@@ -388,7 +392,7 @@ sticky or token-consistent routing.
 ```text
 Qwen3TTS-Streaming/
 ├── engine/                     # Inference engine: frontend/backend/gateway/core
-├── client/                     # Standalone Python SDK package (qwen3-tts-client, pip-installable from Git)
+├── client/                     # Standalone Python SDK package (qwen3-tts-client, released as a wheel)
 │   ├── src/qwen3tts/           #   Client implementation and transport adapters
 │   └── src/qwen3tts_protocol/  #   Shared protocol layer (single source of truth)
 ├── demo_api/                   # WebUI Demo API (depends on the client package)

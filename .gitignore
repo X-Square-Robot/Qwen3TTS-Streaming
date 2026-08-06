@@ -24,6 +24,7 @@ webui/tsconfig.tsbuildinfo
 .env
 .venv/
 venv/
+.cache/
 .DS_Store
 .idea/
 .claude/

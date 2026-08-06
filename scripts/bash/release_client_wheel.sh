@@ -2,11 +2,10 @@
 # ===========================================================================
 #  release_client_wheel.sh — Build the distributable client SDK wheel on a tag
 #
-#  Channel 2 of client delivery (channel 1 is `pip install "... @ git+ssh://
-#  ...@<tag>#subdirectory=client"`). The wheel version is derived from the git
-#  tag via hatch-vcs, so engine image and wheel built from the same tag carry
-#  the same version — that pairing is the whole point. This script therefore
-#  refuses to build from a dirty tree or an untagged commit.
+#  The wheel version is derived from the git tag via hatch-vcs, so the package
+#  registry artifact and engine image built by the tag pipeline carry the same
+#  version. This script therefore refuses to build from a dirty tree or an
+#  untagged commit.
 #
 #  Usage:
 #    git tag v0.2.0 && bash scripts/bash/release_client_wheel.sh
@@ -54,9 +53,17 @@ tag="$(git -C "$REPO_ROOT" describe --tags --exact-match --match "v[0-9]*" HEAD 
 
 log_info "Building client wheel at tag $tag ..."
 mkdir -p "$OUT_DIR"
+rm -f "$OUT_DIR"/qwen3_tts_client-*.whl
 python3 -m pip wheel --no-deps --wheel-dir "$OUT_DIR" "$REPO_ROOT/client"
 
-wheel_file="$(ls -t "$OUT_DIR"/qwen3_tts_client-*.whl | head -1)"
+shopt -s nullglob
+wheel_files=("$OUT_DIR"/qwen3_tts_client-*.whl)
+shopt -u nullglob
+if [[ "${#wheel_files[@]}" -ne 1 ]]; then
+    log_error "expected exactly one client wheel in $OUT_DIR, found ${#wheel_files[@]}"
+    exit 1
+fi
+wheel_file="${wheel_files[0]}"
 wheel_version="$(basename "$wheel_file" | cut -d- -f2)"
 expected="${tag#v}"
 if [[ "$wheel_version" != "$expected" ]]; then
@@ -64,5 +71,24 @@ if [[ "$wheel_version" != "$expected" ]]; then
     exit 1
 fi
 
+python3 - "$wheel_file" <<'PY'
+import sys
+import zipfile
+
+wheel = sys.argv[1]
+with zipfile.ZipFile(wheel) as archive:
+    names = set(archive.namelist())
+
+required = {"qwen3tts/__init__.py", "qwen3tts_protocol/__init__.py"}
+missing = sorted(required - names)
+if missing:
+    raise SystemExit(f"release wheel is missing required packages: {missing}")
+
+forbidden = ("engine/", "demo_api/", "third_party/", "workspace/")
+unexpected = sorted(name for name in names if name.startswith(forbidden))
+if unexpected:
+    raise SystemExit(f"release wheel contains server/repository files: {unexpected[:10]}")
+PY
+
 log_info "Release wheel ready: $wheel_file"
-log_info "Deliver it alongside engine image tag $tag (engine advertises 'engine_version': $tag in its capabilities)"
+log_info "Publish this exact file before building engine image $tag"
