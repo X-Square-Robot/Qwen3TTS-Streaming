@@ -120,16 +120,44 @@ Each pipeline independently enforces the same build-once contract:
    Neither Release points at an expiring job artifact.
 
 The engine image job needs a Docker-capable runner with ample free disk (at
-least 50 GB is recommended for the TensorRT base plus CUDA PyTorch layers).
+least 50 GB is recommended for the NVIDIA PyTorch runtime image and build
+cache). The base already provides a matched CUDA, PyTorch, and TensorRT stack;
+the project installs only its application-level Python dependencies on top.
 GitLab's Docker-in-Docker runner must be privileged. GitHub defaults this job
 to `self-hosted`; set the repository variable `RELEASE_IMAGE_RUNNER` to the
 label of a suitably sized runner when needed; a self-hosted runner must provide
 Docker and GitHub CLI (`gh`). Set the protected `NGC_API_KEY` secret as well if
-the selected NGC base image requires authenticated access.
+the selected NGC base image requires authenticated access. The GitLab image job
+declares a three-hour timeout; any maximum timeout configured on its Runner must
+be at least as large.
 Protect the `v*` tag namespace and release environment so only release
 maintainers can trigger jobs with publishing credentials. GHCR packages are
 private by default; make the package public explicitly if anonymous image pulls
 are part of the release contract.
+
+Both pipelines default runner downloads to configurable mainland-China
+endpoints: BFSU for general Python packages, the NJU mirror for CPU-only
+PyTorch used by GitHub unit tests, BFSU for GitLab's Debian/Alpine packages,
+and DaoCloud for GitLab job images and the `nvcr.io` NVIDIA PyTorch base image.
+Override these names as repository variables on GitHub or CI/CD variables on
+GitLab:
+
+| Variable | Purpose |
+| --- | --- |
+| `PIP_INDEX_URL` | Wheel builds, smoke tests, and general Python image dependencies |
+| `ENGINE_BASE_IMAGE` | NVIDIA PyTorch base containing matched CUDA/PyTorch/TensorRT; preferably a digest-pinned company Harbor/ACR copy |
+| `PYTORCH_CPU_INDEX` | CPU-only PyTorch index used by GitHub unit tests |
+| `RUNNER_*_IMAGE`, `DEBIAN_*_MIRROR`, `ALPINE_MIRROR` | GitLab job/service images and OS package mirrors |
+
+The public proxies are useful for getting a constrained runner working. For a
+stable release path, pre-sync the NGC and job images into an internal Registry
+and override `ENGINE_BASE_IMAGE` and the `RUNNER_*_IMAGE` values. These package
+mirrors do not proxy GitHub Actions, the Release API, GHCR pushes, or GitLab
+publication traffic, so the runner must still reach its forge. Both release
+pipelines publish inline Docker cache metadata under the mutable `buildcache`
+image tag; the immutable release tag is still the deployment artifact. The
+first build must pull the large NGC base, while later tag builds can reuse its
+verified dependency layers through the Registry.
 
 `client/dist/` remains an ignored local/CI staging directory. Wheel binaries
 are deliberately not committed to Git, and neither tag pipeline invokes the

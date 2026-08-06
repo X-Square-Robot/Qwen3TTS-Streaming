@@ -394,7 +394,8 @@ engine_health_check() {
 # ---------------------------------------------------------------------------
 #  engine_docker_image_has_app <image_tag>
 #  Returns 0 if the image was built from Dockerfile.engine (bundled engine/ under /app).
-#  Returns 1 if the tag points at a wrong image (e.g. base TensorRT retagged as qwen3-engine).
+#  Returns 1 if the tag points at a wrong image (for example, an NVIDIA base
+#  image retagged directly as qwen3-engine).
 # ---------------------------------------------------------------------------
 engine_docker_image_has_app() {
     local image="$1"
@@ -424,13 +425,14 @@ PY
 
 # ---------------------------------------------------------------------------
 #  engine_docker_image_tensorrt_release <image_tag>
-#  Echoes NVIDIA_TENSORRT_VERSION from the image (e.g. 25.03, 26.02).
+#  Echoes the monthly NVIDIA release carried by either the TensorRT or PyTorch
+#  base image (e.g. 25.03, 26.02).
 # ---------------------------------------------------------------------------
 engine_docker_image_tensorrt_release() {
     local image="$1"
     docker image inspect "$image" \
         --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
-        | awk -F= '$1 == "NVIDIA_TENSORRT_VERSION" { print $2; exit }'
+        | awk -F= '$1 == "NVIDIA_TENSORRT_VERSION" || $1 == "NVIDIA_PYTORCH_VERSION" { print $2; exit }'
 }
 
 # ---------------------------------------------------------------------------
@@ -494,18 +496,12 @@ engine_build_image() {
     local base_image="${ENGINE_BASE_IMAGE:-}"
     if [ -z "$base_image" ]; then
         if [ -n "$image_tag_release" ]; then
-            base_image="nvcr.io/nvidia/tensorrt:${image_tag_release}-py3"
+            base_image="nvcr.io/nvidia/pytorch:${image_tag_release}-py3"
         else
-            base_image="nvcr.io/nvidia/tensorrt:26.02-py3"
+            base_image="nvcr.io/nvidia/pytorch:26.02-py3"
         fi
     fi
-    local pytorch_cuda_tag="${ENGINE_PYTORCH_CUDA_TAG:-${PYTORCH_CUDA_TAG:-}}"
-    if [ -z "$pytorch_cuda_tag" ]; then
-        if [ -n "$image_tag_release" ] && declare -F resolve_ngc_torch_index_tag >/dev/null; then
-            pytorch_cuda_tag=$(resolve_ngc_torch_index_tag "$image_tag_release" 2>/dev/null || true)
-        fi
-        pytorch_cuda_tag="${pytorch_cuda_tag:-cu130}"
-    fi
+    local pip_index_url="${PIP_INDEX_URL:-https://mirrors.bfsu.edu.cn/pypi/web/simple}"
     local base_release=""
     if [[ "$base_image" =~ :([0-9]{2}\.[0-9]{2})-py3$ ]]; then
         base_release="${BASH_REMATCH[1]}"
@@ -517,7 +513,7 @@ engine_build_image() {
     # BuildKit: enables RUN --mount cache for pip (faster rebuilds; see Dockerfile.engine).
     DOCKER_BUILDKIT=1 docker build \
         --build-arg "BASE_IMAGE=$base_image" \
-        --build-arg "PYTORCH_CUDA_TAG=$pytorch_cuda_tag" \
+        --build-arg "PIP_INDEX_URL=$pip_index_url" \
         -t "$image_tag" \
         -f "$dockerfile" \
         "$repo_root" \
@@ -527,14 +523,8 @@ engine_build_image() {
     if [ -n "$expected_release" ] && ! engine_docker_image_matches_release "$image_tag" "$expected_release"; then
         local actual_release
         actual_release=$(engine_docker_image_tensorrt_release "$image_tag" || true)
-        log_error "Built image TensorRT release mismatch: image=$image_tag expected=$expected_release actual=${actual_release:-unknown}"
+        log_error "Built image NVIDIA release mismatch: image=$image_tag expected=$expected_release actual=${actual_release:-unknown}"
         log_error "Base image was: $base_image"
-        return 1
-    fi
-    if [ -n "$pytorch_cuda_tag" ] && ! engine_docker_image_matches_torch_cuda "$image_tag" "$pytorch_cuda_tag"; then
-        local actual_torch_cuda_tag
-        actual_torch_cuda_tag=$(engine_docker_image_torch_cuda_tag "$image_tag" || true)
-        log_error "Built image PyTorch CUDA wheel mismatch: image=$image_tag expected=$pytorch_cuda_tag actual=${actual_torch_cuda_tag:-unknown}"
         return 1
     fi
     log_info "Image built: $image_tag"

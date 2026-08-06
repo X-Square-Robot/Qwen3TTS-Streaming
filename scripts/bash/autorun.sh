@@ -421,14 +421,13 @@ build_forward_args() {
             BUILD_IMAGE="$_ngc_image"
         fi
         export TRITON_BASE_IMAGE="${TRITON_BASE_IMAGE:-$_ngc_image}"
-        export ENGINE_BASE_IMAGE="${ENGINE_BASE_IMAGE:-nvcr.io/nvidia/tensorrt:${NGC_TAG}-py3}"
+        export ENGINE_BASE_IMAGE="${ENGINE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:${NGC_TAG}-py3}"
         export TRITON_IMAGE="${TRITON_IMAGE:-qwen3tts-streaming:${NGC_TAG}}"
         if ! $ENGINE_DOCKER_IMAGE_EXPLICIT; then
             ENGINE_DOCKER_IMAGE="qwen3-engine:${NGC_TAG}"
             export ENGINE_IMAGE="$ENGINE_DOCKER_IMAGE"
         fi
         export PYTORCH_CUDA_TAG="${PYTORCH_CUDA_TAG:-$_torch_tag}"
-        export ENGINE_PYTORCH_CUDA_TAG="${ENGINE_PYTORCH_CUDA_TAG:-$_torch_tag}"
         export TRITON_PYTORCH_CUDA_TAG="${TRITON_PYTORCH_CUDA_TAG:-$_torch_tag}"
         export TRITON_TENSORRT_PYTHON_VERSION="${TRITON_TENSORRT_PYTHON_VERSION:-$_trt_python_version}"
         export TRITON_TENSORRT_PIP_VERSION="${TRITON_TENSORRT_PIP_VERSION:-$_trt_python_version}"

@@ -10,15 +10,30 @@ stages:
   - release
 
 # hatch-vcs derives the SDK version from the release tag, so the main checkout
-# needs complete tag metadata.  The SDK is self-contained under client/ and
-# must never fetch the upstream model repository.
+# needs complete tag metadata. The SDK is self-contained under client/ and
+# must never fetch the upstream model repository. Project/group CI variables
+# can override every mirror default below (prefer an internal Registry in
+# production).
 variables:
   GIT_DEPTH: "0"
   GIT_SUBMODULE_STRATEGY: "none"
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  PIP_INDEX_URL: "https://mirrors.bfsu.edu.cn/pypi/web/simple"
+  PIP_DEFAULT_TIMEOUT: "120"
+  PIP_RETRIES: "10"
+  ENGINE_BASE_IMAGE: "m.daocloud.io/nvcr.io/nvidia/pytorch:26.02-py3"
+  RUNNER_PYTHON_IMAGE: "m.daocloud.io/docker.io/library/python:3.11-slim"
+  RUNNER_DOCKER_CLI_IMAGE: "m.daocloud.io/docker.io/library/docker:27.4.1-cli"
+  RUNNER_DOCKER_DIND_IMAGE: "m.daocloud.io/docker.io/library/docker:27.4.1-dind"
+  RUNNER_GLAB_IMAGE: "m.daocloud.io/registry.gitlab.com/gitlab-org/cli:v1.58.0"
+  DEBIAN_MIRROR: "https://mirrors.bfsu.edu.cn/debian"
+  DEBIAN_SECURITY_MIRROR: "https://mirrors.bfsu.edu.cn/debian-security"
+  ALPINE_MIRROR: "https://mirrors.bfsu.edu.cn/alpine"
   ENGINE_RELEASE_IMAGE: "$CI_REGISTRY_IMAGE/engine:$CI_COMMIT_TAG"
+  ENGINE_BUILD_CACHE_IMAGE: "$CI_REGISTRY_IMAGE/engine:buildcache"
   DOCKER_HOST: "tcp://docker:2375"
   DOCKER_TLS_CERTDIR: ""
+  DOCKER_DRIVER: "overlay2"
   DOCKER_BUILDKIT: "1"
 
 .tag-release-job:
@@ -29,10 +44,21 @@ variables:
 build-client-wheel:
   extends: .tag-release-job
   stage: sdk-build
-  image: python:3.11-slim
+  image: "$RUNNER_PYTHON_IMAGE"
   variables:
     GIT_STRATEGY: clone
   before_script:
+    - |
+      for sources_file in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do
+        [ ! -f "$sources_file" ] || sed -i \
+          -e "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+          -e "s|https://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+          -e "s|http://security.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+          -e "s|https://security.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+          -e "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
+          -e "s|https://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
+          "$sources_file"
+      done
     - apt-get update
     - apt-get install --yes --no-install-recommends git
   script:
@@ -82,13 +108,24 @@ build-client-wheel:
 publish-client-wheel:
   extends: .tag-release-job
   stage: sdk-publish
-  image: python:3.11-slim
+  image: "$RUNNER_PYTHON_IMAGE"
   needs:
     - job: build-client-wheel
       artifacts: true
   variables:
     GIT_STRATEGY: none
   before_script:
+    - |
+      for sources_file in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do
+        [ ! -f "$sources_file" ] || sed -i \
+          -e "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+          -e "s|https://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+          -e "s|http://security.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+          -e "s|https://security.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+          -e "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
+          -e "s|https://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
+          "$sources_file"
+      done
     - apt-get update
     - apt-get install --yes --no-install-recommends curl
     - python -m pip install twine==6.2.0
@@ -150,9 +187,11 @@ publish-client-wheel:
 build-engine-image:
   extends: .tag-release-job
   stage: image
-  image: docker:27.4.1-cli
+  timeout: 3h
+  resource_group: engine-image-cache
+  image: "$RUNNER_DOCKER_CLI_IMAGE"
   services:
-    - name: docker:27.4.1-dind
+    - name: "$RUNNER_DOCKER_DIND_IMAGE"
       alias: docker
       command: ["--tls=false"]
   needs:
@@ -162,6 +201,7 @@ build-engine-image:
     GIT_STRATEGY: clone
     GIT_DEPTH: "1"
   before_script:
+    - sed -i -e "s|http://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" -e "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" /etc/apk/repositories
     - apk add --no-cache curl
     - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" --username "$CI_REGISTRY_USER" --password-stdin
     - |
@@ -187,14 +227,22 @@ build-engine-image:
         exit 1
       fi
     - |
+      # DinD starts with an empty daemon on every job. Pull the last verified
+      # image so BuildKit can reuse its exported dependency layers.
+      docker pull "$ENGINE_BUILD_CACHE_IMAGE" || true
       docker build --pull \
         --file infra/docker/Dockerfile.engine \
+        --cache-from "$ENGINE_BUILD_CACHE_IMAGE" \
+        --build-arg "BUILDKIT_INLINE_CACHE=1" \
+        --build-arg "BASE_IMAGE=$ENGINE_BASE_IMAGE" \
+        --build-arg "PIP_INDEX_URL=$PIP_INDEX_URL" \
         --build-arg "ENGINE_VERSION=$CI_COMMIT_TAG" \
         --build-arg "CLIENT_WHEEL_FILENAME=$WHEEL_FILENAME" \
         --build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256" \
         --label "org.opencontainers.image.source=$CI_PROJECT_URL" \
         --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
         --tag "$ENGINE_RELEASE_IMAGE" \
+        --tag "$ENGINE_BUILD_CACHE_IMAGE" \
         .
     - |
       container_id="$(docker create "$ENGINE_RELEASE_IMAGE")"
@@ -219,11 +267,12 @@ build-engine-image:
       docker rm "$container_id" >/dev/null
       trap - EXIT
     - docker push "$ENGINE_RELEASE_IMAGE"
+    - docker push "$ENGINE_BUILD_CACHE_IMAGE" || echo "Warning: could not update optional engine build cache" >&2
 
 create-release:
   extends: .tag-release-job
   stage: release
-  image: registry.gitlab.com/gitlab-org/cli:v1.58.0
+  image: "$RUNNER_GLAB_IMAGE"
   needs:
     - job: publish-client-wheel
       artifacts: true

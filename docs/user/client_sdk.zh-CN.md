@@ -109,14 +109,36 @@ pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-no
 5. 镜像成功后，GitLab 幂等地创建或更新指向 Registry 对象的 Release 链接，
    GitHub 则公开已验证的草稿 Release；两者都不链接会过期的 job artifact。
 
-引擎镜像 job 需要能运行 Docker 且有足够磁盘的 runner（TensorRT 基础镜像加 CUDA
-PyTorch 层建议至少预留 50 GB）。GitLab 的 Docker-in-Docker runner 必须开启
+引擎镜像 job 需要能运行 Docker 且有足够磁盘的 runner（NVIDIA PyTorch 运行时镜像
+及构建缓存建议至少预留 50 GB）。该基础镜像已经包含版本匹配的 CUDA、PyTorch 和
+TensorRT，本项目只在其上安装应用层 Python 依赖。GitLab 的 Docker-in-Docker runner 必须开启
 privileged；GitHub 默认把该 job 派给 `self-hosted`，需要时可用仓库变量
 `RELEASE_IMAGE_RUNNER` 指定容量足够的 runner label；自托管 runner 需要提供
 Docker 与 GitHub CLI（`gh`）。若所选 NGC 基础镜像要求认证，还需配置受保护的
-`NGC_API_KEY` secret。应保护 `v*` tag 命名空间与发布
+`NGC_API_KEY` secret。GitLab 镜像 job 声明了 3 小时超时，Runner 自身配置的
+maximum timeout 也必须不小于 3 小时。应保护 `v*` tag 命名空间与发布
 environment，确保只有发布维护者能触发带发布凭据的 job。GHCR package 默认私有；
 若正式镜像要求匿名拉取，需要显式改为 public。
+
+两套 CI 对国内 runner 默认启用可覆盖的下载入口：普通 Python 包使用 BFSU，
+GitHub 单元测试的 CPU-only PyTorch 使用南京大学镜像；GitLab 的 Debian/Alpine
+软件包以及 job 镜像分别使用 BFSU 与 DaoCloud，GitHub/GitLab 的引擎镜像 job
+则默认从 DaoCloud 的 `nvcr.io` 代理拉取 NVIDIA PyTorch 基础镜像。可在仓库变量
+（GitHub）或 CI/CD 变量（GitLab）中覆盖以下同名值：
+
+| 变量 | 用途 |
+| --- | --- |
+| `PIP_INDEX_URL` | wheel 构建、烟测及镜像内普通 Python 依赖 |
+| `ENGINE_BASE_IMAGE` | 已包含匹配 CUDA/PyTorch/TensorRT 的 NVIDIA PyTorch 基础镜像；优先指向公司 Harbor/ACR 中按 digest 同步的副本 |
+| `PYTORCH_CPU_INDEX` | GitHub 单元测试使用的 CPU-only PyTorch 索引 |
+| `RUNNER_*_IMAGE`、`DEBIAN_*_MIRROR`、`ALPINE_MIRROR` | GitLab job/service 镜像与系统包源 |
+
+公共代理适合先恢复流水线；稳定发版更建议把 NGC 与 job 镜像预同步到内网 Registry，
+再覆盖 `ENGINE_BASE_IMAGE` 和各 `RUNNER_*_IMAGE`。这些镜像不会代理 GitHub
+Actions、Release API、GHCR 推送或 GitLab 发布流量，runner 仍需能访问对应发布平台。
+两套发布流水线都会把 Docker inline cache 发布到可变的 `buildcache` 镜像标签；不可变
+release tag 仍是部署产物。首次构建仍需拉取较大的 NGC 基础镜像，后续 tag 可以从
+Registry 复用已验证的依赖层。
 
 `client/dist/` 保持为被忽略的本地/CI 暂存目录；wheel 二进制不提交进 Git。
 两个 tag CI 都不会调用会重新构建 wheel 的本地 `compose.sh` 路径。

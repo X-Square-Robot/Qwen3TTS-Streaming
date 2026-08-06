@@ -8,8 +8,8 @@ services:
       context: ../..
       dockerfile: infra/docker/Dockerfile.engine
       args:
-        BASE_IMAGE: ${ENGINE_BASE_IMAGE:-nvcr.io/nvidia/tensorrt:26.02-py3}
-        PYTORCH_CUDA_TAG: ${ENGINE_PYTORCH_CUDA_TAG:-cu130}
+        BASE_IMAGE: ${ENGINE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:26.02-py3}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.bfsu.edu.cn/pypi/web/simple}
         ENGINE_VERSION: ${ENGINE_VERSION:-}
         CLIENT_WHEEL_FILENAME: ${CLIENT_WHEEL_FILENAME:-}
         CLIENT_WHEEL_SHA256: ${CLIENT_WHEEL_SHA256:-}

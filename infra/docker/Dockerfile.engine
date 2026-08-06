@@ -1,25 +1,26 @@
-# Standalone TTS engine: TRT base + Python deps + bundled application code.
+# Standalone TTS engine: NVIDIA PyTorch base + app deps + bundled code.
 # Large artifacts are NOT baked in; mount the shared model_repository at runtime.
 #
-# Layer order: pip deps (cached by Docker if unchanged) then COPY app.
-# Rebuilds after only editing engine/ reuse the deps layer — no re-download.
-# For repeated clean builds on the same host, enable BuildKit + pip cache mount
-# (see RUN below): wheels stay under Docker's build cache, not in the image.
-ARG BASE_IMAGE=nvcr.io/nvidia/tensorrt:26.02-py3
-ARG PYTORCH_CUDA_TAG=cu130
+# The monthly NVIDIA PyTorch image already contains a mutually tested CUDA,
+# PyTorch and TensorRT stack.  Do not pip-install another CUDA PyTorch wheel on
+# top: that duplicates several GiB of CUDA libraries and can mix CUDA minors.
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.02-py3
+ARG PIP_INDEX_URL=https://mirrors.bfsu.edu.cn/pypi/web/simple
 FROM ${BASE_IMAGE} AS engine-deps
-ARG PYTORCH_CUDA_TAG
+ARG PIP_INDEX_URL
 
 WORKDIR /app
-ENV PYTHONPATH=/app \
-    ENGINE_PYTORCH_CUDA_TAG=${PYTORCH_CUDA_TAG}
+ENV PYTHONPATH=/app
 
-# BuildKit: persist ~/.cache/pip across builds so torch/grpc wheels are not re-fetched every time.
-# Requires: DOCKER_BUILDKIT=1 (set in engine_build_image).
+# Install only application-level dependencies missing from the NVIDIA base.
+# BuildKit keeps these wheels in the build cache; tag CI additionally exports
+# inline cache metadata to its container registry so ephemeral DinD jobs can
+# reuse this layer.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install \
-    -i https://mirrors.bfsu.edu.cn/pypi/web/simple \
-    --trusted-host mirrors.bfsu.edu.cn \
+    --timeout 120 \
+    --retries 10 \
+    --index-url "${PIP_INDEX_URL}" \
     filelock \
     fsspec \
     jinja2 \
@@ -34,14 +35,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     grpcio-tools \
     uvloop \
     orjson \
-    && pip install \
-    --timeout 120 \
-    --retries 10 \
-    --index-url https://download.pytorch.org/whl/${PYTORCH_CUDA_TAG} \
-    torch \
     && python3 -c "\
+import os; \
 import tensorrt as trt; \
 import torch, tokenizers, yaml, grpc, numpy; \
+base_cuda = '.'.join(os.environ.get('CUDA_VERSION', '').split('.')[:2]); \
+torch_cuda = '.'.join((torch.version.cuda or '').split('.')[:2]); \
+assert base_cuda and torch_cuda == base_cuda, f'base CUDA {base_cuda}, torch CUDA {torch.version.cuda}'; \
 print(f'TRT {trt.__version__}'); \
 print(f'torch {torch.__version__}, CUDA {torch.version.cuda}'); \
 print(f'tokenizers {tokenizers.__version__}'); \

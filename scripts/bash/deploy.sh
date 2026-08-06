@@ -385,18 +385,10 @@ resolve_engine_docker_image() {
     fi
 
     if [ -n "$expected_release" ] && [ -z "${ENGINE_BASE_IMAGE:-}" ]; then
-        export ENGINE_BASE_IMAGE="nvcr.io/nvidia/tensorrt:${expected_release}-py3"
-    fi
-    if [ -n "$expected_release" ] && [ -z "${ENGINE_PYTORCH_CUDA_TAG:-${PYTORCH_CUDA_TAG:-}}" ]; then
-        local torch_cuda_tag
-        torch_cuda_tag=$(resolve_ngc_torch_index_tag "$expected_release" 2>/dev/null || true)
-        if [ -n "$torch_cuda_tag" ]; then
-            export ENGINE_PYTORCH_CUDA_TAG="$torch_cuda_tag"
-        fi
+        export ENGINE_BASE_IMAGE="nvcr.io/nvidia/pytorch:${expected_release}-py3"
     fi
 
     EXPECTED_ENGINE_RELEASE="$expected_release"
-    EXPECTED_ENGINE_TORCH_CUDA_TAG="${ENGINE_PYTORCH_CUDA_TAG:-${PYTORCH_CUDA_TAG:-}}"
     echo "$img"
 }
 
@@ -409,7 +401,7 @@ ensure_engine_docker_image_current() {
     elif ! docker image inspect "$img" &>/dev/null; then
         need_build=true
     elif ! engine_docker_image_has_app "$img"; then
-        log_warn "镜像 $img 存在但未包含 /app 下的 engine 包（常见于把 TensorRT 基础镜像误打成同名 tag）。"
+        log_warn "镜像 $img 存在但未包含 /app 下的 engine 包（常见于把 NVIDIA 基础镜像误打成同名 tag）。"
         log_info "将按 Dockerfile.engine 重新构建..."
         need_build=true
     elif ! engine_docker_image_supports_model_package_engine "$img"; then
@@ -419,14 +411,8 @@ ensure_engine_docker_image_current() {
     elif [ -n "$EXPECTED_ENGINE_RELEASE" ] && ! engine_docker_image_matches_release "$img" "$EXPECTED_ENGINE_RELEASE"; then
         local actual_release
         actual_release=$(engine_docker_image_tensorrt_release "$img" || true)
-        log_warn "镜像 $img 的 TensorRT 版本是 ${actual_release:-unknown}，但 Phase B manifest 对应 $EXPECTED_ENGINE_RELEASE。"
+        log_warn "镜像 $img 的 NVIDIA release 是 ${actual_release:-unknown}，但 Phase B manifest 对应 $EXPECTED_ENGINE_RELEASE。"
         log_info "将按 Dockerfile.engine 使用 ENGINE_BASE_IMAGE=$ENGINE_BASE_IMAGE 重新构建..."
-        need_build=true
-    elif [ -n "$EXPECTED_ENGINE_TORCH_CUDA_TAG" ] && ! engine_docker_image_matches_torch_cuda "$img" "$EXPECTED_ENGINE_TORCH_CUDA_TAG"; then
-        local actual_torch_cuda_tag
-        actual_torch_cuda_tag=$(engine_docker_image_torch_cuda_tag "$img" || true)
-        log_warn "镜像 $img 的 PyTorch CUDA wheel 是 ${actual_torch_cuda_tag:-unknown}，但目标应为 $EXPECTED_ENGINE_TORCH_CUDA_TAG。"
-        log_info "将按 Dockerfile.engine 使用 ENGINE_PYTORCH_CUDA_TAG=$EXPECTED_ENGINE_TORCH_CUDA_TAG 重新构建..."
         need_build=true
     fi
     if $need_build; then

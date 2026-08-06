@@ -1,5 +1,13 @@
 name: Release
 
+env:
+  # Defaults are optimized for runners in mainland China. Repository variables
+  # with the same names can point at an internal proxy or restore an origin URL.
+  PIP_INDEX_URL: ${{ vars.PIP_INDEX_URL || 'https://mirrors.bfsu.edu.cn/pypi/web/simple' }}
+  PIP_DEFAULT_TIMEOUT: "120"
+  PIP_RETRIES: "10"
+  ENGINE_BASE_IMAGE: ${{ vars.ENGINE_BASE_IMAGE || 'm.daocloud.io/nvcr.io/nvidia/pytorch:26.02-py3' }}
+
 on:
   push:
     tags:
@@ -156,8 +164,8 @@ jobs:
     needs:
       - build-client-wheel
       - publish-client-wheel
-    # The TensorRT base image and CUDA PyTorch layers exceed the practical disk
-    # budget of a standard 14 GB hosted runner. Point RELEASE_IMAGE_RUNNER at a
+    # The NVIDIA PyTorch runtime image exceeds the practical disk budget of a
+    # standard 14 GB hosted runner. Point RELEASE_IMAGE_RUNNER at a
     # larger runner label; otherwise use a repository self-hosted runner.
     runs-on: ${{ vars.RELEASE_IMAGE_RUNNER || 'self-hosted' }}
     permissions:
@@ -166,6 +174,7 @@ jobs:
     outputs:
       engine_image: ${{ steps.image.outputs.engine_image }}
     env:
+      DOCKER_BUILDKIT: "1"
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       NGC_API_KEY: ${{ secrets.NGC_API_KEY }}
@@ -213,16 +222,23 @@ jobs:
         run: |
           image_repository="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
           engine_image="ghcr.io/${image_repository}:${GITHUB_REF_NAME}"
+          engine_cache_image="ghcr.io/${image_repository}:buildcache"
           echo "engine_image=$engine_image" >> "$GITHUB_OUTPUT"
 
+          docker pull "$engine_cache_image" || true
           docker build --pull \
             --file infra/docker/Dockerfile.engine \
+            --cache-from "$engine_cache_image" \
+            --build-arg "BUILDKIT_INLINE_CACHE=1" \
+            --build-arg "BASE_IMAGE=$ENGINE_BASE_IMAGE" \
+            --build-arg "PIP_INDEX_URL=$PIP_INDEX_URL" \
             --build-arg "ENGINE_VERSION=$GITHUB_REF_NAME" \
             --build-arg "CLIENT_WHEEL_FILENAME=$WHEEL_FILENAME" \
             --build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256" \
             --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --tag "$engine_image" \
+            --tag "$engine_cache_image" \
             .
 
           container_id="$(docker create "$engine_image")"
@@ -247,6 +263,7 @@ jobs:
           docker rm "$container_id" >/dev/null
           trap - EXIT
           docker push "$engine_image"
+          docker push "$engine_cache_image" || echo "Warning: could not update optional engine build cache" >&2
 
   finalize-release:
     needs:

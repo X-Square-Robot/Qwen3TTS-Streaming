@@ -227,16 +227,7 @@ _compose_ngc_tag_from_image() {
 
 _compose_apply_engine_ngc_defaults() {
     local ngc_tag="$1"
-    export ENGINE_BASE_IMAGE="${ENGINE_BASE_IMAGE:-nvcr.io/nvidia/tensorrt:${ngc_tag}-py3}"
-    if [[ -z "${ENGINE_PYTORCH_CUDA_TAG:-}" ]]; then
-        if [[ -n "${PYTORCH_CUDA_TAG:-}" ]]; then
-            export ENGINE_PYTORCH_CUDA_TAG="$PYTORCH_CUDA_TAG"
-        else
-            local torch_cuda_tag
-            torch_cuda_tag=$(resolve_ngc_torch_index_tag "$ngc_tag" 2>/dev/null || true)
-            [[ -n "$torch_cuda_tag" ]] && export ENGINE_PYTORCH_CUDA_TAG="$torch_cuda_tag"
-        fi
-    fi
+    export ENGINE_BASE_IMAGE="${ENGINE_BASE_IMAGE:-nvcr.io/nvidia/pytorch:${ngc_tag}-py3}"
 }
 
 _compose_apply_triton_ngc_defaults() {
@@ -340,18 +331,11 @@ verify_compose_engine_image() {
     if [[ -n "$expected_release" ]] && ! engine_docker_image_matches_release "$image" "$expected_release"; then
         local actual_release
         actual_release=$(engine_docker_image_tensorrt_release "$image" || true)
-        log_error "Built engine image TensorRT release mismatch: image=$image expected=$expected_release actual=${actual_release:-unknown}"
+        log_error "Built engine image NVIDIA release mismatch: image=$image expected=$expected_release actual=${actual_release:-unknown}"
         log_error "Check ENGINE_BASE_IMAGE / --image; Docker tags do not guarantee image contents."
         return 1
     fi
 
-    local expected_torch_cuda_tag="${ENGINE_PYTORCH_CUDA_TAG:-}"
-    if [[ -n "$expected_torch_cuda_tag" ]] && ! engine_docker_image_matches_torch_cuda "$image" "$expected_torch_cuda_tag"; then
-        local actual_torch_cuda_tag
-        actual_torch_cuda_tag=$(engine_docker_image_torch_cuda_tag "$image" || true)
-        log_error "Built engine image PyTorch CUDA wheel mismatch: image=$image expected=$expected_torch_cuda_tag actual=${actual_torch_cuda_tag:-unknown}"
-        return 1
-    fi
 }
 
 compose_manifest_profile_value() {

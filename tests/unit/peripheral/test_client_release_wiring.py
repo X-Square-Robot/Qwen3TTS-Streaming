@@ -86,6 +86,53 @@ def test_engine_image_fails_closed_on_wrong_wheel_bytes():
     assert "CLIENT_WHEEL_SHA256: ${CLIENT_WHEEL_SHA256:-}" in compose
 
 
+def test_runner_downloads_default_to_overridable_china_mirrors():
+    ci = _read(".gitlab-ci.yml")
+    github_ci = _read(".github/workflows/ci.yml")
+    github_release = _read(".github/workflows/release.yml")
+    dockerfile = _read("infra/docker/Dockerfile.engine")
+
+    for workflow in (ci, github_ci, github_release):
+        assert "https://mirrors.bfsu.edu.cn/pypi/web/simple" in workflow
+
+    assert "https://mirrors.nju.edu.cn/pytorch/whl/cpu" in github_ci
+    assert 'pip install --index-url "$PYTORCH_CPU_INDEX" torch' in github_ci
+    assert "m.daocloud.io/docker.io/library/python:3.11-slim" in ci
+    assert "m.daocloud.io/docker.io/library/docker:27.4.1-dind" in ci
+    assert "m.daocloud.io/nvcr.io/nvidia/pytorch:26.02-py3" in ci
+    assert "m.daocloud.io/nvcr.io/nvidia/pytorch:26.02-py3" in github_release
+    assert "${DEBIAN_MIRROR}" in ci
+    assert "${ALPINE_MIRROR}" in ci
+
+    assert "ARG PIP_INDEX_URL=" in dockerfile
+    assert "ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.02-py3" in dockerfile
+    assert "PYTORCH_INDEX_BASE" not in dockerfile
+    assert dockerfile.count("    pip install \\") == 1
+    assert "PYTORCH_CUDA_TAG" not in dockerfile
+    assert "torch_cuda == base_cuda" in dockerfile
+    for workflow in (ci, github_release):
+        assert '--build-arg "BASE_IMAGE=$ENGINE_BASE_IMAGE"' in workflow
+        assert '--build-arg "PIP_INDEX_URL=$PIP_INDEX_URL"' in workflow
+
+
+def test_engine_release_build_reuses_registry_layers_and_has_a_timeout():
+    ci = _read(".gitlab-ci.yml")
+    github = _read(".github/workflows/release.yml")
+    image_job = _job(ci, "build-engine-image", "create-release")
+    github_image_job = github.split("\n  build-engine-image:\n", 1)[1].split(
+        "\n  finalize-release:\n", 1
+    )[0]
+
+    assert "timeout: 3h" in image_job
+    assert "resource_group: engine-image-cache" in image_job
+    assert "ENGINE_BUILD_CACHE_IMAGE" in ci
+    assert 'DOCKER_BUILDKIT: "1"' in github_image_job
+    for job in (image_job, github_image_job):
+        assert "--cache-from" in job
+        assert 'BUILDKIT_INLINE_CACHE=1' in job
+        assert ":buildcache" in job or "ENGINE_BUILD_CACHE_IMAGE" in job
+
+
 def test_release_wheels_remain_artifacts_not_git_sources():
     gitignore = _read(".gitignore")
     dockerignore = _read(".dockerignore")
