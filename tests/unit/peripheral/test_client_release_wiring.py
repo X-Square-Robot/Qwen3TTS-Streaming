@@ -9,6 +9,8 @@ wheel build in the image job.
 import subprocess
 from pathlib import Path
 
+import yaml
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -19,6 +21,30 @@ def _read(relative: str) -> str:
 
 def _job(ci: str, name: str, next_name: str) -> str:
     return ci.split(f"\n{name}:\n", 1)[1].split(f"\n{next_name}:\n", 1)[0]
+
+
+def _assert_gitlab_command_strings(value, *, depth: int = 0) -> None:
+    """Mirror GitLab's string-or-nested-string-array command contract."""
+    assert depth <= 10
+    if isinstance(value, str):
+        return
+    assert isinstance(value, list)
+    for item in value:
+        _assert_gitlab_command_strings(item, depth=depth + 1)
+
+
+def test_gitlab_shell_commands_parse_as_strings():
+    config = yaml.safe_load(_read(".gitlab-ci.yml"))
+
+    for job_name, job in config.items():
+        if not isinstance(job, dict):
+            continue
+        for key in ("before_script", "script", "after_script"):
+            if key in job:
+                try:
+                    _assert_gitlab_command_strings(job[key])
+                except AssertionError as exc:
+                    raise AssertionError(f"{job_name}.{key} contains a non-string") from exc
 
 
 def test_tag_pipeline_builds_one_wheel_without_submodules():

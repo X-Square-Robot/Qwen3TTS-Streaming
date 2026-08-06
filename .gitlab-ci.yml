@@ -267,7 +267,8 @@ build-engine-image:
       docker rm "$container_id" >/dev/null
       trap - EXIT
     - docker push "$ENGINE_RELEASE_IMAGE"
-    - docker push "$ENGINE_BUILD_CACHE_IMAGE" || echo "Warning: could not update optional engine build cache" >&2
+    - |
+      docker push "$ENGINE_BUILD_CACHE_IMAGE" || echo "Warning: could not update optional engine build cache" >&2
 
 create-release:
   extends: .tag-release-job
