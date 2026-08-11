@@ -192,7 +192,14 @@ def test_release_links_are_durable_and_docs_never_use_vcs_installs():
         if "third_party" not in path.parts and "workspace" not in path.parts
     )
 
-    assert '--repo "$CI_PROJECT_URL"' in gitlab
+    assert "gitlab-org/cli:v1.112.0" in gitlab
+    assert (
+        'glab config set api_protocol "$CI_SERVER_PROTOCOL" '
+        '--host "$CI_SERVER_FQDN"' in gitlab
+    )
+    assert 'glab api --hostname "$CI_SERVER_FQDN" job --silent' in gitlab
+    assert '--repo "$CI_PROJECT_PATH"' in gitlab
+    assert '--hostname "$CI_SERVER_FQDN"' in gitlab
     assert '"url=$WHEEL_REGISTRY_URL"' in gitlab
     assert '"direct_asset_path=/client-sdk/$WHEEL_FILENAME"' in gitlab
     assert "$WHEEL_REGISTRY_URL" in gitlab

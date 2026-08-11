@@ -25,7 +25,7 @@ variables:
   RUNNER_PYTHON_IMAGE: "m.daocloud.io/docker.io/library/python:3.11-slim"
   RUNNER_DOCKER_CLI_IMAGE: "m.daocloud.io/docker.io/library/docker:27.4.1-cli"
   RUNNER_DOCKER_DIND_IMAGE: "m.daocloud.io/docker.io/library/docker:27.4.1-dind"
-  RUNNER_GLAB_IMAGE: "m.daocloud.io/registry.gitlab.com/gitlab-org/cli:v1.58.0"
+  RUNNER_GLAB_IMAGE: "m.daocloud.io/registry.gitlab.com/gitlab-org/cli:v1.112.0"
   DEBIAN_MIRROR: "https://mirrors.bfsu.edu.cn/debian"
   DEBIAN_SECURITY_MIRROR: "https://mirrors.bfsu.edu.cn/debian-security"
   ALPINE_MIRROR: "https://mirrors.bfsu.edu.cn/alpine"
@@ -282,18 +282,29 @@ create-release:
   variables:
     GIT_STRATEGY: none
     GLAB_ENABLE_CI_AUTOLOGIN: "true"
+  before_script:
+    - |
+      case "$CI_SERVER_PROTOCOL" in
+        http|https) ;;
+        *)
+          echo "Unsupported GitLab API protocol: $CI_SERVER_PROTOCOL" >&2
+          exit 1
+          ;;
+      esac
+      glab config set api_protocol "$CI_SERVER_PROTOCOL" --host "$CI_SERVER_FQDN"
+      glab api --hostname "$CI_SERVER_FQDN" job --silent
   script:
     - |
       notes="$(printf 'SDK wheel: `%s`\n\nSDK SHA256: `%s`\n\nEngine image: `%s`\n' \
         "$WHEEL_FILENAME" "$WHEEL_SHA256" "$ENGINE_RELEASE_IMAGE")"
       glab release create "$CI_COMMIT_TAG" \
-        --repo "$CI_PROJECT_URL" \
+        --repo "$CI_PROJECT_PATH" \
         --ref "$CI_COMMIT_SHA" \
         --name "Qwen3TTS-Streaming $CI_COMMIT_TAG" \
         --notes "$notes"
 
       links_endpoint="projects/${CI_PROJECT_ID}/releases/${CI_COMMIT_TAG}/assets/links"
-      links_json="$(glab api --hostname "$CI_SERVER_HOST" "$links_endpoint")"
+      links_json="$(glab api --hostname "$CI_SERVER_FQDN" "$links_endpoint")"
       matching_links="$(printf '%s' "$links_json" | jq \
         --arg name "$WHEEL_FILENAME" \
         --arg url "$WHEEL_REGISTRY_URL" \
@@ -302,7 +313,7 @@ create-release:
 
       case "$matching_count" in
         0)
-          matching_link="$(glab api --hostname "$CI_SERVER_HOST" \
+          matching_link="$(glab api --hostname "$CI_SERVER_FQDN" \
             --method POST "$links_endpoint" \
             --raw-field "name=$WHEEL_FILENAME" \
             --raw-field "url=$WHEEL_REGISTRY_URL" \
