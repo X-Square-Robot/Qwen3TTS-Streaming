@@ -21,7 +21,9 @@ variables:
   PIP_INDEX_URL: "https://mirrors.bfsu.edu.cn/pypi/web/simple"
   PIP_DEFAULT_TIMEOUT: "120"
   PIP_RETRIES: "10"
-  ENGINE_BASE_IMAGE: "m.daocloud.io/nvcr.io/nvidia/pytorch:26.02-py3"
+  # Keep the GitLab production image on the established Driver 580 channel.
+  # The NVIDIA PyTorch image already includes matched CUDA and TensorRT.
+  ENGINE_BASE_IMAGE: "m.daocloud.io/nvcr.io/nvidia/pytorch:25.10-py3"
   RUNNER_PYTHON_IMAGE: "m.daocloud.io/docker.io/library/python:3.11-slim"
   RUNNER_DOCKER_CLI_IMAGE: "m.daocloud.io/docker.io/library/docker:27.4.1-cli"
   RUNNER_DOCKER_DIND_IMAGE: "m.daocloud.io/docker.io/library/docker:27.4.1-dind"
@@ -29,8 +31,9 @@ variables:
   DEBIAN_MIRROR: "https://mirrors.bfsu.edu.cn/debian"
   DEBIAN_SECURITY_MIRROR: "https://mirrors.bfsu.edu.cn/debian-security"
   ALPINE_MIRROR: "https://mirrors.bfsu.edu.cn/alpine"
-  ENGINE_RELEASE_IMAGE: "$CI_REGISTRY_IMAGE/engine:$CI_COMMIT_TAG"
-  ENGINE_BUILD_CACHE_IMAGE: "$CI_REGISTRY_IMAGE/engine:buildcache"
+  X2ROBOT_REGISTRY: "cr.x2robot.cn"
+  X2ROBOT_IMAGE: "cr.x2robot.cn/audio/qwen3tt-streaming"
+  X2ROBOT_IMAGE_TAG_PREFIX: "trt25.10_580_cu13_"
   DOCKER_HOST: "tcp://docker:2375"
   DOCKER_TLS_CERTDIR: ""
   DOCKER_DRIVER: "overlay2"
@@ -203,7 +206,21 @@ build-engine-image:
   before_script:
     - sed -i -e "s|http://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" -e "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" /etc/apk/repositories
     - apk add --no-cache curl
-    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" --username "$CI_REGISTRY_USER" --password-stdin
+    - |
+      test -n "${X2ROBOT_REGISTRY_USER:-}" || {
+        echo "X2ROBOT_REGISTRY_USER is required" >&2
+        exit 1
+      }
+      test -n "${X2ROBOT_REGISTRY_PASSWORD:-}" || {
+        echo "X2ROBOT_REGISTRY_PASSWORD is required" >&2
+        exit 1
+      }
+      ENGINE_RELEASE_IMAGE="${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}${CI_COMMIT_TAG}"
+      ENGINE_BUILD_CACHE_IMAGE="${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}buildcache"
+      export ENGINE_RELEASE_IMAGE ENGINE_BUILD_CACHE_IMAGE
+      printf '%s\n' "$X2ROBOT_REGISTRY_PASSWORD" | docker login \
+        --username "$X2ROBOT_REGISTRY_USER" \
+        --password-stdin "$X2ROBOT_REGISTRY"
     - |
       if [ -n "${NGC_API_KEY:-}" ]; then
         echo "$NGC_API_KEY" | docker login nvcr.io --username '$oauthtoken' --password-stdin
@@ -284,6 +301,8 @@ create-release:
     GLAB_ENABLE_CI_AUTOLOGIN: "true"
   before_script:
     - |
+      ENGINE_RELEASE_IMAGE="${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}${CI_COMMIT_TAG}"
+      export ENGINE_RELEASE_IMAGE
       case "$CI_SERVER_PROTOCOL" in
         http|https) ;;
         *)

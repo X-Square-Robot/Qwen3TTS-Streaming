@@ -114,7 +114,7 @@ Each pipeline independently enforces the same build-once contract:
    input for the rest of that pipeline.
 4. Each image job downloads its forge's canonical wheel, verifies SHA256, and
    embeds those exact bytes under `/app/sdk/` before pushing the engine image
-   to the GitLab Container Registry or GHCR.
+   to `cr.x2robot.cn/audio/qwen3tt-streaming` or GHCR.
 5. After the image succeeds, GitLab creates or updates an idempotent Release
    link to its Registry object and GitHub publishes the verified draft Release.
    Neither Release points at an expiring job artifact.
@@ -130,6 +130,13 @@ Docker and GitHub CLI (`gh`). Set the protected `NGC_API_KEY` secret as well if
 the selected NGC base image requires authenticated access. The GitLab image job
 declares a three-hour timeout; any maximum timeout configured on its Runner must
 be at least as large.
+GitLab also requires masked `X2ROBOT_REGISTRY_USER` and
+`X2ROBOT_REGISTRY_PASSWORD` CI/CD variables. If those variables are protected,
+the `v*` tags that trigger releases must be protected too. GitLab release images
+use the established
+`cr.x2robot.cn/audio/qwen3tt-streaming:trt25.10_580_cu13_<git-tag>` naming and
+the corresponding NVIDIA PyTorch 25.10 runtime (CUDA 13.0, TensorRT 10.13,
+Driver 580 channel).
 Protect the `v*` tag namespace and release environment so only release
 maintainers can trigger jobs with publishing credentials. GHCR packages are
 private by default; make the package public explicitly if anonymous image pulls
@@ -146,6 +153,8 @@ GitLab:
 | --- | --- |
 | `PIP_INDEX_URL` | Wheel builds, smoke tests, and general Python image dependencies |
 | `ENGINE_BASE_IMAGE` | NVIDIA PyTorch base containing matched CUDA/PyTorch/TensorRT; preferably a digest-pinned company Harbor/ACR copy |
+| `X2ROBOT_REGISTRY`, `X2ROBOT_IMAGE`, `X2ROBOT_IMAGE_TAG_PREFIX` | GitLab engine image destination and compatibility tag channel |
+| `X2ROBOT_REGISTRY_USER`, `X2ROBOT_REGISTRY_PASSWORD` | Masked GitLab CI/CD credentials for pushing the engine image |
 | `PYTORCH_CPU_INDEX` | CPU-only PyTorch index used by GitHub unit tests |
 | `RUNNER_*_IMAGE`, `DEBIAN_*_MIRROR`, `ALPINE_MIRROR` | GitLab job/service images and OS package mirrors |
 
@@ -154,10 +163,10 @@ stable release path, pre-sync the NGC and job images into an internal Registry
 and override `ENGINE_BASE_IMAGE` and the `RUNNER_*_IMAGE` values. These package
 mirrors do not proxy GitHub Actions, the Release API, GHCR pushes, or GitLab
 publication traffic, so the runner must still reach its forge. Both release
-pipelines publish inline Docker cache metadata under the mutable `buildcache`
-image tag; the immutable release tag is still the deployment artifact. The
-first build must pull the large NGC base, while later tag builds can reuse its
-verified dependency layers through the Registry.
+pipelines publish inline Docker cache metadata under a mutable `buildcache`
+image tag (runtime-prefixed on GitLab); the immutable release tag is still the
+deployment artifact. The first build must pull the large NGC base, while later
+tag builds can reuse its verified dependency layers through the Registry.
 
 `client/dist/` remains an ignored local/CI staging directory. Wheel binaries
 are deliberately not committed to Git, and neither tag pipeline invokes the

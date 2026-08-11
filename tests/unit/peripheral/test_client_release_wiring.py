@@ -125,7 +125,7 @@ def test_runner_downloads_default_to_overridable_china_mirrors():
     assert 'pip install --index-url "$PYTORCH_CPU_INDEX" torch' in github_ci
     assert "m.daocloud.io/docker.io/library/python:3.11-slim" in ci
     assert "m.daocloud.io/docker.io/library/docker:27.4.1-dind" in ci
-    assert "m.daocloud.io/nvcr.io/nvidia/pytorch:26.02-py3" in ci
+    assert "m.daocloud.io/nvcr.io/nvidia/pytorch:25.10-py3" in ci
     assert "m.daocloud.io/nvcr.io/nvidia/pytorch:26.02-py3" in github_release
     assert "${DEBIAN_MIRROR}" in ci
     assert "${ALPINE_MIRROR}" in ci
@@ -157,6 +157,23 @@ def test_engine_release_build_reuses_registry_layers_and_has_a_timeout():
         assert "--cache-from" in job
         assert 'BUILDKIT_INLINE_CACHE=1' in job
         assert ":buildcache" in job or "ENGINE_BUILD_CACHE_IMAGE" in job
+
+
+def test_gitlab_engine_image_uses_the_x2robot_registry():
+    ci = _read(".gitlab-ci.yml")
+    image_job = _job(ci, "build-engine-image", "create-release")
+    release_job = ci.split("\ncreate-release:\n", 1)[1]
+
+    assert 'X2ROBOT_REGISTRY: "cr.x2robot.cn"' in ci
+    assert 'X2ROBOT_IMAGE: "cr.x2robot.cn/audio/qwen3tt-streaming"' in ci
+    assert 'X2ROBOT_IMAGE_TAG_PREFIX: "trt25.10_580_cu13_"' in ci
+    assert "${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}${CI_COMMIT_TAG}" in image_job
+    assert "${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}buildcache" in image_job
+    assert "X2ROBOT_REGISTRY_USER is required" in image_job
+    assert "X2ROBOT_REGISTRY_PASSWORD is required" in image_job
+    assert '--password-stdin "$X2ROBOT_REGISTRY"' in image_job
+    assert "$CI_REGISTRY" not in image_job
+    assert "ENGINE_RELEASE_IMAGE" in release_job
 
 
 def test_release_wheels_remain_artifacts_not_git_sources():

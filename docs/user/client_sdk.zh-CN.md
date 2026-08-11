@@ -105,7 +105,8 @@ pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-no
 3. GitLab 把 wheel 发布到 PyPI Package Registry；GitHub 把 wheel 上传到草稿
    Release。这个持久对象成为该流水线后续步骤的唯一标准输入。
 4. 两边的镜像 job 都从各自标准发布位置下载 wheel、校验 SHA256，再把完全相同的
-   字节放入 `/app/sdk/`，分别推送到 GitLab Container Registry 与 GHCR。
+   字节放入 `/app/sdk/`，分别推送到 `cr.x2robot.cn/audio/qwen3tt-streaming`
+   与 GHCR。
 5. 镜像成功后，GitLab 幂等地创建或更新指向 Registry 对象的 Release 链接，
    GitHub 则公开已验证的草稿 Release；两者都不链接会过期的 job artifact。
 
@@ -116,7 +117,13 @@ privileged；GitHub 默认把该 job 派给 `self-hosted`，需要时可用仓�
 `RELEASE_IMAGE_RUNNER` 指定容量足够的 runner label；自托管 runner 需要提供
 Docker 与 GitHub CLI（`gh`）。若所选 NGC 基础镜像要求认证，还需配置受保护的
 `NGC_API_KEY` secret。GitLab 镜像 job 声明了 3 小时超时，Runner 自身配置的
-maximum timeout 也必须不小于 3 小时。应保护 `v*` tag 命名空间与发布
+maximum timeout 也必须不小于 3 小时。GitLab 还必须配置 masked 的
+`X2ROBOT_REGISTRY_USER` 和
+`X2ROBOT_REGISTRY_PASSWORD` CI/CD 变量；若变量设为 protected，触发发布的
+`v*` tag 也必须是 protected。GitLab 发布镜像沿用
+`cr.x2robot.cn/audio/qwen3tt-streaming:trt25.10_580_cu13_<git-tag>` 命名，并使用
+与其一致的 NVIDIA PyTorch 25.10 运行时（CUDA 13.0、TensorRT 10.13、Driver 580
+通道）。应保护 `v*` tag 命名空间与发布
 environment，确保只有发布维护者能触发带发布凭据的 job。GHCR package 默认私有；
 若正式镜像要求匿名拉取，需要显式改为 public。
 
@@ -130,15 +137,17 @@ GitHub 单元测试的 CPU-only PyTorch 使用南京大学镜像；GitLab 的 De
 | --- | --- |
 | `PIP_INDEX_URL` | wheel 构建、烟测及镜像内普通 Python 依赖 |
 | `ENGINE_BASE_IMAGE` | 已包含匹配 CUDA/PyTorch/TensorRT 的 NVIDIA PyTorch 基础镜像；优先指向公司 Harbor/ACR 中按 digest 同步的副本 |
+| `X2ROBOT_REGISTRY`、`X2ROBOT_IMAGE`、`X2ROBOT_IMAGE_TAG_PREFIX` | GitLab 引擎镜像的目标仓库及兼容性 tag 通道 |
+| `X2ROBOT_REGISTRY_USER`、`X2ROBOT_REGISTRY_PASSWORD` | GitLab 推送引擎镜像所需的 masked CI/CD 凭据 |
 | `PYTORCH_CPU_INDEX` | GitHub 单元测试使用的 CPU-only PyTorch 索引 |
 | `RUNNER_*_IMAGE`、`DEBIAN_*_MIRROR`、`ALPINE_MIRROR` | GitLab job/service 镜像与系统包源 |
 
 公共代理适合先恢复流水线；稳定发版更建议把 NGC 与 job 镜像预同步到内网 Registry，
 再覆盖 `ENGINE_BASE_IMAGE` 和各 `RUNNER_*_IMAGE`。这些镜像不会代理 GitHub
 Actions、Release API、GHCR 推送或 GitLab 发布流量，runner 仍需能访问对应发布平台。
-两套发布流水线都会把 Docker inline cache 发布到可变的 `buildcache` 镜像标签；不可变
-release tag 仍是部署产物。首次构建仍需拉取较大的 NGC 基础镜像，后续 tag 可以从
-Registry 复用已验证的依赖层。
+两套发布流水线都会把 Docker inline cache 发布到可变的 `buildcache` 镜像标签（GitLab
+按运行时前缀隔离）；不可变 release tag 仍是部署产物。首次构建仍需拉取较大的 NGC
+基础镜像，后续 tag 可以从 Registry 复用已验证的依赖层。
 
 `client/dist/` 保持为被忽略的本地/CI 暂存目录；wheel 二进制不提交进 Git。
 两个 tag CI 都不会调用会重新构建 wheel 的本地 `compose.sh` 路径。
