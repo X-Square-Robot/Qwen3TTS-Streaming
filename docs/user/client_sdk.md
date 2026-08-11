@@ -28,9 +28,9 @@ The purpose of this is to avoid packing heavy server-side dependencies and deplo
 
 ## Installation
 
-### Version pairing
+### Version compatibility
 
-Engine and SDK are released **from the same git tag**: the engine image bakes
+Engine and SDK are still released from the same git tag: the engine image bakes
 the tag in at build time (`git describe`), and the wheel version is derived
 from the same tag (hatch-vcs). The engine advertises its release on the
 versioned **capabilities** surface as `engine_version` (`/health` is a pure
@@ -41,12 +41,15 @@ curl http://<engine-host>:<ws-port>/v1/capabilities
 # → {"loaded_model_type": "...", "engine_version": "v0.1.0", "protocol_version": "...", ...}
 ```
 
-Install the SDK at that same version. `connect()` reads the server's
-capabilities and fails fast on a mismatch — `ProtocolVersionMismatchError` (the
-wire-protocol generation) or `EngineVersionMismatchError` (the engine/SDK
-release). Set `QWEN3TTS_SKIP_PROTOCOL_CHECK=1` to downgrade either to a warning
-for deliberate cross-version experiments, or pass `verify=False` to `connect()`
-to skip the connect-time capabilities check entirely.
+Installing that SDK version is recommended for an exactly reproducible release.
+`connect()` reads the server's capabilities and raises
+`ProtocolVersionMismatchError` only when the wire-protocol family or major is
+incompatible. Protocol revisions within one major are compatible. A differing
+`engine_version` only emits `RuntimeWarning` and does not reject the connection;
+optional behavior is selected from capabilities. Set
+`QWEN3TTS_SKIP_PROTOCOL_CHECK=1` to downgrade protocol incompatibility to a
+warning for deliberate experiments, or pass `verify=False` to `connect()` to
+skip the connect-time capabilities check entirely.
 
 ### Channel 1 — GitHub/GitLab Release and GitLab Package Registry
 

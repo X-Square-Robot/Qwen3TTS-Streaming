@@ -28,9 +28,9 @@ SDK 作为独立子项目放在仓库的 [`client/`](../../client) 目录下：
 
 ## 安装
 
-### 版本配对
+### 版本兼容
 
-引擎与 SDK **从同一个 git tag 发布**：引擎镜像构建时把 tag 烤进去
+引擎与 SDK 仍从同一个 git tag 发布：引擎镜像构建时把 tag 烤进去
 （`git describe`），wheel 版本号也由同一 tag 推导（hatch-vcs）。引擎把发布版本
 登记在**版本化的 capabilities** 里（字段 `engine_version`）；`/health` 是纯存活
 探针、不带版本。查询运行中引擎的版本：
@@ -40,11 +40,13 @@ curl http://<engine-host>:<ws-port>/v1/capabilities
 # → {"loaded_model_type": "...", "engine_version": "v0.1.0", "protocol_version": "...", ...}
 ```
 
-按该版本安装 SDK。`connect()` 读取服务端 capabilities，配对错误时立即快速失败——
-`ProtocolVersionMismatchError`（线协议代不匹配）或 `EngineVersionMismatchError`
-（引擎/SDK 发布版本不匹配）。需要刻意跨版本实验时，设
-`QWEN3TTS_SKIP_PROTOCOL_CHECK=1` 可把两者都降级为警告；或给 `connect()` 传
-`verify=False` 彻底跳过连接时的 capabilities 校验。
+推荐安装该版本的 SDK，以便完整复现发布环境。`connect()` 读取服务端
+capabilities：协议族或协议大版本不兼容时抛出
+`ProtocolVersionMismatchError`；同一大版本内的协议修订兼容。
+`engine_version` 与 SDK 发布版本不同时只产生 `RuntimeWarning`，不会阻止连接，
+具体可选功能以 capabilities 为准。需要刻意绕过协议检查时，设
+`QWEN3TTS_SKIP_PROTOCOL_CHECK=1` 可将错误降级为警告；或给 `connect()` 传
+`verify=False` 跳过连接时的 capabilities 校验。
 
 ### 通道一 —— GitHub/GitLab Release 与 GitLab Package Registry
 

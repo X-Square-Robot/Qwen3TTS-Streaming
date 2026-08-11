@@ -252,9 +252,10 @@ You can also configure the reference library and reference cache in `engine.yaml
 
 A standalone Python SDK package that provides unified access to the engine and Triton endpoints, supporting four transports: engine-websocket / engine-grpc / triton-grpc / triton-http. The default `transport="auto"` auto-detects the endpoint.
 
-Engine and SDK are version-paired from the same git tag. Read
-`engine_version` from `GET /v1/capabilities`, then install that tag's wheel
-from the GitHub or GitLab Release:
+SDK compatibility is determined by the wire-protocol family and major reported
+by `GET /v1/capabilities`. Release skew in `engine_version` is diagnostic and
+only produces a warning; installing the engine's wheel is still the simplest
+way to reproduce an exactly matched environment:
 
 ```bash
 curl http://<engine-host>:<ws-port>/v1/capabilities

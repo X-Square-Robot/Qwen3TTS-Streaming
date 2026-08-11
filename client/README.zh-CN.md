@@ -29,7 +29,8 @@ print(result.audio_format, len(result.audio_bytes))
 
 ## 安装
 
-引擎与 SDK 从同一个 git tag **版本一一配对**。先查询引擎正在运行的发布版本：
+SDK 是否兼容由 capabilities 中的**协议族和协议大版本**决定。`engine_version`
+仅用于诊断；与 SDK 发布版本不同时会告警，但不会阻止连接。先查询引擎版本：
 
 ```bash
 curl http://<engine-host>:<ws-port>/v1/capabilities
@@ -57,9 +58,10 @@ pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-no
 两个代码托管平台的 tag 流水线都只构建一次 wheel：先发布，再按 SHA256 把同一
 文件下载进各自的引擎镜像。`client/dist/` 只是本地/CI 暂存目录，wheel 二进制不进 Git。
 
-从本地检出安装：`pip install ./client`（在仓库根目录执行）。装错配对会在
-连接时立即报 `ProtocolVersionMismatchError`（设
-`QWEN3TTS_SKIP_PROTOCOL_CHECK=1` 可降级为警告）。
+从本地检出安装：`pip install ./client`（在仓库根目录执行）。协议族或协议大版本
+不兼容时会在连接时立即报 `ProtocolVersionMismatchError`；同一大版本内的协议修订
+兼容，engine/SDK 发布版本不同只产生 `RuntimeWarning`。设
+`QWEN3TTS_SKIP_PROTOCOL_CHECK=1` 可将协议不兼容错误降级为警告。
 
 附加项按连接对象 / 所需功能划分。可写在 Release 直链引用中
 （`qwen3-tts-client[grpc] @ https://...whl`），或用于本地安装

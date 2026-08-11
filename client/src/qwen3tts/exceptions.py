@@ -22,30 +22,22 @@ class ProtocolError(TTSClientError):
 
 
 class ProtocolVersionMismatchError(TTSClientError):
-    """Raised when the server speaks a different protocol generation.
+    """Raised when the server speaks an incompatible protocol family or major.
 
-    Engine and client SDK are version-paired: install the wheel the engine
-    serves at ``GET /sdk/`` on its health port, or the matching wheel from the
-    GitHub/GitLab Release or Package Registry. The engine reports its release as
-    ``capabilities.engine_version``. Set ``QWEN3TTS_SKIP_PROTOCOL_CHECK=1`` to
-    downgrade this error to a warning.
+    Revisions within one protocol major are compatible. Install the wheel the
+    engine serves at ``GET /sdk/`` on its health port, or the matching wheel
+    from the GitHub/GitLab Release or Package Registry. Set
+    ``QWEN3TTS_SKIP_PROTOCOL_CHECK=1`` to downgrade this error to a warning.
     """
 
 
 class EngineVersionMismatchError(TTSClientError):
-    """Raised at ``connect()`` when the engine's reported *release* version
-    differs from this SDK's.
+    """Legacy exception retained for API compatibility.
 
-    The engine image and the client wheel are cut 1:1 from the same git tag.
-    ``connect()`` reads the engine's release stamp from the ``engine_version``
-    capability (the versioned capabilities surface, not ``/health``, which
-    stays a pure liveness probe) and compares it against this package's
-    ``__version__``. Install the wheel the engine serves at ``GET /sdk/`` or
-    the matching GitHub/GitLab Release or Package Registry wheel. Pass
-    ``verify=False`` (or set ``QWEN3TTS_SKIP_PROTOCOL_CHECK=1``) to override.
-
-    Distinct from :class:`ProtocolVersionMismatchError`, which flags a changed
-    wire-protocol *generation* rather than a release skew.
+    Built-in clients no longer raise this exception: ``engine_version`` is
+    diagnostic metadata, so release skew emits a ``RuntimeWarning``. Only an
+    incompatible wire-protocol family or major rejects a connection via
+    :class:`ProtocolVersionMismatchError`.
     """
 
 

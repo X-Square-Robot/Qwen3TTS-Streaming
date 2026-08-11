@@ -31,8 +31,9 @@ print(result.audio_format, len(result.audio_bytes))
 
 ## Install
 
-Engine and SDK are **version-paired** from the same git tag. First ask the
-engine which release it is running:
+SDK compatibility is determined by the protocol family and major advertised in
+capabilities. `engine_version` is diagnostic: release skew emits a warning but
+does not reject the connection. First ask the engine which release it is running:
 
 ```bash
 curl http://<engine-host>:<ws-port>/v1/capabilities
@@ -61,9 +62,12 @@ Each forge's tag pipeline builds its wheel once, publishes it, and downloads
 that same SHA256-verified file into its engine image. `client/dist/` is a
 local/CI staging directory; wheel binaries are not tracked in Git.
 
-From a local checkout: `pip install ./client` (repo root). A mispaired
-install fails fast at connect with `ProtocolVersionMismatchError`
-(set `QWEN3TTS_SKIP_PROTOCOL_CHECK=1` to downgrade it to a warning).
+From a local checkout: `pip install ./client` (repo root). An incompatible
+protocol family or major fails fast at connect with
+`ProtocolVersionMismatchError`; revisions within one major are compatible and
+engine/SDK release skew only emits `RuntimeWarning`. Set
+`QWEN3TTS_SKIP_PROTOCOL_CHECK=1` to downgrade protocol incompatibility to a
+warning.
 
 Extras are selected by what you connect to / need. Add them to the Release
 direct reference (`qwen3-tts-client[grpc] @ https://...whl`) or a local install

@@ -3,13 +3,12 @@ from __future__ import annotations
 import base64
 import json
 import os
-import re
 import socket
 import warnings
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
-from qwen3tts_protocol.protocol import PROTOCOL_VERSION
+from qwen3tts_protocol.protocol import PROTOCOL_VERSION, protocol_versions_compatible
 from qwen3tts_protocol import (
     AudioChunk,
     AudioFormat,
@@ -27,7 +26,6 @@ from qwen3tts_protocol import (
 
 from ..constants import DEFAULT_ENGINE_WS_PATH
 from ..exceptions import (
-    EngineVersionMismatchError,
     ProtocolError,
     ProtocolVersionMismatchError,
 )
@@ -172,19 +170,21 @@ def build_bytes_result(
 
 
 def check_protocol_version(server_version: Any) -> None:
-    """Runtime pairing guard: server protocol generation must match this SDK's.
+    """Runtime guard: server and SDK protocol compatibility majors must match.
 
     A missing/empty server value is tolerated (older builds that predate the
-    handshake). On mismatch this raises with a pointer to the matching wheel;
+    handshake). Revisions within the same protocol family and major are
+    compatible. An unknown format fails closed unless it exactly matches. On
+    mismatch this raises with a pointer to the matching wheel;
     ``QWEN3TTS_SKIP_PROTOCOL_CHECK=1`` downgrades it to a warning for
     deliberate cross-version experiments.
     """
     server = str(server_version or "").strip()
-    if not server or server == PROTOCOL_VERSION:
+    if not server or protocol_versions_compatible(server, PROTOCOL_VERSION):
         return
     message = (
-        f"Server protocol version {server!r} does not match this SDK's "
-        f"{PROTOCOL_VERSION!r}. Engine and client are version-paired: install "
+        f"Server protocol version {server!r} is not compatible with this SDK's "
+        f"{PROTOCOL_VERSION!r}. Protocol family and major version must match. Install "
         "the wheel this engine serves at GET /sdk/ on its health port, or the "
         "matching GitHub/GitLab Release or Package Registry wheel (the engine reports "
         "its release as capabilities.engine_version). "
@@ -196,15 +196,6 @@ def check_protocol_version(server_version: Any) -> None:
     raise ProtocolVersionMismatchError(message)
 
 
-# A "clean release" is a bare PEP 440 release, optionally an a/b/rc pre-release
-# (the repo tags betas as vX.Y.Zb1). Only when BOTH the engine and the SDK
-# report such a form does a difference mean a genuine mispairing worth raising
-# on. git-describe distance/dirty suffixes (v0.2.0-5-gabc123), hatch-vcs dev
-# builds (0.2.1.dev5+gabc123), and the 0.0.0 source-tree fallback are all
-# "unversioned" and only ever warn.
-_RELEASE_RE = re.compile(r"^\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?$")
-
-
 def _normalize_release(version: Any) -> str:
     """Strip a leading ``v`` so the engine's ``git describe`` stamp (``v0.2.0``)
     and the SDK's hatch-vcs version (``0.2.0``) compare equal on a matched tag."""
@@ -214,22 +205,12 @@ def _normalize_release(version: Any) -> str:
     return value
 
 
-def _is_clean_release(version: Any) -> bool:
-    normalized = _normalize_release(version)
-    if normalized.startswith("0.0.0"):
-        return False  # SDK source-tree fallback; never a real release
-    return bool(_RELEASE_RE.match(normalized))
-
-
 def check_engine_version(server_version: Any) -> None:
-    """Connect-time SDK<->engine *release* pairing guard, read from capabilities.
+    """Warn about SDK/engine release skew without rejecting a connection.
 
-    Complements :func:`check_protocol_version` (the wire-protocol generation):
-    the engine image and the client wheel are cut 1:1 from the same git tag, so
-    a divergence between two *release* versions is a mispaired install. A
-    missing/empty engine value (pre-versioning build) is tolerated; a mismatch
-    where either side is a dev/dirty/source-tree build only warns.
-    ``QWEN3TTS_SKIP_PROTOCOL_CHECK=1`` downgrades a hard mismatch to a warning.
+    Release stamps are diagnostic metadata, not a wire compatibility boundary.
+    :func:`check_protocol_version` is the only hard compatibility guard. A
+    missing/empty engine value (pre-versioning build) is tolerated.
     """
     from qwen3tts import __version__  # deferred: the package imports this module
 
@@ -237,28 +218,21 @@ def check_engine_version(server_version: Any) -> None:
     if not server or server == _normalize_release(__version__):
         return
     message = (
-        f"SDK/engine release mismatch: client qwen3-tts-client {__version__!r} "
-        f"vs engine {str(server_version).strip()!r}. The engine image and client "
-        f"wheel are released 1:1 from the same git tag — install the wheel this "
-        f"engine serves at GET /sdk/ (on its health port), or the matching "
-        f"GitHub/GitLab Release or Package Registry wheel. Set "
-        f"QWEN3TTS_SKIP_PROTOCOL_CHECK=1 to proceed anyway."
+        f"SDK/engine release skew: client qwen3-tts-client {__version__!r} "
+        f"vs engine {str(server_version).strip()!r}. Continuing because release "
+        "versions do not define wire compatibility; protocol compatibility and "
+        "advertised capabilities do. Install the wheel served at GET /sdk/ if "
+        "you need an exactly matched release."
     )
-    if (
-        os.environ.get("QWEN3TTS_SKIP_PROTOCOL_CHECK", "") == "1"
-        or not _is_clean_release(server_version)
-        or not _is_clean_release(__version__)
-    ):
-        warnings.warn(message, RuntimeWarning, stacklevel=2)
-        return
-    raise EngineVersionMismatchError(message)
+    warnings.warn(message, RuntimeWarning, stacklevel=2)
 
 
 def check_capabilities_pairing(caps: Mapping[str, Any]) -> None:
-    """Run both connect-time pairing guards over a capabilities mapping:
-    protocol generation (:func:`check_protocol_version`) and engine release
-    (:func:`check_engine_version`). This is the single funnel every transport's
-    capability exchange flows through."""
+    """Check compatibility and release diagnostics for a capabilities mapping.
+
+    Protocol incompatibility is fatal; engine release skew only emits a warning.
+    This is the single funnel every transport's capability exchange flows through.
+    """
     getter = caps.get if isinstance(caps, Mapping) else (lambda _k: "")
     check_protocol_version(getter("protocol_version"))
     check_engine_version(getter("engine_version"))

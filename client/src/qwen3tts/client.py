@@ -114,11 +114,11 @@ class TTSClient:
         )
         client = cls(endpoint=endpoint, adapter=adapter, detected=detected)
         # Connect-time compatibility guard via the versioned capabilities
-        # surface: protocol generation + engine/SDK release pairing. Auto-detect
+        # surface: protocol major compatibility + engine/SDK release diagnostics. Auto-detect
         # already exchanged capabilities (and validated), so only the explicit-
         # transport path needs an extra in-band fetch here to close that gap.
         # ``verify=False`` skips it for a lazy connect; a mismatch raises
-        # ProtocolVersionMismatchError / EngineVersionMismatchError.
+        # ProtocolVersionMismatchError; release skew only emits a warning.
         if verify and transport != "auto":
             client.get_capabilities()
         elif transport == "auto" and detected.transport == TRANSPORT_ENGINE_WEBSOCKET:

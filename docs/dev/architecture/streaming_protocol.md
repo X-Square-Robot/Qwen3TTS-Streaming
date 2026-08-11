@@ -85,6 +85,12 @@ The interface contract version is:
 
 - `protocol_version = tts-session-v2alpha1`
 
+The compatibility boundary is the protocol family plus major version, so the
+current compatibility key is `tts-session/v2`. Suffixes such as `alpha1` are
+revisions within that major and must remain backward-compatible; changing the
+family or moving to `v3` is incompatible. `engine_version` is release
+diagnostic metadata and does not participate in wire compatibility.
+
 Current transports remain backward-compatible:
 
 - gRPC legacy `init/text_complete`

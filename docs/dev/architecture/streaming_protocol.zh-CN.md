@@ -85,6 +85,11 @@ Backend 拥有合成状态。
 
 - `protocol_version = tts-session-v2alpha1`
 
+兼容边界由协议族和大版本共同确定，即当前兼容键为 `tts-session/v2`。
+`alpha1` 等后缀表示该大版本内的协议修订，必须保持向后兼容；变更协议族或
+升级到 `v3` 才是不兼容变更。`engine_version` 是发布诊断信息，不参与线协议
+兼容性判定。
+
 当前传输保持向后兼容：
 
 - gRPC 遗留 `init/text_complete`
