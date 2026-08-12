@@ -217,7 +217,7 @@ class ReferenceCacheConfig:
 class SpliterConfig:
     """Text segmentation / Spliter parameters."""
 
-    ema_ratio_initial: float = 5.5
+    ema_ratio_initial: float = 4.5
     ema_alpha: float = 0.1
     ema_overflow_alpha: float = 0.5
     ema_min_ratio: float = 2.0

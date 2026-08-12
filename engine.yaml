@@ -76,7 +76,7 @@ reference_cache:
   max_entries: 16            # cached ref-audio preprocessing results (separate from prefix KV)
 
 spliter:
-  ema_ratio_initial: 6.0
+  ema_ratio_initial: 4.5
   ema_alpha: 0.1
   ema_overflow_alpha: 0.5
   max_concurrent_segments: 2
