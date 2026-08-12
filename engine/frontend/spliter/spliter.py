@@ -205,6 +205,17 @@ class Spliter:
     def ema_ratio(self) -> float:
         return self._ema_ratio
 
+    def ema_ratio_for_segment(self, segment_idx: int) -> float:
+        """Return the EMA snapshot frozen when *segment_idx* opened.
+
+        Progress estimation must use the segment-local snapshot.  Using the
+        session's latest EMA would make a long-running segment change its
+        denominator halfway through playback and could move the estimate
+        backwards when a later segment teaches the splitter a new ratio.
+        """
+
+        return self._seg_ema_ratio.get(int(segment_idx), self._ema_ratio)
+
     @property
     def current_segment_idx(self) -> int:
         """Index that will be assigned to the next segment created."""

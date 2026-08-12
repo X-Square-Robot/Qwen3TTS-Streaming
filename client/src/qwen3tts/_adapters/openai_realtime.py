@@ -425,6 +425,27 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
                 )
             )
             return False
+        if event_type in {
+            "qwen.text_token",
+            "qwen.text_boundary_commit",
+            "qwen.text_progress",
+        }:
+            meta = {
+                str(key): str(value)
+                for key, value in dict(event.get("meta") or {}).items()
+            }
+            meta["response_id"] = self.response_id
+            self._put_message(
+                StreamEvent(
+                    type=event_type.removeprefix("qwen."),
+                    session_id=self.session_id,
+                    segment_id=int(event.get("segment_id", -1)),
+                    text=str(event.get("text") or ""),
+                    audio=self.audio_format,
+                    meta=meta,
+                )
+            )
+            return False
         if event_type != "response.done":
             return False
 

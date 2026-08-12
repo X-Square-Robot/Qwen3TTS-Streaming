@@ -32,6 +32,50 @@ export interface DecodeTraceModel {
   source: "engine_trace" | "synthetic";
 }
 
+export interface TextProgressEstimate {
+  segmentIdx: number;
+  sourceFrameEnd: number;
+  textTokenEnd: number;
+  textTokenCount: number;
+  progress: number;
+  basis: string;
+  quality: string;
+  final: boolean;
+}
+
+export function latestTextProgress(events: TraceEvent[]): TextProgressEstimate | undefined {
+  const event = [...events].reverse().find((item) => {
+    if (item.type === "text_progress") {
+      return true;
+    }
+    if (item.type !== "segment_end") {
+      return false;
+    }
+    const meta = nestedMeta(item.meta);
+    return numberFrom(meta.text_progress ?? item.meta?.text_progress) !== undefined;
+  });
+  if (!event) {
+    return undefined;
+  }
+  const meta = nestedMeta(event.meta);
+  const progress = numberFrom(meta.text_progress ?? event.meta?.text_progress);
+  const tokenEnd = numberFrom(meta.text_token_end ?? event.meta?.text_token_end);
+  const tokenCount = numberFrom(meta.text_token_count ?? event.meta?.text_token_count);
+  if (progress === undefined || tokenEnd === undefined || tokenCount === undefined) {
+    return undefined;
+  }
+  return {
+    segmentIdx: segmentIdx(event),
+    sourceFrameEnd: numberFrom(meta.source_frame_end ?? event.meta?.source_frame_end) ?? 0,
+    textTokenEnd: Math.max(0, Math.round(tokenEnd)),
+    textTokenCount: Math.max(0, Math.round(tokenCount)),
+    progress: Math.max(0, Math.min(1, progress)),
+    basis: String(meta.progress_basis ?? event.meta?.progress_basis ?? "unknown"),
+    quality: String(meta.progress_quality ?? event.meta?.progress_quality ?? "unknown"),
+    final: String(meta.progress_final ?? event.meta?.progress_final ?? "false") === "true",
+  };
+}
+
 export function buildDecodeTrace(events: TraceEvent[], fallbackText: string): DecodeTraceModel {
   const tokens = textTokens(events, fallbackText);
   const realTokens = tokens.filter((token) => !token.synthetic);

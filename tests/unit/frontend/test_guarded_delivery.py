@@ -190,6 +190,9 @@ class _FakeSpliter:
     def on_segment_done(self, seg_idx):
         return []
 
+    def ema_ratio_for_segment(self, seg_idx):
+        return 5.0
+
 
 def _fake_interface_self():
     async def _noop_async(*args, **kwargs):
@@ -213,6 +216,13 @@ def _fake_interface_self():
         == "firehose"
         else DeliveryHoldWindow(0.1, 24000 * 4)
     )
+
+    def _make_text_progress_event(session, segment_idx, metrics, final=False):
+        return FrontendInterface._make_text_progress_event(
+            fake, session, segment_idx, metrics, final=final
+        )
+
+    fake._make_text_progress_event = _make_text_progress_event
     return fake
 
 

@@ -50,6 +50,24 @@ class _RealtimeStubEngine:
         # OpenAI Realtime output audio token.
         audio = np.linspace(-0.25, 0.25, 1200, dtype=np.float32).tobytes()
         await self.callbacks[session_id]["on_audio"](session_id, audio)
+        await self.callbacks[session_id]["on_event"](
+            session_id,
+            {
+                "type": "text_progress",
+                "segment_idx": 0,
+                "meta": {
+                    "progress_basis": "ema_frame_ratio_v1",
+                    "progress_quality": "rough",
+                    "source_frame_start": "0",
+                    "source_frame_end": "1",
+                    "text_token_start": "0",
+                    "text_token_end": "1",
+                    "text_token_count": "2",
+                    "text_progress": "0.5",
+                    "progress_final": "false",
+                },
+            },
+        )
 
     async def mark_input_complete(self, session_id: str) -> None:
         await self.callbacks[session_id]["on_done"](session_id, {})
@@ -160,6 +178,13 @@ async def test_standard_realtime_tts_lifecycle_and_usage():
                 if event["type"] == "response.output_audio.delta"
             )
             assert len(base64.b64decode(delta["delta"])) == 2400
+            progress = next(
+                event for event in events if event["type"] == "qwen.text_progress"
+            )
+            assert progress["segment_id"] == 0
+            assert progress["meta"]["text_token_end"] == "1"
+            assert progress["meta"]["output_sample_end"] == "1200"
+            assert events.index(progress) > events.index(delta)
             assert event_types[-4:] == [
                 "response.output_audio.done",
                 "response.content_part.done",
@@ -256,6 +281,11 @@ async def test_new_sdk_incremental_realtime_is_full_duplex_and_exposes_usage():
             await asyncio.to_thread(client.close)
 
     assert len([message for message in messages if isinstance(message, AudioChunk)]) == 2
+    progress_events = [
+        message for message in messages if getattr(message, "type", "") == "text_progress"
+    ]
+    assert len(progress_events) == 2
+    assert progress_events[0].meta["progress_basis"] == "ema_frame_ratio_v1"
     assert session.response_status == "completed"
     assert session.usage["input_tokens"] == len("hello")
     assert session.usage["output_token_details"]["audio_tokens"] == 2

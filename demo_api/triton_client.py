@@ -259,6 +259,7 @@ async def stream_once(
                 "warning",
                 "text_token",
                 "text_boundary_commit",
+                "text_progress",
                 "segment_end",
             }:
                 emit(

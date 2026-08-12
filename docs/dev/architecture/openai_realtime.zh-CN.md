@@ -54,6 +54,23 @@ response.created
 `response.output_audio.delta.delta` 是 Base64 编码的 mono PCM16。当前支持 16 kHz 和
 24 kHz，推荐 24 kHz。
 
+### Qwen 文本进度扩展
+
+在标准音频事件之外，服务端会在同一个 Realtime 数据通道发送以下带命名空间的事件：
+
+```text
+qwen.text_token
+qwen.text_boundary_commit
+qwen.text_progress
+```
+
+`qwen.text_progress` 是当前版本的粗略进度，不是 ASR 或音素级对齐。其 `meta` 至少包含
+`progress_basis=ema_frame_ratio_v1`、`progress_quality=rough`、源音频帧范围、文本 token
+范围、`text_progress` 和 `progress_final`；gateway 还会填充已经发送的
+`output_sample_end`。客户端应把它作为 UI 游标的估计值，并以本地播放/缓冲时钟控制实际
+展示。后续替换为 ASR 或 codec-text aligner 时，保持这些传输字段不变，只升级
+`progress_basis` 和估计器内部实现。
+
 ## Usage 与计费
 
 usage 在 `response.done.response.usage` 返回，同时 gateway 发射一次服务端

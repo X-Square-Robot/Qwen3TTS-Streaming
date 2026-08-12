@@ -59,6 +59,26 @@ response.created
 Audio deltas contain Base64 mono PCM16. The current supported rates are 16 kHz
 and 24 kHz; 24 kHz is recommended.
 
+### Qwen text-progress extension
+
+Alongside standard audio events, the server emits these namespaced Realtime
+data-channel events:
+
+```text
+qwen.text_token
+qwen.text_boundary_commit
+qwen.text_progress
+```
+
+`qwen.text_progress` is intentionally coarse in the current implementation;
+it is not an ASR or phoneme-level alignment. Its `meta` includes
+`progress_basis=ema_frame_ratio_v1`, `progress_quality=rough`, source-audio
+frame and text-token ranges, `text_progress`, and `progress_final`. The gateway
+also adds `output_sample_end`, the number of PCM samples sent so far. Clients
+should use this as a UI estimate and reconcile it with their local playback or
+buffer clock. A future ASR or codec-text aligner can keep the transport fields
+stable while changing `progress_basis` and the estimator implementation.
+
 ## Usage and Billing
 
 Usage is returned in `response.done.response.usage` and emitted once as a

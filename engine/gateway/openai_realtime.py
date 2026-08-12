@@ -661,6 +661,41 @@ class _RealtimeConnection:
                 if event_type == "done":
                     await self._finish_response(state, status="completed")
                     return
+                if event_type in {
+                    "text_token",
+                    "text_boundary_commit",
+                    "text_progress",
+                }:
+                    # These are Qwen extensions carried on the Realtime data
+                    # channel.  Standard Realtime clients can ignore unknown
+                    # namespaced events; Qwen clients use them to render the
+                    # source text cursor and future ASR/alignment revisions.
+                    event_meta = dict(event.get("meta") or {})
+                    if event_type == "text_progress":
+                        # This is the gateway's output-side clock.  It is
+                        # deliberately separate from source_frame_end so a
+                        # WebRTC or buffered client can reconcile the rough
+                        # EMA estimate with the samples it has actually sent.
+                        event_meta.setdefault(
+                            "output_sample_end", str(state.audio_samples)
+                        )
+                    raw_segment_id = event.get("segment_id")
+                    if raw_segment_id is None:
+                        raw_segment_id = event.get("segment_idx", -1)
+                    segment_id = int(raw_segment_id)
+                    await self._send(
+                        {
+                            "type": f"qwen.{event_type}",
+                            "response_id": state.response_id,
+                            "item_id": state.item_id,
+                            "output_index": 0,
+                            "content_index": 0,
+                            "segment_id": segment_id,
+                            "text": str(event.get("text") or ""),
+                            "meta": event_meta,
+                        }
+                    )
+                    continue
                 if event_type == "error":
                     message = str(event.get("message") or "engine synthesis failed")
                     await self._send_error(

@@ -88,6 +88,11 @@ class Session:
     segment_texts: dict[int, str] = field(default_factory=dict)
     text_boundary_emitted: set[int] = field(default_factory=set)
     segment_token_emitted_count: dict[int, int] = field(default_factory=dict)
+    # Frontend-owned coarse text progress state.  The estimator is deliberately
+    # transport-neutral so OpenAI Realtime, WebSocket, gRPC and demo clients
+    # observe the same source-frame contract.
+    text_progress_estimators: dict[int, Any] = field(default_factory=dict)
+    segment_progress_frames: dict[int, int] = field(default_factory=dict)
     engine_tokens_done_sent: bool = False
 
     # Optional transport-layer callback hook (e.g. gRPC / Triton adapters)

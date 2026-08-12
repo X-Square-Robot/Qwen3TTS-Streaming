@@ -1,7 +1,7 @@
 import { Pause, Play, RadioTower, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TraceEvent } from "../types";
-import { buildDecodeTrace } from "../trace";
+import { buildDecodeTrace, latestTextProgress } from "../trace";
 import { formatMs } from "./Timeline";
 
 interface TextPlayerProps {
@@ -23,6 +23,26 @@ export function TextPlayer({ events, text, audioUrl, liveMs, live, source }: Tex
   const displayMs = hasSeekableAudio && (!live || manualPlayback) ? cursorMs : liveMs;
   const activeStep = stepAt(model.steps, displayMs);
   const maxMs = Math.max(model.audioDurationMs, 1);
+  const observedProgress = latestTextProgress(events);
+  const sourceTokens = model.tokens.filter((token) => !token.synthetic);
+  const observedSegmentOffset = observedProgress
+    ? sourceTokens.filter((token) => token.segmentIdx < observedProgress.segmentIdx).length
+    : 0;
+  const observedGlobalTokenCount = observedProgress
+    ? Math.max(sourceTokens.length, observedSegmentOffset + observedProgress.textTokenCount)
+    : 0;
+  const observedGlobalTokenEnd = observedProgress
+    ? Math.min(observedGlobalTokenCount, observedSegmentOffset + observedProgress.textTokenEnd)
+    : 0;
+  const observedGlobalProgress = observedProgress && observedGlobalTokenCount > 0
+    ? observedGlobalTokenEnd / observedGlobalTokenCount
+    : observedProgress?.progress;
+  const progressPercent = live && observedProgress
+    ? (observedGlobalProgress ?? 0) * 100
+    : Math.max(0, Math.min(100, (displayMs / maxMs) * 100));
+  const progressExcerpt = live && observedProgress
+    ? progressTextExcerpt(model.tokens, observedProgress.segmentIdx, observedProgress.textTokenEnd)
+    : "";
 
   useEffect(() => {
     setPlaying(false);
@@ -118,6 +138,24 @@ export function TextPlayer({ events, text, audioUrl, liveMs, live, source }: Tex
         </button>
       </div>
 
+      <div className="text-progress" aria-label="estimated text progress">
+        <div className="text-progress-head">
+          <span>Estimated text progress</span>
+          <strong>{progressPercent.toFixed(0)}%</strong>
+        </div>
+        <div className="text-progress-track">
+          <div className="text-progress-fill" style={{ width: `${progressPercent}%` }} />
+        </div>
+        <div className="text-progress-detail">
+          <span>
+            {live && observedProgress
+              ? `about ${observedProgress.textTokenEnd}/${observedProgress.textTokenCount} tokens · ${observedProgress.quality}`
+              : "derived from audio playback position"}
+          </span>
+          {progressExcerpt && <em>“…{progressExcerpt}”</em>}
+        </div>
+      </div>
+
       {!hasSeekableAudio && (
         <div className="player-note">
           {live
@@ -159,4 +197,15 @@ export function TextPlayer({ events, text, audioUrl, liveMs, live, source }: Tex
 
 function stepAt(steps: ReturnType<typeof buildDecodeTrace>["steps"], ms: number) {
   return steps.find((step) => ms >= step.startMs && ms < step.endMs) ?? steps[steps.length - 1];
+}
+
+function progressTextExcerpt(
+  tokens: ReturnType<typeof buildDecodeTrace>["tokens"],
+  segmentIdx: number,
+  tokenEnd: number,
+): string {
+  const sourceTokens = tokens.filter((token) => !token.synthetic);
+  const segmentOffset = sourceTokens.filter((token) => token.segmentIdx < segmentIdx).length;
+  const end = Math.max(0, Math.min(sourceTokens.length, segmentOffset + tokenEnd));
+  return sourceTokens.slice(Math.max(0, end - 18), end).map((token) => token.text).join("");
 }

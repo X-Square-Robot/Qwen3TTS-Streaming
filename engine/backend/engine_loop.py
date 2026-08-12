@@ -1448,6 +1448,7 @@ class EngineLoop:
                     session_id=seg.session_id,
                     segment_idx=seg.segment_idx,
                     audio_bytes=prefill_audio,
+                    metrics=self._audio_progress_metrics(seg),
                 ),
             )
         if prefill_eos:
@@ -2215,6 +2216,7 @@ class EngineLoop:
                                         session_id=seg.session_id,
                                         segment_idx=seg.segment_idx,
                                         audio_bytes=self._fade_out_chunk(audio),
+                                        metrics=self._audio_progress_metrics(seg),
                                     ),
                                 )
                             self._handle_segment_eos(
@@ -2298,7 +2300,7 @@ class EngineLoop:
 
                 if audio is not None and len(audio) > 0:
                     # -- First raw audio observability --
-                    audio_metrics: dict = {}
+                    audio_metrics: dict = self._audio_progress_metrics(seg)
                     if not seg.first_raw_audio_sent:
                         seg.first_raw_audio_sent = True
                         now_mono = time.monotonic()
@@ -2439,6 +2441,23 @@ class EngineLoop:
         if health == "audible":
             seg.audible_frame_seen = True
         return health
+
+    @staticmethod
+    def _audio_progress_metrics(seg: EngineSegment) -> dict[str, int]:
+        """Describe the emitted source-frame interval for one audio chunk.
+
+        ``audio_frames_seen`` is incremented by ``_record_audio_health`` before
+        every chunk is published.  Keeping this cursor on the engine result
+        makes the progress contract independent of transport packetization and
+        lets a future aligner replace only the estimator.
+        """
+
+        frame_end = max(0, int(seg.audio_frames_seen))
+        return {
+            "source_frame_start": max(0, frame_end - 1),
+            "source_frame_end": frame_end,
+            "text_tokens": max(0, int(seg.text_tokens_consumed)),
+        }
 
     def _handle_natural_eos(
         self, group: EngineSessionGroup, seg: EngineSegment

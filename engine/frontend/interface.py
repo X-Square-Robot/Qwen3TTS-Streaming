@@ -17,6 +17,7 @@ import logging
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 from ..core.session import Session, SegmentOrderMeta
+from ..core.text_progress import EmaTextProgressEstimator
 from ..core.types import (
     EngineResult,
     GroupPolicy,
@@ -59,6 +60,17 @@ def _normalize_tts_text(text: str) -> str:
     while "  " in text:
         text = text.replace("  ", " ")
     return text
+
+
+def _metric_int(value: Any) -> Optional[int]:
+    """Parse numeric engine metadata while tolerating legacy string values."""
+
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class FrontendInterface:
@@ -563,6 +575,14 @@ class FrontendInterface:
                     )
                     ready = reorder.push(meta.group_idx, meta.local_idx, audio)
                     await _deliver(ready)
+                    if ready and on_event:
+                        progress = self._make_text_progress_event(
+                            session,
+                            result.segment_idx,
+                            result.metrics or {},
+                        )
+                        if progress is not None:
+                            await on_event(session.session_id, progress)
 
                 elif result.type == ResultType.PREFILL_DONE:
                     # Propagate prefill timing from engine thread
@@ -627,6 +647,8 @@ class FrontendInterface:
                         SegmentOrderMeta(result.segment_idx, 0, True),
                     )
                     dropped = session.reorder.discard(meta.group_idx, meta.local_idx)
+                    session.text_progress_estimators.pop(result.segment_idx, None)
+                    session.segment_progress_frames.pop(result.segment_idx, None)
                     rm = result.metrics or {}
                     logger.info(
                         "Segment retry: %s seg=%d reason=%s attempt=%s "
@@ -778,6 +800,14 @@ class FrontendInterface:
                             metrics["segment_prefill_ms"] = str(
                                 result.metrics["prefill_duration_ms"]
                             )
+                        progress = self._make_text_progress_event(
+                            session,
+                            seg_idx,
+                            result.metrics or {},
+                            final=True,
+                        )
+                        if progress is not None:
+                            metrics.update(progress["meta"])
                         session.segment_token_emitted_count.pop(seg_idx, None)
                         session.text_boundary_emitted.discard(seg_idx)
                         await on_event(
@@ -791,6 +821,8 @@ class FrontendInterface:
                         )
 
                     new_actions = session.spliter.on_segment_done(seg_idx)
+                    session.text_progress_estimators.pop(seg_idx, None)
+                    session.segment_progress_frames.pop(seg_idx, None)
                     if new_actions:
                         await self._dispatch_segment_actions(session, new_actions)
                     await self._dispatcher.maybe_send_session_tokens_done(session)
@@ -1052,6 +1084,69 @@ class FrontendInterface:
                 session.segment_texts[sa.segment_idx] = (
                     session.segment_texts.get(sa.segment_idx, "") + sa.token_text
                 )
+
+    def _make_text_progress_event(
+        self,
+        session: Session,
+        segment_idx: int,
+        metrics: dict,
+        *,
+        final: bool = False,
+    ) -> Optional[dict]:
+        """Build the transport-neutral EMA text progress event."""
+
+        if session.spliter is None:
+            return None
+
+        frame_end = _metric_int(metrics.get("source_frame_end"))
+        if frame_end is None:
+            frame_end = session.segment_progress_frames.get(segment_idx, 0) + (
+                0 if final else 1
+            )
+        frame_start = _metric_int(metrics.get("source_frame_start"))
+        if frame_start is None:
+            frame_start = max(0, frame_end - (0 if final else 1))
+        session.segment_progress_frames[segment_idx] = max(
+            session.segment_progress_frames.get(segment_idx, 0), frame_end
+        )
+
+        text_token_count = _metric_int(metrics.get("text_tokens"))
+        if text_token_count is None:
+            text_token_count = session.segment_token_emitted_count.get(segment_idx, 0)
+        text_token_count = max(0, text_token_count)
+
+        estimator = session.text_progress_estimators.get(segment_idx)
+        if estimator is None:
+            ratio_for_segment = getattr(
+                session.spliter, "ema_ratio_for_segment", None
+            )
+            if callable(ratio_for_segment):
+                ema_ratio = ratio_for_segment(segment_idx)
+            else:
+                # Keep custom/legacy spliter test doubles source-compatible;
+                # production Spliter instances always expose the frozen API.
+                ema_ratio = getattr(session.spliter, "_ema_ratio", 5.0)
+            estimator = EmaTextProgressEstimator(
+                segment_idx=segment_idx,
+                ema_ratio=ema_ratio,
+            )
+            session.text_progress_estimators[segment_idx] = estimator
+
+        estimate = estimator.update(
+            source_frame_start=frame_start,
+            source_frame_end=frame_end,
+            text_token_count=text_token_count,
+            final=final,
+        )
+        return {
+            "type": "text_progress",
+            "segment_idx": segment_idx,
+            "text": "",
+            "meta": {
+                "segment_id": str(segment_idx),
+                **estimate.to_meta(),
+            },
+        }
 
     @staticmethod
     def _segment_event_meta(sa) -> dict[str, str]:
