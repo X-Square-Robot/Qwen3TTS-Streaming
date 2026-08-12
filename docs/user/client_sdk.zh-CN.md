@@ -8,12 +8,14 @@
 
 支持的服务入口：
 
+- `openai-realtime`（主协议）
 - `engine-websocket`
 - `engine-grpc`
 - `triton-grpc`
 - `triton-http`
 
-默认行为是 `transport="auto"`，客户端会先做探测，再绑定到具体 adaptor。
+默认行为是 `transport="auto"`：客户端优先探测 Realtime，仅在主协议不可用时绑定旧
+adaptor。
 
 ## 目录与发布
 
@@ -192,7 +194,40 @@ result = client.synthesize_bytes(
 )
 print(result.audio_format)
 print(len(result.audio_bytes))
+print(result.details["usage"])
 ```
+
+standalone 部署中，`localhost` 会解析到
+`ws://localhost:50052/v1/realtime`；Triton compose 则通过 sidecar 暴露同一公共协议，
+默认地址为 `ws://localhost:50053/v1/realtime`。最终选择可从
+`client.resolved_transport` 读取。
+
+## OpenAI Realtime 与旧协议迁移
+
+需要确定性选择入口时可显式固定主 transport：
+
+```python
+client = TTSClient.connect(
+    "wss://tts.example/v1/realtime",
+    transport="openai-realtime",
+    key="your-key",
+)
+```
+
+一次性合成使用标准 `conversation.item.create` 和 `response.create`。增量
+`open_stream()` 使用服务端必须明确声明的 `qwen.input_text_buffer.v1`
+append/commit 扩展。传输仍是全双工：音频 delta 下行时可以继续 append 文本或发送
+`response.cancel`。
+
+终态 `response.done.response.usage` 在一次性调用中位于
+`result.details["usage"]`，流式调用中位于 `session.usage`；
+`session.response_id` 和 `session.response_status` 用于计费关联和终态判断。若客户端未
+收到终态即断联，已配置的服务端 ledger 仍是权威计费来源。
+
+迁移期继续保留四种旧 transport，并按每进程、每 transport 发出一次
+`FutureWarning`；可用 `QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING=1` 临时静默。
+Realtime 当前尚未实现活动流恢复，断联会明确失败。下文的可恢复连接池行为只适用于
+兼容的 `engine-websocket`。
 
 对于 `engine-websocket` 传输，`timeout` 表示连接建立后请求的接收空闲预算。
 如果网络握手失败时需要更快释放调用线程，可以单独设置 `connect_timeout`；
@@ -285,7 +320,7 @@ engine execution。SDK 在连接池内替换坏连接，不会再次调用 `open
 ```python
 from qwen3tts import SessionStartRequest, SynthesisConfig, TTSClient
 
-client = TTSClient.connect("ws://localhost:50052/v1/ws")
+client = TTSClient.connect("ws://localhost:50052/v1/realtime")
 session = client.open_stream(
     SessionStartRequest(
         session_id="demo-session",
@@ -299,6 +334,8 @@ session.stop()  # 与兼容接口 session.end() 等价：停止输入并排空�
 
 for message in session.iter_messages():
     print(type(message).__name__, getattr(message, "meta", {}))
+
+print(session.response_id, session.response_status, session.usage)
 ```
 
 中继服务可用 `session.iter_messages(post_send_idle_timeout=30.0)` 限制已经接收
@@ -314,10 +351,14 @@ for message in session.iter_messages():
 
 `transport="auto"` 时：
 
-- `ws://` / `wss://`：直接判定为 `engine-websocket`
-- `http://` / `https://`：先探测 standalone `GET /v1/capabilities`，失败后探测 Triton HTTP `/v2/health/live`、`/v2/health/ready`、`/v2/models/<model>/ready`
-- 裸 `host:port`：优先按端口规则探测 standalone，再探测 Triton，再回落 HTTP
-- 裸 `host`：自动扩展默认候选端口 `50052`、`50051`、`8001`、`8000`
+- `ws://` / `wss://`：`/v1/realtime` 按 Realtime 探测；根 URL 先尝试
+  `/v1/realtime` 再尝试 `/v1/ws`；显式 `/v1/ws` 保持旧协议。
+- `http://` / `https://`：先探测 `GET /v1/capabilities`，优先采用声明的
+  `openai-realtime-v1`，否则才走旧 standalone 或 Triton HTTP 探测。
+- 裸 `host:port`：`50052` 和 `50053` 优先探测 Realtime，旧协议和 Triton 探测作为
+  fallback。
+- 裸 `host`：按 `50052`（standalone Realtime）、`50053`（Triton Realtime
+  sidecar）、`50051`、`8001`、`8000` 的优先级扩展。
 
 探测结果会暴露在：
 
@@ -348,11 +389,12 @@ Triton HTTP 本身不支持真正的 decoupled streaming infer。
 - SDK 代码被收敛到 `client/` 子项目
 - 提供统一同步 / 异步 façade
 - 引入共享协议层 `qwen3tts_protocol`
-- 提供 auto-detect 骨架和四类 adaptor 入口
+- OpenAI Realtime 成为 auto-detect 首选 adaptor
+- 四类旧 adaptor 继续可用并发出 deprecation warning
 - 为 `triton-http` 提供显式的流式降级语义
 
 当前仍建议把它视为 v1 alpha：
 
-- transport 适配已成型，但还需要继续补更完整的集成验证
-- `engine-websocket` / `engine-grpc` 路径最接近现有服务端真实合同
-- Triton 相关路径后续建议继续补真实环境 smoke test
+- SDK 到 gateway 的 Realtime 集成已经覆盖，无需模型/GPU
+- 真实 Triton sidecar 和 GPU smoke test 仍应在部署 CI 中执行
+- durable usage、鉴权、配额与 Realtime 断线恢复验收通过后，才公布旧协议删除版本

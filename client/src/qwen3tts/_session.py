@@ -22,6 +22,9 @@ class BaseStreamSession:
         self.session_id = session_id
         self.transport = transport
         self.degraded_to_oneshot = False
+        self.usage: dict = {}
+        self.response_id = ""
+        self.response_status = ""
         self._messages: queue.Queue[object] = queue.Queue()
         self._closed = False
         self._send_closed = False
@@ -140,6 +143,18 @@ class AsyncStreamSession:
         self.session_id = sync_session.session_id
         self.transport = sync_session.transport
         self.degraded_to_oneshot = sync_session.degraded_to_oneshot
+
+    @property
+    def usage(self) -> dict:
+        return dict(getattr(self._sync, "usage", {}) or {})
+
+    @property
+    def response_id(self) -> str:
+        return str(getattr(self._sync, "response_id", "") or "")
+
+    @property
+    def response_status(self) -> str:
+        return str(getattr(self._sync, "response_status", "") or "")
 
     async def send_text(
         self,

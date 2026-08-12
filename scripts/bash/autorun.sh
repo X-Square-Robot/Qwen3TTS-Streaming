@@ -140,6 +140,7 @@ ENGINE_DOCKER_IMAGE="$(_env_or_empty ENGINE_IMAGE)"
 ENGINE_DOCKER_IMAGE_EXPLICIT=false
 GRPC_PORT="$(_env_or_empty TRITON_GRPC_PORT)"
 HTTP_PORT="$(_env_or_empty TRITON_HTTP_PORT)"
+REALTIME_PORT="$(_env_or_empty TRITON_REALTIME_HOST_PORT)"
 RUNTIME_MAX_BATCH_SIZE="${RUNTIME_MAX_BATCH_SIZE:-}"
 RUNTIME_MAX_SEQ_LEN="${RUNTIME_MAX_SEQ_LEN:-}"
 # Serving knobs forwarded to deploy.sh (Phase C).
@@ -245,6 +246,7 @@ Phase C options (forwarded to deploy.sh):
   --dev                   Enable compose dev overlay (triton/engine gateways)
   --health-port <N>       Engine health port (default: 8080)
   --metrics-port <N>      Triton metrics port (default: 8002)
+  --realtime-port <N>     Triton OpenAI Realtime port (default: 50053)
   --triton-device <N>     Triton GPU device
   --grpc-port <port>      Triton gRPC port (default: 8001)
   --http-port <port>      Triton HTTP port (default: 8000)
@@ -339,6 +341,7 @@ parse_args() {
             --dev)              DEV_OVERLAY=true; shift ;;
             --health-port)      HEALTH_PORT="$2"; shift 2 ;;
             --metrics-port)     METRICS_PORT="$2"; shift 2 ;;
+            --realtime-port)    REALTIME_PORT="$2"; shift 2 ;;
             --triton-device)    TRITON_DEVICE="$2"; shift 2 ;;
             --grpc-port)        GRPC_PORT="$2"; shift 2 ;;
             --http-port)        HTTP_PORT="$2"; shift 2 ;;
@@ -516,6 +519,7 @@ build_forward_args() {
     if [ "$DEV_OVERLAY" = "true" ]; then DEPLOY_ARGS+=(--dev); fi
     append_optarg DEPLOY_ARGS --health-port "$HEALTH_PORT"
     append_optarg DEPLOY_ARGS --metrics-port "$METRICS_PORT"
+    append_optarg DEPLOY_ARGS --realtime-port "$REALTIME_PORT"
     append_optarg DEPLOY_ARGS --triton-device "$TRITON_DEVICE"
     append_optarg DEPLOY_ARGS --model-version "$MODEL_VERSION"
     if $BUILD_IMAGE_EXPLICIT; then

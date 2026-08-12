@@ -70,7 +70,9 @@ from engine.interface import (
     OutputPipeline,
     SessionStartRequest,
     parse_output_policy,
+    parse_timing_context,
     to_core_output_policy,
+    to_core_timing_context,
 )
 from engine.runtime.fingerprint import (
     FingerprintCheckError,
@@ -89,6 +91,7 @@ _ENGINE_SAMPLE_RATE = 24000
 _FINAL_FLAGS = pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL
 
 _INPUT_MODE_BY_NAME = {
+    "auto": InputMode.AUTO,
     "token": InputMode.TOKEN,
     "clause": InputMode.CLAUSE,
     "long_segment": InputMode.LONG_SEGMENT,
@@ -173,6 +176,7 @@ def _parse_input_mode(raw: Any, *, default_mode: InputMode) -> InputMode:
             2: InputMode.CLAUSE,
             3: InputMode.LONG_SEGMENT,
             4: InputMode.FULL_TEXT,
+            5: InputMode.AUTO,
         }
         return mapping.get(raw, default_mode)
     return default_mode
@@ -453,6 +457,7 @@ class TritonPythonModel:
         )
         self._sessions_lock = threading.Lock()
         self._active_sessions: set[str] = set()
+        self._session_senders: dict[str, Any] = {}
 
         try:
             self._run_coro(self._engine.start())
@@ -585,8 +590,31 @@ class TritonPythonModel:
         if not session_id:
             raise ValueError("cancel requires session_id")
         with self._sessions_lock:
+            if session_id not in self._active_sessions:
+                raise ValueError(f"session {session_id} not found")
             self._active_sessions.discard(session_id)
-        self._run_coro(self._engine.cancel(session_id))
+            original_sender = self._session_senders.pop(session_id, None)
+        try:
+            self._run_coro(self._engine.cancel(session_id))
+        except Exception as exc:
+            if original_sender is not None:
+                self._send_event(
+                    original_sender,
+                    event_type="error",
+                    session_id=session_id,
+                    message=str(exc),
+                    meta={"cancelled": "true"},
+                    is_final=True,
+                )
+            raise
+        if original_sender is not None:
+            self._send_event(
+                original_sender,
+                event_type="done",
+                session_id=session_id,
+                meta={"cancelled": "true"},
+                is_final=True,
+            )
         self._safe_send_final(response_sender)
 
     def _send_event(
@@ -707,6 +735,7 @@ class TritonPythonModel:
         async def on_done(_sid: str, metrics: dict) -> None:
             with self._sessions_lock:
                 self._active_sessions.discard(_sid)
+                self._session_senders.pop(_sid, None)
             error = metrics.get("error") if isinstance(metrics, dict) else None
             # pipeline.done_meta() merges in the ServerTimingAccumulator data
             # (queue_wait/prefill/cache_hit/total_latency) and already excludes
@@ -743,6 +772,7 @@ class TritonPythonModel:
             )
             with self._sessions_lock:
                 self._active_sessions.add(session_id)
+                self._session_senders[session_id] = response_sender
             self._send_event(
                 response_sender,
                 event_type="start",
@@ -761,6 +791,7 @@ class TritonPythonModel:
         except Exception:
             with self._sessions_lock:
                 self._active_sessions.discard(session_id)
+                self._session_senders.pop(session_id, None)
             try:
                 self._run_coro(self._engine.cancel(session_id))
             except Exception:
@@ -800,6 +831,9 @@ class TritonPythonModel:
             group_policy=_parse_group_policy(req.get("group_policy")),
             audio=audio,
             output_policy=output_policy,
+            timing=to_core_timing_context(
+                parse_timing_context(req.get("timing") or req.get("timing_context"))
+            ),
         )
         if not streaming:
             config.input_mode = InputMode.FULL_TEXT

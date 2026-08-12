@@ -9,8 +9,9 @@ See the repo README for how to start one.
 Use the tag in the engine's ``capabilities.engine_version``; the engine also
 serves the matching wheel at GET /sdk/ on the health port.
 
-Default endpoint: ws://localhost:50052/v1/ws  (standalone engine WebSocket)
-Other examples: localhost:50051 (engine gRPC), http://localhost:8000 (Triton).
+Default endpoint: ws://localhost:50052/v1/realtime  (OpenAI Realtime)
+Other examples: ws://localhost:50053/v1/realtime (Triton sidecar),
+localhost:50051 (legacy engine gRPC), http://localhost:8000 (legacy Triton HTTP).
 """
 
 from __future__ import annotations
@@ -21,14 +22,16 @@ import wave
 
 from qwen3tts import TTSClient, SynthesisConfig
 
-ENDPOINT = sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:50052/v1/ws"
+ENDPOINT = (
+    sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:50052/v1/realtime"
+)
 TEXT = "你好，欢迎使用 Qwen3-TTS。"
 OUT = "quickstart.wav"
 
 
 def main() -> None:
     # transport defaults to "auto": the SDK probes the endpoint and picks the
-    # right adapter (engine-websocket / engine-grpc / triton-grpc / triton-http).
+    # Realtime adapter first, with legacy transports retained as fallbacks.
     client = TTSClient.connect(ENDPOINT)
     result = client.synthesize_bytes(
         TEXT,
@@ -40,6 +43,7 @@ def main() -> None:
         f"transport={result.transport}  encoding={fmt.encoding}  "
         f"sample_rate={fmt.sample_rate}  bytes={len(result.audio_bytes)}"
     )
+    print(f"usage={result.details.get('usage', {})}")
 
     _save_wav(OUT, result.audio_bytes, fmt.encoding, fmt.sample_rate)
     print(f"saved {OUT}")

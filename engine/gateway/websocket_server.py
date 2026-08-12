@@ -95,6 +95,7 @@ _WEBSOCKET_REQUEST_QUEUE_MAXSIZE = int(
     os.environ.get("ENGINE_WEBSOCKET_REQUEST_QUEUE_MAXSIZE", "64") or "64"
 )
 _CAPABILITIES_PATH = "/v1/capabilities"
+_OPENAI_REALTIME_PATH = "/v1/realtime"
 _WEBSOCKET_HEARTBEAT_SEC = float(
     os.environ.get("ENGINE_WEBSOCKET_HEARTBEAT_SEC", "30") or "30"
 )
@@ -139,6 +140,12 @@ class WebSocketGateway:
         capabilities["stream_resume_max_buffer_bytes"] = (
             self._resume_registry.max_buffer_bytes
         )
+        capabilities["supported_api_protocols"] = [
+            "openai-realtime-v1",
+            "tts-session-v2alpha1",
+        ]
+        capabilities["openai_realtime_path"] = _OPENAI_REALTIME_PATH
+        capabilities["supported_realtime_extensions"] = ["qwen.input_text_buffer.v1"]
         return capabilities
 
     async def handle_capabilities(self, request):
@@ -1109,6 +1116,7 @@ async def serve(
     path: str = "/v1/ws",
     started: asyncio.Event | None = None,
     health_state: HealthState | None = None,
+    realtime_usage_recorder: Any = None,
 ) -> None:
     """Start the websocket gateway using aiohttp.
 
@@ -1122,8 +1130,16 @@ async def serve(
 
     ws_path = _normalize_ws_path(path)
     gateway = WebSocketGateway(engine)
+    from .openai_realtime import OpenAIRealtimeGateway
+
+    realtime_gateway = OpenAIRealtimeGateway(
+        engine,
+        session_starter=gateway._create_session,
+        usage_recorder=realtime_usage_recorder,
+    )
     app = web.Application()
     app.router.add_get(_CAPABILITIES_PATH, gateway.handle_capabilities)
+    app.router.add_get(_OPENAI_REALTIME_PATH, realtime_gateway.handle_websocket)
     app.router.add_get(ws_path, gateway.handle_websocket)
     if health_state is not None:
         add_health_routes(app, health_state)
@@ -1136,9 +1152,10 @@ async def serve(
         if started is not None:
             started.set()
         logger.info(
-            "WebSocket server listening on port %d (ws path %s, capabilities %s)",
+            "WebSocket server listening on port %d (legacy %s, realtime %s, capabilities %s)",
             port,
             ws_path,
+            _OPENAI_REALTIME_PATH,
             _CAPABILITIES_PATH,
         )
         await stop_event.wait()

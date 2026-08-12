@@ -112,6 +112,19 @@ class FrontendInterface:
     def active_count(self) -> int:
         return len(self._sessions)
 
+    def count_text_tokens(self, text: str) -> int:
+        """Count model input tokens using the synthesis tokenizer.
+
+        Billing adapters must use the same normalization and tokenizer as the
+        actual frontend.  Keeping this operation here avoids protocol layers
+        guessing from characters or depending on tokenizer implementation
+        details.
+        """
+        normalized = _normalize_tts_text(text).strip()
+        if not normalized:
+            return 0
+        return len(self._encode_ids(normalized))
+
     async def create_session(
         self,
         session_id: str,

@@ -549,6 +549,12 @@ class TTSEngine:
     async def cancel(self, session_id: str) -> None:
         await self._frontend.cancel_session(session_id)
 
+    def count_text_tokens(self, text: str) -> int:
+        """Return billable text tokens using the live model tokenizer."""
+        if self._frontend is None:
+            raise RuntimeError("TTS engine has not been started")
+        return self._frontend.count_text_tokens(text)
+
     def engine_thread_alive(self) -> bool:
         """True while the engine-loop thread is running (post-start liveness).
 

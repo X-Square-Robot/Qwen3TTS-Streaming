@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import warnings
+
 import pytest
 
 from qwen3tts import SessionStartRequest, SynthesisConfig, TTSClient
 from qwen3tts.audio import decode_audio_bytes_to_array
 from qwen3tts.client import _build_adapter
+from qwen3tts import client as client_module
 from qwen3tts.constants import (
     TRANSPORT_ENGINE_GRPC,
     TRANSPORT_ENGINE_WEBSOCKET,
+    TRANSPORT_OPENAI_REALTIME,
     TRANSPORT_TRITON_GRPC,
     TRANSPORT_TRITON_HTTP,
 )
@@ -196,6 +200,72 @@ def test_build_websocket_adapter_forwards_connect_timeout():
     assert adapter.keepalive_interval == 9.0
     assert adapter.keepalive_jitter == 0.1
     assert adapter.headers == {"X-Test": "1"}
+
+
+def test_build_openai_realtime_adapter_forwards_model_and_auth():
+    adapter = _build_adapter(
+        TRANSPORT_OPENAI_REALTIME,
+        endpoint="ws://localhost:50053/v1/realtime",
+        model_name="qwen3-tts-realtime",
+        model_version="1",
+        timeout=120.0,
+        connect_timeout=5.0,
+        reconnect_attempts=3,
+        headers={"Authorization": "Bearer secret"},
+        metadata=None,
+    )
+
+    assert adapter.transport_name == TRANSPORT_OPENAI_REALTIME
+    assert adapter.endpoint.endswith("?model=qwen3-tts-realtime")
+    assert adapter.connect_timeout == 5.0
+    assert adapter.reconnect_attempts == 3
+    assert adapter.headers == {"Authorization": "Bearer secret"}
+
+
+def test_legacy_transport_warning_is_emitted_once(monkeypatch):
+    client_module._WARNED_LEGACY_TRANSPORTS.clear()
+    monkeypatch.delenv("QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING", raising=False)
+
+    with pytest.warns(FutureWarning, match="compatibility path"):
+        TTSClient.connect(
+            "ws://localhost:50052/v1/ws",
+            transport=TRANSPORT_ENGINE_WEBSOCKET,
+            verify=False,
+        )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        TTSClient.connect(
+            "ws://localhost:50052/v1/ws",
+            transport=TRANSPORT_ENGINE_WEBSOCKET,
+            verify=False,
+        )
+    assert caught == []
+
+
+def test_openai_realtime_transport_has_no_legacy_warning(monkeypatch):
+    monkeypatch.setattr(
+        client_module,
+        "detect_transport",
+        lambda *args, **kwargs: type(
+            "Detected",
+            (),
+            {
+                "transport": TRANSPORT_OPENAI_REALTIME,
+                "resolved_endpoint": "ws://localhost:50053/v1/realtime",
+                "model_name": "qwen3-tts-realtime",
+                "model_version": "1",
+                "probe_report": [],
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        client_module, "_build_adapter", lambda *args, **kwargs: _FakeAdapter()
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        TTSClient.connect("localhost", transport="auto", verify=False)
+    assert caught == []
 
 
 @pytest.mark.parametrize(

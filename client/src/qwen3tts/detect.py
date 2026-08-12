@@ -11,18 +11,22 @@ from qwen3tts_protocol import DetectedTransport
 
 from ._internal.auth import grpc_metadata_as_headers, normalize_grpc_metadata
 from ._internal.raw_websocket import ws_close, ws_connect, ws_recv_frame, ws_send_json
-from ._internal.utils import check_capabilities_pairing
+from ._internal.utils import check_capabilities_pairing, check_engine_version
 from .constants import (
     DEFAULT_ENGINE_CAPABILITIES_PATH,
     DEFAULT_ENGINE_GRPC_PORT,
     DEFAULT_ENGINE_WS_PATH,
     DEFAULT_ENGINE_WS_PORT,
+    DEFAULT_OPENAI_REALTIME_MODEL,
+    DEFAULT_OPENAI_REALTIME_PATH,
     DEFAULT_MODEL_VERSION,
+    DEFAULT_TRITON_REALTIME_PORT,
     DEFAULT_TRITON_GRPC_MODEL,
     DEFAULT_TRITON_GRPC_PORT,
     DEFAULT_TRITON_HTTP_MODEL,
     DEFAULT_TRITON_HTTP_PORT,
     SUPPORTED_TRANSPORTS,
+    TRANSPORT_OPENAI_REALTIME,
     TRANSPORT_ENGINE_GRPC,
     TRANSPORT_ENGINE_WEBSOCKET,
     TRANSPORT_TRITON_GRPC,
@@ -75,6 +79,7 @@ def detect_transport(
             connect_timeout=connect_timeout,
             headers=headers,
             report=report,
+            model_name=model_name,
             model_version=model_version,
         )
     if parsed.scheme in {"http", "https"}:
@@ -105,11 +110,58 @@ def _detect_websocket_url(
     connect_timeout: float | None,
     headers,
     report: list[dict],
+    model_name: str | None,
     model_version: str,
 ) -> DetectedTransport:
+    parsed = urlparse(url)
+    if not parsed.path.endswith(DEFAULT_ENGINE_WS_PATH):
+        realtime_url = url
+        if parsed.path in ("", "/"):
+            realtime_url = url.rstrip("/") + DEFAULT_OPENAI_REALTIME_PATH
+        try:
+            _probe_openai_realtime(
+                realtime_url,
+                timeout=timeout,
+                connect_timeout=connect_timeout,
+                headers=headers,
+            )
+        except Exception as exc:
+            report.append(
+                {
+                    "transport": TRANSPORT_OPENAI_REALTIME,
+                    "endpoint": realtime_url,
+                    "ok": False,
+                    "reason": str(exc),
+                }
+            )
+            if parsed.path.endswith(DEFAULT_OPENAI_REALTIME_PATH):
+                raise TransportProbeError(
+                    f"OpenAI Realtime endpoint probe failed: {exc}",
+                    probe_report=report,
+                ) from exc
+        else:
+            report.append(
+                {
+                    "transport": TRANSPORT_OPENAI_REALTIME,
+                    "endpoint": realtime_url,
+                    "ok": True,
+                }
+            )
+            return DetectedTransport(
+                requested_endpoint=url,
+                resolved_endpoint=realtime_url,
+                transport=TRANSPORT_OPENAI_REALTIME,
+                model_name=model_name or DEFAULT_OPENAI_REALTIME_MODEL,
+                model_version=model_version,
+                probe_report=report,
+            )
+
+    legacy_url = url
+    if parsed.path in ("", "/"):
+        legacy_url = url.rstrip("/") + DEFAULT_ENGINE_WS_PATH
     try:
         _probe_engine_websocket(
-            url,
+            legacy_url,
             timeout=timeout,
             connect_timeout=connect_timeout,
             headers=headers,
@@ -121,7 +173,7 @@ def _detect_websocket_url(
         report.append(
             {
                 "transport": TRANSPORT_ENGINE_WEBSOCKET,
-                "endpoint": url,
+                "endpoint": legacy_url,
                 "ok": False,
                 "reason": str(exc),
             }
@@ -130,11 +182,15 @@ def _detect_websocket_url(
             f"websocket endpoint probe failed: {exc}", probe_report=report
         ) from exc
     report.append(
-        {"transport": TRANSPORT_ENGINE_WEBSOCKET, "endpoint": url, "ok": True}
+        {
+            "transport": TRANSPORT_ENGINE_WEBSOCKET,
+            "endpoint": legacy_url,
+            "ok": True,
+        }
     )
     return DetectedTransport(
         requested_endpoint=url,
-        resolved_endpoint=url,
+        resolved_endpoint=legacy_url,
         transport=TRANSPORT_ENGINE_WEBSOCKET,
         model_name="",
         model_version=model_version,
@@ -156,26 +212,52 @@ def _detect_http_url(
         response = requests.get(capabilities_url, timeout=timeout, headers=headers)
         if response.status_code == 200:
             payload = response.json()
-            if isinstance(payload, dict) and "loaded_model_type" in payload:
-                check_capabilities_pairing(payload)
-                report.append(
-                    {
-                        "transport": "engine-http-capabilities",
-                        "endpoint": capabilities_url,
-                        "ok": True,
-                    }
-                )
-                return DetectedTransport(
-                    requested_endpoint=base_url,
-                    resolved_endpoint=(
-                        f"{_http_base_to_websocket(base_url).rstrip('/')}"
-                        f"{DEFAULT_ENGINE_WS_PATH}"
-                    ),
-                    transport=TRANSPORT_ENGINE_WEBSOCKET,
-                    model_name="",
-                    model_version=model_version,
-                    probe_report=report,
-                )
+            if isinstance(payload, dict):
+                protocols = list(payload.get("supported_api_protocols") or [])
+                if "openai-realtime-v1" in protocols:
+                    check_engine_version(payload.get("engine_version"))
+                    report.append(
+                        {
+                            "transport": "openai-realtime-capabilities",
+                            "endpoint": capabilities_url,
+                            "ok": True,
+                        }
+                    )
+                    realtime_path = str(
+                        payload.get("openai_realtime_path")
+                        or DEFAULT_OPENAI_REALTIME_PATH
+                    )
+                    return DetectedTransport(
+                        requested_endpoint=base_url,
+                        resolved_endpoint=(
+                            f"{_http_base_to_websocket(base_url).rstrip('/')}"
+                            f"{realtime_path}"
+                        ),
+                        transport=TRANSPORT_OPENAI_REALTIME,
+                        model_name=model_name or DEFAULT_OPENAI_REALTIME_MODEL,
+                        model_version=model_version,
+                        probe_report=report,
+                    )
+                if "loaded_model_type" in payload:
+                    check_capabilities_pairing(payload)
+                    report.append(
+                        {
+                            "transport": "engine-http-capabilities",
+                            "endpoint": capabilities_url,
+                            "ok": True,
+                        }
+                    )
+                    return DetectedTransport(
+                        requested_endpoint=base_url,
+                        resolved_endpoint=(
+                            f"{_http_base_to_websocket(base_url).rstrip('/')}"
+                            f"{DEFAULT_ENGINE_WS_PATH}"
+                        ),
+                        transport=TRANSPORT_ENGINE_WEBSOCKET,
+                        model_name="",
+                        model_version=model_version,
+                        probe_report=report,
+                    )
         report.append(
             {
                 "transport": "engine-http-capabilities",
@@ -253,9 +335,24 @@ def _detect_bare_endpoint(
     model_version: str,
 ) -> DetectedTransport:
     candidates: list[tuple[str, str]]
-    if ":" in endpoint and not endpoint.endswith("]"):
+    has_explicit_port = ":" in endpoint and not endpoint.endswith("]")
+    if has_explicit_port:
         candidates = [(endpoint, "single")]
     else:
+        for port in (DEFAULT_ENGINE_WS_PORT, DEFAULT_TRITON_REALTIME_PORT):
+            detected = _probe_bare_realtime_candidate(
+                requested_endpoint=endpoint,
+                host=endpoint,
+                port=port,
+                timeout=timeout,
+                connect_timeout=connect_timeout,
+                headers=headers,
+                report=report,
+                model_name=model_name,
+                model_version=model_version,
+            )
+            if detected is not None:
+                return detected
         candidates = [
             (f"{endpoint}:{DEFAULT_ENGINE_WS_PORT}", "ws-port"),
             (f"{endpoint}:{DEFAULT_ENGINE_GRPC_PORT}", "grpc-port"),
@@ -277,6 +374,23 @@ def _detect_bare_endpoint(
                 pass
             continue
         host, port = _split_host_port(candidate)
+        if has_explicit_port and port in (
+            DEFAULT_ENGINE_WS_PORT,
+            DEFAULT_TRITON_REALTIME_PORT,
+        ):
+            detected = _probe_bare_realtime_candidate(
+                requested_endpoint=endpoint,
+                host=host,
+                port=port,
+                timeout=timeout,
+                connect_timeout=connect_timeout,
+                headers=headers,
+                report=report,
+                model_name=model_name,
+                model_version=model_version,
+            )
+            if detected is not None:
+                return detected
         if port == DEFAULT_ENGINE_GRPC_PORT:
             try:
                 _probe_engine_grpc(
@@ -397,6 +511,53 @@ def _detect_bare_endpoint(
     )
 
 
+def _probe_bare_realtime_candidate(
+    *,
+    requested_endpoint: str,
+    host: str,
+    port: int,
+    timeout: float,
+    connect_timeout: float | None,
+    headers,
+    report: list[dict],
+    model_name: str | None,
+    model_version: str,
+) -> DetectedTransport | None:
+    realtime_url = f"ws://{host}:{port}{DEFAULT_OPENAI_REALTIME_PATH}"
+    try:
+        _probe_openai_realtime(
+            realtime_url,
+            timeout=timeout,
+            connect_timeout=connect_timeout,
+            headers=headers,
+        )
+    except Exception as exc:
+        report.append(
+            {
+                "transport": TRANSPORT_OPENAI_REALTIME,
+                "endpoint": realtime_url,
+                "ok": False,
+                "reason": str(exc),
+            }
+        )
+        return None
+    report.append(
+        {
+            "transport": TRANSPORT_OPENAI_REALTIME,
+            "endpoint": realtime_url,
+            "ok": True,
+        }
+    )
+    return DetectedTransport(
+        requested_endpoint=requested_endpoint,
+        resolved_endpoint=realtime_url,
+        transport=TRANSPORT_OPENAI_REALTIME,
+        model_name=model_name or DEFAULT_OPENAI_REALTIME_MODEL,
+        model_version=model_version,
+        probe_report=report,
+    )
+
+
 def _probe_engine_websocket(
     url: str,
     *,
@@ -425,6 +586,41 @@ def _probe_engine_websocket(
                 check_capabilities_pairing(message.get("capabilities") or {})
                 return
         raise TimeoutError("websocket probe timed out")
+    finally:
+        ws_close(conn)
+
+
+def _probe_openai_realtime(
+    url: str,
+    *,
+    timeout: float,
+    connect_timeout: float | None = None,
+    headers,
+) -> None:
+    conn = ws_connect(
+        url,
+        timeout=timeout if connect_timeout is None else connect_timeout,
+        headers=headers,
+    )
+    try:
+        deadline = time.perf_counter() + timeout
+        while time.perf_counter() < deadline:
+            conn.settimeout(max(0.05, min(0.2, deadline - time.perf_counter())))
+            try:
+                opcode, payload = ws_recv_frame(conn)
+            except socket.timeout:
+                continue
+            if opcode == 0x8:
+                raise RuntimeError("websocket closed before session.created")
+            if opcode != 0x1:
+                continue
+            message = json.loads(payload.decode("utf-8"))
+            if message.get("type") == "session.created":
+                return
+            if message.get("type") == "error":
+                error = message.get("error") or {}
+                raise RuntimeError(str(error.get("message") or "Realtime probe failed"))
+        raise TimeoutError("OpenAI Realtime probe timed out")
     finally:
         ws_close(conn)
 
@@ -490,6 +686,14 @@ def _probe_triton_grpc(
 
 
 def _resolve_explicit_endpoint(endpoint: str, transport: str) -> str:
+    if transport == TRANSPORT_OPENAI_REALTIME:
+        if endpoint.startswith("ws://") or endpoint.startswith("wss://"):
+            parsed = urlparse(endpoint)
+            if parsed.path in ("", "/"):
+                return endpoint.rstrip("/") + DEFAULT_OPENAI_REALTIME_PATH
+            return endpoint
+        host, port = _split_host_port(endpoint, default_port=DEFAULT_ENGINE_WS_PORT)
+        return f"ws://{host}:{port}{DEFAULT_OPENAI_REALTIME_PATH}"
     if transport == TRANSPORT_ENGINE_WEBSOCKET:
         if endpoint.startswith("ws://") or endpoint.startswith("wss://"):
             return endpoint
@@ -513,6 +717,8 @@ def _resolve_explicit_endpoint(endpoint: str, transport: str) -> str:
 
 
 def _default_model_for_transport(transport: str) -> str:
+    if transport == TRANSPORT_OPENAI_REALTIME:
+        return DEFAULT_OPENAI_REALTIME_MODEL
     if transport == TRANSPORT_TRITON_GRPC:
         return DEFAULT_TRITON_GRPC_MODEL
     if transport == TRANSPORT_TRITON_HTTP:

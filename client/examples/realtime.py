@@ -7,7 +7,7 @@ never underruns.
 
     python realtime.py [endpoint]
 
-Default endpoint: ws://localhost:50052/v1/ws
+Default endpoint: ws://localhost:50052/v1/realtime
 """
 
 from __future__ import annotations
@@ -21,7 +21,9 @@ from qwen3tts import (
     TTSClient,
 )
 
-ENDPOINT = sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:50052/v1/ws"
+ENDPOINT = (
+    sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:50052/v1/realtime"
+)
 
 
 def main() -> None:
@@ -43,7 +45,10 @@ def main() -> None:
         audio_frames += 1
         # In a real app: webrtc_track.write(frame.data) / audio_device.play(frame.data)
 
-    print(f"audio frames={audio_frames}  silence frames={silence_frames}")
+    print(
+        f"audio frames={audio_frames}  silence frames={silence_frames}  "
+        f"usage={session.usage}"
+    )
 
 
 if __name__ == "__main__":

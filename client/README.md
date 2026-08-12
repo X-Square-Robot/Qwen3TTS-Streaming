@@ -3,13 +3,13 @@
 # Qwen3-TTS Python Client
 
 `qwen3-tts-client` is a lightweight Python SDK for talking to a Qwen3-TTS
-deployment. One import root, one API, four transports — point it at an endpoint
-and synthesize speech.
+deployment. OpenAI Realtime is the primary protocol; four older transports
+remain available as migration fallbacks behind the same API.
 
 ```python
 from qwen3tts import TTSClient, SynthesisConfig
 
-client = TTSClient.connect("ws://localhost:50052/v1/ws")
+client = TTSClient.connect("ws://localhost:50052/v1/realtime")
 result = client.synthesize_bytes("你好，欢迎使用 Qwen3-TTS。",
                                  request=SynthesisConfig(task_type="custom_voice"))
 print(result.audio_format, len(result.audio_bytes))
@@ -20,10 +20,11 @@ print(result.audio_format, len(result.audio_bytes))
 
 ## Features
 
-- **One API, four transports** — `engine-websocket`, `engine-grpc`,
-  `triton-grpc`, `triton-http`, all behind the same `TTSClient`.
+- **OpenAI Realtime first** — `openai-realtime` is the primary transport;
+  `engine-websocket`, `engine-grpc`, `triton-grpc`, and `triton-http` remain
+  compatibility fallbacks behind the same `TTSClient`.
 - **Auto-detection** — `transport="auto"` (the default) probes the endpoint and
-  binds the right adapter, so you usually just pass a URL.
+  prefers Realtime when the server advertises or accepts it.
 - **One-shot, streaming, and realtime** modes.
 - **Sync and async** clients (`TTSClient` / `AsyncTTSClient`).
 - **Slim dependencies** — the core install only needs `requests` and
@@ -89,13 +90,14 @@ Requires Python 3.10+.
 ```python
 from qwen3tts import TTSClient, SynthesisConfig
 
-client = TTSClient.connect("ws://localhost:50052/v1/ws")
+client = TTSClient.connect("ws://localhost:50052/v1/realtime")
 result = client.synthesize_bytes(
     "你好，欢迎使用 Qwen3-TTS。",
     request=SynthesisConfig(task_type="custom_voice", speaker="serena"),
 )
 # result.audio_bytes is raw PCM; result.audio_format tells you encoding + rate.
 print(result.transport, result.audio_format.encoding, result.audio_format.sample_rate)
+print(result.details["usage"])  # terminal input/output token usage for billing
 ```
 
 Need a numpy array instead of bytes (requires the `audio` extra)?
@@ -113,7 +115,7 @@ it arrives:
 ```python
 from qwen3tts import TTSClient, SessionStartRequest, SynthesisConfig, AudioChunk, StreamEvent
 
-client = TTSClient.connect("ws://localhost:50052/v1/ws")
+client = TTSClient.connect("ws://localhost:50052/v1/realtime")
 session = client.open_stream(
     SessionStartRequest(session_id="demo", config=SynthesisConfig(task_type="custom_voice"))
 )
@@ -126,6 +128,9 @@ for message in session.iter_messages():
         ...  # message.pcm_bytes
     elif isinstance(message, StreamEvent):
         print("event:", message.type)
+
+# Available after response.done, including partial usage for cancellation/failure.
+print(session.usage, session.response_id, session.response_status)
 ```
 
 ### Realtime playback (WebRTC / audio device)
@@ -137,7 +142,7 @@ to cover gaps so a playback device / WebRTC track never underruns:
 ```python
 from qwen3tts import TTSClient, RealtimeAudioStream, SessionStartRequest, SynthesisConfig
 
-client = TTSClient.connect("ws://localhost:50052/v1/ws")
+client = TTSClient.connect("ws://localhost:50052/v1/realtime")
 session = client.open_stream(
     SessionStartRequest(session_id="webrtc", config=SynthesisConfig(task_type="custom_voice"))
 )
@@ -164,7 +169,7 @@ for frame in RealtimeAudioStream(session, chunk_s=0.02, fill_silence=True):
 ```python
 from qwen3tts import AsyncTTSClient, SynthesisConfig
 
-client = await AsyncTTSClient.connect("ws://localhost:50052/v1/ws")
+client = await AsyncTTSClient.connect("ws://localhost:50052/v1/realtime")
 result = await client.synthesize_bytes("你好。", request=SynthesisConfig(task_type="custom_voice"))
 # streaming: session = await client.aopen_stream(SessionStartRequest(...))
 ```
@@ -176,9 +181,32 @@ auto-detects the backend. To pin it explicitly, pass `transport=`:
 
 | Endpoint example | Detected transport |
 |------------------|--------------------|
+| `ws://localhost:50052/v1/realtime` | `openai-realtime` (standalone) |
+| `ws://localhost:50053/v1/realtime` | `openai-realtime` (Triton sidecar) |
 | `ws://localhost:50052/v1/ws` | `engine-websocket` |
 | `localhost:50051` | `engine-grpc` |
 | `http://localhost:8000` | `triton-http` / `triton-grpc` |
+
+### Realtime migration and usage
+
+Complete-text `synthesize_bytes()` uses standard Realtime
+`conversation.item.create` and `response.create` events. Incremental
+`open_stream()` uses the advertised `qwen.input_text_buffer.v1` extension for
+append/commit while audio is received concurrently. A server that does not
+advertise that extension is still usable for one-shot synthesis, but the SDK
+rejects incremental streaming during session setup.
+
+`response.done.response.usage` is exposed as `result.details["usage"]` for
+one-shot calls and as `session.usage` after the terminal event for streaming.
+A configured server-side billing ledger remains authoritative when a client
+disconnects before receiving that event.
+
+The four legacy transports emit one `FutureWarning` per process and transport.
+They are not removed yet. `QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING=1` can
+temporarily silence the warning during migration. Active-stream transparent
+resume currently remains specific to the compatibility `engine-websocket`
+transport; an interrupted Realtime stream fails explicitly rather than
+silently re-synthesizing audio.
 
 ### Authentication and persistent WebSockets
 

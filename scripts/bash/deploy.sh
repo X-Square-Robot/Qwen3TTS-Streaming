@@ -43,6 +43,7 @@
 #    ENGINE_PYTHON           Python binary for standalone engine (default: conda env qwen3-tts, else PATH)
 #    QWEN3_TTS_ENV_NAME      Conda env name for auto-resolve (default: qwen3-tts)
 #    TRITON_GRPC_PORT        Triton gRPC port (default: 8001)
+#    TRITON_REALTIME_HOST_PORT  Triton OpenAI Realtime port (default: 50053)
 # ===========================================================================
 
 set -euo pipefail
@@ -119,6 +120,7 @@ Options:
     --dev                Enable the compose dev overlay (bind mounts)
     --health-port <N>    Engine health port (default: 8080)
     --metrics-port <N>   Triton metrics port (default: 8002)
+    --realtime-port <N>  Triton OpenAI Realtime port (default: 50053)
     --triton-device <N>  Triton GPU device
 
   Triton options (forwarded to build_triton.sh):
@@ -203,6 +205,7 @@ while [[ $# -gt 0 ]]; do
         --dev)            COMPOSE_EXTRA+=(--dev); shift ;;
         --health-port)    COMPOSE_EXTRA+=(--health-port "$2"); shift 2 ;;
         --metrics-port)   COMPOSE_EXTRA+=(--metrics-port "$2"); shift 2 ;;
+        --realtime-port)  COMPOSE_EXTRA+=(--realtime-port "$2"); shift 2 ;;
         --triton-device)  COMPOSE_EXTRA+=(--triton-device "$2"); shift 2 ;;
 
         # Everything else is forwarded to build_triton.sh

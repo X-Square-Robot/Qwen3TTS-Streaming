@@ -2,6 +2,11 @@
 
 # 独立协议重新设计
 
+> 迁移状态：新的公共 WebSocket 主协议是 OpenAI Realtime
+> `/v1/realtime`。本页记录的 `tts-session-v2alpha1` 是仍受支持的兼容协议。
+> Realtime 事件、usage 计费和 Triton sidecar 边界见
+> [OpenAI Realtime TTS 协议与 Triton 边界](openai_realtime.zh-CN.md)。
+
 ## 目标
 
 围绕显式会话协议统一独立的 `gateway -> interface -> dispatcher -> backend`，以便：
@@ -442,7 +447,9 @@ Gateway 接受 `AudioFormat` 请求，并通过共享的 `engine.interface.outpu
 - backend 中的流式暂停/恢复语义，而非无条件 pad 注入
 - 独立 `base` / `icl` 参考解析器、仅 TensorRT 参考预处理、进程内参考特征缓存和 ICL 参考前缀 KV cache
 
-仍待实现以与 Triton 编排器完全对等：
+仍待实现以达到完整 transport 对等：
 
 - 完整采样参数传递
-- 替换当前手写 gRPC 层的 Triton gateway
+
+OpenAI Realtime Triton sidecar 及其双向 streaming-gRPC backend 已实现；旧 SDK
+transport 仅作为迁移期兼容路径继续保留。

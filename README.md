@@ -195,7 +195,7 @@ Run `engine.server` in local Python, suitable for debugging the engine, protocol
 bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway standalone --engine-mode trt
 ```
 
-Default ports: gRPC `50051`, WebSocket `ws://localhost:50052/v1/ws`, HTTP capabilities `http://localhost:50052/v1/capabilities`, health `http://localhost:8080/health` (binds at process start; returns `503` while the model loads, `200` once ready — see [deployment](docs/user/deployment.md) for probe details).
+Default ports: gRPC `50051`, OpenAI Realtime `ws://localhost:50052/v1/realtime`, compatibility WebSocket `ws://localhost:50052/v1/ws`, HTTP capabilities `http://localhost:50052/v1/capabilities`, health `http://localhost:8080/health` (binds at process start; returns `503` while the model loads, `200` once ready — see [deployment](docs/user/deployment.md) for probe details).
 
 ### Engine Docker
 
@@ -232,6 +232,15 @@ bash scripts/bash/compose.sh prepare --gateway triton --variant custom-1.7b --en
 bash scripts/bash/compose.sh up --gateway triton --variant custom-1.7b
 ```
 
+The Triton deployment starts both Triton and an OpenAI Realtime sidecar. Its
+default public endpoints are Realtime
+`ws://localhost:50053/v1/realtime`, capabilities
+`http://localhost:50053/v1/capabilities`, and health
+`http://localhost:50053/health`; Triton's native HTTP/gRPC/metrics ports remain
+`8000/8001/8002`. Set `--realtime-port` on `compose.sh` to change the host port.
+Completed and partial-response usage is returned on the wire and appended to
+`workspace/realtime_usage/realtime_usage.jsonl` for billing ingestion.
+
 ### Base / ICL Experimental Paths
 
 When deploying the `base-1.7b` / `icl` experimental paths, you need to prepare a default reference audio and a reference registry:
@@ -250,7 +259,10 @@ You can also configure the reference library and reference cache in `engine.yaml
 
 ## Client SDK
 
-A standalone Python SDK package that provides unified access to the engine and Triton endpoints, supporting four transports: engine-websocket / engine-grpc / triton-grpc / triton-http. The default `transport="auto"` auto-detects the endpoint.
+The Python SDK now prefers `openai-realtime` when `transport="auto"` can
+discover it. The four compatibility transports—engine-websocket, engine-grpc,
+triton-grpc, and triton-http—remain available and emit deprecation warnings;
+they are not removed yet.
 
 SDK compatibility is determined by the wire-protocol family and major reported
 by `GET /v1/capabilities`. Release skew in `engine_version` is diagnostic and
@@ -277,11 +289,12 @@ Quick usage:
 ```python
 from qwen3tts import TTSClient, SynthesisConfig
 
-client = TTSClient.connect("ws://localhost:50052/v1/ws")
+client = TTSClient.connect("ws://localhost:50052/v1/realtime")
 result = client.synthesize_bytes(
     "你好，欢迎使用 Qwen3-TTS。",
     request=SynthesisConfig(task_type="custom_voice"),
 )
+print(result.details["usage"])
 ```
 
 Streaming session:
@@ -298,6 +311,7 @@ session.send_text("这是流式输入。")
 session.end()
 for message in session.iter_messages():
     print(type(message).__name__, getattr(message, "meta", {}))
+print(session.response_id, session.response_status, session.usage)
 ```
 
 For detailed documentation, see [Client SDK](docs/user/client_sdk.md) and the [`client/`](client) subproject.
@@ -366,7 +380,9 @@ docker compose --profile demo -f infra/docker/compose.yaml up --build demo-api w
 
 ## Streaming Protocol
 
-The standalone engine supports both gRPC and WebSocket. Example WebSocket control frames:
+New clients should use OpenAI Realtime at `/v1/realtime`. It is a full-duplex WebSocket: input and cancellation remain available while audio flows downstream. Complete text uses `conversation.item.create` plus `response.create`; token-level input uses the `qwen.input_text_buffer.append/commit` extension. Billable tokens are returned in `response.done.response.usage`. See [OpenAI Realtime TTS Protocol and Triton Boundary](docs/dev/architecture/openai_realtime.md).
+
+The following `/v1/ws` control frames remain for compatibility with the old SDK:
 
 ```json
 {"type":"start","session_id":"demo","config":{"task_type":"custom_voice","speaker":"Serena"}}

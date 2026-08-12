@@ -397,6 +397,13 @@ async def test_websocket_reuses_connection_for_serial_sessions_and_stop_alias():
                 "stream_resume_v1",
             ]
             assert capabilities["capabilities"]["stream_resume_grace_ms"] == 30000
+            assert capabilities["capabilities"]["supported_api_protocols"] == [
+                "openai-realtime-v1",
+                "tts-session-v2alpha1",
+            ]
+            assert capabilities["capabilities"]["openai_realtime_path"] == (
+                "/v1/realtime"
+            )
 
             await ws.send_json({"type": "start", "session_id": "serial-1"})
             await ws.send_json({"type": "text", "text": "first"})

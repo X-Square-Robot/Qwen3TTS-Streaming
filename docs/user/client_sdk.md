@@ -8,12 +8,14 @@ This SDK targets external callers, providing a unified, lightweight Python clien
 
 Supported service entry points:
 
+- `openai-realtime` (primary)
 - `engine-websocket`
 - `engine-grpc`
 - `triton-grpc`
 - `triton-http`
 
-The default behavior is `transport="auto"`: the client first probes, then binds to a specific adaptor.
+The default behavior is `transport="auto"`: the client probes Realtime first,
+then binds a legacy adaptor only when the primary protocol is unavailable.
 
 ## Layout and Publishing
 
@@ -215,7 +217,45 @@ result = client.synthesize_bytes(
 )
 print(result.audio_format)
 print(len(result.audio_bytes))
+print(result.details["usage"])
 ```
+
+On the standalone deployment, `localhost` resolves to
+`ws://localhost:50052/v1/realtime`. The Triton compose deployment exposes the
+same public protocol through its sidecar at
+`ws://localhost:50053/v1/realtime`. `client.resolved_transport` reports the
+selected adaptor.
+
+## OpenAI Realtime and Legacy Migration
+
+Pin the primary transport when endpoint selection must be deterministic:
+
+```python
+client = TTSClient.connect(
+    "wss://tts.example/v1/realtime",
+    transport="openai-realtime",
+    key="your-key",
+)
+```
+
+One-shot synthesis uses standard `conversation.item.create` and
+`response.create` events. Incremental `open_stream()` uses the
+`qwen.input_text_buffer.v1` append/commit extension, which must be advertised by
+the server. The transport remains full duplex: text append and
+`response.cancel` can be sent while audio deltas are arriving.
+
+Terminal `response.done.response.usage` is available at
+`result.details["usage"]` for one-shot calls and `session.usage` for streaming.
+`session.response_id` and `session.response_status` expose the billing
+correlation and terminal state. A configured server ledger remains
+authoritative if a client disconnects before receiving the terminal event.
+
+The four older transports remain available during migration and emit one
+`FutureWarning` per process and transport. The temporary environment switch
+`QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING=1` suppresses that warning. Active
+stream resume is not yet implemented for Realtime: an interrupted stream fails
+explicitly. The resumable connection-pool behavior documented below applies
+only to the compatibility `engine-websocket` transport.
 
 For the `engine-websocket` transport, `timeout` is the receive-idle budget for
 an established request. Set `connect_timeout` separately when a failed network
@@ -322,7 +362,7 @@ gateways that do not negotiate the feature retain fail-fast behavior. Call
 ```python
 from qwen3tts import SessionStartRequest, SynthesisConfig, TTSClient
 
-client = TTSClient.connect("ws://localhost:50052/v1/ws")
+client = TTSClient.connect("ws://localhost:50052/v1/realtime")
 session = client.open_stream(
     SessionStartRequest(
         session_id="demo-session",
@@ -336,6 +376,8 @@ session.stop()  # same as compatibility API session.end(): stop input and drain 
 
 for message in session.iter_messages():
     print(type(message).__name__, getattr(message, "meta", {}))
+
+print(session.response_id, session.response_status, session.usage)
 ```
 
 Relays can bound a remote stream that accepted `end()` or `cancel()` but never
@@ -353,10 +395,14 @@ When `transport=` is set explicitly, no probing is done and the specified adapto
 
 When `transport="auto"`:
 
-- `ws://` / `wss://`: directly resolved as `engine-websocket`
-- `http://` / `https://`: first probe standalone `GET /v1/capabilities`, then on failure probe Triton HTTP `/v2/health/live`, `/v2/health/ready`, `/v2/models/<model>/ready`
-- Bare `host:port`: probe standalone first by port rules, then Triton, then fall back to HTTP
-- Bare `host`: automatically expand to the default candidate ports `50052`, `50051`, `8001`, `8000`
+- `ws://` / `wss://`: `/v1/realtime` is probed as Realtime; a root URL tries
+  `/v1/realtime` before `/v1/ws`; an explicit `/v1/ws` remains legacy.
+- `http://` / `https://`: probe `GET /v1/capabilities`; prefer its advertised
+  `openai-realtime-v1`, otherwise use the legacy standalone or Triton HTTP checks.
+- Bare `host:port`: ports `50052` and `50053` probe Realtime first; compatible
+  legacy and Triton probes remain fallbacks.
+- Bare `host`: expand candidates in priority order `50052` (standalone
+  Realtime), `50053` (Triton Realtime sidecar), `50051`, `8001`, `8000`.
 
 The probing results are exposed at:
 
@@ -387,11 +433,13 @@ The current release has completed these structural goals:
 - The SDK code is consolidated into the `client/` subproject
 - A unified sync / async façade is provided
 - The shared protocol layer `qwen3tts_protocol` is introduced
-- An auto-detect skeleton and four adaptor entry points are provided
+- OpenAI Realtime is the preferred auto-detected adaptor
+- Four legacy adaptor entry points remain available with deprecation warnings
 - Explicit streaming-degradation semantics are provided for `triton-http`
 
 It is still recommended to treat it as v1 alpha:
 
-- The transport adaptation is in place, but more complete integration validation still needs to be added
-- The `engine-websocket` / `engine-grpc` paths are closest to the real contract of the existing server
-- For the Triton-related paths, it is recommended to add real-environment smoke tests later
+- SDK-to-gateway Realtime integration is covered without requiring a model/GPU
+- Real Triton sidecar and GPU smoke tests should still be run in deployment CI
+- Durable usage, auth, quotas, and Realtime reconnect acceptance remain gates
+  before announcing the legacy removal release

@@ -11,7 +11,7 @@ build-backend = "hatchling.build"
 [project]
 name = "qwen3-tts-client"
 dynamic = ["version"]
-description = "Lightweight Python client SDK for Qwen3-TTS standalone engine and Triton endpoints."
+description = "OpenAI Realtime client SDK for Qwen3-TTS with legacy transport fallbacks."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}

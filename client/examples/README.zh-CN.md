@@ -3,7 +3,7 @@
 # 示例
 
 `qwen3-tts-client` SDK 的可运行示例。每个示例接受一个可选的
-端点参数（默认：`ws://localhost:50052/v1/ws`）。
+端点参数（默认：`ws://localhost:50052/v1/realtime`）。
 
 请先启动一个 Qwen3-TTS 端点（见仓库 README），然后：
 
@@ -18,8 +18,9 @@ python realtime.py                    # wall-clock aligned frames (WebRTC/playba
 指向不同的端点：
 
 ```bash
-python quickstart.py localhost:50051            # engine gRPC
-python quickstart.py http://localhost:8000      # Triton HTTP
+python quickstart.py ws://localhost:50053/v1/realtime  # Triton sidecar
+python quickstart.py localhost:50051                  # 旧 engine gRPC
+python quickstart.py http://localhost:8000            # 旧 Triton HTTP
 ```
 
 | Example | Shows |

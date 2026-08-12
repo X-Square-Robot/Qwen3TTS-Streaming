@@ -3,7 +3,7 @@
 # Examples
 
 Runnable examples for the `qwen3-tts-client` SDK. Each takes an optional
-endpoint argument (default: `ws://localhost:50052/v1/ws`).
+endpoint argument (default: `ws://localhost:50052/v1/realtime`).
 
 First start a Qwen3-TTS endpoint (see the repo README), then:
 
@@ -18,8 +18,9 @@ python realtime.py                    # wall-clock aligned frames (WebRTC/playba
 Point at a different endpoint:
 
 ```bash
-python quickstart.py localhost:50051            # engine gRPC
-python quickstart.py http://localhost:8000      # Triton HTTP
+python quickstart.py ws://localhost:50053/v1/realtime  # Triton sidecar
+python quickstart.py localhost:50051                  # legacy engine gRPC
+python quickstart.py http://localhost:8000            # legacy Triton HTTP
 ```
 
 | Example | Shows |

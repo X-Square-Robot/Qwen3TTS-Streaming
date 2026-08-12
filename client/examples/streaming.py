@@ -5,7 +5,7 @@ engine streams audio back. Run a Qwen3-TTS endpoint first, then:
 
     python streaming.py [endpoint]
 
-Default endpoint: ws://localhost:50052/v1/ws
+Default endpoint: ws://localhost:50052/v1/realtime
 """
 
 from __future__ import annotations
@@ -22,7 +22,9 @@ from qwen3tts import (
     TTSClient,
 )
 
-ENDPOINT = sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:50052/v1/ws"
+ENDPOINT = (
+    sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:50052/v1/realtime"
+)
 OUT = "streaming.wav"
 
 
@@ -57,6 +59,10 @@ def main() -> None:
                 return
 
     print(f"received {len(pcm)} bytes  encoding={encoding}  sample_rate={sample_rate}")
+    print(
+        f"response_id={session.response_id} status={session.response_status} "
+        f"usage={session.usage}"
+    )
     _save_wav(OUT, bytes(pcm), encoding, sample_rate)
     print(f"saved {OUT}")
 

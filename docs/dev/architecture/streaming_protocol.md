@@ -2,6 +2,12 @@
 
 # Standalone Protocol Redesign
 
+> Migration status: the primary new public WebSocket protocol is OpenAI
+> Realtime at `/v1/realtime`. The `tts-session-v2alpha1` contract documented
+> here remains supported for compatibility. See
+> [OpenAI Realtime TTS Protocol and Triton Boundary](openai_realtime.md) for
+> Realtime events, usage billing, and the Triton sidecar boundary.
+
 ## Goals
 
 Unify the standalone `gateway -> interface -> dispatcher -> backend` around an explicit session protocol, so that:
@@ -450,7 +456,10 @@ Already implemented in the standalone engine:
 - Streaming pause/resume semantics in the backend, rather than unconditional pad injection
 - Standalone `base` / `icl` reference resolver, TensorRT-only reference preprocessing, in-process reference feature cache, and ICL reference prefix KV cache
 
-Still to be implemented for full parity with the Triton orchestrator:
+Still to be implemented for full transport parity:
 
 - Full sampling parameter passing
-- A Triton gateway to replace the current hand-written gRPC layer
+
+The OpenAI Realtime Triton sidecar and its bidirectional streaming-gRPC backend
+are implemented. The legacy SDK transport remains available only as a
+compatibility path during migration.

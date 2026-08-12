@@ -67,6 +67,7 @@ Phase C:
   --runtime-max-batch-size <N>  runtime scheduler batch limit
   --runtime-max-seq-len <N>     runtime scheduler seq limit
   --runtime-device <dev>        runtime service GPU
+  --realtime-port <N>           Triton OpenAI Realtime host port (default: 50053)
 ```
 
 ### Model Version Number
@@ -239,7 +240,8 @@ bash scripts/bash/autorun.sh deploy \
 Endpoints:
 
 - gRPC: `localhost:50051`
-- WebSocket: `ws://localhost:50052/v1/ws`
+- OpenAI Realtime: `ws://localhost:50052/v1/realtime`
+- compatibility WebSocket: `ws://localhost:50052/v1/ws`
 - capabilities: `http://localhost:50052/v1/capabilities`
 - health: `http://localhost:8080/health`
 
@@ -280,8 +282,10 @@ Platform probe checklist:
   lose ready-gating on that path (`/readyz` keeps it). The short alias
   `ENGINE_HEALTH_PROBE_MODE` works only in compose / engine-docker deployments,
   where the entrypoint maps it.
-- Triton gateway deployments have no `/health`; point the probe at
-  `http://<host>:8000/v2/health/ready` instead.
+- For Triton's native readiness, probe
+  `http://<host>:8000/v2/health/ready`. For the public Realtime serving path,
+  probe the sidecar at `http://<host>:50053/health`; it stays `503` until both
+  the sidecar and `tts_orchestrator` are ready.
 
 In the standalone TRT path, `base` / `icl` reference preprocessing is executed serially by
 `speaker_encoder.engine`, `speech_tokenizer_codec_fused.engine`, and the optional
@@ -378,6 +382,15 @@ Triton default ports:
 - HTTP: `localhost:8000`
 - gRPC: `localhost:8001`
 - Metrics: `localhost:8002`
+- OpenAI Realtime sidecar: `ws://localhost:50053/v1/realtime`
+- Realtime capabilities / health: `http://localhost:50053/v1/capabilities` and
+  `http://localhost:50053/health`
+
+The compose wrapper starts Triton and the Realtime sidecar together. Use
+`--realtime-port <N>` to change the sidecar's host port. Billing usage is always
+returned in `response.done.response.usage`; the default deployment also appends
+complete, cancelled, and failed response records to
+`workspace/realtime_usage/realtime_usage.jsonl`.
 
 ### Logs inside the container
 
@@ -386,6 +399,7 @@ of the Docker logging driver:
 
 - Engine Docker: `/var/log/qwen3tts/engine.log`
 - Triton: `/var/log/qwen3tts/triton.log`
+- Triton Realtime sidecar: `/var/log/qwen3tts/realtime-gateway.log`
 
 By default, each log rotates at 50 MiB and keeps 10 backup files. Configure the
 policy with these container environment variables:

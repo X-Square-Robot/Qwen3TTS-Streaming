@@ -51,6 +51,18 @@ class _CharTokenizer:
         }
 
 
+def test_count_text_tokens_uses_synthesis_normalization_and_tokenizer():
+    interface = FrontendInterface(
+        engine_inbox=asyncio.Queue(maxsize=16),
+        tokenizer=_CharTokenizer(),
+        max_sessions=2,
+        engine_max_decode_len=64,
+    )
+
+    assert interface.count_text_tokens(" 你好😊\n世界 ") == len("你好世界")
+    assert interface.count_text_tokens("😊🚀") == 0
+
+
 async def _drain_requests(inbox: asyncio.Queue) -> list:
     requests = []
     while not inbox.empty():

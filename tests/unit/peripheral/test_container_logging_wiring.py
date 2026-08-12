@@ -91,7 +91,8 @@ def test_runtime_dockerfiles_copy_the_log_runner(dockerfile: str):
     ("service", "next_service", "child_command"),
     (
         ("engine", "triton", "engine-entrypoint.sh"),
-        ("triton", "demo-api", "tritonserver"),
+        ("triton", "realtime-gateway", "tritonserver"),
+        ("realtime-gateway", "demo-api", "triton_realtime_server"),
     ),
 )
 def test_compose_services_wrap_commands_and_expose_log_settings(

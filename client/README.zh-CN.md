@@ -3,12 +3,12 @@
 # Qwen3-TTS Python 客户端
 
 `qwen3-tts-client` 是一个轻量级 Python SDK，用于与 Qwen3-TTS 部署进行通信。
-统一的导入根、统一的 API、四种传输方式——指向某个端点即可合成语音。
+OpenAI Realtime 是主协议；旧的四种 transport 继续作为迁移期 fallback，并共用同一 API。
 
 ```python
 from qwen3tts import TTSClient, SynthesisConfig
 
-client = TTSClient.connect("ws://localhost:50052/v1/ws")
+client = TTSClient.connect("ws://localhost:50052/v1/realtime")
 result = client.synthesize_bytes("你好，欢迎使用 Qwen3-TTS。",
                                  request=SynthesisConfig(task_type="custom_voice"))
 print(result.audio_format, len(result.audio_bytes))
@@ -18,10 +18,11 @@ print(result.audio_format, len(result.audio_bytes))
 
 ## 特性
 
-- **统一 API，四种传输方式** —— `engine-websocket`、`engine-grpc`、
-  `triton-grpc`、`triton-http`，全部由同一个 `TTSClient` 承载。
+- **OpenAI Realtime 优先** —— `openai-realtime` 是主 transport；
+  `engine-websocket`、`engine-grpc`、`triton-grpc`、`triton-http` 作为兼容
+  fallback，全部由同一个 `TTSClient` 承载。
 - **自动检测** —— `transport="auto"`（默认）会探测端点并
-  绑定正确的适配器，因此通常只需传入一个 URL。
+  在服务端声明或接受 Realtime 时优先绑定它。
 - **一次性、流式（streaming）和实时（realtime）** 三种模式。
 - **同步与异步** 客户端（`TTSClient` / `AsyncTTSClient`）。
 - **精简依赖** —— 核心安装仅需 `requests` 和 `websocket-client`；
@@ -83,13 +84,14 @@ pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-no
 ```python
 from qwen3tts import TTSClient, SynthesisConfig
 
-client = TTSClient.connect("ws://localhost:50052/v1/ws")
+client = TTSClient.connect("ws://localhost:50052/v1/realtime")
 result = client.synthesize_bytes(
     "你好，欢迎使用 Qwen3-TTS。",
     request=SynthesisConfig(task_type="custom_voice", speaker="serena"),
 )
 # result.audio_bytes is raw PCM; result.audio_format tells you encoding + rate.
 print(result.transport, result.audio_format.encoding, result.audio_format.sample_rate)
+print(result.details["usage"])  # 用于计费的终态 input/output token usage
 ```
 
 需要 numpy 数组而不是字节（需要 `audio` 附加项）？
@@ -106,7 +108,7 @@ print(arr.audio_array.shape)
 ```python
 from qwen3tts import TTSClient, SessionStartRequest, SynthesisConfig, AudioChunk, StreamEvent
 
-client = TTSClient.connect("ws://localhost:50052/v1/ws")
+client = TTSClient.connect("ws://localhost:50052/v1/realtime")
 session = client.open_stream(
     SessionStartRequest(session_id="demo", config=SynthesisConfig(task_type="custom_voice"))
 )
@@ -119,6 +121,9 @@ for message in session.iter_messages():
         ...  # message.pcm_bytes
     elif isinstance(message, StreamEvent):
         print("event:", message.type)
+
+# response.done 后可读；取消或失败也保留部分 usage。
+print(session.usage, session.response_id, session.response_status)
 ```
 
 ### 实时播放（WebRTC / 音频设备）
@@ -130,7 +135,7 @@ for message in session.iter_messages():
 ```python
 from qwen3tts import TTSClient, RealtimeAudioStream, SessionStartRequest, SynthesisConfig
 
-client = TTSClient.connect("ws://localhost:50052/v1/ws")
+client = TTSClient.connect("ws://localhost:50052/v1/realtime")
 session = client.open_stream(
     SessionStartRequest(session_id="webrtc", config=SynthesisConfig(task_type="custom_voice"))
 )
@@ -157,7 +162,7 @@ for frame in RealtimeAudioStream(session, chunk_s=0.02, fill_silence=True):
 ```python
 from qwen3tts import AsyncTTSClient, SynthesisConfig
 
-client = await AsyncTTSClient.connect("ws://localhost:50052/v1/ws")
+client = await AsyncTTSClient.connect("ws://localhost:50052/v1/realtime")
 result = await client.synthesize_bytes("你好。", request=SynthesisConfig(task_type="custom_voice"))
 # streaming: session = await client.aopen_stream(SessionStartRequest(...))
 ```
@@ -169,9 +174,28 @@ result = await client.synthesize_bytes("你好。", request=SynthesisConfig(task
 
 | Endpoint example | Detected transport |
 |------------------|--------------------|
+| `ws://localhost:50052/v1/realtime` | `openai-realtime`（standalone） |
+| `ws://localhost:50053/v1/realtime` | `openai-realtime`（Triton sidecar） |
 | `ws://localhost:50052/v1/ws` | `engine-websocket` |
 | `localhost:50051` | `engine-grpc` |
 | `http://localhost:8000` | `triton-http` / `triton-grpc` |
+
+### Realtime 迁移与 usage
+
+完整文本的 `synthesize_bytes()` 使用标准 Realtime
+`conversation.item.create` 和 `response.create` 事件。增量 `open_stream()` 使用
+服务端明确声明的 `qwen.input_text_buffer.v1` append/commit 扩展，并在音频下行时继续
+发送文本。未声明该扩展的服务仍可做一次性合成，但 SDK 会在 session 建立阶段拒绝
+增量流式调用。
+
+`response.done.response.usage` 在一次性调用中映射为
+`result.details["usage"]`，流式调用则在终态事件后映射为 `session.usage`。若客户端在
+终态前断联，已配置的服务端计费账本仍是权威数据源。
+
+四种旧 transport 当前不会删除，但每个进程、每种 transport 会发出一次
+`FutureWarning`。迁移期间可用 `QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING=1` 临时
+静默。活动流透明恢复目前只属于兼容的 `engine-websocket`；Realtime 流断开时明确
+失败，不会静默地从头重新合成。
 
 ### 鉴权与 WebSocket 长连接
 

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import os
+import threading
+import warnings
 
 from qwen3tts_protocol import (
     ArrayResult,
@@ -11,6 +14,7 @@ from qwen3tts_protocol import (
 
 from ._adapters.engine_grpc import EngineGrpcAdapter
 from ._adapters.engine_websocket import EngineWebSocketAdapter
+from ._adapters.openai_realtime import OpenAIRealtimeAdapter
 from ._adapters.triton_grpc import TritonGrpcAdapter
 from ._adapters.triton_http import TritonHttpAdapter
 from ._internal.auth import apply_bearer_key
@@ -21,6 +25,7 @@ from .constants import (
     DEFAULT_TRITON_HTTP_MODEL,
     TRANSPORT_ENGINE_GRPC,
     TRANSPORT_ENGINE_WEBSOCKET,
+    TRANSPORT_OPENAI_REALTIME,
     TRANSPORT_TRITON_GRPC,
     TRANSPORT_TRITON_HTTP,
 )
@@ -89,6 +94,7 @@ class TTSClient:
             headers=headers,
             metadata=metadata,
         )
+        _warn_legacy_transport(detected.transport)
         adapter = _build_adapter(
             detected.transport,
             endpoint=detected.resolved_endpoint,
@@ -265,6 +271,15 @@ def _build_adapter(
             keepalive_interval=keepalive_interval,
             keepalive_jitter=keepalive_jitter,
         )
+    if transport == TRANSPORT_OPENAI_REALTIME:
+        return OpenAIRealtimeAdapter(
+            endpoint,
+            timeout=timeout,
+            connect_timeout=connect_timeout,
+            headers=headers,
+            model_name=model_name,
+            reconnect_attempts=reconnect_attempts,
+        )
     if transport == TRANSPORT_ENGINE_GRPC:
         return EngineGrpcAdapter(
             endpoint, timeout=timeout, metadata=metadata, headers=headers
@@ -287,3 +302,31 @@ def _build_adapter(
             headers=headers,
         )
     raise ValueError(f"unsupported transport: {transport!r}")
+
+
+_LEGACY_TRANSPORTS = {
+    TRANSPORT_ENGINE_WEBSOCKET,
+    TRANSPORT_ENGINE_GRPC,
+    TRANSPORT_TRITON_GRPC,
+    TRANSPORT_TRITON_HTTP,
+}
+_WARNED_LEGACY_TRANSPORTS: set[str] = set()
+_LEGACY_WARNING_LOCK = threading.Lock()
+
+
+def _warn_legacy_transport(transport: str) -> None:
+    if transport not in _LEGACY_TRANSPORTS:
+        return
+    if os.environ.get("QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING", "") == "1":
+        return
+    with _LEGACY_WARNING_LOCK:
+        if transport in _WARNED_LEGACY_TRANSPORTS:
+            return
+        _WARNED_LEGACY_TRANSPORTS.add(transport)
+    warnings.warn(
+        f"The {transport!r} transport is a compatibility path and will be "
+        "removed in a future major release. Prefer transport='openai-realtime' "
+        "or transport='auto' against a server that advertises OpenAI Realtime.",
+        FutureWarning,
+        stacklevel=3,
+    )

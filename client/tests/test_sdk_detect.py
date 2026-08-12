@@ -8,6 +8,7 @@ import pytest
 from qwen3tts.constants import (
     DEFAULT_TRITON_HTTP_MODEL,
     DEFAULT_TRITON_GRPC_MODEL,
+    TRANSPORT_OPENAI_REALTIME,
     TRANSPORT_ENGINE_GRPC,
     TRANSPORT_ENGINE_WEBSOCKET,
     TRANSPORT_TRITON_GRPC,
@@ -26,6 +27,17 @@ def test_explicit_ws_transport_resolves_ws_endpoint():
     )
     assert detected.transport == TRANSPORT_ENGINE_WEBSOCKET
     assert detected.resolved_endpoint == "ws://localhost:50052/v1/ws"
+
+
+def test_explicit_openai_realtime_resolves_default_path():
+    detected = detect_transport(
+        "localhost:50053",
+        transport=TRANSPORT_OPENAI_REALTIME,
+        model_name=None,
+        timeout=1.0,
+    )
+    assert detected.transport == TRANSPORT_OPENAI_REALTIME
+    assert detected.resolved_endpoint == "ws://localhost:50053/v1/realtime"
 
 
 def test_explicit_triton_http_resolves_http_endpoint():
@@ -81,6 +93,33 @@ def test_ws_scheme_short_circuit(monkeypatch):
     assert calls == [
         (
             "ws://example.test/v1/ws",
+            2.0,
+            0.5,
+            {"Authorization": "Bearer secret"},
+        )
+    ]
+
+
+def test_realtime_ws_scheme_short_circuit(monkeypatch):
+    calls = []
+
+    def fake_probe(url, *, timeout, connect_timeout, headers):
+        calls.append((url, timeout, connect_timeout, headers))
+
+    monkeypatch.setattr("qwen3tts.detect._probe_openai_realtime", fake_probe)
+    detected = detect_transport(
+        "wss://example.test/v1/realtime",
+        transport="auto",
+        model_name="private-realtime-model",
+        timeout=2.0,
+        connect_timeout=0.5,
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert detected.transport == TRANSPORT_OPENAI_REALTIME
+    assert detected.model_name == "private-realtime-model"
+    assert calls == [
+        (
+            "wss://example.test/v1/realtime",
             2.0,
             0.5,
             {"Authorization": "Bearer secret"},
@@ -151,6 +190,32 @@ def test_http_scheme_prefers_standalone_capabilities(monkeypatch):
     assert detected.resolved_endpoint == "ws://example.test:50052/v1/ws"
 
 
+def test_http_capabilities_prefer_openai_realtime_when_advertised(monkeypatch):
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "loaded_model_type": "custom_voice",
+                "supported_api_protocols": [
+                    "openai-realtime-v1",
+                    "tts-session-v2alpha1",
+                ],
+                "openai_realtime_path": "/v1/realtime",
+            }
+
+    monkeypatch.setattr("qwen3tts.detect.requests.get", lambda *args, **kwargs: _Resp())
+    detected = detect_transport(
+        "https://example.test/tts",
+        transport="auto",
+        model_name=None,
+        timeout=2.0,
+    )
+
+    assert detected.transport == TRANSPORT_OPENAI_REALTIME
+    assert detected.resolved_endpoint == "wss://example.test/tts/v1/realtime"
+
+
 def test_https_capabilities_resolves_secure_websocket(monkeypatch):
     class _Resp:
         status_code = 200
@@ -200,10 +265,16 @@ def test_host_port_prefers_engine_grpc(monkeypatch):
 
 def test_host_without_port_expands_candidates(monkeypatch):
     seen = []
+    realtime_seen = []
 
     def fake_engine_ws(url, *, timeout, connect_timeout, headers):
         seen.append((url, headers))
 
+    def fake_realtime(url, **_kwargs):
+        realtime_seen.append(url)
+        raise RuntimeError("not realtime")
+
+    monkeypatch.setattr("qwen3tts.detect._probe_openai_realtime", fake_realtime)
     monkeypatch.setattr("qwen3tts.detect._probe_engine_websocket", fake_engine_ws)
     detected = detect_transport(
         "host.test",
@@ -218,6 +289,65 @@ def test_host_without_port_expands_candidates(monkeypatch):
             "ws://host.test:50052/v1/ws",
             {"Authorization": "Bearer secret"},
         )
+    ]
+    assert realtime_seen == [
+        "ws://host.test:50052/v1/realtime",
+        "ws://host.test:50053/v1/realtime",
+    ]
+
+
+def test_host_without_port_prefers_realtime_before_legacy(monkeypatch):
+    seen = []
+
+    def fake_realtime(url, *, timeout, connect_timeout, headers):
+        seen.append(url)
+
+    monkeypatch.setattr("qwen3tts.detect._probe_openai_realtime", fake_realtime)
+    monkeypatch.setattr(
+        "qwen3tts.detect._probe_engine_websocket",
+        lambda *_args, **_kwargs: pytest.fail("legacy websocket should not be probed"),
+    )
+
+    detected = detect_transport(
+        "host.test",
+        transport="auto",
+        model_name=None,
+        timeout=2.0,
+    )
+
+    assert detected.transport == TRANSPORT_OPENAI_REALTIME
+    assert detected.resolved_endpoint == "ws://host.test:50052/v1/realtime"
+    assert seen == ["ws://host.test:50052/v1/realtime"]
+
+
+def test_host_without_port_tries_triton_realtime_sidecar_second(monkeypatch):
+    seen = []
+
+    def fake_realtime(url, *, timeout, connect_timeout, headers):
+        seen.append(url)
+        if ":50052/" in url:
+            raise RuntimeError("standalone unavailable")
+
+    monkeypatch.setattr("qwen3tts.detect._probe_openai_realtime", fake_realtime)
+    monkeypatch.setattr(
+        "qwen3tts.detect._probe_engine_websocket",
+        lambda *_args, **_kwargs: pytest.fail(
+            "legacy must not be probed before the Realtime sidecar"
+        ),
+    )
+
+    detected = detect_transport(
+        "host.test",
+        transport="auto",
+        model_name=None,
+        timeout=2.0,
+    )
+
+    assert detected.transport == TRANSPORT_OPENAI_REALTIME
+    assert detected.resolved_endpoint == "ws://host.test:50053/v1/realtime"
+    assert seen == [
+        "ws://host.test:50052/v1/realtime",
+        "ws://host.test:50053/v1/realtime",
     ]
 
 

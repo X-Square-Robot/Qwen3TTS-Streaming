@@ -67,6 +67,7 @@ Phase C:
   --runtime-max-batch-size <N>  runtime scheduler batch 上限
   --runtime-max-seq-len <N>     runtime scheduler seq 上限
   --runtime-device <dev>        runtime 服务 GPU
+  --realtime-port <N>           Triton OpenAI Realtime 宿主机端口（默认 50053）
 ```
 
 ### 模型版本号
@@ -239,7 +240,8 @@ bash scripts/bash/autorun.sh deploy \
 端点：
 
 - gRPC: `localhost:50051`
-- WebSocket: `ws://localhost:50052/v1/ws`
+- OpenAI Realtime: `ws://localhost:50052/v1/realtime`
+- 兼容 WebSocket: `ws://localhost:50052/v1/ws`
 - capabilities: `http://localhost:50052/v1/capabilities`
 - health: `http://localhost:8080/health`
 
@@ -268,7 +270,9 @@ health 端口在进程启动时立即监听（先于模型加载），探针始�
   （或 `engine.yaml` 里 `server.health_probe_mode: alive`）：`/health` 在端口起来后即返回
   `200`，代价是该路径失去就绪门控（`/readyz` 仍保留）。短别名
   `ENGINE_HEALTH_PROBE_MODE` 仅在 compose / engine-docker 部署下有效（由入口脚本映射）。
-- Triton gateway 部署没有 `/health`，探针请指向 `http://<host>:8000/v2/health/ready`。
+- Triton 原生 readiness 探针指向 `http://<host>:8000/v2/health/ready`；公共 Realtime
+  服务路径探针指向 sidecar 的 `http://<host>:50053/health`。sidecar 和
+  `tts_orchestrator` 任一未就绪时，该路径都返回 `503`。
 
 `base` / `icl` reference preprocessing 在 standalone TRT 路径中由
 `speaker_encoder.engine`、`speech_tokenizer_codec_fused.engine` 和可选
@@ -366,6 +370,14 @@ Triton 默认端口：
 - HTTP: `localhost:8000`
 - gRPC: `localhost:8001`
 - Metrics: `localhost:8002`
+- OpenAI Realtime sidecar：`ws://localhost:50053/v1/realtime`
+- Realtime capabilities / health：`http://localhost:50053/v1/capabilities` 和
+  `http://localhost:50053/health`
+
+compose wrapper 会同时启动 Triton 和 Realtime sidecar；用 `--realtime-port <N>`
+修改 sidecar 的宿主机端口。计费 usage 始终在 `response.done.response.usage` 返回；默认
+部署还会把 completed、cancelled、failed response 追加到
+`workspace/realtime_usage/realtime_usage.jsonl`。
 
 ### 容器内日志
 
@@ -374,6 +386,7 @@ driver：
 
 - Engine Docker：`/var/log/qwen3tts/engine.log`
 - Triton：`/var/log/qwen3tts/triton.log`
+- Triton Realtime sidecar：`/var/log/qwen3tts/realtime-gateway.log`
 
 默认每个日志文件达到 50 MiB 时轮转，并保留 10 份备份。可通过以下容器环境变量
 调整策略：

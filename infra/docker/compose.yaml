@@ -159,6 +159,66 @@ services:
         - action: rebuild
           path: ../.dockerignore
 
+  realtime-gateway:
+    profiles: ["triton"]
+    image: ${TRITON_IMAGE:-qwen3tts-streaming:26.02}
+    container_name: ${TRITON_REALTIME_CONTAINER_NAME:-qwen3tts-realtime-gateway}
+    working_dir: /opt/qwen3-tts
+    command:
+      - python3
+      - /tmp/qwen3tts_rotating_log_runner.py
+      - --service
+      - realtime-gateway
+      - --
+      - python3
+      - -m
+      - engine.gateway.triton_realtime_server
+    environment:
+      TRITON_GRPC_ENDPOINT: triton:8001
+      TRITON_MODEL_NAME: ${ENGINE_MODEL_NAME:-tts_orchestrator}
+      TRITON_MODEL_VERSION: ${ENGINE_MODEL_VERSION:-1}
+      TRITON_MODEL_PACKAGE_DIR: ${ENGINE_MODEL_PACKAGE_DIR:-/models/tts_orchestrator/1}
+      TRITON_REALTIME_HOST: 0.0.0.0
+      TRITON_REALTIME_PORT: 50052
+      TRITON_REALTIME_USAGE_LOG: /var/lib/qwen3tts/realtime_usage.jsonl
+      TRITON_GRPC_AUTH_TOKEN: ${TRITON_GRPC_AUTH_TOKEN:-}
+      QWEN_LOG_DIR: ${QWEN_LOG_DIR:-/var/log/qwen3tts}
+      QWEN_LOG_MAX_BYTES: ${QWEN_LOG_MAX_BYTES:-52428800}
+      QWEN_LOG_BACKUP_COUNT: ${QWEN_LOG_BACKUP_COUNT:-10}
+      QWEN_LOG_STDOUT: ${QWEN_LOG_STDOUT:-1}
+      PYTHONUNBUFFERED: "1"
+      TZ: Asia/Shanghai
+    ports:
+      - "${TRITON_REALTIME_HOST_PORT:-50053}:50052"
+    volumes:
+      - ${MODEL_REPO_DIR:-../../workspace/model_repository}:/models:ro
+      - ${TRITON_REALTIME_USAGE_DIR:-../../workspace/realtime_usage}:/var/lib/qwen3tts
+      - ../../scripts/compose/rotating_log_runner.py:/tmp/qwen3tts_rotating_log_runner.py:ro
+    depends_on:
+      - triton
+    init: true
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:50052/health\", timeout=2).read()'"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 12
+    restart: unless-stopped
+    develop:
+      watch:
+        - action: sync+restart
+          path: ../../engine
+          target: /opt/qwen3-tts/engine
+          ignore:
+            - __pycache__/
+            - "*.pyc"
+        - action: sync+restart
+          path: ../../client/src/qwen3tts_protocol
+          target: /opt/qwen3-tts/qwen3tts_protocol
+          ignore:
+            - __pycache__/
+            - "*.pyc"
+
   demo-api:
     profiles: ["demo"]
     image: ${DEMO_API_IMAGE:-qwen3-tts-demo-api:latest}

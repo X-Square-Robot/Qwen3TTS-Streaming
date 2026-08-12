@@ -4,7 +4,7 @@
 #
 #  Wraps compose.yaml with project-specific defaults:
 #    - engine: standalone engine.server in Docker with mounted model_repository
-#    - triton: Triton Inference Server with the same mounted model_repository
+#    - triton: Triton Inference Server plus its OpenAI Realtime sidecar
 # ===========================================================================
 
 set -euo pipefail
@@ -46,6 +46,7 @@ ENGINE_MAX_SEQ_LEN="${ENGINE_MAX_SEQ_LEN:-${RUNTIME_MAX_SEQ_LEN:-}}"
 TRITON_HTTP="${TRITON_HTTP_PORT:-8000}"
 TRITON_GRPC="${TRITON_GRPC_PORT:-8001}"
 TRITON_METRICS="${TRITON_METRICS_PORT:-8002}"
+TRITON_REALTIME="${TRITON_REALTIME_HOST_PORT:-50053}"
 TRITON_GPU_DEVICE="${TRITON_GPU_DEVICE:-$ENGINE_DEVICE}"
 TRITON_MAX_BATCH="${TRITON_MAX_BATCH_SLOTS:-${RUNTIME_MAX_BATCH_SIZE:-}}"
 TRITON_MAX_SEQ_LEN="${TRITON_MAX_SEQ_LEN:-${RUNTIME_MAX_SEQ_LEN:-}}"
@@ -78,6 +79,7 @@ Options:
   --grpc-port <N>        Triton gRPC port
   --http-port <N>        Triton HTTP port
   --metrics-port <N>     Triton metrics port
+  --realtime-port <N>    Triton OpenAI Realtime WebSocket port (default: 50053)
   --device <N|auto>      Runtime CUDA device (engine and Triton)
   --triton-device <N>    Triton CUDA device override
   --max-batch <N>        Runtime max batch size
@@ -199,6 +201,7 @@ export_compose_env() {
     export TRITON_HTTP_PORT="$TRITON_HTTP"
     export TRITON_GRPC_PORT="$TRITON_GRPC"
     export TRITON_METRICS_PORT="$TRITON_METRICS"
+    export TRITON_REALTIME_HOST_PORT="$TRITON_REALTIME"
     export TRITON_GPU_DEVICE="$TRITON_GPU_DEVICE"
     export TRITON_MAX_BATCH_SLOTS="$TRITON_MAX_BATCH"
     export TRITON_MAX_SEQ_LEN="$TRITON_MAX_SEQ_LEN"
@@ -310,6 +313,7 @@ log_compose_runtime_summary() {
     log_info "  Triton device:    $TRITON_GPU_DEVICE"
     log_info "  Triton max batch: $TRITON_MAX_BATCH"
     log_info "  Triton max seq:   $TRITON_MAX_SEQ_LEN"
+    [[ "$GATEWAY" == "triton" || "$GATEWAY" == "all" ]] && log_info "  Realtime URL:     ws://localhost:$TRITON_REALTIME/v1/realtime"
 }
 
 verify_compose_engine_image() {
@@ -432,6 +436,7 @@ compose_service_container_name() {
     case "$service" in
         engine) printf '%s\n' "${ENGINE_CONTAINER_NAME:-qwen3-engine}" ;;
         triton) printf '%s\n' "${TRITON_CONTAINER_NAME:-qwen3tts-streaming}" ;;
+        realtime-gateway) printf '%s\n' "${TRITON_REALTIME_CONTAINER_NAME:-qwen3tts-realtime-gateway}" ;;
         *)
             log_error "Unknown compose service: $service"
             return 1
@@ -516,6 +521,9 @@ compose_preflight_service() {
             ;;
         triton)
             compose_remove_stale_container_if_needed "$service" "$container" 8000 8001 8002
+            ;;
+        realtime-gateway)
+            compose_remove_stale_container_if_needed "$service" "$container" 50052
             ;;
     esac
 }
@@ -618,6 +626,25 @@ compose_wait_triton_ready() {
         return 0
     fi
     compose_diagnose_service triton
+    return 1
+}
+
+compose_wait_triton_realtime_ready() {
+    compose_assert_service_network realtime-gateway 50052 || return 1
+    local timeout=120
+    local elapsed=0
+    local interval=2
+    local url="http://localhost:${TRITON_REALTIME}/health"
+    while [ "$elapsed" -lt "$timeout" ]; do
+        if curl -fsS "$url" >/dev/null 2>&1; then
+            log_info "Triton OpenAI Realtime gateway ready at ws://localhost:${TRITON_REALTIME}/v1/realtime"
+            return 0
+        fi
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
+    log_error "Triton OpenAI Realtime health check timed out after ${timeout}s"
+    compose_diagnose_service realtime-gateway
     return 1
 }
 
@@ -804,8 +831,8 @@ cmd_up() {
         log_compose_runtime_summary
         case "$GATEWAY" in
             engine) _compose_up_exec engine ;;
-            triton) _compose_up_exec triton ;;
-            all)    _compose_up_exec engine triton ;;
+            triton) _compose_up_exec triton realtime-gateway ;;
+            all)    _compose_up_exec engine triton realtime-gateway ;;
         esac
         return 0
     fi
@@ -829,9 +856,11 @@ cmd_up() {
             export_compose_env
             resolve_compose_image_defaults
             compose_preflight_service triton
-            _compose_up_exec triton
+            compose_preflight_service realtime-gateway
+            _compose_up_exec triton realtime-gateway
             if ! $NO_HEALTH_CHECK; then
                 compose_wait_triton_ready
+                compose_wait_triton_realtime_ready
             fi
             ;;
         all)
@@ -840,10 +869,12 @@ cmd_up() {
             resolve_compose_image_defaults
             compose_preflight_service engine
             compose_preflight_service triton
-            _compose_up_exec engine triton
+            compose_preflight_service realtime-gateway
+            _compose_up_exec engine triton realtime-gateway
             if ! $NO_HEALTH_CHECK; then
                 compose_wait_engine_ready
                 compose_wait_triton_ready
+                compose_wait_triton_realtime_ready
             fi
             ;;
     esac
@@ -871,8 +902,8 @@ cmd_watch() {
 
     case "$GATEWAY" in
         engine) args+=(engine) ;;
-        triton) args+=(triton) ;;
-        all) args+=(engine triton) ;;
+        triton) args+=(triton realtime-gateway) ;;
+        all) args+=(engine triton realtime-gateway) ;;
     esac
 
     compose_cmd "${args[@]}"
@@ -887,8 +918,8 @@ cmd_down() {
             compose_cmd rm -sf engine
             ;;
         triton)
-            compose_cmd stop triton
-            compose_cmd rm -sf triton
+            compose_cmd stop realtime-gateway triton
+            compose_cmd rm -sf realtime-gateway triton
             ;;
         all)
             compose_cmd down --remove-orphans
@@ -903,7 +934,7 @@ cmd_logs() {
     $FOLLOW && args+=(-f)
     case "$GATEWAY" in
         engine) args+=(engine) ;;
-        triton) args+=(triton) ;;
+        triton) args+=(triton realtime-gateway) ;;
         all) ;;
     esac
     compose_cmd "${args[@]}"
@@ -946,6 +977,7 @@ while [[ $# -gt 0 ]]; do
         --grpc-port) TRITON_GRPC="$2"; shift 2 ;;
         --http-port) TRITON_HTTP="$2"; shift 2 ;;
         --metrics-port) TRITON_METRICS="$2"; shift 2 ;;
+        --realtime-port) TRITON_REALTIME="$2"; shift 2 ;;
         --device) ENGINE_DEVICE="$2"; TRITON_GPU_DEVICE="$2"; shift 2 ;;
         --triton-device) TRITON_GPU_DEVICE="$2"; shift 2 ;;
         --max-batch|--runtime-max-batch-size|--runtime-max-batch)

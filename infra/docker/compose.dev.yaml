@@ -8,3 +8,8 @@ services:
   triton:
     volumes:
       - ../../engine:/opt/qwen3-tts/engine:ro
+
+  realtime-gateway:
+    volumes:
+      - ../../engine:/opt/qwen3-tts/engine:ro
+      - ../../client/src/qwen3tts_protocol:/opt/qwen3-tts/qwen3tts_protocol:ro

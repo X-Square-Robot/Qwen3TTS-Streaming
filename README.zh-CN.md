@@ -195,7 +195,7 @@ bash scripts/bash/autorun.sh deploy  -m custom-1.7b --gateway standalone --engin
 bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway standalone --engine-mode trt
 ```
 
-默认端口：gRPC `50051`，WebSocket `ws://localhost:50052/v1/ws`，HTTP capabilities `http://localhost:50052/v1/capabilities`，health `http://localhost:8080/health`（进程启动即监听；模型加载期间返回 `503`，就绪后返回 `200`，探针细节见[部署文档](docs/user/deployment.zh-CN.md)）。
+默认端口：gRPC `50051`，OpenAI Realtime `ws://localhost:50052/v1/realtime`，兼容 WebSocket `ws://localhost:50052/v1/ws`，HTTP capabilities `http://localhost:50052/v1/capabilities`，health `http://localhost:8080/health`（进程启动即监听；模型加载期间返回 `503`，就绪后返回 `200`，探针细节见[部署文档](docs/user/deployment.zh-CN.md)）。
 
 ### Engine Docker
 
@@ -232,6 +232,14 @@ bash scripts/bash/compose.sh prepare --gateway triton --variant custom-1.7b --en
 bash scripts/bash/compose.sh up --gateway triton --variant custom-1.7b
 ```
 
+Triton 部署会同时启动 Triton 和 OpenAI Realtime sidecar。默认公共入口为 Realtime
+`ws://localhost:50053/v1/realtime`、capabilities
+`http://localhost:50053/v1/capabilities` 和 health
+`http://localhost:50053/health`；Triton 原生 HTTP/gRPC/metrics 端口仍为
+`8000/8001/8002`。可用 `compose.sh --realtime-port` 修改宿主机端口。完整和部分
+response 的 usage 都会在协议中返回，并追加到
+`workspace/realtime_usage/realtime_usage.jsonl`，供计费系统消费。
+
 ### Base / ICL 实验路径
 
 部署 `base-1.7b` / `icl` 实验路径时，需准备默认参考音频和 reference registry：
@@ -250,7 +258,9 @@ bash scripts/bash/autorun.sh all -m base-1.7b --gateway standalone --engine-mode
 
 ## Client SDK
 
-独立 Python SDK 包，统一访问 engine 和 Triton 端点，支持 engine-websocket / engine-grpc / triton-grpc / triton-http 四种传输。默认 `transport="auto"` 自动探测端点。
+Python SDK 在 `transport="auto"` 能探测到 Realtime 时，现已优先选择
+`openai-realtime`。engine-websocket、engine-grpc、triton-grpc、triton-http 四种兼容
+transport 继续可用并发出弃用告警，当前尚未删除。
 
 引擎与 SDK 从同一个 git tag 配对发布。先从 `GET /v1/capabilities` 读取
 `engine_version`，再安装对应 GitHub 或 GitLab Release 中的 wheel：
@@ -275,11 +285,12 @@ pip install "./client[all]"
 ```python
 from qwen3tts import TTSClient, SynthesisConfig
 
-client = TTSClient.connect("ws://localhost:50052/v1/ws")
+client = TTSClient.connect("ws://localhost:50052/v1/realtime")
 result = client.synthesize_bytes(
     "你好，欢迎使用 Qwen3-TTS。",
     request=SynthesisConfig(task_type="custom_voice"),
 )
+print(result.details["usage"])
 ```
 
 流式 session：
@@ -296,6 +307,7 @@ session.send_text("这是流式输入。")
 session.end()
 for message in session.iter_messages():
     print(type(message).__name__, getattr(message, "meta", {}))
+print(session.response_id, session.response_status, session.usage)
 ```
 
 详细文档见 [Client SDK](docs/user/client_sdk.zh-CN.md) 和 [`client/`](client) 子项目。
@@ -368,7 +380,9 @@ docker compose --profile demo -f infra/docker/compose.yaml up --build demo-api w
 
 ## 流式协议
 
-standalone engine 同时支持 gRPC 和 WebSocket。WebSocket 控制帧示例：
+新客户端以 OpenAI Realtime `/v1/realtime` 为主协议；它是全双工 WebSocket，音频下行时仍可追加输入或取消。完整文本使用 `conversation.item.create` + `response.create`，token 级追加使用 `qwen.input_text_buffer.append/commit` 扩展，最终 `response.done.response.usage` 返回计费 token。完整说明见 [OpenAI Realtime TTS 协议与 Triton 边界](docs/dev/architecture/openai_realtime.zh-CN.md)。
+
+以下 `/v1/ws` 控制帧保留用于旧 SDK 兼容：
 
 ```json
 {"type":"start","session_id":"demo","config":{"task_type":"custom_voice","speaker":"Serena"}}
