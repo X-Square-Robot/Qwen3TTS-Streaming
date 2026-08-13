@@ -220,6 +220,12 @@ class TTSVADProcessor(ABC):
         # Input buffer: accumulate partial frames from variable-size chunks
         self._input_buffer: np.ndarray = np.empty((0,), dtype=np.int16)
         self._input_provenance: list[SampleProvenanceSpan] = []
+        # Number of real input samples that have passed through the frame
+        # state-machine.  A partial frame is deliberately not counted until
+        # the next complete frame or an explicit flush/discard decision.  The
+        # output processor uses this boundary to keep a text marker pending
+        # while the VAD still owns the tail of the source chunk.
+        self._processed_input_samples = 0
 
         # Start margin buffer: ring buffer of recent frames for lookback
         self._margin_samples = max(
@@ -267,6 +273,11 @@ class TTSVADProcessor(ABC):
     def metrics(self) -> VADMetrics:
         return self._metrics
 
+    @property
+    def processed_input_samples(self) -> int:
+        """Return the source-sample boundary already decided by the VAD."""
+        return self._processed_input_samples
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -296,6 +307,7 @@ class TTSVADProcessor(ABC):
         if not self._config.enabled:
             self._metrics.original_audio_samples += pcm_int16.size
             self._metrics.effective_audio_samples += pcm_int16.size
+            self._processed_input_samples += pcm_int16.size
             return AttributedSamples(pcm_int16, _slice_spans(provenance, 0, pcm_int16.size))
 
         # Append to input buffer
@@ -317,9 +329,13 @@ class TTSVADProcessor(ABC):
         frames = self._input_buffer[:consumed].reshape(n_frames, self._frame_samples)
         self._input_buffer = self._input_buffer[consumed:]
         frame_provenance = _slice_spans(self._input_provenance, 0, consumed)
-        self._input_provenance = _shift_spans(
-            _slice_spans(self._input_provenance, consumed, consumed + self._input_buffer.size),
-            -consumed,
+        # _slice_spans already rebases the surviving range to the new input
+        # buffer. Applying a second negative shift would collapse every
+        # cross-chunk provenance span to zero and lose its marker.
+        self._input_provenance = _slice_spans(
+            self._input_provenance,
+            consumed,
+            consumed + self._input_buffer.size,
         )
 
         for i in range(n_frames):
@@ -331,6 +347,8 @@ class TTSVADProcessor(ABC):
             )
             self._metrics.original_audio_samples += frame.size
             self._process_frame(frame, provenance=frame_spans)
+
+        self._processed_input_samples += consumed
 
         return self._drain_emit_buffer_attributed()
 
@@ -349,6 +367,7 @@ class TTSVADProcessor(ABC):
             self._input_buffer = np.empty((0,), dtype=np.int16)
             provenance = self._input_provenance
             self._input_provenance = []
+            self._processed_input_samples += result.size
             return AttributedSamples(result, _slice_spans(provenance, 0, result.size))
 
         # Process remaining partial frame (pad only for scoring).  The state
@@ -366,6 +385,7 @@ class TTSVADProcessor(ABC):
             )
             self._input_buffer = np.empty((0,), dtype=np.int16)
             self._input_provenance = []
+            self._processed_input_samples += valid_samples
 
         # Flush: emit everything pending regardless of state
         if self._state == VADState.SILENCE:
@@ -410,6 +430,7 @@ class TTSVADProcessor(ABC):
         if self._input_buffer.size > 0:
             self._metrics.original_audio_samples += self._input_buffer.size
             self._record_trimmed_samples(self._input_buffer.size)
+            self._processed_input_samples += self._input_buffer.size
         self._record_trimmed_samples(self._margin_buffer.size)
         for candidate, _ in self._begin_buffer:
             self._record_trimmed_samples(candidate.size)
@@ -420,6 +441,7 @@ class TTSVADProcessor(ABC):
     def reset(self) -> None:
         """Reset all state for reuse."""
         self._clear_stream_state()
+        self._processed_input_samples = 0
         self._metrics = VADMetrics()
         self._reset_detector_state()
 
@@ -592,13 +614,10 @@ class TTSVADProcessor(ABC):
         if self._margin_buffer.size > self._margin_samples:
             excess = self._margin_buffer.size - self._margin_samples
             self._margin_buffer = self._margin_buffer[excess:]
-            self._margin_provenance = _shift_spans(
-                _slice_spans(
-                    self._margin_provenance,
-                    excess,
-                    excess + self._margin_buffer.size,
-                ),
-                -excess,
+            self._margin_provenance = _slice_spans(
+                self._margin_provenance,
+                excess,
+                excess + self._margin_buffer.size,
             )
             self._record_trimmed_samples(excess)
 

@@ -6,6 +6,7 @@ from qwen3tts import (
     TextProgressAnchor,
 )
 from qwen3tts.exceptions import ProtocolError
+import pytest
 
 
 def _anchor(seq, start, end, raw_end, normalized_end):
@@ -65,7 +66,9 @@ def test_tracker_reads_anchor_from_audio_meta():
                 "output_sample_start": "0",
                 "output_sample_end": "2",
                 "output_sample_rate": "24000",
+                "raw_codepoint_start": "0",
                 "raw_codepoint_end": "2",
+                "normalized_codepoint_start": "0",
                 "normalized_codepoint_end": "2",
             },
         )
@@ -81,3 +84,38 @@ def test_tracker_rejects_conflicting_anchor_replay():
         pass
     else:  # pragma: no cover - assertion documents the wire contract
         raise AssertionError("conflicting replay must be rejected")
+
+
+def test_tracker_accepts_exact_replay_after_newer_anchor():
+    tracker = PlaybackProgressTracker([_anchor(1, 0, 10, 1, 1), _anchor(2, 10, 20, 2, 2)])
+    tracker.add_anchor(_anchor(1, 0, 10, 1, 1))
+    assert [anchor.anchor_seq for anchor in tracker.anchors] == [1, 2]
+
+
+def test_tracker_rejects_partial_anchor_meta_instead_of_defaulting_spans():
+    tracker = PlaybackProgressTracker()
+    with pytest.raises(ProtocolError, match="malformed text progress anchor"):
+        tracker.observe(
+            AudioChunk(
+                pcm_bytes=b"\0" * 8,
+                audio=AudioFormat(encoding="pcm_f32", sample_rate=24000, channels=1),
+                meta={
+                    "anchor_seq": "1",
+                    "output_sample_start": "0",
+                    "output_sample_end": "2",
+                    "output_sample_rate": "24000",
+                },
+            )
+        )
+
+
+def test_tracker_playback_update_is_transactional():
+    tracker = PlaybackProgressTracker([_anchor(1, 0, 100, 5, 5)])
+    with pytest.raises(ProtocolError, match="buffered sample"):
+        tracker.update_playback_progress(
+            played_through_sample=50,
+            buffered_through_sample=40,
+        )
+    state = tracker.latest
+    assert state.played_through_sample == 0
+    assert state.buffered_through_sample == 0

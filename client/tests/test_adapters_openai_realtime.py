@@ -239,6 +239,33 @@ def test_stream_cancel_maps_to_response_cancel_and_preserves_partial_usage(monke
     assert session.usage["total_tokens"] == 3
 
 
+def test_realtime_pool_reuses_physical_socket_for_serial_responses(monkeypatch):
+    connection = FakeRealtimeConnection()
+    _patch_transport(monkeypatch, connection)
+    adapter = OpenAIRealtimeAdapter(
+        "ws://example.test/v1/realtime",
+        timeout=1.0,
+        reconnect_attempts=0,
+        max_connections=1,
+        max_idle_connections=1,
+    )
+
+    first = adapter.open_stream(_request("first"))
+    first.send_text("一")
+    first.end()
+    list(first.iter_messages(post_send_idle_timeout=1.0))
+    second = adapter.open_stream(_request("second"))
+    second.send_text("二")
+    second.end()
+    list(second.iter_messages(post_send_idle_timeout=1.0))
+
+    assert connection.closed is False
+    assert connection.sent.count({"type": "session.update"}) == 0
+    assert [payload["type"] for payload in connection.sent].count("session.update") == 2
+    adapter.close()
+    assert connection.closed is True
+
+
 def test_capabilities_use_http_sibling_of_realtime_path(monkeypatch):
     seen = []
 

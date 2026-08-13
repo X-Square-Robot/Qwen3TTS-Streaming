@@ -279,6 +279,14 @@ def _build_adapter(
             headers=headers,
             model_name=model_name,
             reconnect_attempts=reconnect_attempts,
+            active_stream_resume=active_stream_resume,
+            stream_resume_attempts=stream_resume_attempts,
+            stream_resume_timeout=stream_resume_timeout,
+            stream_resume_ack_interval=stream_resume_ack_interval,
+            max_connections=max_connections,
+            max_idle_connections=max_idle_connections,
+            max_pending_acquires=max_pending_acquires,
+            acquire_timeout=acquire_timeout,
         )
     if transport == TRANSPORT_ENGINE_GRPC:
         return EngineGrpcAdapter(

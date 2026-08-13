@@ -9,6 +9,28 @@ from typing import TypeAlias
 from ..core.types import AudioConfig
 
 
+class ProtocolKind(str, Enum):
+    NATIVE_WEBSOCKET = "native_websocket"
+    OPENAI_REALTIME = "openai_realtime"
+
+
+class SessionCommandKind(str, Enum):
+    START = "start"
+    APPEND_TEXT = "append_text"
+    COMPLETE_INPUT = "complete_input"
+    CANCEL = "cancel"
+    ACK = "ack"
+    TERMINAL_ACK = "terminal_ack"
+    PLAYBACK_PROGRESS = "playback_progress"
+
+
+class SessionOutputKind(str, Enum):
+    STARTED = "started"
+    AUDIO = "audio"
+    EVENT = "event"
+    TERMINAL = "terminal"
+
+
 class TerminalStatus(str, Enum):
     COMPLETED = "completed"
     CANCELLED = "cancelled"

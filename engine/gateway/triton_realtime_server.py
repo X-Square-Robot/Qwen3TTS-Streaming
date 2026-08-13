@@ -13,13 +13,21 @@ from pathlib import Path
 from typing import Any
 
 from ..config import resolve_model_package_paths
+from ..session import SessionService
 from .openai_realtime import (
     OPENAI_REALTIME_PATH,
     OPENAI_REALTIME_PROTOCOL,
+    QWEN_REALTIME_EXTENSION_PROTOCOL,
     QWEN_TEXT_BUFFER_EXTENSION,
     OpenAIRealtimeGateway,
 )
 from .triton_realtime_backend import TritonRealtimeBackend
+from .session_backend import TritonSessionBackend
+from .native_session_gateway import (
+    NATIVE_WEBSOCKET_PATH,
+    NATIVE_WEBSOCKET_PROTOCOL,
+    NativeSessionGateway,
+)
 
 try:
     from aiohttp import web
@@ -59,10 +67,68 @@ def create_app(
 
     if web is None:
         raise RuntimeError("Triton Realtime gateway requires aiohttp")
+    # The sidecar uses the same typed logical-session contract as standalone.
+    # Triton-specific streaming frames stop at TritonSessionBackend.
+    service = SessionService(TritonSessionBackend(backend))
     gateway = OpenAIRealtimeGateway(
         None,
-        backend=backend,
+        session_service=service,
         usage_recorder=usage_recorder,
+    )
+    def capabilities_payload() -> dict[str, Any]:
+        return {
+            # Keep the historical flat field stable for one compatibility
+            # release.  New clients use the endpoint-scoped ``protocols`` map
+            # below, which now advertises both first-class wire adapters.
+            "supported_api_protocols": [OPENAI_REALTIME_PROTOCOL],
+            "openai_realtime_path": OPENAI_REALTIME_PATH,
+            "native_websocket_path": NATIVE_WEBSOCKET_PATH,
+            "supported_realtime_extensions": [
+                QWEN_TEXT_BUFFER_EXTENSION,
+                "qwen.text_progress.v1",
+            ],
+            "supported_progress_features": [
+                "text_progress_anchor_v1",
+                "playback_progress_v1",
+                "qwen.text_progress.v1",
+            ],
+            "backend": "triton-grpc",
+            "model": backend.model_name,
+            "model_version": backend.model_version,
+            "usage": {
+                "response_field": "response.done.response.usage",
+                "input": "model_tokenizer",
+                "output_audio_token_ms": 50,
+            },
+            "protocols": {
+                "native_websocket": {
+                    "path": NATIVE_WEBSOCKET_PATH,
+                    "current": NATIVE_WEBSOCKET_PROTOCOL,
+                    "supported": [NATIVE_WEBSOCKET_PROTOCOL],
+                    "features": ["persistent_sessions_v1"],
+                    "audio_formats": ["pcm_f32", "pcm_s16le"],
+                },
+                "openai_realtime": {
+                    "path": OPENAI_REALTIME_PATH,
+                    "base": OPENAI_REALTIME_PROTOCOL,
+                    "supported_extensions": [
+                        QWEN_TEXT_BUFFER_EXTENSION,
+                        "qwen.text_progress.v1",
+                    ],
+                    "extension_protocol": QWEN_REALTIME_EXTENSION_PROTOCOL,
+                    "features": [
+                        "base64_pcm16",
+                        "full_duplex",
+                        "serial_responses",
+                    ],
+                    "audio_formats": ["pcm_s16le"],
+                },
+            },
+        }
+
+    native_gateway = NativeSessionGateway(
+        service,
+        capabilities=capabilities_payload,
     )
     app = web.Application()
 
@@ -79,35 +145,13 @@ def create_app(
         )
 
     async def capabilities(_request):
-        return web.json_response(
-            {
-                "supported_api_protocols": [OPENAI_REALTIME_PROTOCOL],
-                "openai_realtime_path": OPENAI_REALTIME_PATH,
-                "supported_realtime_extensions": [
-                    QWEN_TEXT_BUFFER_EXTENSION,
-                    "qwen.text_progress.v1",
-                ],
-                "supported_progress_features": [
-                    "text_progress_anchor_v1",
-                    "playback_progress_v1",
-                    "qwen.text_progress.v1",
-                ],
-                "backend": "triton-grpc",
-                "model": backend.model_name,
-                "model_version": backend.model_version,
-                "usage": {
-                    "response_field": "response.done.response.usage",
-                    "input": "model_tokenizer",
-                    "output_audio_token_ms": 50,
-                },
-            }
-        )
+        return web.json_response(capabilities_payload())
 
     async def cleanup(_app):
         await gateway.close()
-        await backend.close()
 
     app.router.add_get(OPENAI_REALTIME_PATH, gateway.handle_websocket)
+    app.router.add_get(NATIVE_WEBSOCKET_PATH, native_gateway.handle_websocket)
     app.router.add_get("/v1/capabilities", capabilities)
     app.router.add_get("/health", health)
     app.on_cleanup.append(cleanup)

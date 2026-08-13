@@ -91,6 +91,10 @@ class Session:
     text_boundary_emitted: set[int] = field(default_factory=set)
     segment_token_emitted_count: dict[int, int] = field(default_factory=dict)
     segment_token_spans: dict[int, list[dict[str, int]]] = field(default_factory=dict)
+    # Retry reruns the same segment actions. Keep token identity separate from
+    # the public coordinate spans so a failed attempt can be discarded without
+    # duplicating the segment's canonical text provenance.
+    segment_token_keys: dict[int, set[tuple[Any, ...]]] = field(default_factory=dict)
     next_progress_anchor_seq: int = 1
     # Frontend-owned coarse text progress state.  The estimator is deliberately
     # transport-neutral so OpenAI Realtime, WebSocket, gRPC and demo clients

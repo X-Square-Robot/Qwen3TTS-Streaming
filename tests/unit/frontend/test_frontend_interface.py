@@ -86,6 +86,37 @@ def test_token_spans_keep_session_raw_coordinates_after_normalization():
     assert world.raw_end == 5
 
 
+def test_text_progress_keeps_later_segment_global_coordinates():
+    session = SimpleNamespace(
+        spliter=SimpleNamespace(ema_ratio_for_segment=lambda _segment_idx: 4.5),
+        segment_progress_frames={},
+        text_progress_estimators={},
+        segment_token_spans={
+            1: [
+                {
+                    "normalized_start": 10,
+                    "normalized_end": 11,
+                    "raw_start": 12,
+                    "raw_end": 13,
+                },
+            ]
+        },
+        text_journal=None,
+        input_complete=False,
+    )
+    event = FrontendInterface._make_text_progress_event(
+        None,
+        session,
+        1,
+        {"source_frame_end": "5", "text_tokens": "1"},
+    )
+    assert event is not None
+    assert event["meta"]["normalized_codepoint_start"] == "10"
+    assert event["meta"]["normalized_codepoint_end"] == "11"
+    assert event["meta"]["raw_codepoint_start"] == "12"
+    assert event["meta"]["raw_codepoint_end"] == "13"
+
+
 async def _drain_requests(inbox: asyncio.Queue) -> list:
     requests = []
     while not inbox.empty():

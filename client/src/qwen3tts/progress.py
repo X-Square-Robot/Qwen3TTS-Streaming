@@ -45,16 +45,42 @@ class TextProgressAnchor:
 
     @classmethod
     def from_meta(cls, meta: dict[str, str], *, segment_id: int = -1) -> "TextProgressAnchor | None":
-        seq = _int(meta, "anchor_seq")
-        start = _int(meta, "output_sample_start")
-        end = _int(meta, "output_sample_end")
-        rate = _int(meta, "output_sample_rate", 24000)
-        if seq is None or start is None or end is None or rate is None:
+        required = (
+            "anchor_seq",
+            "output_sample_start",
+            "output_sample_end",
+            "output_sample_rate",
+            "raw_codepoint_start",
+            "raw_codepoint_end",
+            "normalized_codepoint_start",
+            "normalized_codepoint_end",
+        )
+        # Ordinary audio chunks carry output sample coordinates too, but they
+        # are not text anchors unless the dedicated sequence field is present.
+        if "anchor_seq" not in meta:
             return None
+        present = [key in meta for key in required]
+        if not any(present):
+            # A legacy progress event has no v1 fields.  Let the caller keep
+            # its diagnostic percentage without inventing a text anchor.
+            return None
+
+        if not all(present):
+            raise ProtocolError("malformed text progress anchor")
+        values: dict[str, int] = {}
+        for key in required:
+            value = _int(meta, key)
+            if value is None:
+                raise ProtocolError("malformed text progress anchor")
+            values[key] = value
+
+        seq = values["anchor_seq"]
+        start = values["output_sample_start"]
+        end = values["output_sample_end"]
+        rate = values["output_sample_rate"]
+
         def span(prefix: str) -> tuple[int, int]:
-            span_start = _int(meta, f"{prefix}_start", 0) or 0
-            span_end = _int(meta, f"{prefix}_end", 0) or 0
-            return span_start, span_end
+            return values[f"{prefix}_start"], values[f"{prefix}_end"]
 
         raw_start, raw_end = span("raw_codepoint")
         normalized_start, normalized_end = span("normalized_codepoint")
@@ -141,12 +167,11 @@ class PlaybackProgressTracker:
                         message.audio.encoding.lower(), 4
                     )
                     end = start + len(message.pcm_bytes) // (width * channels)
-                self._received_sample = max(self._received_sample, end)
                 if message.output_sample_start is not None:
                     start = int(message.output_sample_start)
                 if message.output_sample_end is not None:
                     end = int(message.output_sample_end)
-                if start < 0 or end < start:
+                if start < 0 or end < start or start < self._received_sample:
                     raise ProtocolError("audio output sample range is invalid")
                 rate = int(message.audio.sample_rate or 0)
                 if rate > 0:
@@ -162,7 +187,6 @@ class PlaybackProgressTracker:
 
     def add_anchor(self, anchor: TextProgressAnchor) -> PlaybackTextProgress:
         with self._lock:
-            self._validate_anchor_locked(anchor)
             old = self._anchors.get(anchor.anchor_seq)
             if old is not None:
                 if old == anchor:
@@ -170,6 +194,7 @@ class PlaybackProgressTracker:
                 raise ProtocolError(
                     f"conflicting replay for text progress anchor {anchor.anchor_seq}"
                 )
+            self._validate_anchor_locked(anchor)
             self._anchors[anchor.anchor_seq] = anchor
             self._received_sample = max(self._received_sample, anchor.output_sample_end)
             return self._recompute_locked()
@@ -190,13 +215,17 @@ class PlaybackProgressTracker:
                 if buffered_through_sample is None
                 else int(buffered_through_sample)
             )
+            if played < 0 or buffered < 0:
+                raise ProtocolError("playback samples must be non-negative")
             if played > self._received_sample or buffered > self._received_sample:
-                raise ValueError("playback sample cannot exceed received output")
+                raise ProtocolError("playback sample cannot exceed received output")
             if buffered < played:
-                raise ValueError("buffered sample cannot be before played sample")
-            self._played_sample = played
+                raise ProtocolError("buffered sample cannot be before played sample")
             if buffered < self._buffered_sample:
                 raise ProtocolError("buffered playback sample moved backwards")
+            # All checks precede mutation.  A rejected report must not advance
+            # one cursor while leaving the other cursor unchanged.
+            self._played_sample = played
             self._buffered_sample = buffered
             return self._recompute_locked()
 

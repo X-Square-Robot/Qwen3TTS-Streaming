@@ -867,6 +867,7 @@ class FrontendInterface:
                     session.text_progress_estimators.pop(seg_idx, None)
                     session.segment_progress_frames.pop(seg_idx, None)
                     session.segment_token_spans.pop(seg_idx, None)
+                    session.segment_token_keys.pop(seg_idx, None)
                     if new_actions:
                         await self._dispatch_segment_actions(session, new_actions)
                     await self._dispatcher.maybe_send_session_tokens_done(session)
@@ -1125,15 +1126,34 @@ class FrontendInterface:
                 ActionType.PREFILL,
                 ActionType.DECODE,
             ):
+                normalized_start = int(getattr(sa, "normalized_start", 0))
+                normalized_end = int(getattr(sa, "normalized_end", 0))
+                raw_start = int(getattr(sa, "raw_start", 0))
+                raw_end = int(getattr(sa, "raw_end", 0))
+                token_key = (
+                    int(sa.segment_idx),
+                    int(getattr(sa, "token_id", -1)),
+                    str(sa.token_text),
+                    normalized_start,
+                    normalized_end,
+                    raw_start,
+                    raw_end,
+                )
+                keys = session.segment_token_keys.setdefault(
+                    sa.segment_idx, set()
+                )
+                if token_key in keys:
+                    continue
+                keys.add(token_key)
                 session.segment_texts[sa.segment_idx] = (
                     session.segment_texts.get(sa.segment_idx, "") + sa.token_text
                 )
                 session.segment_token_spans.setdefault(sa.segment_idx, []).append(
                     {
-                        "normalized_start": int(getattr(sa, "normalized_start", 0)),
-                        "normalized_end": int(getattr(sa, "normalized_end", 0)),
-                        "raw_start": int(getattr(sa, "raw_start", 0)),
-                        "raw_end": int(getattr(sa, "raw_end", 0)),
+                        "normalized_start": normalized_start,
+                        "normalized_end": normalized_end,
+                        "raw_start": raw_start,
+                        "raw_end": raw_end,
                     }
                 )
 
@@ -1191,9 +1211,16 @@ class FrontendInterface:
             final=final,
         )
         spans = session.segment_token_spans.get(segment_idx, [])
-        token_end = estimate.text_token_end
-        if spans and token_end > 0:
-            selected = spans[: min(token_end, len(spans))]
+        if not spans:
+            # A segment without model-token provenance cannot produce a
+            # session-global text anchor. In particular, never fall back to
+            # [0, 0): that would move a later segment's cursor backwards.
+            return None
+
+        token_start = min(max(0, estimate.text_token_start), len(spans))
+        token_end = min(max(token_start, estimate.text_token_end), len(spans))
+        if token_end > token_start:
+            selected = spans[token_start:token_end]
             normalized_start = selected[0]["normalized_start"]
             normalized_end = selected[-1]["normalized_end"]
             if session.text_journal is not None:
@@ -1207,7 +1234,17 @@ class FrontendInterface:
                 raw_start = selected[0]["raw_start"]
                 raw_end = selected[-1]["raw_end"]
         else:
-            normalized_start = normalized_end = raw_start = raw_end = 0
+            # A zero-token EMA step is still a valid boundary, but it must be
+            # anchored at this segment's first global token span rather than
+            # at session offset zero.
+            boundary = spans[min(token_start, len(spans) - 1)]
+            normalized_start = normalized_end = boundary["normalized_start"]
+            if session.text_journal is not None:
+                raw_start, raw_end = session.text_journal.raw_span(
+                    normalized_start, normalized_start
+                )
+            else:
+                raw_start = raw_end = boundary["raw_start"]
         return {
             "type": "text_progress",
             "segment_idx": segment_idx,

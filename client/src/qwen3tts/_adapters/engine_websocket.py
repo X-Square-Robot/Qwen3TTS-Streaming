@@ -1329,13 +1329,24 @@ class EngineWebSocketStreamSession(BaseStreamSession):
         )
 
     def _handle_audio_header(self, header: dict, *, generation: int) -> None:
-        delivery_seq = self._parse_delivery_seq(header)
         with self._transport_condition:
             if generation != self._generation or self._transport_finished:
                 return
-            self._resume_supported = True
             if self._pending_audio_header is not None:
                 raise ProtocolError("audio_header was not followed by binary audio")
+            if header.get("delivery_seq") is None:
+                # Native sidecars may expose absolute sample headers without
+                # offering resumable delivery.  Keep the sample provenance but
+                # do not turn the header into a resume ledger obligation.
+                if self._resume_supported is True:
+                    raise ProtocolError(
+                        "resumable audio header is missing delivery_seq"
+                    )
+                self._resume_supported = False
+                self._pending_audio_header = dict(header)
+                return
+            delivery_seq = self._parse_delivery_seq(header)
+            self._resume_supported = True
             if delivery_seq > self._last_delivery_seq + 1:
                 raise ProtocolError(
                     "websocket delivery gap: expected "
@@ -1381,6 +1392,20 @@ class EngineWebSocketStreamSession(BaseStreamSession):
                         output_sample_end=end_sample,
                     )
                 )
+                self._audio_through_sample = end_sample
+                return False
+
+            if header.get("delivery_seq") is None:
+                start_sample = int(header.get("start_sample", 0) or 0)
+                end_sample = int(header.get("end_sample", start_sample) or start_sample)
+                chunk = decode_audio_chunk(header, pcm_bytes)
+                if (
+                    start_sample < self._audio_through_sample
+                    or end_sample < start_sample
+                    or start_sample != self._audio_through_sample
+                ):
+                    raise ProtocolError("websocket audio sample range is invalid")
+                self._put_message(chunk)
                 self._audio_through_sample = end_sample
                 return False
 

@@ -416,6 +416,15 @@ class ResumableSession:
                     "invalid_playback_progress",
                     "buffered_through_sample must be >= played_through_sample",
                 )
+            completely_old = (
+                played_through_sample <= self.played_through_sample
+                and buffered_through_sample <= self.buffered_through_sample
+            )
+            # Feedback can be replayed after reconnect.  Once both cursors are
+            # at or behind the accepted state it is idempotent, even if the
+            # old delivery sequence has already been trimmed from the ledger.
+            if completely_old:
+                return
             if observed_delivery_seq is None:
                 # Keep older SDKs source-compatible; new SDKs always send the
                 # cumulative delivery sequence so RB can be checked against
@@ -440,12 +449,6 @@ class ResumableSession:
                     "invalid_playback_progress",
                     "buffered_through_sample is ahead of server output/observed delivery",
                 )
-            completely_old = (
-                played_through_sample <= self.played_through_sample
-                and buffered_through_sample <= self.buffered_through_sample
-            )
-            if completely_old:
-                return
             if (
                 played_through_sample < self.played_through_sample
                 or buffered_through_sample < self.buffered_through_sample
@@ -458,8 +461,13 @@ class ResumableSession:
             self.buffered_through_sample = buffered_through_sample
 
     def _audio_end_through_delivery_locked(self, delivery_seq: int) -> int:
-        if delivery_seq <= self._trimmed_through_seq:
+        if delivery_seq == self._trimmed_through_seq:
             return self._trimmed_audio_sample
+        if delivery_seq < self._trimmed_through_seq:
+            raise ResumeProtocolError(
+                "unknown_playback_delivery",
+                "observed_delivery_seq is no longer in the replay ledger",
+            )
         if delivery_seq >= self._next_delivery_seq - 1:
             return self._next_audio_sample
         for delivery in self._records:

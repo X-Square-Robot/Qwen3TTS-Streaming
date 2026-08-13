@@ -30,6 +30,7 @@ from .session_identity import GatewaySessionIdentity
 if TYPE_CHECKING:
     from ..interface import SessionStartRequest
     from ..server import TTSEngine
+    from .triton_realtime_backend import TritonRealtimeBackend
     from .websocket_server import WebSocketGateway
 
 
@@ -217,8 +218,7 @@ class StandaloneSessionBackend:
         return handle
 
     async def close(self) -> None:
-        for queue in list(self._queues):
-            del queue
+        self._queues.clear()
 
 
 class RealtimeSessionServiceBackend:
@@ -242,8 +242,19 @@ class RealtimeSessionServiceBackend:
         self._next_seq[identity.internal_session_id] = 1
 
         async def forward() -> None:
-            async for output in handle.outputs():
-                await outbound_queue.put(self._to_legacy_frame(output, start_request))
+            try:
+                async for output in handle.outputs():
+                    await outbound_queue.put(
+                        self._to_legacy_frame(output, start_request)
+                    )
+            finally:
+                self._handles.pop(identity.internal_session_id, None)
+                self._next_seq.pop(identity.internal_session_id, None)
+                # A terminal output owns the complete logical response.  Drop
+                # its service entry immediately so long-lived Realtime
+                # connections do not accumulate finished Triton executions.
+                if handle.terminal is not None:
+                    await self._service.close_session(identity.internal_session_id)
 
         self._forwarders[identity.internal_session_id] = asyncio.create_task(forward())
 
@@ -343,4 +354,96 @@ class RealtimeSessionServiceBackend:
         }
 
 
-__all__ = ["RealtimeSessionServiceBackend", "StandaloneSessionBackend"]
+class _TritonExecutionHandle:
+    def __init__(self, backend: "TritonRealtimeBackend", session_id: str) -> None:
+        self._backend = backend
+        self._session_id = session_id
+        self._pump: asyncio.Task | None = None
+
+    def set_pump(self, task: asyncio.Task) -> None:
+        self._pump = task
+
+    async def push_text(self, text: str) -> None:
+        await self._backend.push_text(self._session_id, text)
+
+    async def complete_input(self) -> None:
+        await self._backend.complete_input(self._session_id)
+
+    async def cancel(self, reason: str = "") -> None:
+        del reason
+        await self._backend.cancel(self._session_id)
+
+    async def close(self) -> None:
+        if self._pump is not None and not self._pump.done():
+            self._pump.cancel()
+            try:
+                await self._pump
+            except asyncio.CancelledError:
+                pass
+
+
+class TritonSessionBackend:
+    """Adapt the Triton stream backend to the canonical session contract."""
+
+    def __init__(self, backend: "TritonRealtimeBackend") -> None:
+        self._backend = backend
+        self._queues: set[asyncio.Queue] = set()
+
+    async def start(
+        self,
+        identity: GatewaySessionIdentity,
+        *,
+        start_request: "SessionStartRequest",
+        emit,
+    ) -> ExecutionHandle:
+        raw_queue: asyncio.Queue = asyncio.Queue(maxsize=4096)
+        self._queues.add(raw_queue)
+        handle = _TritonExecutionHandle(self._backend, identity.internal_session_id)
+
+        async def pump() -> None:
+            cursor = 0
+            try:
+                while True:
+                    frame = await raw_queue.get()
+                    converted = _raw_frame_to_output(
+                        frame,
+                        start_request=start_request,
+                        sample_cursor=cursor,
+                    )
+                    if converted is None:
+                        continue
+                    output, cursor = converted
+                    await emit(output)
+                    if isinstance(output, TerminalOutput):
+                        return
+            finally:
+                self._queues.discard(raw_queue)
+
+        pump_task = asyncio.create_task(pump())
+        handle.set_pump(pump_task)
+        try:
+            await self._backend.start(
+                identity,
+                start_request=start_request,
+                outbound_queue=raw_queue,
+            )
+        except BaseException:
+            pump_task.cancel()
+            try:
+                await pump_task
+            except asyncio.CancelledError:
+                pass
+            self._queues.discard(raw_queue)
+            raise
+        return handle
+
+    async def close(self) -> None:
+        self._queues.clear()
+        await self._backend.close()
+
+
+__all__ = [
+    "RealtimeSessionServiceBackend",
+    "StandaloneSessionBackend",
+    "TritonSessionBackend",
+]

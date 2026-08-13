@@ -1,4 +1,5 @@
 from engine.core.text_journal import CanonicalTextJournal
+from engine.frontend.interface import _normalize_tts_text
 
 
 def _normalize(text: str) -> str:
@@ -36,3 +37,36 @@ def test_deleted_trailing_codepoints_wait_for_terminal_boundary():
     assert journal.raw_span(0, 5) == (0, 5)
     journal.finish()
     assert journal.raw_span(0, len(journal.normalized_text)) == (0, 12)
+
+
+def test_keycap_split_is_packetization_invariant():
+    one = CanonicalTextJournal(_normalize_tts_text)
+    one.append("第1️⃣1步")
+
+    split = CanonicalTextJournal(_normalize_tts_text)
+    split.append("第1")
+    split.append("️⃣1步")
+
+    assert split.normalized_text == one.normalized_text == "第1步"
+    assert split.normalized_to_raw == one.normalized_to_raw
+    assert split.raw_span(1, 2) == (1, 5)
+
+
+def test_deleted_interior_characters_fold_to_next_normalized_boundary():
+    journal = CanonicalTextJournal(_normalize_tts_text)
+    journal.append("good😊morning")
+
+    # The inserted canonical separator owns the removed emoji provenance.
+    assert journal.raw_span(4, 5) == (4, 5)
+    assert journal.raw_to_normalized[4] == 4
+    assert journal.raw_to_normalized[5] == 5
+
+
+def test_finish_releases_a_held_keycap_base():
+    journal = CanonicalTextJournal(_normalize_tts_text)
+    journal.append("第1")
+    assert journal.normalized_text == "第"
+
+    journal.finish()
+    assert journal.normalized_text == "第1"
+    assert journal.raw_span(1, 2) == (1, 2)

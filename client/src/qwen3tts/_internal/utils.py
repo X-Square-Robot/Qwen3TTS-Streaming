@@ -31,6 +31,26 @@ from ..exceptions import (
 )
 
 
+def advertised_protocols(payload: Mapping[str, Any]) -> list[str]:
+    """Read both legacy flat and endpoint-scoped capability fields."""
+
+    values: list[str] = [str(value) for value in payload.get("supported_api_protocols", [])]
+    protocols = payload.get("protocols")
+    if isinstance(protocols, Mapping):
+        native = protocols.get("native_websocket")
+        if isinstance(native, Mapping):
+            values.extend(str(value) for value in native.get("supported", []) or [])
+            current = native.get("current")
+            if current:
+                values.append(str(current))
+        realtime = protocols.get("openai_realtime")
+        if isinstance(realtime, Mapping):
+            base = realtime.get("base")
+            if base:
+                values.append(str(base))
+    return list(dict.fromkeys(value for value in values if value))
+
+
 def parse_host_port(endpoint: str, *, default_port: int) -> tuple[str, int]:
     value = endpoint.strip()
     if not value:
@@ -112,6 +132,15 @@ def decode_audio_chunk(payload: dict[str, Any], pcm_bytes: bytes) -> AudioChunk:
         **dict(payload.get("meta") or {}),
         **dict(audio.get("meta") or {}),
     }
+    # Resume headers use explicit top-level absolute sample bounds; native
+    # non-resume headers may carry the same bounds only there.  Preserve them
+    # as normal AudioChunk coordinates for both forms.
+    if "output_sample_start" not in meta and payload.get("start_sample") is not None:
+        meta["output_sample_start"] = payload["start_sample"]
+    if "output_sample_end" not in meta and payload.get("end_sample") is not None:
+        meta["output_sample_end"] = payload["end_sample"]
+    if "output_sample_rate" not in meta and audio.get("sample_rate") is not None:
+        meta["output_sample_rate"] = audio["sample_rate"]
     return AudioChunk(
         pcm_bytes=pcm_bytes,
         audio=AudioFormat(

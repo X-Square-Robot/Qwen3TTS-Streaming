@@ -71,5 +71,27 @@ async def test_playback_feedback_is_telemetry_only_and_validated():
                 played_through_sample=50,
                 buffered_through_sample=101,
             )
+
+        # Once delivery 1 is trimmed, an exact replay of its old telemetry is
+        # still harmless; a partially newer report must identify a retained
+        # delivery and cannot use the expired sequence as RB.
+        await session.acknowledge(
+            attachment.generation,
+            through_delivery_seq=1,
+            audio_through_sample=100,
+        )
+        await session.record_playback_progress(
+            attachment.generation,
+            played_through_sample=50,
+            buffered_through_sample=100,
+            observed_delivery_seq=0,
+        )
+        with pytest.raises(ResumeProtocolError, match="no longer in the replay ledger"):
+            await session.record_playback_progress(
+                attachment.generation,
+                played_through_sample=60,
+                buffered_through_sample=100,
+                observed_delivery_seq=0,
+            )
     finally:
         await registry.close()

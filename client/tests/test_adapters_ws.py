@@ -1534,6 +1534,55 @@ class TestConnectionClosedWithoutTerminal:
         assert messages[-1].type == "error"
         assert "without terminal event" in messages[-1].message
 
+    def test_absolute_audio_header_without_resume_delivery_is_supported(self, monkeypatch):
+        from qwen3tts_protocol import AudioChunk, StreamEvent
+
+        self._patch(
+            monkeypatch,
+            [
+                {
+                    "type": "event",
+                    "event": {
+                        "type": "start",
+                        "audio": {
+                            "encoding": "pcm_f32",
+                            "sample_rate": 24000,
+                            "channels": 1,
+                        },
+                    },
+                },
+                {
+                    "type": "audio_header",
+                    "start_sample": 0,
+                    "end_sample": 1,
+                    "audio": {
+                        "encoding": "pcm_f32",
+                        "sample_rate": 24000,
+                        "channels": 1,
+                        "meta": {},
+                    },
+                },
+                b"\x00\x00\x80?",
+                {
+                    "type": "event",
+                    "event": {"type": "done", "meta": {}},
+                },
+            ],
+        )
+        adapter = EngineWebSocketAdapter("ws://localhost:50052/v1/ws", timeout=5.0)
+        session = adapter.open_stream(
+            SessionStartRequest(
+                session_id="s-header",
+                config=SynthesisConfig(task_type="custom_voice"),
+            )
+        )
+        messages = list(session.iter_messages())
+        assert isinstance(messages[0], StreamEvent)
+        audio = next(message for message in messages if isinstance(message, AudioChunk))
+        assert audio.output_sample_start == 0
+        assert audio.output_sample_end == 1
+        assert messages[-1].type == "done"
+
     def test_oneshot_close_frame_raises_instead_of_truncating(self, monkeypatch):
         from qwen3tts.exceptions import ProtocolError
 

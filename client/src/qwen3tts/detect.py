@@ -11,7 +11,11 @@ from qwen3tts_protocol import DetectedTransport
 
 from ._internal.auth import grpc_metadata_as_headers, normalize_grpc_metadata
 from ._internal.raw_websocket import ws_close, ws_connect, ws_recv_frame, ws_send_json
-from ._internal.utils import check_capabilities_pairing, check_engine_version
+from ._internal.utils import (
+    advertised_protocols,
+    check_capabilities_pairing,
+    check_engine_version,
+)
 from .constants import (
     DEFAULT_ENGINE_CAPABILITIES_PATH,
     DEFAULT_ENGINE_GRPC_PORT,
@@ -213,7 +217,7 @@ def _detect_http_url(
         if response.status_code == 200:
             payload = response.json()
             if isinstance(payload, dict):
-                protocols = list(payload.get("supported_api_protocols") or [])
+                protocols = advertised_protocols(payload)
                 if "openai-realtime-v1" in protocols:
                     check_engine_version(payload.get("engine_version"))
                     report.append(

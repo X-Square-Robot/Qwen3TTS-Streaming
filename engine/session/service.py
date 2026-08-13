@@ -99,6 +99,12 @@ class SessionHandle:
         return self.identity.client_session_id
 
     @property
+    def accepted_text_seq(self) -> int:
+        """Highest contiguous text sequence accepted for this session."""
+
+        return self._next_seq - 1
+
+    @property
     def terminal(self) -> TerminalOutput | None:
         return self._terminal
 
@@ -278,4 +284,3 @@ class SessionService:
         for handle in handles:
             await handle.close()
         await self.backend.close()
-

@@ -126,6 +126,18 @@ class WebSocketGateway:
             grace_seconds=stream_resume_grace_seconds,
             max_buffer_bytes=stream_resume_max_buffer_bytes,
         )
+        from ..session import SessionService
+        from .session_backend import StandaloneSessionBackend
+
+        self._session_service = SessionService(
+            StandaloneSessionBackend(self, engine),
+        )
+
+    @property
+    def session_service(self):
+        """Shared typed execution service used by secondary wire adapters."""
+
+        return self._session_service
 
     def _capabilities(self) -> dict[str, Any]:
         capabilities = normalize_capabilities(self._engine.describe_capabilities())
@@ -152,12 +164,37 @@ class WebSocketGateway:
             "qwen.input_text_buffer.v1",
             "qwen.text_progress.v1",
         ]
+        # Keep the historical flat fields for one compatibility release while
+        # making endpoint-specific capabilities explicit.  Consumers must not
+        # infer Realtime resume or native binary formats from engine fields.
+        capabilities["protocols"] = {
+            "native_websocket": {
+                "path": _normalize_ws_path("/v1/ws"),
+                "current": "tts-session-v2alpha1",
+                "supported": ["tts-session-v2alpha1"],
+                "features": list(_SUPPORTED_WEBSOCKET_FEATURES)
+                + ["playback_progress_v1"],
+                "audio_formats": ["pcm_f32", "pcm_s16le"],
+            },
+            "openai_realtime": {
+                "path": _OPENAI_REALTIME_PATH,
+                "base": "openai-realtime-v1",
+                "extension_protocol": "qwen-realtime-v1",
+                "supported_extensions": [
+                    "qwen.input_text_buffer.v1",
+                    "qwen.text_progress.v1",
+                ],
+                "features": ["base64_pcm16", "full_duplex", "serial_responses"],
+                "audio_formats": ["pcm_s16le"],
+            },
+        }
         return capabilities
 
     async def handle_capabilities(self, request):
         return web.json_response(self._capabilities())
 
     async def close(self) -> None:
+        await self._session_service.close()
         await self._resume_registry.close()
 
     async def create_session(
@@ -699,9 +736,21 @@ class WebSocketGateway:
                                         observed_delivery_seq=observed_delivery_seq,
                                     )
                                 else:
+                                    if buffered < played:
+                                        raise ResumeProtocolError(
+                                            "invalid_playback_progress",
+                                            "buffered_through_sample must be >= played_through_sample",
+                                        )
+                                    # Playback feedback may be duplicated by a
+                                    # reconnecting client.  Ignore only a
+                                    # wholly stale pair; a partial rollback is
+                                    # still a protocol error.
+                                    if (
+                                        played <= playback_played_sample
+                                        and buffered <= playback_buffered_sample
+                                    ):
+                                        continue
                                     if played < playback_played_sample:
-                                        if buffered <= playback_buffered_sample:
-                                            continue
                                         raise ResumeProtocolError(
                                             "invalid_playback_progress",
                                             "played_through_sample cannot move backwards",
@@ -710,11 +759,6 @@ class WebSocketGateway:
                                         raise ResumeProtocolError(
                                             "invalid_playback_progress",
                                             "buffered_through_sample cannot move backwards",
-                                        )
-                                    if buffered < played:
-                                        raise ResumeProtocolError(
-                                            "invalid_playback_progress",
-                                            "buffered_through_sample must be >= played_through_sample",
                                         )
                                     if buffered > playback_output_sample:
                                         raise ResumeProtocolError(
@@ -1262,17 +1306,12 @@ async def serve(
     ws_path = _normalize_ws_path(path)
     gateway = WebSocketGateway(engine)
     from .openai_realtime import OpenAIRealtimeGateway
-    from ..session import SessionService
-    from .session_backend import StandaloneSessionBackend
-
     # Both public protocols share the same transport-neutral execution
     # contract.  The native handler keeps its v2 wire loop for compatibility;
     # Realtime receives typed outputs through this service bridge.
-    session_service = SessionService(StandaloneSessionBackend(gateway, engine))
-
     realtime_gateway = OpenAIRealtimeGateway(
         engine,
-        session_service=session_service,
+        session_service=gateway.session_service,
         usage_recorder=realtime_usage_recorder,
     )
     app = web.Application()
@@ -1310,7 +1349,7 @@ def _session_config_from_ws_message(
     return _start_request_from_ws_message(message, default_mode=default_mode).config
 
 
-def _start_request_from_ws_message(
+def parse_session_start_request(
     message: dict[str, Any],
     *,
     default_mode: InputMode,
@@ -1345,6 +1384,11 @@ def _start_request_from_ws_message(
         timing=timing,
         initial_text=str(message.get("text", "") or ""),
     )
+
+
+# Compatibility alias for integrations that imported the old private helper.
+# New adapters must use the public parser above.
+_start_request_from_ws_message = parse_session_start_request
 
 
 def _extract_ws_output_policy(raw: dict[str, Any]) -> dict[str, Any]:

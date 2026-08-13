@@ -16,6 +16,7 @@ DEFAULT_OPENAI_REALTIME_MODEL = "qwen3-tts-realtime"
 DEFAULT_MODEL_VERSION = "1"
 
 OPENAI_REALTIME_PROTOCOL = "openai-realtime-v1"
+QWEN_REALTIME_EXTENSION_PROTOCOL = "qwen-realtime-v1"
 QWEN_TEXT_BUFFER_EXTENSION = "qwen.input_text_buffer.v1"
 QWEN_TEXT_PROGRESS_EXTENSION = "qwen.text_progress.v1"
 

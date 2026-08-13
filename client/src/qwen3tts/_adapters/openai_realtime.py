@@ -31,6 +31,7 @@ from .._internal.raw_websocket import (
     ws_send_json,
 )
 from .._internal.utils import (
+    advertised_protocols,
     build_bytes_result,
     check_engine_version,
     maybe_base64,
@@ -44,6 +45,7 @@ from ..constants import (
     TRANSPORT_OPENAI_REALTIME,
 )
 from ..exceptions import ProtocolError, StreamClosedError
+from ..exceptions import PoolAcquireTimeoutError, PoolSaturatedError
 
 
 class OpenAIRealtimeAdapter:
@@ -60,6 +62,14 @@ class OpenAIRealtimeAdapter:
         headers: dict[str, str] | None = None,
         model_name: str | None = None,
         reconnect_attempts: int = 1,
+        active_stream_resume: bool = True,
+        stream_resume_attempts: int = 2,
+        stream_resume_timeout: float = 10.0,
+        stream_resume_ack_interval: int = 8,
+        max_connections: int = 32,
+        max_idle_connections: int = 0,
+        max_pending_acquires: int = 256,
+        acquire_timeout: float | None = 30.0,
     ) -> None:
         self.model_name = str(model_name or DEFAULT_OPENAI_REALTIME_MODEL)
         self.endpoint = _with_model_query(endpoint, self.model_name)
@@ -71,9 +81,33 @@ class OpenAIRealtimeAdapter:
         )
         self.headers = dict(headers or {})
         self.reconnect_attempts = max(0, int(reconnect_attempts))
+        self.active_stream_resume = bool(active_stream_resume)
+        self.stream_resume_attempts = max(0, int(stream_resume_attempts))
+        self.stream_resume_timeout = max(0.1, float(stream_resume_timeout))
+        self.stream_resume_ack_interval = max(1, int(stream_resume_ack_interval))
+        self.max_connections = int(max_connections)
+        self.max_idle_connections = int(max_idle_connections)
+        if self.max_idle_connections < 0 or self.max_idle_connections > self.max_connections:
+            raise ValueError("max_idle_connections must be between 0 and max_connections")
+        self.max_pending_acquires = int(max_pending_acquires)
+        if self.max_connections <= 0:
+            raise ValueError("max_connections must be greater than zero")
+        if self.max_pending_acquires < 0:
+            raise ValueError("max_pending_acquires must be non-negative")
+        if acquire_timeout is not None and float(acquire_timeout) < 0:
+            raise ValueError("acquire_timeout must be non-negative or None")
+        self.acquire_timeout = (
+            None if acquire_timeout is None else float(acquire_timeout)
+        )
+        self._slot_semaphore = threading.BoundedSemaphore(self.max_connections)
+        self._slot_lock = threading.Lock()
+        self._pending_acquires = 0
         self._sessions: weakref.WeakSet[OpenAIRealtimeStreamSession] = weakref.WeakSet()
         self._sessions_lock = threading.Lock()
         self._closed = False
+        self._pool_lock = threading.Condition(threading.Lock())
+        self._idle_connections: list[RawWebSocketConnection] = []
+        self._physical_connections = 0
 
     def get_capabilities(self, *, timeout: float | None = None) -> Capabilities:
         request_timeout = self.timeout if timeout is None else max(0.1, float(timeout))
@@ -89,7 +123,7 @@ class OpenAIRealtimeAdapter:
         payload = response.json()
         if not isinstance(payload, dict):
             raise ProtocolError("Realtime capabilities response must be a JSON object")
-        protocols = list(payload.get("supported_api_protocols") or [])
+        protocols = advertised_protocols(payload)
         if protocols and OPENAI_REALTIME_PROTOCOL not in protocols:
             raise ProtocolError(
                 f"server does not advertise {OPENAI_REALTIME_PROTOCOL!r}"
@@ -135,6 +169,45 @@ class OpenAIRealtimeAdapter:
     def open_stream(self, start_request: SessionStartRequest):
         return self._open_session(start_request, initial_text=None)
 
+    def prewarm(self, connections: int = 1, *, timeout: float | None = None) -> int:
+        """Establish idle Realtime sockets for short logical responses."""
+        target = max(0, int(connections))
+        if self.max_idle_connections == 0:
+            raise ValueError("OpenAI Realtime pooling is disabled (max_idle_connections=0)")
+        target = min(target, self.max_idle_connections)
+        deadline = time.monotonic() + (
+            self.connect_timeout if timeout is None else max(0.1, float(timeout))
+        )
+        while True:
+            with self._pool_lock:
+                if len(self._idle_connections) >= target:
+                    return len(self._idle_connections)
+                if self._physical_connections >= self.max_connections:
+                    return len(self._idle_connections)
+                self._physical_connections += 1
+            conn = None
+            try:
+                conn = ws_connect(
+                    self.endpoint,
+                    timeout=self.connect_timeout,
+                    headers=self.headers,
+                )
+                _receive_event(
+                    conn,
+                    expected_type="session.created",
+                    timeout=max(0.1, deadline - time.monotonic()),
+                )
+                with self._pool_lock:
+                    self._idle_connections.append(conn)
+                    self._pool_lock.notify()
+            except BaseException:
+                if conn is not None:
+                    ws_close(conn)
+                self._discard_physical_slot()
+                raise
+            if time.monotonic() >= deadline:
+                return len(self._idle_connections)
+
     def close(self) -> None:
         with self._sessions_lock:
             if self._closed:
@@ -143,6 +216,13 @@ class OpenAIRealtimeAdapter:
             sessions = list(self._sessions)
         for session in sessions:
             session.close(reason="client closed")
+        with self._pool_lock:
+            idle = list(self._idle_connections)
+            self._idle_connections.clear()
+            self._physical_connections -= len(idle)
+            self._pool_lock.notify_all()
+        for conn in idle:
+            ws_close(conn)
 
     def _open_session(
         self,
@@ -153,42 +233,135 @@ class OpenAIRealtimeAdapter:
         with self._sessions_lock:
             if self._closed:
                 raise StreamClosedError("Realtime adapter is closed")
+        conn, reused = self._checkout_connection()
+        slot_held = self.max_idle_connections == 0
         last_error: BaseException | None = None
-        for attempt in range(self.reconnect_attempts + 1):
-            conn = None
-            try:
-                conn = ws_connect(
-                    self.endpoint,
-                    timeout=self.connect_timeout,
-                    headers=self.headers,
-                )
-                session = OpenAIRealtimeStreamSession(
-                    adapter=self,
-                    start_request=start_request,
-                    conn=conn,
-                    initial_text=initial_text,
-                )
-                with self._sessions_lock:
-                    if self._closed:
-                        session.close(reason="adapter closed during connect")
-                        raise StreamClosedError("Realtime adapter is closed")
-                    self._sessions.add(session)
-                session._start_reader()
-                return session
-            except BaseException as exc:
-                last_error = exc
-                if conn is not None:
-                    ws_close(conn)
-                if not isinstance(exc, (OSError, RawWebSocketError, TimeoutError)):
-                    raise
-                if attempt >= self.reconnect_attempts:
-                    raise
+        try:
+            for attempt in range(self.reconnect_attempts + 1):
+                try:
+                    if conn is None:
+                        conn = ws_connect(
+                            self.endpoint,
+                            timeout=self.connect_timeout,
+                            headers=self.headers,
+                        )
+                    session = OpenAIRealtimeStreamSession(
+                        adapter=self,
+                        start_request=start_request,
+                        conn=conn,
+                        initial_text=initial_text,
+                        reused_connection=reused,
+                    )
+                    with self._sessions_lock:
+                        if self._closed:
+                            session.close(reason="adapter closed during connect")
+                            raise StreamClosedError("Realtime adapter is closed")
+                        self._sessions.add(session)
+                    session._slot_held = self.max_idle_connections == 0
+                    slot_held = False
+                    session._start_reader()
+                    return session
+                except BaseException as exc:
+                    last_error = exc
+                    if conn is not None:
+                        ws_close(conn)
+                        self._discard_connection(conn)
+                        conn = None
+                        reused = False
+                    elif not slot_held:
+                        self._discard_physical_slot()
+                    if not isinstance(exc, (OSError, RawWebSocketError, TimeoutError)):
+                        raise
+                    if attempt >= self.reconnect_attempts:
+                        raise
+        finally:
+            if slot_held:
+                self._release_slot()
         assert last_error is not None  # pragma: no cover
         raise last_error
+
+    def _checkout_connection(self) -> tuple[RawWebSocketConnection | None, bool]:
+        if self.max_idle_connections == 0:
+            self._acquire_slot()
+            return None, False
+        deadline = None if self.acquire_timeout is None else time.monotonic() + self.acquire_timeout
+        with self._pool_lock:
+            while True:
+                if self._idle_connections:
+                    return self._idle_connections.pop(), True
+                if self._physical_connections < self.max_connections:
+                    self._physical_connections += 1
+                    return None, False
+                if self._pending_acquires >= self.max_pending_acquires:
+                    raise PoolSaturatedError(
+                        "Realtime websocket connection pool pending queue is full"
+                    )
+                self._pending_acquires += 1
+                try:
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        raise PoolAcquireTimeoutError(
+                            "timed out waiting for a Realtime websocket connection"
+                        )
+                    self._pool_lock.wait(remaining)
+                finally:
+                    self._pending_acquires -= 1
+
+    def _release_connection(self, conn: RawWebSocketConnection) -> None:
+        if self.max_idle_connections == 0:
+            ws_close(conn)
+            self._release_slot()
+            return
+        with self._pool_lock:
+            if self._closed or len(self._idle_connections) >= self.max_idle_connections:
+                self._physical_connections -= 1
+                self._pool_lock.notify_all()
+                close = True
+            else:
+                self._idle_connections.append(conn)
+                self._pool_lock.notify()
+                close = False
+        if close:
+            ws_close(conn)
+
+    def _discard_connection(self, conn: RawWebSocketConnection) -> None:
+        if self.max_idle_connections == 0:
+            return
+        with self._pool_lock:
+            self._physical_connections = max(0, self._physical_connections - 1)
+            self._pool_lock.notify_all()
+
+    def _discard_physical_slot(self) -> None:
+        with self._pool_lock:
+            self._physical_connections = max(0, self._physical_connections - 1)
+            self._pool_lock.notify_all()
 
     def _retire(self, session: "OpenAIRealtimeStreamSession") -> None:
         with self._sessions_lock:
             self._sessions.discard(session)
+        if getattr(session, "_slot_held", False):
+            session._slot_held = False
+            self._release_slot()
+
+    def _acquire_slot(self) -> None:
+        with self._slot_lock:
+            if self._pending_acquires >= self.max_pending_acquires:
+                raise PoolSaturatedError(
+                    "Realtime websocket connection pool pending queue is full"
+                )
+            self._pending_acquires += 1
+        try:
+            acquired = self._slot_semaphore.acquire(timeout=self.acquire_timeout)
+        finally:
+            with self._slot_lock:
+                self._pending_acquires -= 1
+        if not acquired:
+            raise PoolAcquireTimeoutError(
+                "timed out waiting for a Realtime websocket connection slot"
+            )
+
+    def _release_slot(self) -> None:
+        self._slot_semaphore.release()
 
 
 class OpenAIRealtimeStreamSession(BaseStreamSession):
@@ -199,6 +372,7 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
         start_request: SessionStartRequest,
         conn: RawWebSocketConnection,
         initial_text: str | None,
+        reused_connection: bool = False,
     ) -> None:
         session_id = start_request.session_id or f"client_{uuid.uuid4().hex}"
         super().__init__(session_id=session_id, transport=adapter.transport_name)
@@ -207,11 +381,13 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
         self._send_lock = threading.Lock()
         self._transport_lock = threading.Lock()
         self._transport_closed = False
+        self._slot_held = False
         self._input_closed = initial_text is not None
         self._next_sequence = 1
         self._chunk_index = 0
         self._audio_sample_cursor = 0
         self._last_error = ""
+        self._response_terminal = False
         self.realtime_session_id = ""
         self.response_id = ""
         self.response_status = "in_progress"
@@ -228,18 +404,26 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
         if int(start_request.config.audio.channels or 1) != 1:
             raise ValueError("OpenAI Realtime output is mono only")
 
-        created = _receive_event(
-            conn,
-            expected_type="session.created",
-            timeout=adapter.connect_timeout,
+        created = None
+        if not reused_connection:
+            created = _receive_event(
+                conn,
+                expected_type="session.created",
+                timeout=adapter.connect_timeout,
+            )
+        self.realtime_session_id = str(
+            ((created or {}).get("session") or {}).get("id") or ""
         )
-        self.realtime_session_id = str((created.get("session") or {}).get("id") or "")
         ws_send_json(conn, _session_update(start_request, adapter.model_name))
         updated = _receive_event(
             conn,
             expected_type="session.updated",
             timeout=adapter.connect_timeout,
         )
+        if not self.realtime_session_id:
+            self.realtime_session_id = str(
+                ((updated.get("session") or {}).get("id") or "")
+            )
         if initial_text is None:
             extensions = ((updated.get("session") or {}).get("qwen") or {}).get(
                 "text_buffer_extension"
@@ -424,9 +608,6 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
                         first_chunk=self._chunk_index == 1,
                         meta={
                             "response_id": self.response_id,
-                            "output_sample_start": str(sample_start),
-                            "output_sample_end": str(sample_end),
-                            "output_sample_rate": str(self.audio_format.sample_rate),
                         },
                         output_sample_start=sample_start,
                         output_sample_end=sample_end,
@@ -475,6 +656,7 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
         response = event.get("response") or {}
         self.response_id = str(response.get("id") or self.response_id)
         self.response_status = str(response.get("status") or "completed")
+        self._response_terminal = True
         usage = response.get("usage") or {}
         if isinstance(usage, dict):
             self.usage = dict(usage)
@@ -514,8 +696,12 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
             if self._transport_closed:
                 return
             self._transport_closed = True
-        ws_close(self._conn)
-        self._adapter._retire(self)
+        if self._response_terminal and self._adapter.max_idle_connections > 0:
+            self._adapter._release_connection(self._conn)
+            self._adapter._retire(self)
+        else:
+            ws_close(self._conn)
+            self._adapter._retire(self)
 
 
 def _receive_event(

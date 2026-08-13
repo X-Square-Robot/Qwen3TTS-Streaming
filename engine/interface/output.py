@@ -33,6 +33,7 @@ class TextProgressCandidate:
     candidate_id: int
     event: dict[str, Any]
     segment_idx: int
+    input_sample_end: int
 
 
 @dataclass
@@ -73,12 +74,14 @@ class StreamingOutputProcessor:
         self._candidates: dict[int, TextProgressCandidate] = {}
         self._retained_candidate_ids: set[int] = set()
         self._emitted_candidate_ids: set[int] = set()
-        self._pending_final: list[tuple[dict[str, Any], int | None]] = []
+        self._pending_final: list[tuple[dict[str, Any], int | None, int]] = []
         self._segment_output_end: dict[int, int] = {}
         self._last_retained_segment = -1
         self._retained_native_cursor = 0
         self._candidate_targets: dict[int, int] = {}
+        self._candidate_input_ends: dict[int, int] = {}
         self._last_anchor_output_end = 0
+        self._source_native_cursor = 0
 
     @property
     def output_sample_cursor(self) -> int:
@@ -93,6 +96,8 @@ class StreamingOutputProcessor:
         raw = np.frombuffer(pcm_bytes, dtype=np.float32)
         if raw.size == 0:
             return OutputBatch()
+        source_sample_end = self._source_native_cursor + int(raw.size)
+        self._source_native_cursor = source_sample_end
 
         provenance = [
             SampleProvenanceSpan(
@@ -104,7 +109,9 @@ class StreamingOutputProcessor:
                 progress_event,
             )
         ]
-        if progress_event:
+        if progress_event and _has_text_span(
+            dict(progress_event.get("meta") or {})
+        ):
             # Candidate identity is internal. A VAD discard must not consume a
             # public anchor sequence number.
             candidate_id = self._next_candidate_id
@@ -113,8 +120,10 @@ class StreamingOutputProcessor:
                 candidate_id=candidate_id,
                 event=_without_anchor_seq(progress_event),
                 segment_idx=segment_idx,
+                input_sample_end=source_sample_end,
             )
             self._candidates[candidate_id] = candidate
+            self._candidate_input_ends[candidate_id] = source_sample_end
             provenance = [
                 SampleProvenanceSpan(
                     span.sample_start,
@@ -149,9 +158,14 @@ class StreamingOutputProcessor:
             return OutputBatch(events=[event])
         meta = dict(event.get("meta") or {})
         if _is_true(meta.get("alignment_final")):
+            if not _has_text_span(meta):
+                # A legacy backend can still report final percentage
+                # diagnostics, but without raw/normalized coordinates it is
+                # not eligible for the v1 anchor contract.
+                return OutputBatch(events=[_without_anchor_seq(event)])
             segment_idx = int(event.get("segment_idx", -1))
             target = self._segment_output_end.get(segment_idx)
-            self._pending_final.append((event, target))
+            self._pending_final.append((event, target, segment_idx))
             # Native output usually reaches the segment boundary before this
             # lifecycle event. A streaming resampler may need one more chunk;
             # leave the marker pending until its target is observable.
@@ -161,6 +175,10 @@ class StreamingOutputProcessor:
             # trusted cursor and do not turn an event-time estimate into a
             # synthetic output anchor.
             return OutputBatch(events=[event])
+        if not _has_text_span(meta):
+            # Do not allocate an anchor sequence for a legacy event that only
+            # happens to carry an output-sample diagnostic.
+            return OutputBatch(events=[_without_anchor_seq(event)])
         # Legacy backends may provide a progress event without an attached
         # audio chunk.  Only use the currently confirmed output cursor; this is
         # intentionally not a sent-byte estimate for new engine paths.
@@ -168,6 +186,18 @@ class StreamingOutputProcessor:
 
     def finish(self, *, emit_final: bool = True) -> list[OutputBatch]:
         """Flush VAD then resampler, and only then emit final text anchors."""
+        if not emit_final:
+            # An abort/cancel must not turn buffered detector or resampler
+            # state into new client-visible audio.  The already emitted output
+            # remains the last trusted cursor; all pending source samples are
+            # explicitly discarded here.
+            self._vad.discard_pending()
+            self._pending_final = []
+            self._candidates.clear()
+            self._candidate_targets.clear()
+            self._candidate_input_ends.clear()
+            return []
+
         batches: list[OutputBatch] = []
         retained = self._vad.flush_attributed()
         if retained.samples.size:
@@ -186,29 +216,24 @@ class StreamingOutputProcessor:
                 )
             batches.append(OutputBatch(audio=flushed))
 
-        if emit_final:
-            # Resolve delayed candidates and lifecycle finals in one
-            # sample-ordered pass. This keeps a segment's final marker from
-            # being emitted after a later segment's anchor.
-            anchors = self._resolve_ready_anchors(
-                self.output_sample_cursor,
-                force_all=True,
-            )
-            if anchors:
-                if batches and batches[-1].audio is not None:
-                    # Keep delayed resampler output and its anchors in one
-                    # logical batch for resumable registration.
-                    batches[-1].anchors.extend(anchors)
-                else:
-                    batches.append(OutputBatch(anchors=anchors))
-            self._candidates.clear()
-            self._pending_final = []
-        else:
-            # Retry/abort/cancel keeps the last trusted position; it must not
-            # be upgraded to a terminal 100% alignment merely because the
-            # output pipeline is being flushed.
-            self._pending_final = []
-            self._candidates.clear()
+        # Resolve delayed candidates and lifecycle finals in one
+        # sample-ordered pass. This keeps a segment's final marker from
+        # being emitted after a later segment's anchor.
+        anchors = self._resolve_ready_anchors(
+            self.output_sample_cursor,
+            force_all=True,
+        )
+        if anchors:
+            if batches and batches[-1].audio is not None:
+                # Keep delayed resampler output and its anchors in one
+                # logical batch for resumable registration.
+                batches[-1].anchors.extend(anchors)
+            else:
+                batches.append(OutputBatch(anchors=anchors))
+        self._candidates.clear()
+        self._candidate_targets.clear()
+        self._candidate_input_ends.clear()
+        self._pending_final = []
         return batches
 
     def _make_batch(
@@ -222,10 +247,13 @@ class StreamingOutputProcessor:
             candidate_id = _candidate_id(candidate)
             if candidate_id is not None:
                 self._retained_candidate_ids.add(candidate_id)
-                self._candidate_targets[candidate_id] = round(
+                target = round(
                     (native_base + span.sample_end)
                     * self.pipeline.start_request.config.audio.sample_rate
                     / self._native_sample_rate
+                )
+                self._candidate_targets[candidate_id] = max(
+                    target, self._candidate_targets.get(candidate_id, 0)
                 )
         if not frame.pcm_bytes:
             return OutputBatch()
@@ -256,13 +284,19 @@ class StreamingOutputProcessor:
         for candidate_id, target in self._candidate_targets.items():
             if candidate_id in self._emitted_candidate_ids:
                 continue
-            if target <= output_end or force_all:
+            input_end = self._candidate_input_ends.get(candidate_id, 0)
+            decided_cursor = (
+                self._vad.processed_input_samples
+                if self._vad.config.enabled
+                else self._source_native_cursor
+            )
+            input_decided = input_end <= decided_cursor
+            if input_decided and (target <= output_end or force_all):
                 ready.append((min(target, output_end), 0, "candidate", candidate_id))
-        for index, (event, target) in enumerate(self._pending_final):
+        for index, (event, target, segment_idx) in enumerate(self._pending_final):
+            target = self._segment_output_end.get(segment_idx, target)
             if target is None:
-                if not force_all:
-                    continue
-                target = output_end
+                continue
             if target <= output_end or force_all:
                 ready.append((min(target, output_end), 1, "final", index))
         ready.sort(key=lambda item: (item[0], item[1], item[3]))
@@ -286,8 +320,11 @@ class StreamingOutputProcessor:
                 self._candidates.pop(candidate_id, None)
             else:
                 index = int(marker_id)
-                event, pending_target = self._pending_final[index]
-                final_target = output_end if pending_target is None else pending_target
+                event, pending_target, segment_idx = self._pending_final[index]
+                final_target = self._segment_output_end.get(
+                    segment_idx,
+                    output_end if pending_target is None else pending_target,
+                )
                 anchors.append(
                     self._anchor_event(
                         event,
@@ -349,6 +386,18 @@ def _without_anchor_seq(event: dict[str, Any]) -> dict[str, Any]:
     meta = dict(event.get("meta") or {})
     meta.pop("anchor_seq", None)
     return {**event, "meta": meta}
+
+
+def _has_text_span(meta: dict[str, Any]) -> bool:
+    return all(
+        key in meta
+        for key in (
+            "raw_codepoint_start",
+            "raw_codepoint_end",
+            "normalized_codepoint_start",
+            "normalized_codepoint_end",
+        )
+    )
 
 
 def _candidate_id(value: Any) -> int | None:

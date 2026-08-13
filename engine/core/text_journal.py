@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
+from ..text_normalization import is_emoji_char, split_pending_emoji
+
 
 @dataclass
 class CanonicalTextJournal:
@@ -26,7 +28,16 @@ class CanonicalTextJournal:
     def append(self, raw_delta: str) -> tuple[str, int]:
         old_normalized = self.normalized_text
         self.raw_text += raw_delta or ""
-        normalized = str(self.normalize(self.raw_text))
+        # Keep a possible keycap base out of the committed canonical stream.
+        # Without this small journal-level hold, appending ``"1"`` followed by
+        # ``"\ufe0f\u20e3"`` would first publish ``"1"`` and then rewrite it
+        # away.  The frontend has the same carry for streaming tokenization;
+        # keeping it here also makes the public coordinate journal invariant
+        # when it is fed directly by a transport or an oracle.
+        committed_raw = self.raw_text
+        if not self.input_final:
+            committed_raw, _ = split_pending_emoji(committed_raw)
+        normalized = str(self.normalize(committed_raw))
         if not normalized.startswith(old_normalized):
             raise ValueError("canonical text normalization rewrote committed text")
         self.normalized_text = normalized
@@ -39,6 +50,9 @@ class CanonicalTextJournal:
 
     def finish(self) -> None:
         self.input_final = True
+        # A non-final append may have held a keycap base.  Recompute the
+        # canonical text now that no future packet can complete that sequence.
+        self.normalized_text = str(self.normalize(self.raw_text))
         self.normalized_to_raw, self.raw_to_normalized = _provenance_maps(
             self.raw_text,
             self.normalized_text,
@@ -91,53 +105,155 @@ def _provenance_maps(
     return the raw boundary after leading whitespace.
     """
 
-    normalized_to_raw = [0]
+    # Walk the normalization result and the raw stream together.  The
+    # normalizer is context-sensitive (emoji can insert a separating space and
+    # whitespace can collapse), so a plain ``str.find`` cannot distinguish a
+    # repeated character before and after a deleted sequence.  Each deleted
+    # run is carried to the next speakable boundary; a trailing run is kept
+    # pending until ``finish()``.
+    char_spans: list[tuple[int, int]] = []
     raw_cursor = 0
+    pending_deleted_start: int | None = None
     for char in normalized:
-        if char.isspace():
-            # Only consume a raw whitespace run when it starts at the current
-            # cursor.  A space inserted around a removed emoji is zero-width
-            # in raw coordinates; searching farther ahead would skip real
-            # speakable text before the next raw space.
-            match = (
-                raw_cursor
-                if raw_cursor < len(raw) and raw[raw_cursor].isspace()
-                else None
+        removed_end = _removed_sequence_end(raw, raw_cursor)
+        if removed_end > raw_cursor:
+            next_raw = raw[removed_end] if removed_end < len(raw) else ""
+            previous_raw = raw[raw_cursor - 1] if raw_cursor > 0 else ""
+            inserts_separator = (
+                char == " "
+                and _is_ascii_word(previous_raw)
+                and _is_ascii_word(next_raw)
             )
-            if match is None:
-                normalized_to_raw.append(raw_cursor)
+            if not inserts_separator:
+                if pending_deleted_start is None:
+                    pending_deleted_start = raw_cursor
+                raw_cursor = removed_end
+                removed_end = _removed_sequence_end(raw, raw_cursor)
+            else:
+                start = (
+                    pending_deleted_start
+                    if pending_deleted_start is not None
+                    else raw_cursor
+                )
+                raw_cursor = removed_end
+                char_spans.append((start, raw_cursor))
+                pending_deleted_start = None
                 continue
-            run_end = match
-            while run_end < len(raw) and raw[run_end].isspace():
-                run_end += 1
-            normalized_to_raw[-1] = max(normalized_to_raw[-1], match)
-            normalized_to_raw.append(run_end)
-            raw_cursor = run_end
+
+        if raw_cursor < len(raw) and raw[raw_cursor] == char:
+            start = (
+                pending_deleted_start
+                if pending_deleted_start is not None
+                else raw_cursor
+            )
+            raw_cursor += 1
+            char_spans.append((start, raw_cursor))
+            pending_deleted_start = None
             continue
 
         match = raw.find(char, raw_cursor)
         if match >= 0:
-            # Any removed/rewritten raw characters before this character are
-            # folded to the next speakable boundary.
-            normalized_to_raw[-1] = max(normalized_to_raw[-1], match)
+            if pending_deleted_start is None and match > raw_cursor:
+                pending_deleted_start = raw_cursor
+            start = (
+                pending_deleted_start
+                if pending_deleted_start is not None
+                else raw_cursor
+            )
             raw_cursor = match + 1
-            normalized_to_raw.append(raw_cursor)
-        else:
-            # Formatting removal or character translation (for example a
-            # full-width space) has no literal match. Consume one raw code
-            # point and attribute the normalized character to that span.
-            start = raw_cursor
-            raw_cursor = min(len(raw), raw_cursor + 1)
-            normalized_to_raw[-1] = max(normalized_to_raw[-1], start)
-            normalized_to_raw.append(raw_cursor)
+            char_spans.append((start, raw_cursor))
+            pending_deleted_start = None
+            continue
 
-    if include_trailing_deleted:
-        normalized_to_raw[-1] = len(raw)
-    else:
-        normalized_to_raw[-1] = max(normalized_to_raw[-1], raw_cursor)
+        # A normalized character with no literal raw match is either an
+        # inserted separator or a spelling/formatting rewrite.  Consume one
+        # raw code point only for the latter; insertion stays zero-width.
+        if raw_cursor < len(raw) and (
+            char != " " or raw[raw_cursor].isspace() or is_emoji_char(raw[raw_cursor])
+        ):
+            start = (
+                pending_deleted_start
+                if pending_deleted_start is not None
+                else raw_cursor
+            )
+            raw_cursor += 1
+            char_spans.append((start, raw_cursor))
+            pending_deleted_start = None
+        else:
+            point = (
+                pending_deleted_start
+                if pending_deleted_start is not None
+                else raw_cursor
+            )
+            char_spans.append((point, point))
+            pending_deleted_start = None
+
+    if raw_cursor < len(raw):
+        if pending_deleted_start is None:
+            pending_deleted_start = raw_cursor
+        raw_cursor = len(raw)
+
+    # A folded whitespace run belongs to its normalized space, not to the
+    # following word.  This also handles the deletion half of a collapsed run.
+    for index, char in enumerate(normalized):
+        if not char.isspace() or index >= len(char_spans):
+            continue
+        start, end = char_spans[index]
+        if start < len(raw) and raw[start].isspace():
+            while end < len(raw) and raw[end].isspace():
+                end += 1
+            char_spans[index] = (start, end)
+
+    normalized_to_raw = [0]
+    for start, end in char_spans:
+        start = max(normalized_to_raw[-1], int(start))
+        end = max(start, int(end))
+        normalized_to_raw.append(end)
+
+    if normalized:
+        if include_trailing_deleted:
+            normalized_to_raw[-1] = len(raw)
+        elif pending_deleted_start is not None:
+            normalized_to_raw[-1] = max(
+                normalized_to_raw[-2], pending_deleted_start
+            )
+    elif include_trailing_deleted:
+        normalized_to_raw[0] = len(raw)
 
     normalized_to_raw = _monotonic(normalized_to_raw)
     return normalized_to_raw, _inverse_boundaries(raw, normalized_to_raw)
+
+
+def _is_ascii_word(value: str) -> bool:
+    return bool(value) and value.isascii() and value.isalnum()
+
+
+def _removed_sequence_end(raw: str, start: int) -> int:
+    """Return the end of an emoji/keycap run beginning at ``start``."""
+    if start >= len(raw):
+        return start
+    if raw[start] in "0123456789#*":
+        if start + 1 < len(raw) and ord(raw[start + 1]) == 0x20E3:
+            return start + 2
+        if (
+            start + 2 < len(raw)
+            and ord(raw[start + 1]) == 0xFE0F
+            and ord(raw[start + 2]) == 0x20E3
+        ):
+            return start + 3
+    if not is_emoji_char(raw[start]):
+        return start
+    end = start + 1
+    while end < len(raw):
+        if raw[end] in "0123456789#*":
+            keycap_end = _removed_sequence_end(raw, end)
+            if keycap_end > end:
+                end = keycap_end
+                continue
+        if not is_emoji_char(raw[end]):
+            break
+        end += 1
+    return end
 
 
 def _monotonic(values: list[int]) -> list[int]:
@@ -150,17 +266,25 @@ def _monotonic(values: list[int]) -> list[int]:
 
 
 def _inverse_boundaries(raw: str, normalized_to_raw: list[int]) -> list[int]:
-    """Invert normalized→raw boundaries with deleted input folding forward."""
+    """Invert boundaries, folding deleted interiors to the next text edge.
+
+    ``normalized_to_raw[i:i+2]`` describes the raw interval attributed to
+    normalized character ``i``.  Raw boundaries inside that interval belong to
+    its left (next speakable) normalized boundary; only the interval's right
+    edge advances the normalized cursor.  This is different from a
+    ``bisect_right`` inversion, which incorrectly moves an emoji/keycap
+    deletion to the end of the following character.
+    """
+
+    from bisect import bisect_left
 
     raw_to_normalized: list[int] = []
-    norm_boundary = 0
     for raw_boundary in range(len(raw) + 1):
-        while (
-            norm_boundary < len(normalized_to_raw) - 1
-            and normalized_to_raw[norm_boundary] < raw_boundary
-        ):
-            norm_boundary += 1
-        raw_to_normalized.append(norm_boundary)
+        index = bisect_left(normalized_to_raw, raw_boundary)
+        if index < len(normalized_to_raw) and normalized_to_raw[index] == raw_boundary:
+            raw_to_normalized.append(index)
+        else:
+            raw_to_normalized.append(max(0, index - 1))
     return raw_to_normalized
 
 

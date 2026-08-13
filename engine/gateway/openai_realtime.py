@@ -29,7 +29,7 @@ from ..core.lifecycle import LifecycleLogger
 from ..core.types import InputMode
 from ..session import SessionService
 from .session_identity import GatewaySessionIdentity
-from .websocket_server import _start_request_from_ws_message
+from .websocket_server import parse_session_start_request
 
 if TYPE_CHECKING:
     from ..interface import SessionStartRequest
@@ -46,8 +46,10 @@ logger = logging.getLogger(__name__)
 
 OPENAI_REALTIME_PATH = "/v1/realtime"
 OPENAI_REALTIME_PROTOCOL = "openai-realtime-v1"
+QWEN_REALTIME_EXTENSION_PROTOCOL = "qwen-realtime-v1"
 QWEN_TEXT_BUFFER_EXTENSION = "qwen.input_text_buffer.v1"
 QWEN_TEXT_PROGRESS_EXTENSION = "qwen.text_progress.v1"
+QWEN_PLAYBACK_ACK_EXTENSION = "qwen.playback_ack.v1"
 _HEARTBEAT_SECONDS = float(
     os.environ.get("ENGINE_WEBSOCKET_HEARTBEAT_SEC", "30") or "30"
 )
@@ -153,8 +155,10 @@ class _SessionSettings:
             },
             "qwen": {
                 **public_qwen,
+                "protocol_version": QWEN_REALTIME_EXTENSION_PROTOCOL,
                 "text_buffer_extension": QWEN_TEXT_BUFFER_EXTENSION,
                 "text_progress_extension": QWEN_TEXT_PROGRESS_EXTENSION,
+                "playback_ack_extension": QWEN_PLAYBACK_ACK_EXTENSION,
             },
         }
 
@@ -243,6 +247,19 @@ class _TextBuffer:
     committed: bool = False
     next_sequence: int = 1
     accepted_sequences: dict[int, str] = field(default_factory=dict)
+
+    def reset_for_response(self) -> None:
+        """Start a fresh Qwen incremental-input journal.
+
+        The buffer is response-scoped.  Keeping its sequence journal on the
+        physical connection made a second serial response reject sequence 1
+        and could leak accepted text into the next response.
+        """
+
+        self.chunks.clear()
+        self.committed = False
+        self.next_sequence = 1
+        self.accepted_sequences.clear()
 
     def append(self, text: Any, sequence: Any) -> tuple[int, bool]:
         value = str(text or "")
@@ -469,6 +486,9 @@ class _RealtimeConnection:
         if event_type == "qwen.input_text_buffer.commit":
             await self._commit_text()
             return
+        if event_type == "qwen.playback.ack":
+            await self._ack_playback(event)
+            return
         raise RealtimeProtocolError(
             "unsupported_event",
             f"unsupported client event type: {event_type!r}",
@@ -567,6 +587,10 @@ class _RealtimeConnection:
         )
         self._active = state
 
+        # The chunks above belong to this response.  Future incremental input
+        # must start a new, response-scoped sequence journal.
+        self._buffer.reset_for_response()
+
         await self._send(
             {"type": "response.created", "response": self._response_payload(state)}
         )
@@ -610,7 +634,7 @@ class _RealtimeConnection:
             "ref_audio": qwen.get("ref_audio"),
             "ref_text": qwen.get("ref_text"),
             "x_vector_only": bool(qwen.get("x_vector_only", False)),
-            "input_mode": "auto",
+            "input_mode": qwen.get("input_mode", "auto"),
             "group_policy": qwen.get("group_policy", "auto"),
             "audio": {
                 "encoding": "pcm_s16le",
@@ -620,7 +644,7 @@ class _RealtimeConnection:
             "output_policy": qwen.get("output_policy", {}),
             "timing": timing,
         }
-        return _start_request_from_ws_message(
+        return parse_session_start_request(
             {"type": "start", "session_id": response_id, "config": config},
             default_mode=InputMode.AUTO,
         )
@@ -795,6 +819,33 @@ class _RealtimeConnection:
             }
         )
 
+    async def _ack_playback(self, event: dict[str, Any]) -> None:
+        response_id = str(event.get("response_id") or "")
+        if not response_id:
+            raise RealtimeProtocolError(
+                "invalid_playback_ack",
+                "qwen.playback.ack requires response_id",
+                param="response_id",
+            )
+        for name in ("played_audio_sample_end", "played_text_char_end"):
+            value = event.get(name, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise RealtimeProtocolError(
+                    "invalid_playback_ack",
+                    f"{name} must be a non-negative integer",
+                    param=name,
+                )
+        await self._send(
+            {
+                "type": "qwen.playback.ack",
+                "response_id": response_id,
+                "played_audio_sample_end": int(event.get("played_audio_sample_end", 0)),
+                "played_text_char_end": int(event.get("played_text_char_end", 0)),
+                "is_estimate": bool(event.get("is_estimate", True)),
+                "accepted": True,
+            }
+        )
+
     async def _cancel_active(self, *, reason: str, send_events: bool) -> None:
         state = self._active
         if state is None or state.finished:
@@ -880,6 +931,9 @@ class _RealtimeConnection:
                 )
             if self._active is state:
                 self._active = None
+                # Voice locking protects one response after its first audio;
+                # a later serial response may negotiate a different voice.
+                self._voice_locked = False
 
     def _usage(self, state: _ResponseState) -> dict[str, Any]:
         input_text_tokens = sum(

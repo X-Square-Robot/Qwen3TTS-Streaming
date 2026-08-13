@@ -41,11 +41,13 @@ def _collect(processor: StreamingOutputProcessor, chunks: list[np.ndarray]) -> t
         event = {
             "type": "text_progress",
             "segment_idx": 0,
-            "meta": {
-                "anchor_seq": str(index + 1),
-                "raw_codepoint_end": str(index + 1),
-                "normalized_codepoint_end": str(index + 1),
-            },
+                "meta": {
+                    "anchor_seq": str(index + 1),
+                    "raw_codepoint_start": str(index),
+                    "raw_codepoint_end": str(index + 1),
+                    "normalized_codepoint_start": str(index),
+                    "normalized_codepoint_end": str(index + 1),
+                },
         }
         batch = processor.process(
             AttributedAudioChunk(chunk.tobytes(), event, segment_idx=0)
@@ -118,7 +120,16 @@ def test_segment_final_marker_stays_before_next_segment_anchor():
     first = processor.process(
         AttributedAudioChunk(
             np.ones(240, dtype=np.float32).tobytes(),
-            {"type": "text_progress", "segment_idx": 0, "meta": {}},
+            {
+                "type": "text_progress",
+                "segment_idx": 0,
+                "meta": {
+                    "raw_codepoint_start": "0",
+                    "raw_codepoint_end": "1",
+                    "normalized_codepoint_start": "0",
+                    "normalized_codepoint_end": "1",
+                },
+            },
             segment_idx=0,
         )
     )
@@ -126,13 +137,28 @@ def test_segment_final_marker_stays_before_next_segment_anchor():
         {
             "type": "text_progress",
             "segment_idx": 0,
-            "meta": {"alignment_final": "true"},
+            "meta": {
+                "alignment_final": "true",
+                "raw_codepoint_start": "0",
+                "raw_codepoint_end": "1",
+                "normalized_codepoint_start": "0",
+                "normalized_codepoint_end": "1",
+            },
         }
     )
     second = processor.process(
         AttributedAudioChunk(
             np.ones(240, dtype=np.float32).tobytes(),
-            {"type": "text_progress", "segment_idx": 1, "meta": {}},
+            {
+                "type": "text_progress",
+                "segment_idx": 1,
+                "meta": {
+                    "raw_codepoint_start": "1",
+                    "raw_codepoint_end": "2",
+                    "normalized_codepoint_start": "1",
+                    "normalized_codepoint_end": "2",
+                },
+            },
             segment_idx=1,
         )
     )
@@ -155,3 +181,85 @@ def test_vad_attributed_frame_spans_are_rebased_and_monotonic():
     assert [(span.sample_start, span.sample_end) for span in result.provenance] == [
         (0, 384)
     ]
+
+
+def test_vad_keeps_marker_pending_until_partial_source_tail_is_decided():
+    vad = EnergyVADProcessor(
+        TTSVADConfig(
+            mode=VADMode.ENERGY,
+            begin_threshold=0.3,
+            begin_count=1,
+            end_threshold=0.2,
+            end_count=100,
+            start_margin_ms=0,
+        ),
+        sample_rate=24000,
+    )
+    processor = _processor(24000, vad=vad)
+    batch = processor.process(
+        AttributedAudioChunk(
+            np.full(500, 0.5, dtype=np.float32).tobytes(),
+            {
+                "type": "text_progress",
+                "segment_idx": 0,
+                "meta": {
+                    "raw_codepoint_start": "0",
+                    "raw_codepoint_end": "1",
+                    "normalized_codepoint_start": "0",
+                    "normalized_codepoint_end": "1",
+                },
+            },
+            segment_idx=0,
+        )
+    )
+    assert batch.audio is not None
+    assert batch.audio.meta["output_sample_end"] == "384"
+    assert batch.anchors == []
+
+    flushed = processor.finish()
+    assert flushed[0].audio is not None
+    assert flushed[0].audio.meta["output_sample_start"] == "384"
+    assert flushed[0].audio.meta["output_sample_end"] == "500"
+    assert flushed[0].anchors[0]["meta"]["output_sample_end"] == "500"
+
+
+def test_abort_discards_vad_and_resampler_pending_audio_without_anchor():
+    vad = EnergyVADProcessor(
+        TTSVADConfig(mode=VADMode.ENERGY, begin_threshold=0.3, begin_count=1),
+        sample_rate=24000,
+    )
+    processor = _processor(16000, vad=vad)
+    processor.process(
+        AttributedAudioChunk(
+            np.full(500, 0.5, dtype=np.float32).tobytes(),
+            {
+                "type": "text_progress",
+                "segment_idx": 0,
+                "meta": {
+                    "raw_codepoint_start": "0",
+                    "raw_codepoint_end": "1",
+                    "normalized_codepoint_start": "0",
+                    "normalized_codepoint_end": "1",
+                },
+            },
+            segment_idx=0,
+        )
+    )
+    assert processor.finish(emit_final=False) == []
+
+
+def test_legacy_progress_without_text_span_is_forwarded_without_v1_anchor():
+    processor = _processor(24000)
+    event = {
+        "type": "text_progress",
+        "segment_idx": 0,
+        "meta": {
+            "anchor_seq": "9",
+            "output_sample_start": "0",
+            "output_sample_end": "240",
+            "text_progress": "0.5",
+        },
+    }
+    batch = processor.process_event(event)
+    assert batch.anchors == []
+    assert batch.events[0]["meta"].get("anchor_seq") is None
