@@ -81,6 +81,9 @@ COPY client/src/qwen3tts_protocol/ /app/qwen3tts_protocol/
 # compose builds stage a development wheel there. It is served at GET /sdk/ on
 # the health port. Release builds pass its filename and SHA256 and fail closed
 # if the registry artifact is missing or changed.
+# A locally reused engine image may already contain an older SDK wheel. Keep
+# the runtime endpoint paired with the wheel staged for this build.
+RUN install -d /app/sdk && rm -f /app/sdk/*.whl
 COPY client/dist/ /app/sdk/
 RUN if [ -n "${CLIENT_WHEEL_FILENAME}" ] || [ -n "${CLIENT_WHEEL_SHA256}" ]; then \
         test -n "${CLIENT_WHEEL_FILENAME}" && \
