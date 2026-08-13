@@ -105,6 +105,35 @@ class SegmentToken:
     token_id: int
     text: str
     punct_level: int = 0
+    normalized_start: int = 0
+    normalized_end: int = 0
+    raw_start: int = 0
+    raw_end: int = 0
+
+
+class AttributedAudioChunk(bytes):
+    """Native PCM plus the text estimate that produced it.
+
+    This object is intentionally transport-neutral.  Reorder and guarded
+    delivery must move it as one unit so an estimate can only be stamped onto
+    the final output samples derived from the same audio.
+    """
+
+    def __new__(
+        cls,
+        pcm_bytes: bytes,
+        progress_event: Optional[dict[str, Any]] = None,
+        segment_idx: int = -1,
+        source_frame_start: int = 0,
+        source_frame_end: int = 0,
+    ):
+        obj = super().__new__(cls, pcm_bytes)
+        obj.progress_event = progress_event
+        obj.segment_idx = int(segment_idx)
+        obj.source_frame_start = int(source_frame_start)
+        obj.source_frame_end = int(source_frame_end)
+        obj.pcm_bytes = bytes(obj)
+        return obj
 
 
 @dataclass

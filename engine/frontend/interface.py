@@ -17,9 +17,11 @@ import logging
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 from ..core.session import Session, SegmentOrderMeta
+from ..core.text_journal import CanonicalTextJournal
 from ..core.text_progress import EmaTextProgressEstimator
 from ..core.types import (
     EngineResult,
+    AttributedAudioChunk,
     GroupPolicy,
     InputMode,
     ResultType,
@@ -84,7 +86,7 @@ class FrontendInterface:
         max_sessions: int = 128,
         engine_max_decode_len: int = 512,
         prefill_len: int = 12,
-        ema_ratio: float = 5.0,
+        ema_ratio: float = 4.5,
         max_concurrent_segments: int = 2,
         ema_alpha: float = 0.1,
         ema_overflow_alpha: float = 0.5,
@@ -164,6 +166,7 @@ class FrontendInterface:
         self._prepare_session_config(config)
 
         session = Session(session_id=session_id, config=config)
+        session.text_journal = CanonicalTextJournal(_normalize_tts_text)
         session.spliter = Spliter(
             engine_max_decode_len=self._engine_max,
             prefill_len=self._prefill_len,
@@ -263,7 +266,7 @@ class FrontendInterface:
         if mode == InputMode.FULL_TEXT:
             # Whole text is buffered and normalized at completion, so there is no
             # per-packet emoji seam to heal here.
-            normalized = _normalize_tts_text(text)
+            normalized, _ = session.text_journal.append(text or "")
             if normalized.strip():
                 session.append_text(normalized)
             return
@@ -278,7 +281,7 @@ class FrontendInterface:
         """Normalize a streaming text body, tokenize, route to the spliter per
         input mode, and dispatch. Shared by push_text_input and the end-of-input
         emoji-carry flush."""
-        text = _normalize_tts_text(body)
+        text, normalized_base = session.text_journal.append(body or "")
         if not text:
             return
         mode = session.config.input_mode
@@ -295,7 +298,11 @@ class FrontendInterface:
                 normalized_preview=obs.text_preview(text),
             )
 
-        tokens = self._tokenize_segment_text(text)
+        tokens = self._tokenize_segment_text(
+            text,
+            normalized_offset=normalized_base,
+            journal=session.text_journal,
+        )
         if not tokens:
             return
 
@@ -316,11 +323,17 @@ class FrontendInterface:
         session = self._sessions.get(session_id)
         if session is None or session.state == SessionState.DONE:
             return
-        text = _normalize_tts_text(text).strip()
+        if session.text_journal is None or not session.text_journal.normalized_text:
+            text, _ = session.text_journal.append(text or "")
+        else:
+            text = session.text_journal.normalized_text
+        text = session.text_journal.trim_normalized()
         if not text:
             return
 
-        tokens = self._tokenize_segment_text(text)
+        tokens = self._tokenize_segment_text(
+            text, normalized_offset=0, journal=session.text_journal
+        )
         if not tokens:
             return
 
@@ -335,6 +348,8 @@ class FrontendInterface:
         if session is None:
             return
         session.mark_input_complete()
+        if session.text_journal is not None:
+            session.text_journal.finish()
 
         mode = session.config.input_mode
         if mode == InputMode.FULL_TEXT:
@@ -573,16 +588,24 @@ class FrontendInterface:
                         result.segment_idx,
                         SegmentOrderMeta(result.segment_idx, 0, True),
                     )
-                    ready = reorder.push(meta.group_idx, meta.local_idx, audio)
+                    progress = self._make_text_progress_event(
+                        session,
+                        result.segment_idx,
+                        result.metrics or {},
+                    )
+                    attributed = AttributedAudioChunk(
+                        pcm_bytes=audio,
+                        progress_event=progress,
+                        segment_idx=result.segment_idx,
+                        source_frame_start=int(
+                            (result.metrics or {}).get("source_frame_start", 0) or 0
+                        ),
+                        source_frame_end=int(
+                            (result.metrics or {}).get("source_frame_end", 0) or 0
+                        ),
+                    )
+                    ready = reorder.push(meta.group_idx, meta.local_idx, attributed)
                     await _deliver(ready)
-                    if ready and on_event:
-                        progress = self._make_text_progress_event(
-                            session,
-                            result.segment_idx,
-                            result.metrics or {},
-                        )
-                        if progress is not None:
-                            await on_event(session.session_id, progress)
 
                 elif result.type == ResultType.PREFILL_DONE:
                     # Propagate prefill timing from engine thread
@@ -649,6 +672,7 @@ class FrontendInterface:
                     dropped = session.reorder.discard(meta.group_idx, meta.local_idx)
                     session.text_progress_estimators.pop(result.segment_idx, None)
                     session.segment_progress_frames.pop(result.segment_idx, None)
+                    session.segment_token_spans.pop(result.segment_idx, None)
                     rm = result.metrics or {}
                     logger.info(
                         "Segment retry: %s seg=%d reason=%s attempt=%s "
@@ -800,11 +824,14 @@ class FrontendInterface:
                             metrics["segment_prefill_ms"] = str(
                                 result.metrics["prefill_duration_ms"]
                             )
+                        eos_reason = str(
+                            (result.metrics or {}).get("eos_reason", "")
+                        )
                         progress = self._make_text_progress_event(
                             session,
                             seg_idx,
                             result.metrics or {},
-                            final=True,
+                            final=not eos_reason.endswith("_abort"),
                         )
                         if progress is not None:
                             metrics.update(progress["meta"])
@@ -823,6 +850,7 @@ class FrontendInterface:
                     new_actions = session.spliter.on_segment_done(seg_idx)
                     session.text_progress_estimators.pop(seg_idx, None)
                     session.segment_progress_frames.pop(seg_idx, None)
+                    session.segment_token_spans.pop(seg_idx, None)
                     if new_actions:
                         await self._dispatch_segment_actions(session, new_actions)
                     await self._dispatcher.maybe_send_session_tokens_done(session)
@@ -1084,6 +1112,14 @@ class FrontendInterface:
                 session.segment_texts[sa.segment_idx] = (
                     session.segment_texts.get(sa.segment_idx, "") + sa.token_text
                 )
+                session.segment_token_spans.setdefault(sa.segment_idx, []).append(
+                    {
+                        "normalized_start": int(getattr(sa, "normalized_start", 0)),
+                        "normalized_end": int(getattr(sa, "normalized_end", 0)),
+                        "raw_start": int(getattr(sa, "raw_start", 0)),
+                        "raw_end": int(getattr(sa, "raw_end", 0)),
+                    }
+                )
 
     def _make_text_progress_event(
         self,
@@ -1125,7 +1161,7 @@ class FrontendInterface:
             else:
                 # Keep custom/legacy spliter test doubles source-compatible;
                 # production Spliter instances always expose the frozen API.
-                ema_ratio = getattr(session.spliter, "_ema_ratio", 5.0)
+                ema_ratio = getattr(session.spliter, "_ema_ratio", 4.5)
             estimator = EmaTextProgressEstimator(
                 segment_idx=segment_idx,
                 ema_ratio=ema_ratio,
@@ -1138,13 +1174,32 @@ class FrontendInterface:
             text_token_count=text_token_count,
             final=final,
         )
+        spans = session.segment_token_spans.get(segment_idx, [])
+        token_end = estimate.text_token_end
+        if spans and token_end > 0:
+            selected = spans[: min(token_end, len(spans))]
+            normalized_start = selected[0]["normalized_start"]
+            normalized_end = selected[-1]["normalized_end"]
+            raw_start = selected[0]["raw_start"]
+            raw_end = selected[-1]["raw_end"]
+        else:
+            normalized_start = normalized_end = raw_start = raw_end = 0
+        anchor_seq = session.next_progress_anchor_seq
+        session.next_progress_anchor_seq += 1
         return {
             "type": "text_progress",
             "segment_idx": segment_idx,
             "text": "",
             "meta": {
+                "anchor_seq": str(anchor_seq),
                 "segment_id": str(segment_idx),
                 **estimate.to_meta(),
+                "raw_codepoint_start": str(raw_start),
+                "raw_codepoint_end": str(raw_end),
+                "normalized_codepoint_start": str(normalized_start),
+                "normalized_codepoint_end": str(normalized_end),
+                "text_input_final": "true" if session.input_complete else "false",
+                "alignment_final": "true" if final else "false",
             },
         }
 
@@ -1154,6 +1209,12 @@ class FrontendInterface:
             "group_idx": str(sa.group_idx),
             "local_idx": str(sa.local_idx),
             "group_final": "true" if sa.group_final else "false",
+            "raw_codepoint_start": str(getattr(sa, "raw_start", 0)),
+            "raw_codepoint_end": str(getattr(sa, "raw_end", 0)),
+            "normalized_codepoint_start": str(
+                getattr(sa, "normalized_start", 0)
+            ),
+            "normalized_codepoint_end": str(getattr(sa, "normalized_end", 0)),
         }
 
     async def _emit_text_token_events(self, session: Session, actions: list) -> None:
@@ -1234,20 +1295,54 @@ class FrontendInterface:
             token_ids=self._encode_ids(normalized),
         )
 
-    def _tokenize_segment_text(self, text: str) -> list[SegmentToken]:
+    def _tokenize_segment_text(
+        self,
+        text: str,
+        *,
+        normalized_offset: int = 0,
+        journal: Optional[CanonicalTextJournal] = None,
+    ) -> list[SegmentToken]:
         self._log_tokenization_debug(
             "segment_text",
             raw_text=text,
             normalized_text=text,
         )
-        ids, texts = self._tokenizer.encode_with_text(text, add_special_tokens=False)
+        if hasattr(self._tokenizer, "encode_with_offsets"):
+            ids, offsets = self._tokenizer.encode_with_offsets(
+                text, add_special_tokens=False
+            )
+        else:
+            ids, pieces = self._tokenizer.encode_with_text(
+                text, add_special_tokens=False
+            )
+            offsets = []
+            cursor = 0
+            for piece in pieces:
+                start = text.find(piece, cursor)
+                if start < 0:
+                    start = cursor
+                end = min(len(text), start + len(piece))
+                offsets.append((start, end))
+                cursor = end
         return [
             SegmentToken(
                 token_id=token_id,
-                text=token_text,
-                punct_level=Spliter.classify_punct_level(token_text),
+                text=text[start:end],
+                normalized_start=normalized_offset + int(start),
+                normalized_end=normalized_offset + int(end),
+                raw_start=(
+                    journal.raw_span(normalized_offset + int(start), normalized_offset + int(end))[0]
+                    if journal is not None
+                    else normalized_offset + int(start)
+                ),
+                raw_end=(
+                    journal.raw_span(normalized_offset + int(start), normalized_offset + int(end))[1]
+                    if journal is not None
+                    else normalized_offset + int(end)
+                ),
+                punct_level=Spliter.classify_punct_level(text[start:end]),
             )
-            for token_id, token_text in zip(ids, texts)
+            for token_id, (start, end) in zip(ids, offsets)
         ]
 
     def _encode_ids(self, text: str) -> list[int]:

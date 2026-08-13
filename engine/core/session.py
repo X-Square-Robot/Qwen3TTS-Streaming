@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .types import EngineResult, SessionConfig, SessionState
+from .text_journal import CanonicalTextJournal
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,7 @@ class Session:
     # Stage-0 cross-packet carry: a trailing suffix held back because it may be
     # the start of an emoji sequence split across packets (see split_pending_emoji).
     _emoji_carry: str = ""
+    text_journal: Optional[CanonicalTextJournal] = None
 
     # Segment tracking
     segments_submitted: int = 0
@@ -88,6 +90,8 @@ class Session:
     segment_texts: dict[int, str] = field(default_factory=dict)
     text_boundary_emitted: set[int] = field(default_factory=set)
     segment_token_emitted_count: dict[int, int] = field(default_factory=dict)
+    segment_token_spans: dict[int, list[dict[str, int]]] = field(default_factory=dict)
+    next_progress_anchor_seq: int = 1
     # Frontend-owned coarse text progress state.  The estimator is deliberately
     # transport-neutral so OpenAI Realtime, WebSocket, gRPC and demo clients
     # observe the same source-frame contract.

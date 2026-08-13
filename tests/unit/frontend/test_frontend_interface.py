@@ -14,6 +14,7 @@ from engine.core.types import (
     SessionConfig,
 )
 from engine.frontend.interface import FrontendInterface, _normalize_tts_text
+from engine.core.text_journal import CanonicalTextJournal
 
 
 def test_tts_text_normalization_strips_emoji_noise():
@@ -61,6 +62,28 @@ def test_count_text_tokens_uses_synthesis_normalization_and_tokenizer():
 
     assert interface.count_text_tokens(" 你好😊\n世界 ") == len("你好世界")
     assert interface.count_text_tokens("😊🚀") == 0
+
+
+def test_token_spans_keep_session_raw_coordinates_after_normalization():
+    interface = FrontendInterface(
+        engine_inbox=asyncio.Queue(maxsize=16),
+        tokenizer=_CharTokenizer(),
+        max_sessions=2,
+        engine_max_decode_len=64,
+    )
+    journal = CanonicalTextJournal(_normalize_tts_text)
+    normalized, offset = journal.append("你好😊 世界")
+    tokens = interface._tokenize_segment_text(
+        normalized,
+        normalized_offset=offset,
+        journal=journal,
+    )
+
+    world = next(token for token in tokens if token.text == "世")
+    assert world.normalized_start == 3
+    assert world.normalized_end == 4
+    assert world.raw_start == 4
+    assert world.raw_end == 5
 
 
 async def _drain_requests(inbox: asyncio.Queue) -> list:

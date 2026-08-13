@@ -93,6 +93,10 @@ class SegmentAction:
     local_idx: int = 0
     group_final: bool = True
     token_text: str = ""
+    normalized_start: int = 0
+    normalized_end: int = 0
+    raw_start: int = 0
+    raw_end: int = 0
 
 
 @dataclass
@@ -136,7 +140,7 @@ class Spliter:
         *,
         engine_max_decode_len: int = 512,
         prefill_len: int = 12,
-        ema_ratio: float = 5.0,
+        ema_ratio: float = 4.5,
         safety_margin: int = 8,
         max_concurrent: int = 2,
         ema_alpha: float = 0.1,
@@ -305,6 +309,7 @@ class Spliter:
         results: List[ActionResult],
         *,
         token_text: str = "",
+        token: Optional[SegmentToken] = None,
         group_idx: Optional[int] = None,
         local_idx: int = 0,
         group_final: bool = True,
@@ -329,7 +334,18 @@ class Spliter:
         for r in results:
             tt = token_text if r.type in (ActionType.PREFILL, ActionType.DECODE) else ""
             out.append(
-                SegmentAction(idx, r, group_idx, local_idx, group_final, token_text=tt)
+                SegmentAction(
+                    idx,
+                    r,
+                    group_idx,
+                    local_idx,
+                    group_final,
+                    token_text=tt,
+                    normalized_start=(token.normalized_start if token is not None else 0),
+                    normalized_end=(token.normalized_end if token is not None else 0),
+                    raw_start=(token.raw_start if token is not None else 0),
+                    raw_end=(token.raw_end if token is not None else 0),
+                )
             )
             if r.type in (ActionType.FLUSH_EOS, ActionType.FLUSH_NOP):
                 self._flushing.add(idx)
@@ -624,6 +640,7 @@ class Spliter:
                 active_idx,
                 driver.feed(evt),
                 token_text=pt.token.text,
+                token=pt.token,
                 group_idx=group_idx,
                 local_idx=local_idx,
                 group_final=is_stream,
