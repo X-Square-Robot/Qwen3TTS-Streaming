@@ -98,6 +98,18 @@ class TestMakeSilence:
         assert frame.data == b""
         assert frame.duration_s == 0.0
 
+    def test_uses_declared_pcm_layout(self):
+        frame = _make_silence(
+            0.01,
+            16000,
+            channels=2,
+            bytes_per_sample=2,
+            output_sample_start=10,
+        )
+        assert len(frame.data) == 160 * 2 * 2
+        assert frame.output_sample_start == 10
+        assert frame.output_sample_end == 170
+
 
 class TestAudioDurationS:
     def test_known_duration(self):
@@ -107,6 +119,12 @@ class TestAudioDurationS:
 
     def test_empty(self):
         assert _audio_duration_s(b"", SAMPLE_RATE) == 0.0
+
+    def test_pcm16_stereo_duration(self):
+        pcm = b"\0" * (160 * 2 * 2)
+        assert _audio_duration_s(
+            pcm, 16000, encoding="pcm_s16le", channels=2
+        ) == pytest.approx(0.01, abs=1e-6)
 
 
 # ---------------------------------------------------------------------------

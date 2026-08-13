@@ -1289,6 +1289,16 @@ class EngineWebSocketStreamSession(BaseStreamSession):
             raise StreamRecoveryError(
                 str(message.get("message") or "server rejected stream resume")
             )
+        if message_type == "playback_progress_error":
+            self._put_message(
+                StreamEvent(
+                    type="warning",
+                    session_id=self.session_id,
+                    message=str(message.get("message") or "playback progress rejected"),
+                    meta={"code": str(message.get("code") or "")},
+                )
+            )
+            return False
         if message_type != "event":
             return False
         return self._handle_event(
@@ -1359,6 +1369,7 @@ class EngineWebSocketStreamSession(BaseStreamSession):
                 chunk = self._trim_audio_overlap(
                     chunk,
                     samples=self._audio_through_sample - start_sample,
+                    output_sample_start=start_sample,
                 )
                 start_sample = self._audio_through_sample
             if end_sample <= self._audio_through_sample:
@@ -1445,7 +1456,12 @@ class EngineWebSocketStreamSession(BaseStreamSession):
         return value
 
     @staticmethod
-    def _trim_audio_overlap(chunk: AudioChunk, *, samples: int) -> AudioChunk:
+    def _trim_audio_overlap(
+        chunk: AudioChunk,
+        *,
+        samples: int,
+        output_sample_start: int,
+    ) -> AudioChunk:
         bytes_per_sample = {
             "pcm_f32": 4,
             "pcm_s16le": 2,
@@ -1460,13 +1476,27 @@ class EngineWebSocketStreamSession(BaseStreamSession):
         byte_offset = samples * max(1, chunk.audio.channels) * bytes_per_sample
         if byte_offset > len(chunk.pcm_bytes):
             raise ProtocolError("resumed audio overlap exceeds binary frame length")
+        trimmed_start = (
+            chunk.output_sample_start
+            if chunk.output_sample_start is not None
+            else output_sample_start
+        ) + samples
+        trimmed_end = chunk.output_sample_end
+        if trimmed_end is not None and trimmed_end < trimmed_start:
+            raise ProtocolError("resumed audio sample metadata is inconsistent")
+        meta = dict(chunk.meta)
+        meta["output_sample_start"] = str(trimmed_start)
+        if trimmed_end is not None:
+            meta["output_sample_end"] = str(trimmed_end)
         return AudioChunk(
             pcm_bytes=chunk.pcm_bytes[byte_offset:],
             audio=chunk.audio,
             chunk_index=chunk.chunk_index,
             first_chunk=False,
             final_chunk=chunk.final_chunk,
-            meta=dict(chunk.meta),
+            meta=meta,
+            output_sample_start=trimmed_start,
+            output_sample_end=trimmed_end,
         )
 
     def _handle_text_ack(self, message: dict) -> None:
@@ -1484,6 +1514,45 @@ class EngineWebSocketStreamSession(BaseStreamSession):
             self._acked_text_seq = through_seq
             while self._text_journal and self._text_journal[0][0] <= through_seq:
                 self._text_journal.popleft()
+
+    def update_playback_progress(
+        self,
+        *,
+        played_through_sample: int,
+        buffered_through_sample: int | None = None,
+        report: bool = False,
+    ):
+        progress = super().update_playback_progress(
+            played_through_sample=played_through_sample,
+            buffered_through_sample=buffered_through_sample,
+            report=False,
+        )
+        if not report:
+            return progress
+        buffered = (
+            played_through_sample
+            if buffered_through_sample is None
+            else buffered_through_sample
+        )
+        with self._transport_condition:
+            if self._transport_finished or self._hard_closed:
+                return progress
+            try:
+                ws_send_json(
+                    self._conn,
+                    {
+                        "type": "playback_progress",
+                        "played_through_sample": int(played_through_sample),
+                        "buffered_through_sample": int(buffered),
+                        "observed_delivery_seq": int(self._last_delivery_seq),
+                        "client_monotonic_ms": int(time.monotonic() * 1000),
+                    },
+                )
+            except (OSError, RawWebSocketError):
+                # Playback telemetry is best effort and must never turn a
+                # healthy local cursor into a stream failure.
+                pass
+        return progress
 
     def _maybe_ack_locked(self, conn: RawWebSocketConnection, generation: int) -> None:
         self._deliveries_since_ack += 1

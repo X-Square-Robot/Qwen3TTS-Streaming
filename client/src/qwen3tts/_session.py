@@ -9,6 +9,7 @@ from typing import Iterator
 from qwen3tts_protocol import AudioChunk, StreamEvent
 
 from .exceptions import StreamClosedError
+from .progress import PlaybackProgressTracker, PlaybackTextProgress
 
 _QUEUE_SENTINEL = object()
 
@@ -29,8 +30,10 @@ class BaseStreamSession:
         self._closed = False
         self._send_closed = False
         self._lock = threading.Lock()
+        self.progress_tracker = PlaybackProgressTracker()
 
     def _put_message(self, message: StreamEvent | AudioChunk) -> None:
+        self.progress_tracker.observe(message)
         self._messages.put(message)
         if _is_terminal_message(message):
             self._close_message_queue()
@@ -79,6 +82,20 @@ class BaseStreamSession:
             # the transport has already disappeared.
             self._mark_send_closed()
             self._close_message_queue()
+
+    def update_playback_progress(
+        self,
+        *,
+        played_through_sample: int,
+        buffered_through_sample: int | None = None,
+        report: bool = False,
+    ) -> PlaybackTextProgress:
+        """Update the local playback clock; transports may override reporting."""
+        del report
+        return self.progress_tracker.update_playback_progress(
+            played_through_sample=played_through_sample,
+            buffered_through_sample=buffered_through_sample,
+        )
 
     def stop(self, *, client_timestamp_ms: int | None = None) -> None:
         """Graceful alias for :meth:`end` across all streaming transports."""
@@ -143,6 +160,7 @@ class AsyncStreamSession:
         self.session_id = sync_session.session_id
         self.transport = sync_session.transport
         self.degraded_to_oneshot = sync_session.degraded_to_oneshot
+        self.progress_tracker = sync_session.progress_tracker
 
     @property
     def usage(self) -> dict:
@@ -183,6 +201,20 @@ class AsyncStreamSession:
 
     async def aclose(self, reason: str = "client closed") -> None:
         await asyncio.to_thread(self._sync.close, reason=reason)
+
+    async def update_playback_progress(
+        self,
+        *,
+        played_through_sample: int,
+        buffered_through_sample: int | None = None,
+        report: bool = False,
+    ) -> PlaybackTextProgress:
+        return await asyncio.to_thread(
+            self._sync.update_playback_progress,
+            played_through_sample=played_through_sample,
+            buffered_through_sample=buffered_through_sample,
+            report=report,
+        )
 
     async def aiter_messages(self, *, post_send_idle_timeout: float | None = None):
         iterator = iter(

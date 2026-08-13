@@ -111,6 +111,8 @@ class AudioChunk:
     first_chunk: bool = False
     final_chunk: bool = False
     meta: dict[str, str] = field(default_factory=dict)
+    output_sample_start: int | None = None
+    output_sample_end: int | None = None
 
 
 @dataclass(frozen=True)

@@ -60,6 +60,12 @@ from .exceptions import (
     TransportProbeError,
 )
 from .realtime import RealtimeAudioStream, TimedAudio
+from .progress import (
+    PlaybackProgressTracker,
+    PlaybackTextProgress,
+    TextCursor,
+    TextProgressAnchor,
+)
 
 __all__ = (
     "ArrayResult",
@@ -78,6 +84,8 @@ __all__ = (
     "ProtocolError",
     "ProtocolVersionMismatchError",
     "RealtimeAudioStream",
+    "PlaybackProgressTracker",
+    "PlaybackTextProgress",
     "SessionEndRequest",
     "SessionStartRequest",
     "StreamCancelRequest",
@@ -87,6 +95,8 @@ __all__ = (
     "StreamTextChunk",
     "SynthesisConfig",
     "TimedAudio",
+    "TextCursor",
+    "TextProgressAnchor",
     "TTSClient",
     "TTSClientError",
     "TimingContext",

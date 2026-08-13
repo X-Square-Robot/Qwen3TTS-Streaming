@@ -40,6 +40,7 @@ from ..constants import (
     DEFAULT_OPENAI_REALTIME_MODEL,
     OPENAI_REALTIME_PROTOCOL,
     QWEN_TEXT_BUFFER_EXTENSION,
+    QWEN_TEXT_PROGRESS_EXTENSION,
     TRANSPORT_OPENAI_REALTIME,
 )
 from ..exceptions import ProtocolError, StreamClosedError
@@ -209,6 +210,7 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
         self._input_closed = initial_text is not None
         self._next_sequence = 1
         self._chunk_index = 0
+        self._audio_sample_cursor = 0
         self._last_error = ""
         self.realtime_session_id = ""
         self.response_id = ""
@@ -247,6 +249,15 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
                     "incremental text streaming requires server extension "
                     f"{QWEN_TEXT_BUFFER_EXTENSION!r}"
                 )
+            # The extension is additive. Older servers may not advertise it;
+            # the session remains usable, but its tracker stays unavailable
+            # until an anchor carrying output samples is received.
+            self._text_progress_supported = (
+                QWEN_TEXT_PROGRESS_EXTENSION
+                == ((updated.get("session") or {}).get("qwen") or {}).get(
+                    "text_progress_extension"
+                )
+            )
             ws_send_json(conn, {"type": "response.create"})
         else:
             ws_send_json(
@@ -399,6 +410,11 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
             except (ValueError, binascii.Error) as exc:
                 raise ProtocolError("invalid Base64 Realtime audio delta") from exc
             if pcm:
+                sample_start = self._audio_sample_cursor
+                sample_end = sample_start + len(pcm) // (
+                    2 * max(1, self.audio_format.channels)
+                )
+                self._audio_sample_cursor = sample_end
                 self._chunk_index += 1
                 self._put_message(
                     AudioChunk(
@@ -406,7 +422,14 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
                         audio=self.audio_format,
                         chunk_index=self._chunk_index,
                         first_chunk=self._chunk_index == 1,
-                        meta={"response_id": self.response_id},
+                        meta={
+                            "response_id": self.response_id,
+                            "output_sample_start": str(sample_start),
+                            "output_sample_end": str(sample_end),
+                            "output_sample_rate": str(self.audio_format.sample_rate),
+                        },
+                        output_sample_start=sample_start,
+                        output_sample_end=sample_end,
                     )
                 )
             return False
@@ -456,6 +479,7 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
         if isinstance(usage, dict):
             self.usage = dict(usage)
         details = response.get("status_details") or {}
+        response_metadata = response.get("metadata") or {}
         failure = details.get("error") if isinstance(details, dict) else {}
         message = (
             str((failure or {}).get("message") if isinstance(failure, dict) else "")
@@ -471,6 +495,12 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
                 meta={
                     "response_id": self.response_id,
                     "status": self.response_status,
+                    "final_output_sample": str(self._audio_sample_cursor),
+                    **{
+                        str(key): str(value)
+                        for key, value in response_metadata.items()
+                        if value is not None
+                    },
                     "usage": json.dumps(
                         self.usage, ensure_ascii=False, separators=(",", ":")
                     ),

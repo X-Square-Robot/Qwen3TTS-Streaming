@@ -31,23 +31,49 @@ class TimedAudio:
     is_silence: bool = False
     """True if this frame is a silence fill inserted to cover a gap."""
 
+    output_sample_start: int | None = None
+    output_sample_end: int | None = None
 
-def _make_silence(duration_s: float, sample_rate: int) -> TimedAudio:
-    """Generate a silence frame of the given duration.
 
-    Uses float32 PCM (4 bytes per sample) to match the engine's native
-    output encoding.
-    """
+def _make_silence(
+    duration_s: float,
+    sample_rate: int,
+    *,
+    channels: int = 1,
+    bytes_per_sample: int = 4,
+    output_sample_start: int | None = None,
+) -> TimedAudio:
+    """Generate a silence frame using the active PCM layout."""
     num_samples = int(sample_rate * duration_s)
     # float32 zero bytes — matches pcm_f32 encoding
-    silence_bytes = b"\x00" * (num_samples * 4)
-    return TimedAudio(data=silence_bytes, duration_s=duration_s, is_silence=True)
+    silence_bytes = b"\x00" * (num_samples * channels * bytes_per_sample)
+    end = None if output_sample_start is None else output_sample_start + num_samples
+    return TimedAudio(
+        data=silence_bytes,
+        duration_s=duration_s,
+        is_silence=True,
+        output_sample_start=output_sample_start,
+        output_sample_end=end,
+    )
 
 
-def _audio_duration_s(pcm_bytes: bytes, sample_rate: int) -> float:
-    """Compute the duration of a pcm_f32 byte buffer at *sample_rate*."""
-    num_samples = len(pcm_bytes) // 4  # float32 = 4 bytes per sample
-    return num_samples / sample_rate
+def _audio_duration_s(
+    pcm_bytes: bytes,
+    sample_rate: int,
+    *,
+    encoding: str = "pcm_f32",
+    channels: int = 1,
+) -> float:
+    """Compute PCM duration using the declared encoding and channel count."""
+    bytes_per_sample = _bytes_per_sample(encoding)
+    num_samples = len(pcm_bytes) // (bytes_per_sample * max(1, channels))
+    return num_samples / max(1, sample_rate)
+
+
+def _bytes_per_sample(encoding: str) -> int:
+    return {"pcm_f32": 4, "pcm_s16le": 2, "pcm_s16": 2, "pcm_u8": 1}.get(
+        encoding.lower(), 4
+    )
 
 
 class RealtimeAudioStream:
@@ -110,8 +136,18 @@ class RealtimeAudioStream:
         """Yield frames as they arrive, no timing alignment."""
         for message in self._session.iter_messages():
             if isinstance(message, AudioChunk):
-                duration = _audio_duration_s(message.pcm_bytes, self._sample_rate)
-                yield TimedAudio(data=message.pcm_bytes, duration_s=duration)
+                duration = _audio_duration_s(
+                    message.pcm_bytes,
+                    message.audio.sample_rate or self._sample_rate,
+                    encoding=message.audio.encoding,
+                    channels=message.audio.channels,
+                )
+                yield TimedAudio(
+                    data=message.pcm_bytes,
+                    duration_s=duration,
+                    output_sample_start=message.output_sample_start,
+                    output_sample_end=message.output_sample_end,
+                )
 
     # ------------------------------------------------------------------
     # Paced mode (fill_silence=True)
@@ -157,6 +193,10 @@ class RealtimeAudioStream:
 
         wall_start: float | None = None  # anchored at the first audio frame
         play_clock = 0.0  # cumulative emitted duration (playhead)
+        sample_cursor = 0
+        active_sample_rate = self._sample_rate
+        active_channels = 1
+        active_bytes_per_sample = 4
 
         try:
             while True:
@@ -170,7 +210,15 @@ class RealtimeAudioStream:
                         continue
                     gap = (time.monotonic() - wall_start) - play_clock
                     if gap > 0:
-                        yield _make_silence(gap, self._sample_rate)
+                        silence = _make_silence(
+                            gap,
+                            active_sample_rate,
+                            channels=active_channels,
+                            bytes_per_sample=active_bytes_per_sample,
+                            output_sample_start=sample_cursor,
+                        )
+                        sample_cursor = silence.output_sample_end or sample_cursor
+                        yield silence
                         play_clock += gap
                     continue
 
@@ -178,20 +226,68 @@ class RealtimeAudioStream:
                 if audio is None:
                     break
 
-                duration = _audio_duration_s(audio.pcm_bytes, self._sample_rate)
+                duration = _audio_duration_s(
+                    audio.pcm_bytes,
+                    audio.audio.sample_rate or self._sample_rate,
+                    encoding=audio.audio.encoding,
+                    channels=audio.audio.channels,
+                )
+                active_sample_rate = audio.audio.sample_rate or self._sample_rate
+                active_channels = max(1, audio.audio.channels)
+                active_bytes_per_sample = _bytes_per_sample(audio.audio.encoding)
 
                 if wall_start is None:
                     # First frame: anchor the clock and emit immediately.
                     wall_start = time.monotonic()
-                    yield TimedAudio(data=audio.pcm_bytes, duration_s=duration)
+                    start = (
+                        audio.output_sample_start
+                        if audio.output_sample_start is not None
+                        else sample_cursor
+                    )
+                    end = (
+                        audio.output_sample_end
+                        if audio.output_sample_end is not None
+                        else start + int(round(duration * active_sample_rate))
+                    )
+                    yield TimedAudio(
+                        data=audio.pcm_bytes,
+                        duration_s=duration,
+                        output_sample_start=start,
+                        output_sample_end=end,
+                    )
+                    sample_cursor = max(sample_cursor, end)
                     play_clock = duration
                 else:
                     # Fill any catch-up gap (engine was late), then emit.
                     gap = (time.monotonic() - wall_start) - play_clock
                     if gap > 0:
-                        yield _make_silence(gap, self._sample_rate)
+                        silence = _make_silence(
+                            gap,
+                            active_sample_rate,
+                            channels=active_channels,
+                            bytes_per_sample=active_bytes_per_sample,
+                            output_sample_start=sample_cursor,
+                        )
+                        sample_cursor = silence.output_sample_end or sample_cursor
+                        yield silence
                         play_clock += gap
-                    yield TimedAudio(data=audio.pcm_bytes, duration_s=duration)
+                    start = (
+                        audio.output_sample_start
+                        if audio.output_sample_start is not None
+                        else sample_cursor
+                    )
+                    end = (
+                        audio.output_sample_end
+                        if audio.output_sample_end is not None
+                        else start + int(round(duration * active_sample_rate))
+                    )
+                    yield TimedAudio(
+                        data=audio.pcm_bytes,
+                        duration_s=duration,
+                        output_sample_start=start,
+                        output_sample_end=end,
+                    )
+                    sample_cursor = max(sample_cursor, end)
                     play_clock += duration
 
                 # If the playhead is ahead of real time, sleep so the output

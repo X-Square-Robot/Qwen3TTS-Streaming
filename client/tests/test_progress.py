@@ -1,0 +1,64 @@
+from qwen3tts import (
+    AudioChunk,
+    AudioFormat,
+    PlaybackProgressTracker,
+    StreamEvent,
+    TextProgressAnchor,
+)
+
+
+def _anchor(seq, start, end, raw_end, normalized_end):
+    return TextProgressAnchor(
+        anchor_seq=seq,
+        output_sample_start=start,
+        output_sample_end=end,
+        output_sample_rate=24000,
+        raw_codepoint_start=0,
+        raw_codepoint_end=raw_end,
+        normalized_codepoint_start=0,
+        normalized_codepoint_end=normalized_end,
+    )
+
+
+def test_tracker_keeps_confirmed_and_interpolated_cursors_separate():
+    tracker = PlaybackProgressTracker(
+        [_anchor(1, 0, 100, 5, 5), _anchor(2, 100, 200, 10, 10)]
+    )
+    state = tracker.update_playback_progress(
+        played_through_sample=150,
+        buffered_through_sample=180,
+    )
+    assert state.confirmed.raw_codepoint == 5
+    assert state.estimated.raw_codepoint == 8
+    assert state.buffered_through_sample == 180
+
+
+def test_tracker_does_not_extrapolate_past_latest_anchor_and_completes_at_terminal():
+    tracker = PlaybackProgressTracker([_anchor(1, 0, 100, 5, 5)])
+    state = tracker.update_playback_progress(played_through_sample=100)
+    assert state.confirmed.raw_codepoint == 5
+    assert state.estimated.raw_codepoint == 5
+    tracker.observe(
+        StreamEvent(type="done", meta={"final_output_sample": "100"})
+    )
+    state = tracker.update_playback_progress(played_through_sample=100)
+    assert state.playback_complete is True
+
+
+def test_tracker_reads_anchor_from_audio_meta():
+    tracker = PlaybackProgressTracker()
+    tracker.observe(
+        AudioChunk(
+            pcm_bytes=b"\0" * 8,
+            audio=AudioFormat(encoding="pcm_f32", sample_rate=24000, channels=1),
+            meta={
+                "anchor_seq": "1",
+                "output_sample_start": "0",
+                "output_sample_end": "2",
+                "output_sample_rate": "24000",
+                "raw_codepoint_end": "2",
+                "normalized_codepoint_end": "2",
+            },
+        )
+    )
+    assert tracker.latest.available is True

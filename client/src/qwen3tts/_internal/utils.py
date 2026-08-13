@@ -108,6 +108,10 @@ def stream_text_chunk_to_mapping(chunk: StreamTextChunk) -> dict[str, Any]:
 
 def decode_audio_chunk(payload: dict[str, Any], pcm_bytes: bytes) -> AudioChunk:
     audio = payload.get("audio") or payload.get("audio_format") or {}
+    meta = {
+        **dict(payload.get("meta") or {}),
+        **dict(audio.get("meta") or {}),
+    }
     return AudioChunk(
         pcm_bytes=pcm_bytes,
         audio=AudioFormat(
@@ -115,14 +119,23 @@ def decode_audio_chunk(payload: dict[str, Any], pcm_bytes: bytes) -> AudioChunk:
             sample_rate=int(audio.get("sample_rate", 24000)),
             channels=int(audio.get("channels", 1)),
         ),
-        chunk_index=int((payload.get("meta") or {}).get("chunk_index", 0) or 0),
+        chunk_index=int(meta.get("chunk_index", 0) or 0),
         first_chunk=str(
-            (payload.get("meta") or {}).get("first_audio_chunk", "")
+            meta.get("first_audio_chunk", "")
         ).lower()
         == "true",
         final_chunk=bool(payload.get("final_chunk", False)),
-        meta={str(k): str(v) for k, v in dict(payload.get("meta") or {}).items()},
+        meta={str(k): str(v) for k, v in meta.items()},
+        output_sample_start=_parse_optional_int(meta.get("output_sample_start")),
+        output_sample_end=_parse_optional_int(meta.get("output_sample_end")),
     )
+
+
+def _parse_optional_int(value: Any) -> int | None:
+    try:
+        return None if value in (None, "") else int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def decode_stream_event(payload: dict[str, Any]) -> StreamEvent:
