@@ -115,6 +115,8 @@ class ResumableSession:
         self.acked_text_seq = 0
         self.input_closed = False
         self.final_text_seq: int | None = None
+        self.played_through_sample = 0
+        self.buffered_through_sample = 0
 
         self.terminal = False
         self.engine_finished = False
@@ -373,6 +375,38 @@ class ResumableSession:
                 self._retained_bytes -= delivery.retained_bytes
             self._trimmed_through_seq = through_delivery_seq
             self._trimmed_audio_sample = audio_through_sample
+
+    async def record_playback_progress(
+        self,
+        generation: int,
+        *,
+        played_through_sample: int,
+        buffered_through_sample: int,
+    ) -> None:
+        """Record untrusted playback telemetry without affecting delivery."""
+        async with self._lock:
+            self._require_generation_locked(generation)
+            if played_through_sample < 0 or buffered_through_sample < 0:
+                raise ResumeProtocolError(
+                    "invalid_playback_progress",
+                    "playback samples must be non-negative",
+                )
+            if played_through_sample < self.played_through_sample:
+                return
+            if buffered_through_sample < played_through_sample:
+                raise ResumeProtocolError(
+                    "invalid_playback_progress",
+                    "buffered_through_sample must be >= played_through_sample",
+                )
+            if buffered_through_sample > self._next_audio_sample:
+                raise ResumeProtocolError(
+                    "invalid_playback_progress",
+                    "playback progress is ahead of server output",
+                )
+            self.played_through_sample = played_through_sample
+            self.buffered_through_sample = max(
+                self.buffered_through_sample, buffered_through_sample
+            )
 
     async def resume_info(self) -> dict[str, Any]:
         async with self._lock:

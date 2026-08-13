@@ -83,7 +83,10 @@ def create_app(
             {
                 "supported_api_protocols": [OPENAI_REALTIME_PROTOCOL],
                 "openai_realtime_path": OPENAI_REALTIME_PATH,
-                "supported_realtime_extensions": [QWEN_TEXT_BUFFER_EXTENSION],
+                "supported_realtime_extensions": [
+                    QWEN_TEXT_BUFFER_EXTENSION,
+                    "qwen.text_progress.v1",
+                ],
                 "backend": "triton-grpc",
                 "model": backend.model_name,
                 "model_version": backend.model_version,

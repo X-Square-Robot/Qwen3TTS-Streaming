@@ -58,6 +58,7 @@ from ..interface import (
     parse_output_policy,
     parse_timing_context,
     serialize_stream_event,
+    stamp_output_anchor,
     to_core_output_policy,
     to_core_timing_context,
 )
@@ -134,6 +135,10 @@ class WebSocketGateway:
         capabilities["supported_websocket_features"] = list(
             _SUPPORTED_WEBSOCKET_FEATURES
         )
+        capabilities["supported_progress_features"] = [
+            "text_progress_anchor_v1",
+            "playback_progress_v1",
+        ]
         capabilities["stream_resume_grace_ms"] = int(
             round(self._resume_registry.grace_seconds * 1000.0)
         )
@@ -145,7 +150,10 @@ class WebSocketGateway:
             "tts-session-v2alpha1",
         ]
         capabilities["openai_realtime_path"] = _OPENAI_REALTIME_PATH
-        capabilities["supported_realtime_extensions"] = ["qwen.input_text_buffer.v1"]
+        capabilities["supported_realtime_extensions"] = [
+            "qwen.input_text_buffer.v1",
+            "qwen.text_progress.v1",
+        ]
         return capabilities
 
     async def handle_capabilities(self, request):
@@ -173,6 +181,8 @@ class WebSocketGateway:
         start_request: SessionStartRequest | None = None
         resume_session: ResumableSession | None = None
         resume_attachment: ResumeAttachment | None = None
+        playback_played_sample = 0
+        playback_buffered_sample = 0
         request_task: asyncio.Task | None = None
         outbound_task: asyncio.Task | None = None
         pump_task = asyncio.create_task(self._pump_messages(ws, request_queue))
@@ -183,6 +193,7 @@ class WebSocketGateway:
             nonlocal client_session_id, internal_session_id
             nonlocal start_request, outbound_queue, outbound_task
             nonlocal input_closed, resume_session, resume_attachment
+            nonlocal playback_played_sample, playback_buffered_sample
             # Usually the queue-get task delivered the terminal itself. It can
             # still be pending when cancel sends its terminal directly.
             if outbound_task is not None and not outbound_task.done():
@@ -199,6 +210,8 @@ class WebSocketGateway:
             outbound_queue = None
             resume_session = None
             resume_attachment = None
+            playback_played_sample = 0
+            playback_buffered_sample = 0
 
         async def send_outbound_frame(frame: dict[str, Any]) -> bool:
             """Send one queued frame; return true when it ends the session."""
@@ -628,6 +641,46 @@ class WebSocketGateway:
                             )
                             await reset_session()
 
+                        elif msg_type == "playback_progress":
+                            try:
+                                played = _required_nonnegative_ws_int(
+                                    message, "played_through_sample", positive=False
+                                )
+                                buffered = _required_nonnegative_ws_int(
+                                    message, "buffered_through_sample", positive=False
+                                )
+                                if resume_session is not None:
+                                    if resume_attachment is None:
+                                        raise ResumeProtocolError(
+                                            "resume_attachment_missing",
+                                            "resumable session has no attachment",
+                                        )
+                                    await resume_session.record_playback_progress(
+                                        resume_attachment.generation,
+                                        played_through_sample=played,
+                                        buffered_through_sample=buffered,
+                                    )
+                                else:
+                                    if played < playback_played_sample:
+                                        continue
+                                    if buffered < played:
+                                        raise ResumeProtocolError(
+                                            "invalid_playback_progress",
+                                            "buffered_through_sample must be >= played_through_sample",
+                                        )
+                                    playback_played_sample = played
+                                    playback_buffered_sample = max(
+                                        playback_buffered_sample, buffered
+                                    )
+                            except ResumeProtocolError as exc:
+                                await ws.send_json(
+                                    {
+                                        "type": "playback_progress_error",
+                                        "code": exc.code,
+                                        "message": str(exc),
+                                    }
+                                )
+
                         elif msg_type == "cancel":
                             if internal_session_id:
                                 cancelled_internal_session_id = internal_session_id
@@ -845,16 +898,38 @@ class WebSocketGateway:
             )
 
         async def on_audio(sid: str, data: bytes) -> None:
+            progress_event = getattr(data, "progress_event", None)
+            data = getattr(data, "pcm_bytes", data)
+
+            async def _publish_progress(frame) -> None:
+                if not progress_event:
+                    return
+                progress = dict(progress_event)
+                progress["meta"] = {
+                    **dict(progress.get("meta") or {}),
+                    **frame.meta,
+                }
+                await outbound_queue.put(
+                    _make_event_frame_from_contract(
+                        build_forward_event(
+                            client_session_id, progress, start_request
+                        )
+                    )
+                )
+
             if not vad_enabled:
                 # Fast path: skip the float32→int16→float32 round-trip (per-
                 # chunk loop cost + silent 15-bit quantization of f32 output).
                 if not data:
                     return
                 frame = pipeline.convert_audio_chunk(data)
+                if progress_event:
+                    frame.meta.update(progress_event.get("meta") or {})
                 log_first_effective_audio(len(data))
                 await outbound_queue.put(
                     _make_audio_frame(frame.pcm_bytes, frame.audio, meta=frame.meta)
                 )
+                await _publish_progress(frame)
                 return
             # Apply VAD filtering before output pipeline
             raw = np.frombuffer(data, dtype=np.float32)
@@ -871,12 +946,16 @@ class WebSocketGateway:
             filtered_bytes = filtered_f32.tobytes()
 
             frame = pipeline.convert_audio_chunk(filtered_bytes)
+            if progress_event:
+                frame.meta.update(progress_event.get("meta") or {})
             log_first_effective_audio(len(filtered_bytes))
             await outbound_queue.put(
                 _make_audio_frame(frame.pcm_bytes, frame.audio, meta=frame.meta)
             )
+            await _publish_progress(frame)
 
         async def on_event(sid: str, event: dict) -> None:
+            event = stamp_output_anchor(event, pipeline)
             await outbound_queue.put(
                 _make_event_frame_from_contract(
                     build_forward_event(client_session_id, event, start_request)
@@ -974,6 +1053,7 @@ def _coalesce_queued_audio_frames(
     parts: list[bytes] | None = None
     leftover: dict[str, Any] | None = None
     total_bytes = len(head["pcm_data"])
+    merged_sample_end = int((head.get("meta") or {}).get("output_sample_end", "0") or 0)
     while total_bytes < _COALESCE_MAX_BYTES and not outbound_queue.empty():
         nxt = outbound_queue.get_nowait()
         audio = nxt.get("audio") if nxt.get("type") == "audio" else None
@@ -988,6 +1068,10 @@ def _coalesce_queued_audio_frames(
                 parts = [head["pcm_data"]]
             parts.append(audio["pcm_data"])
             total_bytes += len(audio["pcm_data"])
+            merged_sample_end = max(
+                merged_sample_end,
+                int((audio.get("meta") or {}).get("output_sample_end", "0") or 0),
+            )
             continue
         leftover = nxt
         break
@@ -995,6 +1079,10 @@ def _coalesce_queued_audio_frames(
         return frame, leftover
     merged_audio = dict(head)
     merged_audio["pcm_data"] = b"".join(parts)
+    merged_audio["meta"] = {
+        **dict(head.get("meta") or {}),
+        "output_sample_end": str(merged_sample_end),
+    }
     merged = dict(frame)
     merged["audio"] = merged_audio
     return merged, leftover

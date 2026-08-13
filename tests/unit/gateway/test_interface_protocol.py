@@ -16,6 +16,7 @@ from engine.interface import (
     serialize_output_policy,
     serialize_stream_event,
     serialize_timing_context,
+    stamp_output_anchor,
     to_core_output_policy,
     to_core_timing_context,
 )
@@ -156,6 +157,32 @@ def test_output_pipeline_emits_server_timing_contract():
     assert done["meta"]["turn_id"] == "turn-2"
     assert done["meta"]["client_request_ts_ms"] == "1710000000000"
     assert done["meta"]["audio_chunk_count"] == "1"
+
+
+def test_output_pipeline_tracks_final_sample_and_stamps_alignment_anchor():
+    cfg = SessionConfig(
+        audio=AudioConfig(sample_rate=16000, encoding=AudioEncoding.PCM_S16LE)
+    )
+    start = SessionStartRequest(
+        session_id="anchor",
+        config=cfg,
+        output_policy=parse_output_policy({}),
+        timing=parse_timing_context({}),
+    )
+    pipeline = OutputPipeline(start, native_sample_rate=16000)
+    pipeline.convert_audio_chunk(bytes(8))  # two native float samples
+
+    event = stamp_output_anchor(
+        {
+            "type": "segment_end",
+            "meta": {"anchor_seq": "7", "alignment_final": "true"},
+        },
+        pipeline,
+    )
+    assert event["meta"]["output_sample_start"] == "2"
+    assert event["meta"]["output_sample_end"] == "2"
+    assert event["meta"]["output_sample_rate"] == "16000"
+    assert pipeline.done_meta({})["final_output_sample"] == "2"
 
 
 def test_output_pipeline_updates_accumulator_with_effective_audio_and_prefix_trim():

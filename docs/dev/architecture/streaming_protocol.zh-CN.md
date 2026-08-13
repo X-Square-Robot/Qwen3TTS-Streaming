@@ -147,7 +147,13 @@ WebSocket capabilities 还会声明 `stream_resume_v1`。客户端通过在
   `stream_resume_max_buffer_bytes`、
   `supported_output_policy_features`、
   `supported_vad_strategies`、
-  `supported_timing_fields`
+  `supported_timing_fields`、
+  `supported_progress_features`
+
+其中 `supported_progress_features` 在支持时包含
+`text_progress_anchor_v1`、`playback_progress_v1`；Realtime 扩展能力包含
+`qwen.text_progress.v1`。服务端保持旧的 `supported_websocket_features` 列表不变，
+避免旧客户端把新增能力误判为未知必选功能。
 
 当前规范能力特性标志为：
 
@@ -164,6 +170,24 @@ WebSocket capabilities 还会声明 `stream_resume_v1`。客户端通过在
   - 客户端提供的时间戳，如 `client_request_ts_ms`
   - 服务器规范化的时间戳，如 `server_first_audio_epoch_ms`
   - 派生延迟指标，如 `server_ttft_ms`
+
+### 文本进度锚点与播放头
+
+`text_progress` / `qwen.text_progress` 的 `meta` 在支持
+`text_progress_anchor_v1` 时包含 `anchor_seq`、`output_sample_start/end`、
+`output_sample_rate`、原文和规范化文本的 Unicode code-point 半开区间，以及
+`text_input_final`、`alignment_final`。sample 坐标是经过 VAD、重采样和编码后的最终
+线路 PCM；被 VAD 删除、guarded delivery 丢弃或 retry/abort 回收的音频不会生成锚点。
+`progress_final` 只是 `alignment_final` 的兼容别名，不表示客户端已经播放到该位置。
+
+SDK 将锚点交给本地 `PlaybackProgressTracker`。调用方在音频真正进入设备缓冲区和被
+设备消费时分别更新 `buffered_through_sample` 与 `played_through_sample`；yield 给调用方
+不等于已经播放。tracker 同时返回已确认游标和相邻锚点之间的插值游标，没有未来锚点时不
+外推，只有 terminal 且播放头到达 `final_output_sample` 才报告 `playback_complete`。
+
+支持播放反馈的 WebSocket 客户端可发送独立的 `playback_progress` 消息。它只用于校验和
+遥测，不影响 guarded delivery；过期值幂等忽略，超前或非法顺序返回非终止错误。OpenAI
+Realtime 本轮只在客户端本地维护 tracker，不发送该非标准客户端消息。
 
 已加载的模型类型在引擎启动时选择。运行时请求不切换模型；它们只能确认客户端和服务器使用相同的模型契约。
 

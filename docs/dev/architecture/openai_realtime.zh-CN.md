@@ -65,11 +65,17 @@ qwen.text_progress
 ```
 
 `qwen.text_progress` 是当前版本的粗略进度，不是 ASR 或音素级对齐。其 `meta` 至少包含
-`progress_basis=ema_frame_ratio_v1`、`progress_quality=rough`、源音频帧范围、文本 token
-范围、`text_progress` 和 `progress_final`；gateway 还会填充已经发送的
-`output_sample_end`。客户端应把它作为 UI 游标的估计值，并以本地播放/缓冲时钟控制实际
-展示。后续替换为 ASR 或 codec-text aligner 时，保持这些传输字段不变，只升级
-`progress_basis` 和估计器内部实现。
+`anchor_seq`、`progress_basis=ema_frame_ratio_v1`、`progress_quality=rough`、源音频帧
+范围、文本 token 范围、原文/规范化文本 code-point 半开区间和
+`output_sample_start/end/sample_rate`。后者基于 VAD、重采样和编码后的最终 PCM；服务端
+发送音频与对应锚点保持同序。`progress_final` 是 `alignment_final` 的兼容别名，不表示
+客户端已经播放。
+
+SDK 不把收到或 yield 音频视为已播放。音频实际进入设备缓冲区、被设备消费后，调用方应
+分别更新 `buffered_through_sample`、`played_through_sample`。tracker 返回已确认游标和
+相邻锚点间插值游标，没有未来锚点时不外推；只有 terminal 且播放头到达
+`final_output_sample` 才完成播放。后续替换为 ASR 或 codec-text aligner 时，保持锚点合同
+不变，只升级 `progress_basis` 和估计器内部实现。
 
 ## Usage 与计费
 

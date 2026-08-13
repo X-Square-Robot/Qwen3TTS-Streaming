@@ -51,6 +51,7 @@ from ..interface import (
     parse_output_policy,
     parse_timing_context,
     serialize_stream_event,
+    stamp_output_anchor,
     to_core_output_policy,
     to_core_timing_context,
 )
@@ -209,6 +210,26 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             )
 
         async def on_audio(sid, data):
+            progress_event = getattr(data, "progress_event", None)
+            data = getattr(data, "pcm_bytes", data)
+
+            async def _publish_progress(frame) -> None:
+                if not progress_event:
+                    return
+                progress = dict(progress_event)
+                progress["meta"] = {
+                    **dict(progress.get("meta") or {}),
+                    **frame.meta,
+                }
+                await audio_queue.put(
+                    (
+                        "event",
+                        _make_event_response_from_contract(
+                            build_forward_event(client_session_id, progress, start_request)
+                        ),
+                    )
+                )
+
             if not vad_enabled:
                 # Fast path: skip the float32→int16→float32 round-trip that
                 # the VAD detour forces on every chunk.  Besides the per-chunk
@@ -217,6 +238,8 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                 if not data:
                     return
                 frame = pipeline.convert_audio_chunk(data)
+                if progress_event:
+                    frame.meta.update(progress_event.get("meta") or {})
                 log_first_effective_audio(len(data))
                 await audio_queue.put(
                     (
@@ -226,6 +249,7 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                         ),
                     )
                 )
+                await _publish_progress(frame)
                 return
             # Apply VAD filtering before output pipeline
             raw = np.frombuffer(data, dtype=np.float32)
@@ -245,6 +269,8 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             filtered_bytes = filtered_f32.tobytes()
 
             frame = pipeline.convert_audio_chunk(filtered_bytes)
+            if progress_event:
+                frame.meta.update(progress_event.get("meta") or {})
             log_first_effective_audio(len(filtered_bytes))
             await audio_queue.put(
                 (
@@ -252,8 +278,10 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                     _make_audio_response(frame.pcm_bytes, frame.audio, meta=frame.meta),
                 )
             )
+            await _publish_progress(frame)
 
         async def on_event(sid, event: dict):
+            event = stamp_output_anchor(event, pipeline)
             await audio_queue.put(
                 (
                     "event",
@@ -762,7 +790,15 @@ def _queue_message_to_response(
 # subset of these carries no per-chunk diagnostics worth preserving and may
 # be absorbed into a merge; anything extra (first_audio_chunk, first-chunk
 # timing fields) blocks absorption so diagnostics survive as message heads.
-_MERGEABLE_META_KEYS = frozenset({"chunk_index", "timing_contract"})
+_MERGEABLE_META_KEYS = frozenset(
+    {
+        "chunk_index",
+        "timing_contract",
+        "output_sample_start",
+        "output_sample_end",
+        "output_sample_rate",
+    }
+)
 # Stop merging before the message approaches gRPC's default 4 MiB client
 # receive limit (a slow reader can backlog an entire session's audio).
 _COALESCE_MAX_BYTES = 256 * 1024
@@ -790,6 +826,7 @@ def _coalesce_queued_audio(
     head = response.audio
     parts: list[bytes] | None = None
     leftover: tuple | None = None
+    merged_sample_end = int(head.meta.get("output_sample_end", "0") or 0)
     total_bytes = len(head.pcm_data)
     while total_bytes < _COALESCE_MAX_BYTES and not audio_queue.empty():
         msg_type_q, payload = audio_queue.get_nowait()
@@ -805,6 +842,10 @@ def _coalesce_queued_audio(
                 parts = [head.pcm_data]
             parts.append(payload.audio.pcm_data)
             total_bytes += len(payload.audio.pcm_data)
+            merged_sample_end = max(
+                merged_sample_end,
+                int(payload.audio.meta.get("output_sample_end", "0") or 0),
+            )
             continue
         leftover = (msg_type_q, payload)
         break
@@ -816,7 +857,7 @@ def _coalesce_queued_audio(
             sample_rate=head.sample_rate,
             encoding=head.encoding,
             channels=head.channels,
-            meta=head.meta,
+            meta={**dict(head.meta), "output_sample_end": str(merged_sample_end)},
         )
     )
     return merged, leftover

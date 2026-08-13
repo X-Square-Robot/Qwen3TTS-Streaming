@@ -5,6 +5,7 @@ from .output import (
     build_done_event,
     build_forward_event,
     build_start_event,
+    stamp_output_anchor,
 )
 from .protocol import (
     PROTOCOL_VERSION,
@@ -66,6 +67,7 @@ __all__ = (
     "build_done_event",
     "build_forward_event",
     "build_start_event",
+    "stamp_output_anchor",
     "create_vad_processor",
     "normalize_capabilities",
     "parse_output_policy",

@@ -396,6 +396,10 @@ async def test_websocket_reuses_connection_for_serial_sessions_and_stop_alias():
                 "persistent_sessions_v1",
                 "stream_resume_v1",
             ]
+            assert capabilities["capabilities"]["supported_progress_features"] == [
+                "text_progress_anchor_v1",
+                "playback_progress_v1",
+            ]
             assert capabilities["capabilities"]["stream_resume_grace_ms"] == 30000
             assert capabilities["capabilities"]["supported_api_protocols"] == [
                 "openai-realtime-v1",

@@ -53,6 +53,7 @@ class OutputPipeline:
         self._first_raw_audio_monotonic: float | None = None
         self._first_effective_audio_monotonic: float | None = None
         self._chunk_index = 0
+        self._output_sample_cursor = 0
 
         # Prefix trim / output gating observability (set when gating lands)
         self._prefix_trim_applied: bool = False
@@ -73,6 +74,11 @@ class OutputPipeline:
     @property
     def chunk_count(self) -> int:
         return self._chunk_index
+
+    @property
+    def output_sample_cursor(self) -> int:
+        """Number of samples retained on the final output PCM path."""
+        return self._output_sample_cursor
 
     def record_prefix_trim(self, trimmed_samples: int, sample_rate: int) -> None:
         """Record prefix trim observability when output gating removes samples."""
@@ -103,7 +109,12 @@ class OutputPipeline:
         meta = {
             "chunk_index": str(chunk_index),
             "timing_contract": TIMING_CONTRACT,
+            "output_sample_start": str(self._output_sample_cursor),
         }
+        output_samples = audio.shape[0]
+        meta["output_sample_end"] = str(self._output_sample_cursor + output_samples)
+        meta["output_sample_rate"] = str(self._audio.sample_rate)
+        self._output_sample_cursor += output_samples
         if first_chunk:
             # Raw audio = audio arriving from engine, before any output gating.
             # The gateway calls this conversion only after output gating, so
@@ -159,6 +170,8 @@ class OutputPipeline:
             "server_done_epoch_ms": str(int(round(time.time() * 1000.0))),
             "server_total_latency_ms": f"{(time.monotonic() - self._request_received_monotonic) * 1000.0:.3f}",
             "audio_chunk_count": str(self._chunk_index),
+            "final_output_sample": str(self._output_sample_cursor),
+            "output_sample_rate": str(self._audio.sample_rate),
         }
 
         # Raw / effective audio timestamps
@@ -233,6 +246,25 @@ class OutputPipeline:
                     continue
                 meta[str(key)] = str(value)
         return meta
+
+
+def stamp_output_anchor(event: dict[str, Any], pipeline: OutputPipeline) -> dict[str, Any]:
+    """Ensure a text anchor has coordinates on the final output timeline."""
+    if not isinstance(event, dict):
+        return event
+    meta = dict(event.get("meta") or {})
+    if (
+        meta.get("anchor_seq")
+        and (
+            "output_sample_start" not in meta or "output_sample_end" not in meta
+        )
+    ):
+        sample = int(pipeline.output_sample_cursor)
+        meta.setdefault("output_sample_start", str(sample))
+        meta.setdefault("output_sample_end", str(sample))
+        meta["output_sample_rate"] = str(pipeline.start_request.config.audio.sample_rate)
+        return {**event, "meta": meta}
+    return event
 
 
 def _base_meta(start_request: SessionStartRequest) -> dict[str, str]:

@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 OPENAI_REALTIME_PATH = "/v1/realtime"
 OPENAI_REALTIME_PROTOCOL = "openai-realtime-v1"
 QWEN_TEXT_BUFFER_EXTENSION = "qwen.input_text_buffer.v1"
+QWEN_TEXT_PROGRESS_EXTENSION = "qwen.text_progress.v1"
 _HEARTBEAT_SECONDS = float(
     os.environ.get("ENGINE_WEBSOCKET_HEARTBEAT_SEC", "30") or "30"
 )
@@ -152,6 +153,7 @@ class _SessionSettings:
             "qwen": {
                 **public_qwen,
                 "text_buffer_extension": QWEN_TEXT_BUFFER_EXTENSION,
+                "text_progress_extension": QWEN_TEXT_PROGRESS_EXTENSION,
             },
         }
 
@@ -671,14 +673,13 @@ class _RealtimeConnection:
                     # namespaced events; Qwen clients use them to render the
                     # source text cursor and future ASR/alignment revisions.
                     event_meta = dict(event.get("meta") or {})
-                    if event_type == "text_progress":
-                        # This is the gateway's output-side clock.  It is
-                        # deliberately separate from source_frame_end so a
-                        # WebRTC or buffered client can reconcile the rough
-                        # EMA estimate with the samples it has actually sent.
-                        event_meta.setdefault(
-                            "output_sample_end", str(state.audio_samples)
-                        )
+                    if event_type == "text_progress" and "output_sample_end" not in event_meta:
+                        # Compatibility for legacy backend callbacks that do
+                        # not carry an attributed audio frame. New callbacks
+                        # always provide the exact output sample range.
+                        event_meta["output_sample_end"] = str(state.audio_samples)
+                        event_meta.setdefault("output_sample_start", "0")
+                        event_meta.setdefault("output_sample_rate", str(state.sample_rate))
                     raw_segment_id = event.get("segment_id")
                     if raw_segment_id is None:
                         raw_segment_id = event.get("segment_idx", -1)
@@ -995,7 +996,10 @@ class _RealtimeConnection:
             "output_modalities": ["audio"],
             "voice": state.voice or None,
             "usage": usage,
-            "metadata": None,
+            "metadata": {
+                "qwen_final_output_sample": str(state.audio_samples),
+                "qwen_output_sample_rate": str(state.sample_rate),
+            },
         }
 
     async def _send_error(
