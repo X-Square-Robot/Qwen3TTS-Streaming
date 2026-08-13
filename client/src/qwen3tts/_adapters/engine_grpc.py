@@ -196,6 +196,10 @@ class EngineGrpcStreamSession(BaseStreamSession):
             for response in self._stream:
                 which = response.WhichOneof("response")
                 if which == "audio":
+                    meta = {
+                        str(k): str(v)
+                        for k, v in dict(response.audio.meta or {}).items()
+                    }
                     self._put_message(
                         AudioChunk(
                             pcm_bytes=bytes(response.audio.pcm_data),
@@ -212,10 +216,13 @@ class EngineGrpcStreamSession(BaseStreamSession):
                                     or self._start_request.config.audio.channels
                                 ),
                             ),
-                            meta={
-                                str(k): str(v)
-                                for k, v in dict(response.audio.meta or {}).items()
-                            },
+                            meta=meta,
+                            output_sample_start=_parse_optional_int(
+                                meta.get("output_sample_start")
+                            ),
+                            output_sample_end=_parse_optional_int(
+                                meta.get("output_sample_end")
+                            ),
                         )
                     )
                 elif which == "event":
@@ -295,6 +302,13 @@ def _audio_encoding_to_proto(value: str):
     if normalized == "pcm_s16le":
         return tts_pb2.AUDIO_ENCODING_PCM_S16LE
     return tts_pb2.AUDIO_ENCODING_PCM_F32
+
+
+def _parse_optional_int(value: Any) -> int | None:
+    try:
+        return None if value in (None, "") else int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _session_config_to_proto(start_request: SessionStartRequest):

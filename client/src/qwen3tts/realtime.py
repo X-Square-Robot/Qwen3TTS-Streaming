@@ -33,6 +33,8 @@ class TimedAudio:
 
     output_sample_start: int | None = None
     output_sample_end: int | None = None
+    playout_sample_start: int | None = None
+    playout_sample_end: int | None = None
 
 
 def _make_silence(
@@ -41,19 +43,34 @@ def _make_silence(
     *,
     channels: int = 1,
     bytes_per_sample: int = 4,
+    playout_sample_start: int | None = None,
     output_sample_start: int | None = None,
 ) -> TimedAudio:
-    """Generate a silence frame using the active PCM layout."""
+    """Generate local playout silence using the active PCM layout.
+
+    ``output_sample_start`` is accepted as a source-compatible deprecated
+    alias for callers that used the old helper directly.  It is intentionally
+    mapped onto the local playout axis; silence never advances server output
+    sample coordinates.
+    """
+    if playout_sample_start is None:
+        playout_sample_start = output_sample_start
     num_samples = int(sample_rate * duration_s)
     # float32 zero bytes — matches pcm_f32 encoding
     silence_bytes = b"\x00" * (num_samples * channels * bytes_per_sample)
-    end = None if output_sample_start is None else output_sample_start + num_samples
+    playout_end = (
+        None
+        if playout_sample_start is None
+        else playout_sample_start + num_samples
+    )
     return TimedAudio(
         data=silence_bytes,
         duration_s=duration_s,
         is_silence=True,
-        output_sample_start=output_sample_start,
-        output_sample_end=end,
+        output_sample_start=None,
+        output_sample_end=None,
+        playout_sample_start=playout_sample_start,
+        playout_sample_end=playout_end,
     )
 
 
@@ -134,6 +151,7 @@ class RealtimeAudioStream:
 
     def _iter_passthrough(self) -> Iterator[TimedAudio]:
         """Yield frames as they arrive, no timing alignment."""
+        playout_sample_cursor = 0
         for message in self._session.iter_messages():
             if isinstance(message, AudioChunk):
                 duration = _audio_duration_s(
@@ -147,6 +165,12 @@ class RealtimeAudioStream:
                     duration_s=duration,
                     output_sample_start=message.output_sample_start,
                     output_sample_end=message.output_sample_end,
+                    playout_sample_start=playout_sample_cursor,
+                    playout_sample_end=playout_sample_cursor
+                    + int(round(duration * (message.audio.sample_rate or self._sample_rate))),
+                )
+                playout_sample_cursor += int(
+                    round(duration * (message.audio.sample_rate or self._sample_rate))
                 )
 
     # ------------------------------------------------------------------
@@ -193,7 +217,8 @@ class RealtimeAudioStream:
 
         wall_start: float | None = None  # anchored at the first audio frame
         play_clock = 0.0  # cumulative emitted duration (playhead)
-        sample_cursor = 0
+        output_sample_cursor = 0
+        playout_sample_cursor = 0
         active_sample_rate = self._sample_rate
         active_channels = 1
         active_bytes_per_sample = 4
@@ -215,9 +240,11 @@ class RealtimeAudioStream:
                             active_sample_rate,
                             channels=active_channels,
                             bytes_per_sample=active_bytes_per_sample,
-                            output_sample_start=sample_cursor,
+                            playout_sample_start=playout_sample_cursor,
                         )
-                        sample_cursor = silence.output_sample_end or sample_cursor
+                        playout_sample_cursor = (
+                            silence.playout_sample_end or playout_sample_cursor
+                        )
                         yield silence
                         play_clock += gap
                     continue
@@ -242,7 +269,7 @@ class RealtimeAudioStream:
                     start = (
                         audio.output_sample_start
                         if audio.output_sample_start is not None
-                        else sample_cursor
+                        else output_sample_cursor
                     )
                     end = (
                         audio.output_sample_end
@@ -254,8 +281,12 @@ class RealtimeAudioStream:
                         duration_s=duration,
                         output_sample_start=start,
                         output_sample_end=end,
+                        playout_sample_start=playout_sample_cursor,
+                        playout_sample_end=playout_sample_cursor
+                        + int(round(duration * active_sample_rate)),
                     )
-                    sample_cursor = max(sample_cursor, end)
+                    output_sample_cursor = max(output_sample_cursor, end)
+                    playout_sample_cursor += int(round(duration * active_sample_rate))
                     play_clock = duration
                 else:
                     # Fill any catch-up gap (engine was late), then emit.
@@ -266,15 +297,17 @@ class RealtimeAudioStream:
                             active_sample_rate,
                             channels=active_channels,
                             bytes_per_sample=active_bytes_per_sample,
-                            output_sample_start=sample_cursor,
+                            playout_sample_start=playout_sample_cursor,
                         )
-                        sample_cursor = silence.output_sample_end or sample_cursor
+                        playout_sample_cursor = (
+                            silence.playout_sample_end or playout_sample_cursor
+                        )
                         yield silence
                         play_clock += gap
                     start = (
                         audio.output_sample_start
                         if audio.output_sample_start is not None
-                        else sample_cursor
+                        else output_sample_cursor
                     )
                     end = (
                         audio.output_sample_end
@@ -286,8 +319,12 @@ class RealtimeAudioStream:
                         duration_s=duration,
                         output_sample_start=start,
                         output_sample_end=end,
+                        playout_sample_start=playout_sample_cursor,
+                        playout_sample_end=playout_sample_cursor
+                        + int(round(duration * active_sample_rate)),
                     )
-                    sample_cursor = max(sample_cursor, end)
+                    output_sample_cursor = max(output_sample_cursor, end)
+                    playout_sample_cursor += int(round(duration * active_sample_rate))
                     play_clock += duration
 
                 # If the playhead is ahead of real time, sleep so the output

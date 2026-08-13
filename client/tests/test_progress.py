@@ -5,6 +5,7 @@ from qwen3tts import (
     StreamEvent,
     TextProgressAnchor,
 )
+from qwen3tts.exceptions import ProtocolError
 
 
 def _anchor(seq, start, end, raw_end, normalized_end):
@@ -62,3 +63,13 @@ def test_tracker_reads_anchor_from_audio_meta():
         )
     )
     assert tracker.latest.available is True
+
+
+def test_tracker_rejects_conflicting_anchor_replay():
+    tracker = PlaybackProgressTracker([_anchor(1, 0, 10, 1, 1)])
+    try:
+        tracker.add_anchor(_anchor(1, 0, 11, 1, 1))
+    except ProtocolError:
+        pass
+    else:  # pragma: no cover - assertion documents the wire contract
+        raise AssertionError("conflicting replay must be rejected")

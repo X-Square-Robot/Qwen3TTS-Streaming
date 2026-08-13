@@ -107,8 +107,10 @@ class TestMakeSilence:
             output_sample_start=10,
         )
         assert len(frame.data) == 160 * 2 * 2
-        assert frame.output_sample_start == 10
-        assert frame.output_sample_end == 170
+        assert frame.output_sample_start is None
+        assert frame.output_sample_end is None
+        assert frame.playout_sample_start == 10
+        assert frame.playout_sample_end == 170
 
 
 class TestAudioDurationS:

@@ -8,6 +8,8 @@ from typing import Iterable
 
 from qwen3tts_protocol import AudioChunk, StreamEvent
 
+from .exceptions import ProtocolError
+
 
 def _int(meta: dict[str, str], key: str, default: int | None = None) -> int | None:
     try:
@@ -114,6 +116,7 @@ class PlaybackProgressTracker:
         self._buffered_sample = 0
         self._terminal = False
         self._final_sample: int | None = None
+        self._output_sample_rate: int | None = None
         self._latest = PlaybackTextProgress()
         for anchor in anchors:
             self.add_anchor(anchor)
@@ -142,9 +145,19 @@ class PlaybackProgressTracker:
                     )
                     end = start + len(message.pcm_bytes) // (width * channels)
                 self._received_sample = max(self._received_sample, end)
-                self._add_meta_anchor(message.meta, -1)
+                if message.output_sample_start is not None:
+                    start = int(message.output_sample_start)
+                if message.output_sample_end is not None:
+                    end = int(message.output_sample_end)
+                if start < 0 or end < start:
+                    raise ProtocolError("audio output sample range is invalid")
+                rate = int(message.audio.sample_rate or 0)
+                if rate > 0:
+                    self._remember_sample_rate_locked(rate)
+                self._received_sample = max(self._received_sample, end)
+                self._add_meta_anchor(message.meta, -1, require_received=False)
             else:
-                self._add_meta_anchor(message.meta, message.segment_id)
+                self._add_meta_anchor(message.meta, message.segment_id, require_received=True)
                 if message.type in {"done", "error"}:
                     self._terminal = True
                     self._final_sample = _int(message.meta, "final_output_sample", self._received_sample)
@@ -152,14 +165,15 @@ class PlaybackProgressTracker:
 
     def add_anchor(self, anchor: TextProgressAnchor) -> PlaybackTextProgress:
         with self._lock:
-            if anchor.anchor_seq <= 0 or anchor.output_sample_start < 0:
-                return self._recompute_locked()
+            self._validate_anchor_locked(anchor)
             old = self._anchors.get(anchor.anchor_seq)
-            if old is None or (anchor.output_sample_end, anchor.alignment_final) >= (
-                old.output_sample_end,
-                old.alignment_final,
-            ):
-                self._anchors[anchor.anchor_seq] = anchor
+            if old is not None:
+                if old == anchor:
+                    return self._recompute_locked()
+                raise ProtocolError(
+                    f"conflicting replay for text progress anchor {anchor.anchor_seq}"
+                )
+            self._anchors[anchor.anchor_seq] = anchor
             self._received_sample = max(self._received_sample, anchor.output_sample_end)
             return self._recompute_locked()
 
@@ -170,7 +184,10 @@ class PlaybackProgressTracker:
         buffered_through_sample: int | None = None,
     ) -> PlaybackTextProgress:
         with self._lock:
-            played = max(self._played_sample, int(played_through_sample))
+            requested_played = int(played_through_sample)
+            if requested_played < self._played_sample:
+                raise ProtocolError("played playback sample moved backwards")
+            played = requested_played
             buffered = (
                 max(self._buffered_sample, played)
                 if buffered_through_sample is None
@@ -181,13 +198,63 @@ class PlaybackProgressTracker:
             if buffered < played:
                 raise ValueError("buffered sample cannot be before played sample")
             self._played_sample = played
-            self._buffered_sample = max(self._buffered_sample, buffered)
+            if buffered < self._buffered_sample:
+                raise ProtocolError("buffered playback sample moved backwards")
+            self._buffered_sample = buffered
             return self._recompute_locked()
 
-    def _add_meta_anchor(self, meta: dict[str, str], segment_id: int) -> None:
+    def _add_meta_anchor(
+        self,
+        meta: dict[str, str],
+        segment_id: int,
+        *,
+        require_received: bool,
+    ) -> None:
         anchor = TextProgressAnchor.from_meta(meta, segment_id=segment_id)
         if anchor is not None:
+            if require_received and anchor.output_sample_end > self._received_sample:
+                raise ProtocolError(
+                    "text progress anchor is ahead of received output audio"
+                )
             self.add_anchor(anchor)
+
+    def _remember_sample_rate_locked(self, sample_rate: int) -> None:
+        if self._output_sample_rate is None:
+            self._output_sample_rate = sample_rate
+            return
+        if self._output_sample_rate != sample_rate:
+            raise ProtocolError("output sample rate changed within a playback stream")
+
+    def _validate_anchor_locked(self, anchor: TextProgressAnchor) -> None:
+        if (
+            anchor.anchor_seq <= 0
+            or anchor.output_sample_start < 0
+            or anchor.output_sample_end < anchor.output_sample_start
+            or anchor.output_sample_rate <= 0
+            or anchor.raw_codepoint_start < 0
+            or anchor.raw_codepoint_end < anchor.raw_codepoint_start
+            or anchor.normalized_codepoint_start < 0
+            or anchor.normalized_codepoint_end < anchor.normalized_codepoint_start
+        ):
+            raise ProtocolError("malformed text progress anchor")
+        self._remember_sample_rate_locked(anchor.output_sample_rate)
+        for old in self._anchors.values():
+            if old.anchor_seq == anchor.anchor_seq:
+                continue
+            if anchor.anchor_seq < old.anchor_seq:
+                raise ProtocolError("text progress anchor sequence moved backwards")
+            if anchor.output_sample_start < old.output_sample_start:
+                raise ProtocolError("text progress sample range moved backwards")
+            if anchor.output_sample_end < old.output_sample_end:
+                raise ProtocolError("text progress sample end moved backwards")
+            if anchor.raw_codepoint_start < old.raw_codepoint_start:
+                raise ProtocolError("text progress raw range moved backwards")
+            if anchor.raw_codepoint_end < old.raw_codepoint_end:
+                raise ProtocolError("text progress raw range moved backwards")
+            if anchor.normalized_codepoint_start < old.normalized_codepoint_start:
+                raise ProtocolError("text progress normalized range moved backwards")
+            if anchor.normalized_codepoint_end < old.normalized_codepoint_end:
+                raise ProtocolError("text progress normalized range moved backwards")
 
     def _recompute_locked(self) -> PlaybackTextProgress:
         ordered = sorted(self._anchors.values(), key=lambda item: (item.output_sample_end, item.anchor_seq))

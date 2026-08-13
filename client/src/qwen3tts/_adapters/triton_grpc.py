@@ -286,14 +286,21 @@ class TritonGrpcStreamSession(BaseStreamSession):
                 )
             elif event_type == "audio":
                 raw_bytes = _decode_audio_bytes_field(audio_value, payload)
+                meta = {
+                    str(k): str(v)
+                    for k, v in dict(payload.get("meta") or {}).items()
+                }
                 self._put_message(
                     AudioChunk(
                         pcm_bytes=raw_bytes,
                         audio=current_audio_format,
-                        meta={
-                            str(k): str(v)
-                            for k, v in dict(payload.get("meta") or {}).items()
-                        },
+                        meta=meta,
+                        output_sample_start=_parse_optional_int(
+                            meta.get("output_sample_start")
+                        ),
+                        output_sample_end=_parse_optional_int(
+                            meta.get("output_sample_end")
+                        ),
                     )
                 )
             elif event_type:
@@ -389,6 +396,13 @@ def _scalar_from_result(result, name: str):
         except UnicodeDecodeError:
             return value
     return value
+
+
+def _parse_optional_int(value: Any) -> int | None:
+    try:
+        return None if value in (None, "") else int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _decode_audio_bytes_field(value: Any, payload: dict[str, Any]) -> bytes:

@@ -1099,6 +1099,7 @@ def _iter_conn_messages(
     # generation speed with the default 120 s).
     idle_deadline = time.perf_counter() + timeout
     current_audio = AudioFormat()
+    legacy_sample_cursor = 0
     while time.perf_counter() < idle_deadline:
         conn.settimeout(max(0.02, min(0.5, idle_deadline - time.perf_counter())))
         try:
@@ -1107,10 +1108,21 @@ def _iter_conn_messages(
             continue
         idle_deadline = time.perf_counter() + timeout
         if opcode == 0x2:
+            bytes_per_sample = _bytes_per_sample(current_audio.encoding)
+            channels = max(1, int(current_audio.channels or 1))
+            sample_count = len(payload) // (bytes_per_sample * channels)
+            start_sample = legacy_sample_cursor
+            legacy_sample_cursor += sample_count
             yield AudioChunk(
                 pcm_bytes=payload,
                 audio=current_audio,
-                meta={},
+                meta={
+                    "output_sample_start": str(start_sample),
+                    "output_sample_end": str(legacy_sample_cursor),
+                    "output_sample_rate": str(current_audio.sample_rate),
+                },
+                output_sample_start=start_sample,
+                output_sample_end=legacy_sample_cursor,
             )
             continue
         if opcode == 0x8:
@@ -1146,6 +1158,15 @@ def _is_truthy(value) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _bytes_per_sample(encoding: str) -> int:
+    return {
+        "pcm_f32": 4,
+        "pcm_s16le": 2,
+        "pcm_s16": 2,
+        "pcm_u8": 1,
+    }.get(str(encoding or "pcm_f32").lower(), 4)
 
 
 class EngineWebSocketStreamSession(BaseStreamSession):
@@ -1342,13 +1363,25 @@ class EngineWebSocketStreamSession(BaseStreamSession):
                 # Legacy gateway: no delivery sidecar means active recovery is
                 # unsafe, but normal fail-fast streaming remains unchanged.
                 self._resume_supported = False
+                bytes_per_sample = _bytes_per_sample(self._current_audio.encoding)
+                channels = max(1, int(self._current_audio.channels or 1))
+                sample_count = len(pcm_bytes) // (bytes_per_sample * channels)
+                start_sample = self._audio_through_sample
+                end_sample = start_sample + sample_count
                 self._put_message(
                     AudioChunk(
                         pcm_bytes=pcm_bytes,
                         audio=self._current_audio,
-                        meta={},
+                        meta={
+                            "output_sample_start": str(start_sample),
+                            "output_sample_end": str(end_sample),
+                            "output_sample_rate": str(self._current_audio.sample_rate),
+                        },
+                        output_sample_start=start_sample,
+                        output_sample_end=end_sample,
                     )
                 )
+                self._audio_through_sample = end_sample
                 return False
 
             delivery_seq = self._parse_delivery_seq(header)
