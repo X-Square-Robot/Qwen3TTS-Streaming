@@ -672,7 +672,6 @@ class FrontendInterface:
                     dropped = session.reorder.discard(meta.group_idx, meta.local_idx)
                     session.text_progress_estimators.pop(result.segment_idx, None)
                     session.segment_progress_frames.pop(result.segment_idx, None)
-                    session.segment_token_spans.pop(result.segment_idx, None)
                     rm = result.metrics or {}
                     logger.info(
                         "Segment retry: %s seg=%d reason=%s attempt=%s "
@@ -834,7 +833,16 @@ class FrontendInterface:
                             final=not eos_reason.endswith("_abort"),
                         )
                         if progress is not None:
-                            metrics.update(progress["meta"])
+                            # ``segment_end`` is a legacy diagnostic event.
+                            # The complete progress record is sent separately
+                            # so transports cannot mistake a segment lifecycle
+                            # notification for an output-sample anchor.
+                            metrics["text_progress"] = progress["meta"].get(
+                                "text_progress", "0"
+                            )
+                            metrics["progress_final"] = progress["meta"].get(
+                                "progress_final", "false"
+                            )
                         session.segment_token_emitted_count.pop(seg_idx, None)
                         session.text_boundary_emitted.discard(seg_idx)
                         await on_event(
@@ -846,6 +854,8 @@ class FrontendInterface:
                                 "meta": metrics,
                             },
                         )
+                        if progress is not None:
+                            await on_event(session.session_id, progress)
 
                     new_actions = session.spliter.on_segment_done(seg_idx)
                     session.text_progress_estimators.pop(seg_idx, None)
@@ -1180,8 +1190,16 @@ class FrontendInterface:
             selected = spans[: min(token_end, len(spans))]
             normalized_start = selected[0]["normalized_start"]
             normalized_end = selected[-1]["normalized_end"]
-            raw_start = selected[0]["raw_start"]
-            raw_end = selected[-1]["raw_end"]
+            if session.text_journal is not None:
+                raw_start, _ = session.text_journal.raw_span(
+                    normalized_start, normalized_start
+                )
+                _, raw_end = session.text_journal.raw_span(
+                    normalized_end, normalized_end
+                )
+            else:
+                raw_start = selected[0]["raw_start"]
+                raw_end = selected[-1]["raw_end"]
         else:
             normalized_start = normalized_end = raw_start = raw_end = 0
         anchor_seq = session.next_progress_anchor_seq
@@ -1324,6 +1342,16 @@ class FrontendInterface:
                 end = min(len(text), start + len(piece))
                 offsets.append((start, end))
                 cursor = end
+        # Keep the frontend safe even for legacy/test tokenizer adapters that
+        # expose the raw tokenizers offsets directly instead of the stable
+        # LightQwen3TTSTokenizer wrapper.
+        stable_offsets = []
+        previous_end = 0
+        for start, end in offsets:
+            start = min(len(text), max(previous_end, int(start)))
+            end = min(len(text), max(start, int(end)))
+            stable_offsets.append((start, end))
+            previous_end = end
         return [
             SegmentToken(
                 token_id=token_id,
@@ -1342,7 +1370,7 @@ class FrontendInterface:
                 ),
                 punct_level=Spliter.classify_punct_level(text[start:end]),
             )
-            for token_id, (start, end) in zip(ids, offsets)
+            for token_id, (start, end) in zip(ids, stable_offsets)
         ]
 
     def _encode_ids(self, text: str) -> list[int]:

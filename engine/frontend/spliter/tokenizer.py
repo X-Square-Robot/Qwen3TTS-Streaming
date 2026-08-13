@@ -129,9 +129,31 @@ class LightQwen3TTSTokenizer:
     def encode_with_offsets(
         self, text: str, add_special_tokens: bool = True, **kwargs: Any
     ) -> Tuple[List[int], List[Tuple[int, int]]]:
-        """Return token ids and the corresponding original text offsets."""
+        """Return token ids and stable, non-overlapping text offsets.
+
+        Qwen's byte-level tokenizer can report overlapping offsets for a
+        mixed CJK/Latin sequence.  Those offsets are useful to the tokenizer
+        implementation but unsafe as public text provenance: slicing them can
+        duplicate a code point.  Normalize them once at this boundary so every
+        caller (frontend, diagnostics, and future aligners) gets the same
+        half-open partition of the input text.
+        """
         enc = self.encode(text, add_special_tokens=add_special_tokens, **kwargs)
-        return enc.ids, enc.offsets
+        return enc.ids, self._stable_offsets(text, enc.offsets)
+
+    @staticmethod
+    def _stable_offsets(
+        text: str, offsets: List[Tuple[int, int]]
+    ) -> List[Tuple[int, int]]:
+        stable: List[Tuple[int, int]] = []
+        previous_end = 0
+        text_len = len(text)
+        for start, end in offsets:
+            start = min(text_len, max(previous_end, int(start)))
+            end = min(text_len, max(start, int(end)))
+            stable.append((start, end))
+            previous_end = end
+        return stable
 
     def encode_with_tokens(
         self, text: str, add_special_tokens: bool = True, **kwargs: Any
@@ -150,16 +172,10 @@ class LightQwen3TTSTokenizer:
         slices so joining the spans always reconstructs the original text.
         """
         enc = self.encode(text, add_special_tokens=add_special_tokens, **kwargs)
+        offsets = self._stable_offsets(text, enc.offsets)
         spans: List[str] = []
-        prev_end = 0
-        text_len = len(text)
-        for start, end in enc.offsets:
-            start = max(int(start), prev_end)
-            end = max(int(end), start)
-            if end > text_len:
-                end = text_len
+        for start, end in offsets:
             spans.append(text[start:end])
-            prev_end = end
         return enc.ids, spans
 
     def debug_snapshot(
@@ -170,21 +186,15 @@ class LightQwen3TTSTokenizer:
     ) -> Dict[str, Any]:
         """Return a structured tokenization snapshot for observability."""
         enc = self.encode(text, add_special_tokens=add_special_tokens, **kwargs)
+        offsets = self._stable_offsets(text, enc.offsets)
         spans: List[str] = []
-        prev_end = 0
-        text_len = len(text)
-        for start, end in enc.offsets:
-            start = max(int(start), prev_end)
-            end = max(int(end), start)
-            if end > text_len:
-                end = text_len
+        for start, end in offsets:
             spans.append(text[start:end])
-            prev_end = end
 
         pieces = []
         for idx, token_id in enumerate(enc.ids):
             token = enc.tokens[idx] if idx < len(enc.tokens) else ""
-            offset = enc.offsets[idx] if idx < len(enc.offsets) else (0, 0)
+            offset = offsets[idx] if idx < len(offsets) else (0, 0)
             span = spans[idx] if idx < len(spans) else ""
             pieces.append(
                 {
@@ -205,7 +215,7 @@ class LightQwen3TTSTokenizer:
             "ids": [int(token_id) for token_id in enc.ids],
             "tokens": list(enc.tokens),
             "tokens_display": [self._display_token_text(token) for token in enc.tokens],
-            "offsets": [[int(start), int(end)] for start, end in enc.offsets],
+            "offsets": [[int(start), int(end)] for start, end in offsets],
             "spans": spans,
             "spans_display": [self._display_token_text(span) for span in spans],
             "pieces": pieces,
