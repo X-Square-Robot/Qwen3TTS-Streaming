@@ -34,6 +34,14 @@ def test_tracker_keeps_confirmed_and_interpolated_cursors_separate():
     assert state.buffered_through_sample == 180
 
 
+def test_tracker_interpolates_inside_first_anchor_without_future_extrapolation():
+    tracker = PlaybackProgressTracker([_anchor(1, 0, 100, 10, 10)])
+    state = tracker.update_playback_progress(played_through_sample=50)
+    assert state.confirmed.available is False
+    assert state.estimated.raw_codepoint == 5
+    assert state.estimated.normalized_codepoint == 5
+
+
 def test_tracker_does_not_extrapolate_past_latest_anchor_and_completes_at_terminal():
     tracker = PlaybackProgressTracker([_anchor(1, 0, 100, 5, 5)])
     state = tracker.update_playback_progress(played_through_sample=100)

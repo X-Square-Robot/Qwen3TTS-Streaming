@@ -148,9 +148,17 @@ class LightQwen3TTSTokenizer:
         stable: List[Tuple[int, int]] = []
         previous_end = 0
         text_len = len(text)
-        for start, end in offsets:
-            start = min(text_len, max(previous_end, int(start)))
+        for index, (_start, end) in enumerate(offsets):
+            # A tokenizer offset gap is just as unsafe as an overlap for
+            # provenance: token text would no longer partition the source.
+            # Assign the gap to the next token and keep offsets half-open.
+            start = min(text_len, previous_end)
             end = min(text_len, max(start, int(end)))
+            # Some tokenizers leave a trailing gap (notably around zero-width
+            # special tokens). The last token owns that gap so concatenating
+            # token slices is exactly the input text.
+            if index == len(offsets) - 1:
+                end = text_len
             stable.append((start, end))
             previous_end = end
         return stable

@@ -25,7 +25,7 @@ import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -91,7 +91,7 @@ class SampleProvenanceSpan:
     segment_idx: int = -1
     source_frame_start: int = 0
     source_frame_end: int = 0
-    progress_event: Optional[dict] = None
+    progress_event: Optional[Any] = None
 
 
 @dataclass

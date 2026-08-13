@@ -23,3 +23,16 @@ def test_journal_trim_preserves_raw_boundaries():
     journal.append("  hello  ")
     assert journal.trim_normalized() == "hello"
     assert journal.raw_span(0, 5) == (2, 7)
+
+
+def test_deleted_trailing_codepoints_wait_for_terminal_boundary():
+    def normalize(value: str) -> str:
+        return value.replace("😊", "")
+
+    journal = CanonicalTextJournal(normalize)
+    journal.append("hello😊")
+    assert journal.raw_span(0, 5) == (0, 5)
+    journal.append(" world")
+    assert journal.raw_span(0, 5) == (0, 5)
+    journal.finish()
+    assert journal.raw_span(0, len(journal.normalized_text)) == (0, 12)

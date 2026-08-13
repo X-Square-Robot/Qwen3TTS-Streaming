@@ -71,13 +71,18 @@ qwen.text_progress
 ```
 
 `qwen.text_progress` is intentionally coarse in the current implementation;
-it is not an ASR or phoneme-level alignment. Its `meta` includes
-`progress_basis=ema_frame_ratio_v1`, `progress_quality=rough`, source-audio
-frame and text-token ranges, `text_progress`, and `progress_final`. The gateway
-also adds `output_sample_end`, the number of PCM samples sent so far. Clients
-should use this as a UI estimate and reconcile it with their local playback or
-buffer clock. A future ASR or codec-text aligner can keep the transport fields
-stable while changing `progress_basis` and the estimator implementation.
+it is not an ASR or phoneme-level alignment. When the anchor capability is
+available, its `meta` includes `anchor_seq`, final-output sample
+`output_sample_start/end/sample_rate`, raw and normalized Unicode code-point
+ranges, `progress_basis=ema_frame_ratio_v1`, `progress_quality=rough`,
+source-audio frame and text-token ranges, `text_progress`, and
+`alignment_final` (`progress_final` is its compatibility alias). These sample
+coordinates are assigned after VAD and streaming resampling, and are emitted
+after the corresponding `response.output_audio.delta`; the gateway does not
+infer them from bytes sent. Legacy backends keep only their coarse progress
+fields. Clients should map the coordinates to their local playback clock. A
+future ASR or codec-text aligner can keep the transport fields stable while
+changing `progress_basis` and the estimator implementation.
 
 ## Usage and Billing
 

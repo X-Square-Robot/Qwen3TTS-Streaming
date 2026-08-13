@@ -780,7 +780,9 @@ class TritonPythonModel:
                 self._active_sessions.discard(_sid)
                 self._session_senders.pop(_sid, None)
             error = metrics.get("error") if isinstance(metrics, dict) else None
-            for batch in output_processor.finish():
+            for batch in output_processor.finish(
+                emit_final=not bool(error or metrics.get("cancelled"))
+            ):
                 if batch.audio is not None and batch.audio.pcm_bytes:
                     self._send_event(
                         response_sender,

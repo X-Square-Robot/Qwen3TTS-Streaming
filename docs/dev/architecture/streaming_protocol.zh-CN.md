@@ -151,8 +151,8 @@ WebSocket capabilities 还会声明 `stream_resume_v1`。客户端通过在
   `supported_progress_features`
 
 其中 `supported_progress_features` 在支持时包含
-`text_progress_anchor_v1`、`playback_progress_v1`；Realtime 扩展能力包含
-`qwen.text_progress.v1`。服务端保持旧的 `supported_websocket_features` 列表不变，
+`text_progress_anchor_v1`、`playback_progress_v1`、`qwen.text_progress.v1`。服务端保持旧的
+`supported_websocket_features` 列表不变，
 避免旧客户端把新增能力误判为未知必选功能。
 
 当前规范能力特性标志为：

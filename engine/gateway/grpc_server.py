@@ -246,7 +246,9 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                 )
 
         async def on_done(sid, metrics):
-            for batch in output_processor.finish():
+            for batch in output_processor.finish(
+                emit_final=not bool(metrics.get("error") or metrics.get("cancelled"))
+            ):
                 if batch.audio is not None and batch.audio.pcm_bytes:
                     log_first_effective_audio(len(batch.audio.pcm_bytes))
                     await audio_queue.put(

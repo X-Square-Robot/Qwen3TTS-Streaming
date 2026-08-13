@@ -76,6 +76,11 @@ class TestEncodeWithOffsets:
                 f"Gap/overlap between token {i - 1} and {i}: {offsets[i - 1]} vs {offsets[i]}"
             )
 
+    def test_offset_slices_partition_mixed_text(self, tok):
+        text = "你好，这是 token player + audio 并行流式测试。"
+        _, offsets = tok.encode_with_offsets(text, add_special_tokens=False)
+        assert "".join(text[start:end] for start, end in offsets) == text
+
 
 # ── encode_with_tokens (BPE internal) ──────────────────────────
 

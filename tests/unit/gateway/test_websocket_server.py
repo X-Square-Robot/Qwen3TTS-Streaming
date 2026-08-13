@@ -399,6 +399,7 @@ async def test_websocket_reuses_connection_for_serial_sessions_and_stop_alias():
             assert capabilities["capabilities"]["supported_progress_features"] == [
                 "text_progress_anchor_v1",
                 "playback_progress_v1",
+                "qwen.text_progress.v1",
             ]
             assert capabilities["capabilities"]["stream_resume_grace_ms"] == 30000
             assert capabilities["capabilities"]["supported_api_protocols"] == [

@@ -135,6 +135,7 @@ class WebSocketGateway:
         capabilities["supported_progress_features"] = [
             "text_progress_anchor_v1",
             "playback_progress_v1",
+            "qwen.text_progress.v1",
         ]
         capabilities["stream_resume_grace_ms"] = int(
             round(self._resume_registry.grace_seconds * 1000.0)
@@ -685,6 +686,11 @@ class WebSocketGateway:
                                             "invalid_playback_progress",
                                             "played_through_sample cannot move backwards",
                                         )
+                                    if buffered < playback_buffered_sample:
+                                        raise ResumeProtocolError(
+                                            "invalid_playback_progress",
+                                            "buffered_through_sample cannot move backwards",
+                                        )
                                     if buffered < played:
                                         raise ResumeProtocolError(
                                             "invalid_playback_progress",
@@ -968,7 +974,9 @@ class WebSocketGateway:
             await _enqueue_frames(frames)
 
         async def on_done(sid: str, metrics: dict) -> None:
-            for batch in output_processor.finish():
+            for batch in output_processor.finish(
+                emit_final=not bool(metrics.get("error") or metrics.get("cancelled"))
+            ):
                 frames = []
                 if batch.audio is not None and batch.audio.pcm_bytes:
                     log_first_effective_audio(len(batch.audio.pcm_bytes))

@@ -86,7 +86,8 @@ def test_vad_provenance_drops_marker_attached_to_prefix_silence():
     tone = np.full(384 * 3, 0.5, dtype=np.float32)
     audio, anchors = _collect(processor, [silence, tone])
     assert audio
-    assert [a["meta"]["anchor_seq"] for a in anchors] == ["2"]
+    # The discarded prefix candidate does not consume a public sequence.
+    assert [a["meta"]["anchor_seq"] for a in anchors] == ["1"]
 
 
 def test_soxr_stream_flush_produces_final_output_samples():
@@ -95,6 +96,50 @@ def test_soxr_stream_flush_produces_final_output_samples():
         processor, [np.linspace(-0.5, 0.5, 2400, dtype=np.float32)]
     )
     assert len(audio) // 4 == 1600
+
+
+def test_resampled_anchor_boundaries_use_integer_native_ratio():
+    processor = _processor(16000)
+    _audio, anchors = _collect(
+        processor,
+        [
+            np.linspace(-0.5, 0.0, 1200, dtype=np.float32),
+            np.linspace(0.0, 0.5, 1200, dtype=np.float32),
+        ],
+    )
+    assert [
+        (item["meta"]["output_sample_start"], item["meta"]["output_sample_end"])
+        for item in anchors
+    ] == [("0", "800"), ("800", "1600")]
+
+
+def test_segment_final_marker_stays_before_next_segment_anchor():
+    processor = _processor(24000)
+    first = processor.process(
+        AttributedAudioChunk(
+            np.ones(240, dtype=np.float32).tobytes(),
+            {"type": "text_progress", "segment_idx": 0, "meta": {}},
+            segment_idx=0,
+        )
+    )
+    final = processor.process_event(
+        {
+            "type": "text_progress",
+            "segment_idx": 0,
+            "meta": {"alignment_final": "true"},
+        }
+    )
+    second = processor.process(
+        AttributedAudioChunk(
+            np.ones(240, dtype=np.float32).tobytes(),
+            {"type": "text_progress", "segment_idx": 1, "meta": {}},
+            segment_idx=1,
+        )
+    )
+    anchors = [*first.anchors, *final.anchors, *second.anchors]
+    assert [item["meta"]["anchor_seq"] for item in anchors] == ["1", "2", "3"]
+    assert anchors[1]["meta"]["alignment_final"] == "true"
+    assert anchors[1]["meta"]["output_sample_end"] == "240"
 
 
 def test_vad_attributed_frame_spans_are_rebased_and_monotonic():

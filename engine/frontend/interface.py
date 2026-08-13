@@ -323,6 +323,9 @@ class FrontendInterface:
         session = self._sessions.get(session_id)
         if session is None or session.state == SessionState.DONE:
             return
+        session.mark_input_complete()
+        if session.text_journal is not None:
+            session.text_journal.finish()
         if session.text_journal is None or not session.text_journal.normalized_text:
             text, _ = session.text_journal.append(text or "")
         else:
@@ -337,7 +340,6 @@ class FrontendInterface:
         if not tokens:
             return
 
-        session.mark_input_complete()
         seg_actions = session.spliter.set_full_text(tokens)
         await self._dispatch_segment_actions(session, seg_actions)
         await self._dispatcher.maybe_send_session_tokens_done(session)
@@ -540,7 +542,11 @@ class FrontendInterface:
                 audio_steps = int(metrics.get("audio_steps", 0) or 0)
                 tail = int(metrics.get("abort_tail_frames", 0) or 0)
                 keep = max(0, audio_steps - tail)
-                ema = float(getattr(session.spliter, "_ema_ratio", 0.0) or 0.0)
+                frozen_ratios = getattr(session.spliter, "_seg_ema_ratio", None)
+                if isinstance(frozen_ratios, dict) and seg_idx in frozen_ratios:
+                    ema = float(frozen_ratios[seg_idx] or 0.0)
+                else:
+                    ema = float(getattr(session.spliter, "_ema_ratio", 0.0) or 0.0)
                 text_tokens = int(metrics.get("text_tokens", 0) or 0)
                 if ema > 0 and text_tokens > 0:
                     expected = int(ema * text_tokens * 1.15) + 2
@@ -1344,9 +1350,11 @@ class FrontendInterface:
         # LightQwen3TTSTokenizer wrapper.
         stable_offsets = []
         previous_end = 0
-        for start, end in offsets:
-            start = min(len(text), max(previous_end, int(start)))
+        for index, (_start, end) in enumerate(offsets):
+            start = min(len(text), previous_end)
             end = min(len(text), max(start, int(end)))
+            if index == len(offsets) - 1:
+                end = len(text)
             stable_offsets.append((start, end))
             previous_end = end
         return [

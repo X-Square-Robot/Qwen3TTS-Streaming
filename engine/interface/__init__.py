@@ -36,6 +36,8 @@ from .types import (
     VADPolicy,
 )
 from .vad import (
+    AttributedSamples,
+    SampleProvenanceSpan,
     TTSVADConfig,
     TTSVADProcessor,
     VADMode,
@@ -48,6 +50,7 @@ from .vad import (
 
 __all__ = (
     "AudioFrame",
+    "AttributedSamples",
     "DisabledVADProcessor",
     "EnergyVADProcessor",
     "OutputPipeline",
@@ -61,6 +64,7 @@ __all__ = (
     "SUPPORTED_VAD_STRATEGIES",
     "SessionEndRequest",
     "SessionStartRequest",
+    "SampleProvenanceSpan",
     "StreamCancelRequest",
     "StreamEvent",
     "StreamTextChunk",

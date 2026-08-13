@@ -51,12 +51,9 @@ class TextProgressAnchor:
         rate = _int(meta, "output_sample_rate", 24000)
         if seq is None or start is None or end is None or rate is None:
             return None
-        start = max(0, start)
-        end = max(start, end)
-
         def span(prefix: str) -> tuple[int, int]:
-            span_start = max(0, _int(meta, f"{prefix}_start", 0) or 0)
-            span_end = max(span_start, _int(meta, f"{prefix}_end", 0) or 0)
+            span_start = _int(meta, f"{prefix}_start", 0) or 0
+            span_end = _int(meta, f"{prefix}_end", 0) or 0
             return span_start, span_end
 
         raw_start, raw_end = span("raw_codepoint")
@@ -65,7 +62,7 @@ class TextProgressAnchor:
             anchor_seq=seq,
             output_sample_start=start,
             output_sample_end=end,
-            output_sample_rate=max(1, rate),
+            output_sample_rate=rate,
             raw_codepoint_start=raw_start,
             raw_codepoint_end=raw_end,
             normalized_codepoint_start=normalized_start,
@@ -264,9 +261,29 @@ class PlaybackProgressTracker:
         for anchor in ordered:
             if self._played_sample >= anchor.output_sample_end:
                 confirmed = TextCursor(anchor.raw_codepoint_end, anchor.normalized_codepoint_end, anchor.anchor_seq, True)
-            if previous is not None and previous.output_sample_end <= self._played_sample <= anchor.output_sample_end:
+            if previous is None and anchor.output_sample_start <= self._played_sample <= anchor.output_sample_end:
+                width = anchor.output_sample_end - anchor.output_sample_start
+                ratio = (
+                    1.0
+                    if width <= 0
+                    else (self._played_sample - anchor.output_sample_start) / width
+                )
+                estimated = TextCursor(
+                    round(anchor.raw_codepoint_start + ratio * (anchor.raw_codepoint_end - anchor.raw_codepoint_start)),
+                    round(anchor.normalized_codepoint_start + ratio * (anchor.normalized_codepoint_end - anchor.normalized_codepoint_start)),
+                    anchor.anchor_seq,
+                    True,
+                )
+            elif (
+                previous is not None
+                and previous.output_sample_end <= self._played_sample <= anchor.output_sample_end
+            ):
                 width = anchor.output_sample_end - previous.output_sample_end
-                ratio = 1.0 if width <= 0 else (self._played_sample - previous.output_sample_end) / width
+                ratio = (
+                    1.0
+                    if width <= 0
+                    else (self._played_sample - previous.output_sample_end) / width
+                )
                 estimated = TextCursor(
                     round(previous.raw_codepoint_end + ratio * (anchor.raw_codepoint_end - previous.raw_codepoint_end)),
                     round(previous.normalized_codepoint_end + ratio * (anchor.normalized_codepoint_end - previous.normalized_codepoint_end)),

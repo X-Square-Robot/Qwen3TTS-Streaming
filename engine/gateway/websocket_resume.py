@@ -173,12 +173,13 @@ class ResumableSession:
         async with self._lock:
             if self.closed or self.failure_code is not None or self.terminal:
                 return
+            staged: list[ResumeDelivery] = []
+            staged_bytes = 0
+            staged_sample = self._next_audio_sample
             for frame in frames:
-                if self.terminal:
-                    break
-                seq = self._next_delivery_seq
+                seq = self._next_delivery_seq + len(staged)
                 copied = _copy_frame(frame)
-                start_sample = self._next_audio_sample
+                start_sample = staged_sample
                 end_sample = start_sample
                 if copied.get("type") == "audio":
                     audio = copied["audio"]
@@ -187,36 +188,41 @@ class ResumableSession:
                     copied["delivery_seq"] = seq
 
                 retained_bytes = _retained_size(copied)
-                if self._retained_bytes + retained_bytes > self.max_buffer_bytes:
-                    self.failure_code = "resume_buffer_exceeded"
-                    self.failure_message = (
-                        "resumable stream output exceeded the server replay window"
+                staged.append(
+                    ResumeDelivery(
+                        delivery_seq=seq,
+                        frame=copied,
+                        start_sample=start_sample,
+                        end_sample=end_sample,
+                        retained_bytes=retained_bytes,
                     )
-                    failure = ResumeFailure(self.failure_code, self.failure_message)
-                    attachment = self._attachment
-                    schedule_overflow = True
+                )
+                staged_bytes += retained_bytes
+                staged_sample = end_sample
+                if _is_terminal(copied):
                     break
 
-                delivery = ResumeDelivery(
-                    delivery_seq=seq,
-                    frame=copied,
-                    start_sample=start_sample,
-                    end_sample=end_sample,
-                    retained_bytes=retained_bytes,
+            if self._retained_bytes + staged_bytes > self.max_buffer_bytes:
+                self.failure_code = "resume_buffer_exceeded"
+                self.failure_message = (
+                    "resumable stream output exceeded the server replay window"
                 )
-                self._records.append(delivery)
-                self._retained_bytes += retained_bytes
-                self._next_delivery_seq += 1
-                self._next_audio_sample = end_sample
+                failure = ResumeFailure(self.failure_code, self.failure_message)
                 attachment = self._attachment
-
-                if _is_terminal(copied):
-                    self.terminal = True
-                    self.engine_finished = True
-                    schedule_terminal = True
-
-                if attachment is not None:
-                    attachment.queue.put_nowait(delivery)
+                schedule_overflow = True
+            else:
+                self._records.extend(staged)
+                self._retained_bytes += staged_bytes
+                self._next_delivery_seq += len(staged)
+                self._next_audio_sample = staged_sample
+                attachment = self._attachment
+                for delivery in staged:
+                    if _is_terminal(delivery.frame):
+                        self.terminal = True
+                        self.engine_finished = True
+                        schedule_terminal = True
+                    if attachment is not None:
+                        attachment.queue.put_nowait(delivery)
 
         if failure is not None and attachment is not None:
             attachment.queue.put_nowait(failure)
