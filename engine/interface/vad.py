@@ -77,6 +77,86 @@ class VADState(Enum):
     SPEECH = auto()
 
 
+@dataclass(frozen=True)
+class SampleProvenanceSpan:
+    """Source attribution for a half-open native-sample range.
+
+    The range is local to the ``AttributedSamples`` object that carries it.
+    ``progress_event`` is a candidate only; output sample coordinates are
+    assigned by the shared output processor after VAD and resampling.
+    """
+
+    sample_start: int
+    sample_end: int
+    segment_idx: int = -1
+    source_frame_start: int = 0
+    source_frame_end: int = 0
+    progress_event: Optional[dict] = None
+
+
+@dataclass
+class AttributedSamples:
+    """Native PCM together with run-length provenance spans."""
+
+    samples: np.ndarray
+    provenance: list[SampleProvenanceSpan]
+
+
+def _shift_spans(
+    spans: list[SampleProvenanceSpan], offset: int
+) -> list[SampleProvenanceSpan]:
+    return [
+        SampleProvenanceSpan(
+            max(0, span.sample_start + offset),
+            max(0, span.sample_end + offset),
+            span.segment_idx,
+            span.source_frame_start,
+            span.source_frame_end,
+            span.progress_event,
+        )
+        for span in spans
+        if span.sample_end > span.sample_start
+    ]
+
+
+def _slice_spans(
+    spans: list[SampleProvenanceSpan], start: int, end: int
+) -> list[SampleProvenanceSpan]:
+    """Clip local provenance spans to ``[start, end)`` and rebase to zero."""
+
+    clipped: list[SampleProvenanceSpan] = []
+    for span in spans:
+        left = max(start, span.sample_start)
+        right = min(end, span.sample_end)
+        if right <= left:
+            continue
+        clipped.append(
+            SampleProvenanceSpan(
+                left - start,
+                right - start,
+                span.segment_idx,
+                span.source_frame_start,
+                span.source_frame_end,
+                span.progress_event,
+            )
+        )
+    return clipped
+
+
+def _concat_spans(
+    blocks: list[tuple[np.ndarray, list[SampleProvenanceSpan]]]
+) -> AttributedSamples:
+    if not blocks:
+        return AttributedSamples(np.empty((0,), dtype=np.int16), [])
+    samples = np.concatenate([audio for audio, _ in blocks])
+    provenance: list[SampleProvenanceSpan] = []
+    offset = 0
+    for audio, spans in blocks:
+        provenance.extend(_shift_spans(spans, offset))
+        offset += audio.size
+    return AttributedSamples(samples, provenance)
+
+
 # ---------------------------------------------------------------------------
 # Observability
 # ---------------------------------------------------------------------------
@@ -139,20 +219,22 @@ class TTSVADProcessor(ABC):
 
         # Input buffer: accumulate partial frames from variable-size chunks
         self._input_buffer: np.ndarray = np.empty((0,), dtype=np.int16)
+        self._input_provenance: list[SampleProvenanceSpan] = []
 
         # Start margin buffer: ring buffer of recent frames for lookback
         self._margin_samples = max(
             0, int(round(sample_rate * config.start_margin_ms / 1000.0))
         )
         self._margin_buffer: np.ndarray = np.empty((0,), dtype=np.int16)
+        self._margin_provenance: list[SampleProvenanceSpan] = []
 
         # Pending emit buffer: audio confirmed as speech, awaiting batch emit
-        self._emit_buffer: list[np.ndarray] = []
+        self._emit_buffer: list[tuple[np.ndarray, list[SampleProvenanceSpan]]] = []
 
         # Candidate onset frames: consecutive above-threshold frames while the
         # begin counter is climbing. Held uncapped (bounded by begin_count) so a
         # real speech onset is never evicted by the small lookback margin.
-        self._begin_buffer: list[np.ndarray] = []
+        self._begin_buffer: list[tuple[np.ndarray, list[SampleProvenanceSpan]]] = []
 
         # State counters
         self._begin_counter: int = 0
@@ -191,35 +273,73 @@ class TTSVADProcessor(ABC):
 
     def process_chunk(self, pcm_int16: np.ndarray) -> np.ndarray:
         """Process a PCM chunk, return audio that should be emitted now."""
-        if not self._config.enabled or pcm_int16.size == 0:
+        return self.process_attributed_chunk(
+            pcm_int16,
+            [SampleProvenanceSpan(0, int(pcm_int16.size))],
+        ).samples
+
+    def process_attributed_chunk(
+        self,
+        pcm_int16: np.ndarray,
+        provenance: list[SampleProvenanceSpan],
+    ) -> AttributedSamples:
+        """Process native PCM while retaining source provenance.
+
+        The legacy :meth:`process_chunk` API remains a thin ndarray wrapper.
+        Gateways that need text alignment use this method so prefix margin,
+        onset candidates, and tail decisions carry the original segment/event
+        attribution through the state machine.
+        """
+        pcm_int16 = np.asarray(pcm_int16, dtype=np.int16).reshape(-1)
+        if pcm_int16.size == 0:
+            return AttributedSamples(pcm_int16, [])
+        if not self._config.enabled:
             self._metrics.original_audio_samples += pcm_int16.size
             self._metrics.effective_audio_samples += pcm_int16.size
-            return pcm_int16
+            return AttributedSamples(pcm_int16, _slice_spans(provenance, 0, pcm_int16.size))
 
         # Append to input buffer
         if self._input_buffer.size > 0:
             self._input_buffer = np.concatenate((self._input_buffer, pcm_int16))
+            self._input_provenance.extend(
+                _shift_spans(provenance, self._input_buffer.size - pcm_int16.size)
+            )
         else:
             self._input_buffer = pcm_int16.copy()
+            self._input_provenance = _slice_spans(provenance, 0, pcm_int16.size)
 
         # Process complete frames
         n_frames = self._input_buffer.size // self._frame_samples
         if n_frames == 0:
-            return self._drain_emit_buffer()
+            return self._drain_emit_buffer_attributed()
 
         consumed = n_frames * self._frame_samples
         frames = self._input_buffer[:consumed].reshape(n_frames, self._frame_samples)
         self._input_buffer = self._input_buffer[consumed:]
+        frame_provenance = _slice_spans(self._input_provenance, 0, consumed)
+        self._input_provenance = _shift_spans(
+            _slice_spans(self._input_provenance, consumed, consumed + self._input_buffer.size),
+            -consumed,
+        )
 
         for i in range(n_frames):
             frame = frames[i]
+            frame_spans = _slice_spans(
+                frame_provenance,
+                i * self._frame_samples,
+                (i + 1) * self._frame_samples,
+            )
             self._metrics.original_audio_samples += frame.size
-            self._process_frame(frame)
+            self._process_frame(frame, provenance=frame_spans)
 
-        return self._drain_emit_buffer()
+        return self._drain_emit_buffer_attributed()
 
     def flush(self) -> np.ndarray:
         """Audio stream ending: emit all pending audio and reset."""
+        return self.flush_attributed().samples
+
+    def flush_attributed(self) -> AttributedSamples:
+        """Flush the detector and return retained samples with provenance."""
         if not self._config.enabled:
             result = (
                 self._input_buffer.copy()
@@ -227,7 +347,9 @@ class TTSVADProcessor(ABC):
                 else np.empty((0,), dtype=np.int16)
             )
             self._input_buffer = np.empty((0,), dtype=np.int16)
-            return result
+            provenance = self._input_provenance
+            self._input_provenance = []
+            return AttributedSamples(result, _slice_spans(provenance, 0, result.size))
 
         # Process remaining partial frame (pad only for scoring).  The state
         # machine receives the real sample count so padding is never emitted or
@@ -237,8 +359,13 @@ class TTSVADProcessor(ABC):
             padded = np.zeros(self._frame_samples, dtype=np.int16)
             padded[:valid_samples] = self._input_buffer
             self._metrics.original_audio_samples += valid_samples
-            self._process_frame(padded, valid_samples=valid_samples)
+            self._process_frame(
+                padded,
+                valid_samples=valid_samples,
+                provenance=_slice_spans(self._input_provenance, 0, valid_samples),
+            )
             self._input_buffer = np.empty((0,), dtype=np.int16)
+            self._input_provenance = []
 
         # Flush: emit everything pending regardless of state
         if self._state == VADState.SILENCE:
@@ -247,19 +374,23 @@ class TTSVADProcessor(ABC):
             # tail silence after speech has already been emitted.
             self._record_trimmed_samples(self._margin_buffer.size)
             self._margin_buffer = np.empty((0,), dtype=np.int16)
+            self._margin_provenance = []
             # Candidate onset frames that never confirmed as speech are discarded
             # too (an unconfirmed begin run at end-of-stream).
-            for candidate in self._begin_buffer:
+            for candidate, _ in self._begin_buffer:
                 self._record_trimmed_samples(candidate.size)
             self._begin_buffer = []
         else:
             # In speech state — emit all pending
             if self._margin_buffer.size > 0:
-                self._emit_buffer.append(self._margin_buffer.copy())
+                self._emit_buffer.append(
+                    (self._margin_buffer.copy(), self._margin_provenance)
+                )
                 self._metrics.effective_audio_samples += self._margin_buffer.size
                 self._margin_buffer = np.empty((0,), dtype=np.int16)
+                self._margin_provenance = []
 
-        result = self._drain_emit_buffer()
+        result = self._drain_emit_buffer_attributed()
         self._state = VADState.SILENCE
         self._begin_counter = 0
         self._end_counter = 0
@@ -280,7 +411,7 @@ class TTSVADProcessor(ABC):
             self._metrics.original_audio_samples += self._input_buffer.size
             self._record_trimmed_samples(self._input_buffer.size)
         self._record_trimmed_samples(self._margin_buffer.size)
-        for candidate in self._begin_buffer:
+        for candidate, _ in self._begin_buffer:
             self._record_trimmed_samples(candidate.size)
 
         self._clear_stream_state()
@@ -296,7 +427,9 @@ class TTSVADProcessor(ABC):
         """Clear stream buffers/counters without touching accumulated metrics."""
         self._state = VADState.SILENCE
         self._input_buffer = np.empty((0,), dtype=np.int16)
+        self._input_provenance = []
         self._margin_buffer = np.empty((0,), dtype=np.int16)
+        self._margin_provenance = []
         self._emit_buffer = []
         self._begin_buffer = []
         self._begin_counter = 0
@@ -319,7 +452,10 @@ class TTSVADProcessor(ABC):
         ...
 
     def _process_frame(
-        self, frame_int16: np.ndarray, valid_samples: Optional[int] = None
+        self,
+        frame_int16: np.ndarray,
+        valid_samples: Optional[int] = None,
+        provenance: Optional[list[SampleProvenanceSpan]] = None,
     ) -> None:
         """Core VAD state machine for one frame."""
         score = self._score_frame(frame_int16)
@@ -329,23 +465,28 @@ class TTSVADProcessor(ABC):
             if valid_samples is None
             else frame_int16[: max(0, min(valid_samples, frame_int16.size))]
         )
+        frame_provenance = _slice_spans(
+            provenance or [SampleProvenanceSpan(0, frame_int16.size)],
+            0,
+            audio.size,
+        )
 
         if self._state == VADState.SILENCE:
             # Check for begin
             if score >= cfg.begin_threshold:
                 self._begin_counter += 1
                 # Hold this candidate onset frame uncapped (see _begin_buffer).
-                self._begin_buffer.append(audio.copy())
+                self._begin_buffer.append((audio.copy(), frame_provenance))
             else:
                 # A below-threshold frame breaks the run: the candidate frames
                 # were not speech after all → demote them to lookback silence
                 # (capped). Samples are counted as trimmed only when evicted
                 # from lookback, because retained margin may still be emitted.
-                for candidate in self._begin_buffer:
-                    self._update_margin_buffer(candidate)
+                for candidate, candidate_provenance in self._begin_buffer:
+                    self._update_margin_buffer(candidate, candidate_provenance)
                 self._begin_buffer = []
                 self._begin_counter = 0
-                self._update_margin_buffer(audio)
+                self._update_margin_buffer(audio, frame_provenance)
 
             if self._begin_counter >= cfg.begin_count:
                 # Begin triggered!
@@ -365,17 +506,20 @@ class TTSVADProcessor(ABC):
 
                 # Emit the lookback margin (silence before the onset) ...
                 if self._margin_buffer.size > 0:
-                    self._emit_buffer.append(self._margin_buffer.copy())
+                    self._emit_buffer.append(
+                        (self._margin_buffer.copy(), self._margin_provenance)
+                    )
                     self._metrics.effective_audio_samples += self._margin_buffer.size
                     self._margin_buffer = np.empty((0,), dtype=np.int16)
+                    self._margin_provenance = []
 
                 if not self._metrics.first_effective_audio_found:
                     self._metrics.first_effective_audio_found = True
 
                 # ... then ALL candidate onset frames (uncapped) — this is the
                 # real speech onset that the old code clipped via the margin cap.
-                for candidate in self._begin_buffer:
-                    self._emit_buffer.append(candidate)
+                for candidate, candidate_provenance in self._begin_buffer:
+                    self._emit_buffer.append((candidate, candidate_provenance))
                     self._metrics.effective_audio_samples += candidate.size
                 self._begin_buffer = []
 
@@ -406,9 +550,10 @@ class TTSVADProcessor(ABC):
                 self._record_trimmed_samples(audio.size)
                 # Start fresh margin buffer
                 self._margin_buffer = np.empty((0,), dtype=np.int16)
+                self._margin_provenance = []
             else:
                 # Still speech — emit
-                self._emit_buffer.append(audio.copy())
+                self._emit_buffer.append((audio.copy(), frame_provenance))
                 self._metrics.effective_audio_samples += audio.size
 
     def _record_trimmed_samples(self, sample_count: int) -> None:
@@ -425,7 +570,11 @@ class TTSVADProcessor(ABC):
         else:
             self._metrics.prefix_trimmed_samples += sample_count
 
-    def _update_margin_buffer(self, frame_int16: np.ndarray) -> None:
+    def _update_margin_buffer(
+        self,
+        frame_int16: np.ndarray,
+        provenance: Optional[list[SampleProvenanceSpan]] = None,
+    ) -> None:
         """Add audio to lookback and account only samples actually evicted."""
         if frame_int16.size == 0:
             return
@@ -433,16 +582,33 @@ class TTSVADProcessor(ABC):
             self._record_trimmed_samples(frame_int16.size)
             return
         self._margin_buffer = np.concatenate((self._margin_buffer, frame_int16))
+        offset = self._margin_buffer.size - frame_int16.size
+        self._margin_provenance.extend(
+            _shift_spans(
+                provenance or [SampleProvenanceSpan(0, frame_int16.size)],
+                offset,
+            )
+        )
         if self._margin_buffer.size > self._margin_samples:
             excess = self._margin_buffer.size - self._margin_samples
             self._margin_buffer = self._margin_buffer[excess:]
+            self._margin_provenance = _shift_spans(
+                _slice_spans(
+                    self._margin_provenance,
+                    excess,
+                    excess + self._margin_buffer.size,
+                ),
+                -excess,
+            )
             self._record_trimmed_samples(excess)
 
     def _drain_emit_buffer(self) -> np.ndarray:
         """Concatenate and return all pending emit audio."""
-        if not self._emit_buffer:
-            return np.empty((0,), dtype=np.int16)
-        result = np.concatenate(self._emit_buffer)
+        return self._drain_emit_buffer_attributed().samples
+
+    def _drain_emit_buffer_attributed(self) -> AttributedSamples:
+        """Concatenate pending audio while retaining run-length provenance."""
+        result = _concat_spans(self._emit_buffer)
         self._emit_buffer = []
         return result
 

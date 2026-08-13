@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+import soxr
 
 from ..core.types import AudioEncoding
 from .protocol import PROTOCOL_VERSION, output_policy_json, timing_context_json
 from .types import AudioFrame, SessionStartRequest, StreamEvent
+from .vad import AttributedSamples, SampleProvenanceSpan, TTSVADProcessor
 
 ENGINE_SAMPLE_RATE = 24000
 TIMING_CONTRACT = "server_monotonic_v1"
@@ -21,6 +24,262 @@ def _resample_linear(audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
     src_x = np.linspace(0.0, duration, num=audio.shape[0], endpoint=False)
     dst_x = np.linspace(0.0, duration, num=dst_len, endpoint=False)
     return np.interp(dst_x, src_x, audio).astype(np.float32)
+
+
+@dataclass(frozen=True)
+class TextProgressCandidate:
+    """A text marker waiting for final output-sample coordinates."""
+
+    event: dict[str, Any]
+    segment_idx: int
+
+
+@dataclass
+class OutputBatch:
+    """Atomic output unit: audio, anchors, and ordinary events."""
+
+    audio: AudioFrame | None = None
+    anchors: list[dict[str, Any]] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
+
+
+class StreamingOutputProcessor:
+    """Shared native→VAD→resample output and text-anchor processor.
+
+    The frontend emits candidate markers with the engine audio that produced
+    them.  This class is the only component allowed to assign output sample
+    coordinates.  VAD provenance is carried through retained samples; a
+    marker attached to discarded audio therefore never becomes an anchor.
+    """
+
+    def __init__(
+        self,
+        start_request: SessionStartRequest,
+        *,
+        vad_processor: TTSVADProcessor,
+        native_sample_rate: int = ENGINE_SAMPLE_RATE,
+        timing_accumulator: Any = None,
+    ) -> None:
+        self.pipeline = OutputPipeline(
+            start_request,
+            native_sample_rate=native_sample_rate,
+            timing_accumulator=timing_accumulator,
+        )
+        self._vad = vad_processor
+        self._native_sample_rate = int(native_sample_rate)
+        self._next_anchor_seq = 1
+        self._candidates: dict[int, dict[str, Any]] = {}
+        self._retained_candidate_seqs: set[int] = set()
+        self._emitted_anchor_seq: set[int] = set()
+        self._pending_final: list[dict[str, Any]] = []
+        self._segment_output_end: dict[int, int] = {}
+        self._last_retained_segment = -1
+
+    @property
+    def output_sample_cursor(self) -> int:
+        return self.pipeline.output_sample_cursor
+
+    def process(self, chunk: Any) -> OutputBatch:
+        """Process one native float32 chunk and return one atomic batch."""
+        progress_event = getattr(chunk, "progress_event", None)
+        segment_idx = int(getattr(chunk, "segment_idx", -1))
+        pcm_bytes = getattr(chunk, "pcm_bytes", chunk)
+        pcm_bytes = bytes(pcm_bytes or b"")
+        raw = np.frombuffer(pcm_bytes, dtype=np.float32)
+        if raw.size == 0:
+            return OutputBatch()
+
+        provenance = [
+            SampleProvenanceSpan(
+                0,
+                int(raw.size),
+                segment_idx,
+                int(getattr(chunk, "source_frame_start", 0)),
+                int(getattr(chunk, "source_frame_end", 0)),
+                progress_event,
+            )
+        ]
+        if progress_event:
+            seq = _optional_int((progress_event.get("meta") or {}).get("anchor_seq"))
+            if seq is None:
+                seq = self._next_anchor_seq
+                self._next_anchor_seq += 1
+                progress_event = _copy_progress_event(progress_event, seq)
+                provenance = [
+                    SampleProvenanceSpan(
+                        span.sample_start,
+                        span.sample_end,
+                        span.segment_idx,
+                        span.source_frame_start,
+                        span.source_frame_end,
+                        progress_event,
+                    )
+                    for span in provenance
+                ]
+            else:
+                self._next_anchor_seq = max(self._next_anchor_seq, seq + 1)
+            self._candidates[seq] = progress_event
+
+        if self._vad.config.enabled:
+            int16 = np.clip(raw, -1.0, 1.0)
+            int16 = (int16 * 32767.0).astype(np.int16)
+            retained = self._vad.process_attributed_chunk(int16, provenance)
+            if retained.samples.size == 0:
+                return OutputBatch()
+            native_bytes = (
+                retained.samples.astype(np.float32, copy=False) / 32767.0
+            ).tobytes()
+        else:
+            retained = AttributedSamples(raw, provenance)
+            native_bytes = pcm_bytes
+        return self._make_batch(retained, native_bytes)
+
+    def process_event(self, event: dict[str, Any]) -> OutputBatch:
+        """Accept a lifecycle event without inventing audio coordinates."""
+        if not isinstance(event, dict):
+            return OutputBatch(events=[event])
+        if event.get("type") != "text_progress":
+            return OutputBatch(events=[event])
+        meta = dict(event.get("meta") or {})
+        if _is_true(meta.get("alignment_final")):
+            self._pending_final.append(event)
+            return OutputBatch()
+        if "output_sample_end" not in meta:
+            # Abort/cancel progress is diagnostic only.  Preserve the last
+            # trusted cursor and do not turn an event-time estimate into a
+            # synthetic output anchor.
+            return OutputBatch(events=[event])
+        # Legacy backends may provide a progress event without an attached
+        # audio chunk.  Only use the currently confirmed output cursor; this is
+        # intentionally not a sent-byte estimate for new engine paths.
+        return OutputBatch(anchors=[self._anchor_event(event, self.output_sample_cursor)])
+
+    def finish(self) -> list[OutputBatch]:
+        """Flush VAD then resampler, and only then emit final text anchors."""
+        batches: list[OutputBatch] = []
+        retained = self._vad.flush_attributed()
+        if retained.samples.size:
+            native_bytes = (
+                retained.samples.astype(np.float32, copy=False) / 32767.0
+            ).tobytes()
+            batches.append(self._make_batch(retained, native_bytes))
+
+        flushed = self.pipeline.flush_resampler()
+        if flushed is not None and flushed.pcm_bytes:
+            if self._last_retained_segment >= 0:
+                self._segment_output_end[
+                    self._last_retained_segment
+                ] = int(
+                    flushed.meta.get("output_sample_end", str(self.output_sample_cursor))
+                )
+            batches.append(OutputBatch(audio=flushed))
+
+        # A streaming resampler may hold the first native block in its delay
+        # line.  Those candidates were not discarded; resolve them against
+        # the final retained output once the delay line has been flushed.
+        if self._candidates:
+            anchors = []
+            for seq, event in list(self._candidates.items()):
+                if seq in self._emitted_anchor_seq:
+                    continue
+                if self._vad.config.enabled and seq not in self._retained_candidate_seqs:
+                    # VAD made a final discard decision for this candidate;
+                    # trimmed samples never create a text anchor.
+                    continue
+                segment_idx = int(event.get("segment_idx", -1))
+                sample = self._segment_output_end.get(
+                    segment_idx, self.output_sample_cursor
+                )
+                anchors.append(self._anchor_event(event, int(sample)))
+                self._emitted_anchor_seq.add(seq)
+            if anchors:
+                batches.append(OutputBatch(anchors=anchors))
+            self._candidates.clear()
+
+        if self._pending_final:
+            final_events = []
+            for event in self._pending_final:
+                segment_idx = int(event.get("segment_idx", -1))
+                sample = self._segment_output_end.get(
+                    segment_idx, self.output_sample_cursor
+                )
+                final_events.append(self._anchor_event(event, int(sample)))
+            batches.append(OutputBatch(anchors=final_events))
+            self._pending_final = []
+        return batches
+
+    def _make_batch(
+        self, retained: AttributedSamples, native_bytes: bytes
+    ) -> OutputBatch:
+        frame = self.pipeline.convert_audio_chunk(native_bytes)
+        for span in retained.provenance:
+            event = span.progress_event
+            if event:
+                seq = _optional_int((event.get("meta") or {}).get("anchor_seq"))
+                if seq is not None:
+                    self._retained_candidate_seqs.add(seq)
+        if not frame.pcm_bytes:
+            return OutputBatch()
+        anchors: list[dict[str, Any]] = []
+        output_start = int(frame.meta.get("output_sample_start", "0"))
+        output_count = int(frame.meta.get("output_sample_end", "0")) - output_start
+        total_native = max(1, int(retained.samples.size))
+        seen: set[int] = set()
+        for span in retained.provenance:
+            event = span.progress_event
+            if not event:
+                continue
+            seq = _optional_int((event.get("meta") or {}).get("anchor_seq"))
+            if seq is None or seq in seen or seq in self._emitted_anchor_seq:
+                continue
+            seen.add(seq)
+            end = output_start + round(output_count * span.sample_end / total_native)
+            anchors.append(self._anchor_event(event, end, start=output_start))
+            self._emitted_anchor_seq.add(seq)
+            self._segment_output_end[span.segment_idx] = end
+            self._candidates.pop(seq, None)
+            self._last_retained_segment = span.segment_idx
+        return OutputBatch(audio=frame, anchors=anchors)
+
+    def _anchor_event(
+        self,
+        event: dict[str, Any],
+        end: int,
+        *,
+        start: int | None = None,
+    ) -> dict[str, Any]:
+        meta = dict(event.get("meta") or {})
+        if start is None:
+            start = int(meta.get("output_sample_start", end) or end)
+        meta["anchor_seq"] = str(
+            _optional_int(meta.get("anchor_seq")) or self._allocate_anchor_seq()
+        )
+        meta["output_sample_start"] = str(max(0, int(start)))
+        meta["output_sample_end"] = str(max(int(start), int(end)))
+        meta["output_sample_rate"] = str(self.pipeline.start_request.config.audio.sample_rate)
+        return {**event, "meta": meta}
+
+    def _allocate_anchor_seq(self) -> int:
+        seq = self._next_anchor_seq
+        self._next_anchor_seq += 1
+        return seq
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_true(value: Any) -> bool:
+    return str(value).lower() in {"true", "1", "yes"}
+
+
+def _copy_progress_event(event: dict[str, Any], seq: int) -> dict[str, Any]:
+    meta = dict(event.get("meta") or {})
+    meta["anchor_seq"] = str(seq)
+    return {**event, "meta": meta}
 
 
 class OutputPipeline:
@@ -54,6 +313,18 @@ class OutputPipeline:
         self._first_effective_audio_monotonic: float | None = None
         self._chunk_index = 0
         self._output_sample_cursor = 0
+        self._resampler = (
+            soxr.ResampleStream(
+                self._native_sample_rate,
+                self._audio.sample_rate,
+                1,
+                dtype="float32",
+                quality="HQ",
+            )
+            if self._audio.sample_rate != self._native_sample_rate
+            else None
+        )
+        self._resampler_flushed = False
 
         # Prefix trim / output gating observability (set when gating lands)
         self._prefix_trim_applied: bool = False
@@ -91,9 +362,36 @@ class OutputPipeline:
 
     def convert_audio_chunk(self, pcm_bytes: bytes) -> AudioFrame:
         audio = np.frombuffer(pcm_bytes, dtype=np.float32)
-        if self._audio.sample_rate != self._native_sample_rate:
-            audio = _resample_linear(
-                audio, self._native_sample_rate, self._audio.sample_rate
+        if self._resampler is not None:
+            audio = self._resampler.resample_chunk(audio, last=False)
+        return self._encode_audio(audio)
+
+    def flush_resampler(self) -> AudioFrame | None:
+        """Flush streaming resampler delay into the final output timeline."""
+        if self._resampler is None or self._resampler_flushed:
+            return None
+        self._resampler_flushed = True
+        audio = self._resampler.resample_chunk(
+            np.empty((0,), dtype=np.float32), last=True
+        )
+        if audio.size == 0:
+            return None
+        return self._encode_audio(audio)
+
+    def _encode_audio(self, audio: np.ndarray) -> AudioFrame:
+        audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if audio.size == 0:
+            return AudioFrame(
+                pcm_bytes=b"",
+                audio=self._audio,
+                chunk_index=self._chunk_index,
+                first_chunk=False,
+                final_chunk=False,
+                meta={
+                    "output_sample_start": str(self._output_sample_cursor),
+                    "output_sample_end": str(self._output_sample_cursor),
+                    "output_sample_rate": str(self._audio.sample_rate),
+                },
             )
         if self._audio.encoding == AudioEncoding.PCM_S16LE:
             audio = np.clip(audio, -1.0, 1.0)

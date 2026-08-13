@@ -2,6 +2,9 @@
 
 from .output import (
     OutputPipeline,
+    OutputBatch,
+    StreamingOutputProcessor,
+    TextProgressCandidate,
     build_done_event,
     build_forward_event,
     build_start_event,
@@ -48,6 +51,9 @@ __all__ = (
     "DisabledVADProcessor",
     "EnergyVADProcessor",
     "OutputPipeline",
+    "OutputBatch",
+    "StreamingOutputProcessor",
+    "TextProgressCandidate",
     "OutputPolicy",
     "PROTOCOL_VERSION",
     "SUPPORTED_OUTPUT_POLICY_FEATURES",

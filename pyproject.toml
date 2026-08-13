@@ -42,6 +42,7 @@ engine = [
     "torch>=2.1",
     "onnxruntime>=1.17",
     "numpy>=1.24",
+    "soxr>=1,<2",
     "grpcio>=1.67.1",
     "protobuf>=5.29.6,<7",
     "pyyaml>=6.0",

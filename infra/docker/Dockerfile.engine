@@ -30,6 +30,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     tokenizers \
     pyyaml \
     numpy \
+    'soxr>=1,<2' \
     aiohttp \
     grpcio \
     grpcio-tools \
@@ -38,7 +39,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && python3 -c "\
 import os; \
 import tensorrt as trt; \
-import torch, tokenizers, yaml, grpc, numpy; \
+import torch, tokenizers, yaml, grpc, numpy, soxr; \
 base_cuda = '.'.join(os.environ.get('CUDA_VERSION', '').split('.')[:2]); \
 torch_cuda = '.'.join((torch.version.cuda or '').split('.')[:2]); \
 assert base_cuda and torch_cuda == base_cuda, f'base CUDA {base_cuda}, torch CUDA {torch.version.cuda}'; \

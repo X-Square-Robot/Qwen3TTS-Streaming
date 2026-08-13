@@ -67,13 +67,14 @@ from engine.core.types import (
     SessionConfig,
 )
 from engine.interface import (
-    OutputPipeline,
     SessionStartRequest,
+    StreamingOutputProcessor,
     parse_output_policy,
     parse_timing_context,
     to_core_output_policy,
     to_core_timing_context,
 )
+from engine.interface.vad import create_vad_processor, vad_config_from_dict
 from engine.runtime.fingerprint import (
     FingerprintCheckError,
     enforce_engine_fingerprint,
@@ -682,22 +683,49 @@ class TritonPythonModel:
         timing_acc.request_received_epoch_ms = int(round(time.time() * 1000.0))
         timing_acc.session_created_epoch_ms = timing_acc.request_received_epoch_ms
         config.timing.extra["_server_timing_accumulator"] = timing_acc
-        pipeline = OutputPipeline(
-            SessionStartRequest(session_id=session_id, config=config),
-            request_received_monotonic=time.monotonic(),
+        start_request = SessionStartRequest(session_id=session_id, config=config)
+        vad_policy = config.output_policy.vad
+        vad_processor = create_vad_processor(
+            vad_config_from_dict(
+                {
+                    "mode": (
+                        str(vad_policy.strategy or "disabled")
+                        if vad_policy.enabled
+                        else "disabled"
+                    ),
+                    **dict(vad_policy.config or {}),
+                    "chunk_ms": vad_policy.chunk_ms,
+                    "begin_threshold": vad_policy.begin_threshold,
+                    "begin_count": vad_policy.begin_count,
+                    "end_threshold": vad_policy.end_threshold,
+                    "end_count": vad_policy.end_count,
+                    "start_margin_ms": vad_policy.start_margin_ms,
+                }
+            ),
+            sample_rate=_ENGINE_SAMPLE_RATE,
+        )
+        output_processor = StreamingOutputProcessor(
+            start_request,
+            vad_processor=vad_processor,
+            native_sample_rate=_ENGINE_SAMPLE_RATE,
             timing_accumulator=timing_acc,
         )
+        pipeline = output_processor.pipeline
 
         async def on_audio(_sid: str, data: bytes) -> None:
             nonlocal first_audio_sent
-            meta = None
+            batch = output_processor.process(data)
+            if batch.audio is None or not batch.audio.pcm_bytes:
+                return
+            meta = dict(batch.audio.meta)
             if not first_audio_sent:
                 first_audio_sent = True
-                meta = {
-                    "triton_adapter_ttft_ms": f"{(time.perf_counter() - request_received) * 1000.0:.3f}",
-                    "first_audio_chunk": "true",
-                }
-            audio_bytes = _convert_audio_chunk_bytes(data, config.audio)
+                meta.update(
+                    {
+                        "triton_adapter_ttft_ms": f"{(time.perf_counter() - request_received) * 1000.0:.3f}",
+                        "first_audio_chunk": "true",
+                    }
+                )
             # Off the shared asyncio loop thread and onto the send pool: with
             # many concurrent sessions, on_audio has no other await point, so
             # calling _send_event() inline here serializes every session's
@@ -716,27 +744,62 @@ class TritonPythonModel:
                     event_type="audio",
                     session_id=_sid,
                     meta=meta,
-                    audio_bytes=audio_bytes,
+                    audio_bytes=batch.audio.pcm_bytes,
                     is_final=False,
                 ),
             )
+            for event in (*batch.anchors, *batch.events):
+                self._send_event(
+                    response_sender,
+                    event_type=str(event.get("type", "") or ""),
+                    session_id=_sid,
+                    segment_idx=int(event.get("segment_idx", -1)),
+                    text=str(event.get("text", "") or ""),
+                    message=str(event.get("message", "") or ""),
+                    meta={
+                        str(k): str(v)
+                        for k, v in (event.get("meta", {}) or {}).items()
+                    },
+                )
 
         async def on_event(_sid: str, event: dict) -> None:
-            self._send_event(
-                response_sender,
-                event_type=str(event.get("type", "") or ""),
-                session_id=_sid,
-                segment_idx=int(event.get("segment_idx", -1)),
-                text=str(event.get("text", "") or ""),
-                message=str(event.get("message", "") or ""),
-                meta={str(k): str(v) for k, v in (event.get("meta", {}) or {}).items()},
-            )
+            batch = output_processor.process_event(event)
+            for item in (*batch.anchors, *batch.events):
+                self._send_event(
+                    response_sender,
+                    event_type=str(item.get("type", "") or ""),
+                    session_id=_sid,
+                    segment_idx=int(item.get("segment_idx", -1)),
+                    text=str(item.get("text", "") or ""),
+                    message=str(item.get("message", "") or ""),
+                    meta={str(k): str(v) for k, v in (item.get("meta", {}) or {}).items()},
+                )
 
         async def on_done(_sid: str, metrics: dict) -> None:
             with self._sessions_lock:
                 self._active_sessions.discard(_sid)
                 self._session_senders.pop(_sid, None)
             error = metrics.get("error") if isinstance(metrics, dict) else None
+            for batch in output_processor.finish():
+                if batch.audio is not None and batch.audio.pcm_bytes:
+                    self._send_event(
+                        response_sender,
+                        event_type="audio",
+                        session_id=_sid,
+                        meta=dict(batch.audio.meta),
+                        audio_bytes=batch.audio.pcm_bytes,
+                        is_final=False,
+                    )
+                for event in (*batch.anchors, *batch.events):
+                    self._send_event(
+                        response_sender,
+                        event_type=str(event.get("type", "") or ""),
+                        session_id=_sid,
+                        segment_idx=int(event.get("segment_idx", -1)),
+                        text=str(event.get("text", "") or ""),
+                        message=str(event.get("message", "") or ""),
+                        meta={str(k): str(v) for k, v in (event.get("meta", {}) or {}).items()},
+                    )
             # pipeline.done_meta() merges in the ServerTimingAccumulator data
             # (queue_wait/prefill/cache_hit/total_latency) and already excludes
             # the "error" key itself, matching build_done_event()'s behavior
