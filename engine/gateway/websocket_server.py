@@ -37,8 +37,6 @@ import os
 import uuid
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
-
 from ..core.types import (
     AudioConfig,
     AudioEncoding,
@@ -49,7 +47,7 @@ from ..core.types import (
 from ..core.timing import ServerTimingAccumulator
 from ..core.lifecycle import LifecycleLogger
 from ..interface import (
-    OutputPipeline,
+    StreamingOutputProcessor,
     SessionStartRequest,
     build_done_event,
     build_forward_event,
@@ -58,7 +56,6 @@ from ..interface import (
     parse_output_policy,
     parse_timing_context,
     serialize_stream_event,
-    stamp_output_anchor,
     to_core_output_policy,
     to_core_timing_context,
 )
@@ -183,6 +180,7 @@ class WebSocketGateway:
         resume_attachment: ResumeAttachment | None = None
         playback_played_sample = 0
         playback_buffered_sample = 0
+        playback_output_sample = 0
         request_task: asyncio.Task | None = None
         outbound_task: asyncio.Task | None = None
         pump_task = asyncio.create_task(self._pump_messages(ws, request_queue))
@@ -194,6 +192,7 @@ class WebSocketGateway:
             nonlocal start_request, outbound_queue, outbound_task
             nonlocal input_closed, resume_session, resume_attachment
             nonlocal playback_played_sample, playback_buffered_sample
+            nonlocal playback_output_sample
             # Usually the queue-get task delivered the terminal itself. It can
             # still be pending when cancel sends its terminal directly.
             if outbound_task is not None and not outbound_task.done():
@@ -212,11 +211,12 @@ class WebSocketGateway:
             resume_attachment = None
             playback_played_sample = 0
             playback_buffered_sample = 0
+            playback_output_sample = 0
 
         async def send_outbound_frame(frame: dict[str, Any]) -> bool:
             """Send one queued frame; return true when it ends the session."""
 
-            nonlocal connection_closed
+            nonlocal connection_closed, playback_output_sample
             terminal = _is_terminal_frame(frame)
             event_type = str(frame.get("event", {}).get("type", ""))
             reusable = terminal and event_type == "done" and input_closed
@@ -227,6 +227,13 @@ class WebSocketGateway:
                 event = frame.setdefault("event", {})
                 event.setdefault("meta", {})[_WEBSOCKET_REUSABLE_META_KEY] = "true"
             await _send_frame(ws, frame)
+            if frame.get("type") == "audio":
+                playback_output_sample = max(
+                    playback_output_sample,
+                    int((frame.get("audio") or {}).get("meta", {}).get(
+                        "output_sample_end", playback_output_sample
+                    ) or playback_output_sample),
+                )
             if not terminal:
                 return False
             await reset_session()
@@ -655,23 +662,41 @@ class WebSocketGateway:
                                             "resume_attachment_missing",
                                             "resumable session has no attachment",
                                         )
+                                    observed_delivery_seq = (
+                                        _required_nonnegative_ws_int(
+                                            message,
+                                            "observed_delivery_seq",
+                                            positive=False,
+                                        )
+                                        if "observed_delivery_seq" in message
+                                        else None
+                                    )
                                     await resume_session.record_playback_progress(
                                         resume_attachment.generation,
                                         played_through_sample=played,
                                         buffered_through_sample=buffered,
+                                        observed_delivery_seq=observed_delivery_seq,
                                     )
                                 else:
                                     if played < playback_played_sample:
-                                        continue
+                                        if buffered <= playback_buffered_sample:
+                                            continue
+                                        raise ResumeProtocolError(
+                                            "invalid_playback_progress",
+                                            "played_through_sample cannot move backwards",
+                                        )
                                     if buffered < played:
                                         raise ResumeProtocolError(
                                             "invalid_playback_progress",
                                             "buffered_through_sample must be >= played_through_sample",
                                         )
+                                    if buffered > playback_output_sample:
+                                        raise ResumeProtocolError(
+                                            "invalid_playback_progress",
+                                            "buffered_through_sample is ahead of server output",
+                                        )
                                     playback_played_sample = played
-                                    playback_buffered_sample = max(
-                                        playback_buffered_sample, buffered
-                                    )
+                                    playback_buffered_sample = buffered
                             except ResumeProtocolError as exc:
                                 await ws.send_json(
                                     {
@@ -826,13 +851,27 @@ class WebSocketGateway:
         # Store accumulator reference in timing extra for engine thread access
         config.timing.extra["_server_timing_accumulator"] = timing_acc
 
-        pipeline = OutputPipeline(start_request, timing_accumulator=timing_acc)
-
         # Create per-session VAD processor from config
         from .grpc_server import ENGINE_SAMPLE_RATE
 
         vad_config = _build_vad_config(config)
         vad_processor = create_vad_processor(vad_config, sample_rate=ENGINE_SAMPLE_RATE)
+        output_processor = StreamingOutputProcessor(
+            start_request,
+            vad_processor=vad_processor,
+            native_sample_rate=ENGINE_SAMPLE_RATE,
+            timing_accumulator=timing_acc,
+        )
+        pipeline = output_processor.pipeline
+
+        async def _enqueue_frames(frames: list[dict[str, Any]]) -> None:
+            if not frames:
+                return
+            if isinstance(outbound_queue, ResumableSession):
+                await outbound_queue.put_batch(frames)
+                return
+            for frame in frames:
+                await outbound_queue.put(frame)
 
         vad_enabled = vad_processor.config.enabled
         first_effective_logged = False
@@ -898,92 +937,68 @@ class WebSocketGateway:
             )
 
         async def on_audio(sid: str, data: bytes) -> None:
-            progress_event = getattr(data, "progress_event", None)
-            data = getattr(data, "pcm_bytes", data)
-
-            async def _publish_progress(frame) -> None:
-                if not progress_event:
-                    return
-                progress = dict(progress_event)
-                progress["meta"] = {
-                    **dict(progress.get("meta") or {}),
-                    **frame.meta,
-                }
-                await outbound_queue.put(
-                    _make_event_frame_from_contract(
-                        build_forward_event(
-                            client_session_id, progress, start_request
-                        )
+            batch = output_processor.process(data)
+            frames: list[dict[str, Any]] = []
+            if batch.audio is not None and batch.audio.pcm_bytes:
+                log_first_effective_audio(len(batch.audio.pcm_bytes))
+                frames.append(
+                    _make_audio_frame(
+                        batch.audio.pcm_bytes,
+                        batch.audio.audio,
+                        meta=batch.audio.meta,
                     )
                 )
-
-            if not vad_enabled:
-                # Fast path: skip the float32→int16→float32 round-trip (per-
-                # chunk loop cost + silent 15-bit quantization of f32 output).
-                if not data:
-                    return
-                frame = pipeline.convert_audio_chunk(data)
-                if progress_event:
-                    frame.meta.update(progress_event.get("meta") or {})
-                log_first_effective_audio(len(data))
-                await outbound_queue.put(
-                    _make_audio_frame(frame.pcm_bytes, frame.audio, meta=frame.meta)
+            for event in (*batch.anchors, *batch.events):
+                frames.append(
+                    _make_event_frame_from_contract(
+                        build_forward_event(client_session_id, event, start_request)
+                    )
                 )
-                await _publish_progress(frame)
-                return
-            # Apply VAD filtering before output pipeline
-            raw = np.frombuffer(data, dtype=np.float32)
-            if raw.size == 0:
-                return
-            audio_int16 = np.clip(raw, -1.0, 1.0)
-            audio_int16 = (audio_int16 * 32767.0).astype(np.int16)
-
-            filtered_int16 = vad_processor.process_chunk(audio_int16)
-            if filtered_int16.size == 0:
-                return
-
-            filtered_f32 = filtered_int16.astype(np.float32) / 32767.0
-            filtered_bytes = filtered_f32.tobytes()
-
-            frame = pipeline.convert_audio_chunk(filtered_bytes)
-            if progress_event:
-                frame.meta.update(progress_event.get("meta") or {})
-            log_first_effective_audio(len(filtered_bytes))
-            await outbound_queue.put(
-                _make_audio_frame(frame.pcm_bytes, frame.audio, meta=frame.meta)
-            )
-            await _publish_progress(frame)
+            await _enqueue_frames(frames)
 
         async def on_event(sid: str, event: dict) -> None:
-            event = stamp_output_anchor(event, pipeline)
-            await outbound_queue.put(
-                _make_event_frame_from_contract(
-                    build_forward_event(client_session_id, event, start_request)
+            batch = output_processor.process_event(event)
+            frames = []
+            for item in (*batch.anchors, *batch.events):
+                frames.append(
+                    _make_event_frame_from_contract(
+                        build_forward_event(client_session_id, item, start_request)
+                    )
                 )
-            )
+            await _enqueue_frames(frames)
 
         async def on_done(sid: str, metrics: dict) -> None:
-            # Flush any remaining audio from VAD
-            final_int16 = vad_processor.flush()
-            if final_int16.size > 0:
-                final_f32 = final_int16.astype(np.float32) / 32767.0
-                final_bytes = final_f32.tobytes()
-                frame = pipeline.convert_audio_chunk(final_bytes)
-                log_first_effective_audio(len(final_bytes))
-                await outbound_queue.put(
-                    _make_audio_frame(frame.pcm_bytes, frame.audio, meta=frame.meta)
-                )
+            for batch in output_processor.finish():
+                frames = []
+                if batch.audio is not None and batch.audio.pcm_bytes:
+                    log_first_effective_audio(len(batch.audio.pcm_bytes))
+                    frames.append(
+                        _make_audio_frame(
+                            batch.audio.pcm_bytes,
+                            batch.audio.audio,
+                            meta=batch.audio.meta,
+                        )
+                    )
+                for event in (*batch.anchors, *batch.events):
+                    frames.append(
+                        _make_event_frame_from_contract(
+                            build_forward_event(
+                                client_session_id, event, start_request
+                            )
+                        )
+                    )
+                await _enqueue_frames(frames)
 
             # All-silence sessions never cross the first-effective boundary,
             # so snapshot the bypass counters unconditionally at completion.
             snapshot_prefix_bypass()
             # Inject VAD observability into metrics
             _inject_vad_metrics(vad_processor, pipeline, metrics)
-            await outbound_queue.put(
+            await _enqueue_frames([
                 _make_event_frame_from_contract(
                     build_done_event(client_session_id, metrics, pipeline)
                 )
-            )
+            ])
 
         await self._engine.start_session(
             internal_session_id,

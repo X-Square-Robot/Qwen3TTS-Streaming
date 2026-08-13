@@ -87,6 +87,11 @@ def create_app(
                     QWEN_TEXT_BUFFER_EXTENSION,
                     "qwen.text_progress.v1",
                 ],
+                "supported_progress_features": [
+                    "text_progress_anchor_v1",
+                    "playback_progress_v1",
+                    "qwen.text_progress.v1",
+                ],
                 "backend": "triton-grpc",
                 "model": backend.model_name,
                 "model_version": backend.model_version,

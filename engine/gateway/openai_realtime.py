@@ -674,12 +674,12 @@ class _RealtimeConnection:
                     # source text cursor and future ASR/alignment revisions.
                     event_meta = dict(event.get("meta") or {})
                     if event_type == "text_progress" and "output_sample_end" not in event_meta:
-                        # Compatibility for legacy backend callbacks that do
-                        # not carry an attributed audio frame. New callbacks
-                        # always provide the exact output sample range.
-                        event_meta["output_sample_end"] = str(state.audio_samples)
-                        event_meta.setdefault("output_sample_start", "0")
-                        event_meta.setdefault("output_sample_rate", str(state.sample_rate))
+                        # A legacy backend may still emit the coarse EMA
+                        # percentage, but bytes sent on this facade are not a
+                        # playback/alignment coordinate. Forward the legacy
+                        # fields without manufacturing a v1 anchor.
+                        event_meta.pop("anchor_seq", None)
+                        event_meta.pop("alignment_final", None)
                     raw_segment_id = event.get("segment_id")
                     if raw_segment_id is None:
                         raw_segment_id = event.get("segment_idx", -1)

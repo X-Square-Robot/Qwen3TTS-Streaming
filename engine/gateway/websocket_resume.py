@@ -153,7 +153,17 @@ class ResumableSession:
             ) from self.initialization_error
 
     async def put(self, frame: dict[str, Any]) -> None:
-        """Publish an exact output frame (the queue-like gateway callback API)."""
+        """Publish one output frame."""
+        await self.put_batch([frame])
+
+    async def put_batch(self, frames: list[dict[str, Any]]) -> None:
+        """Register a batch atomically before waking the attachment.
+
+        Audio and its progress event are still separate wire deliveries, but
+        both records enter the replay ledger under one lock.  A disconnect
+        between their physical sends therefore replays the missing sibling
+        instead of losing the text cursor.
+        """
 
         schedule_overflow = False
         schedule_terminal = False
@@ -163,27 +173,30 @@ class ResumableSession:
         async with self._lock:
             if self.closed or self.failure_code is not None or self.terminal:
                 return
+            for frame in frames:
+                if self.terminal:
+                    break
+                seq = self._next_delivery_seq
+                copied = _copy_frame(frame)
+                start_sample = self._next_audio_sample
+                end_sample = start_sample
+                if copied.get("type") == "audio":
+                    audio = copied["audio"]
+                    end_sample += _audio_sample_count(audio)
+                else:
+                    copied["delivery_seq"] = seq
 
-            seq = self._next_delivery_seq
-            copied = _copy_frame(frame)
-            start_sample = self._next_audio_sample
-            end_sample = start_sample
-            if copied.get("type") == "audio":
-                audio = copied["audio"]
-                end_sample += _audio_sample_count(audio)
-            else:
-                copied["delivery_seq"] = seq
+                retained_bytes = _retained_size(copied)
+                if self._retained_bytes + retained_bytes > self.max_buffer_bytes:
+                    self.failure_code = "resume_buffer_exceeded"
+                    self.failure_message = (
+                        "resumable stream output exceeded the server replay window"
+                    )
+                    failure = ResumeFailure(self.failure_code, self.failure_message)
+                    attachment = self._attachment
+                    schedule_overflow = True
+                    break
 
-            retained_bytes = _retained_size(copied)
-            if self._retained_bytes + retained_bytes > self.max_buffer_bytes:
-                self.failure_code = "resume_buffer_exceeded"
-                self.failure_message = (
-                    "resumable stream output exceeded the server replay window"
-                )
-                failure = ResumeFailure(self.failure_code, self.failure_message)
-                attachment = self._attachment
-                schedule_overflow = True
-            else:
                 delivery = ResumeDelivery(
                     delivery_seq=seq,
                     frame=copied,
@@ -382,6 +395,7 @@ class ResumableSession:
         *,
         played_through_sample: int,
         buffered_through_sample: int,
+        observed_delivery_seq: int | None = None,
     ) -> None:
         """Record untrusted playback telemetry without affecting delivery."""
         async with self._lock:
@@ -391,22 +405,64 @@ class ResumableSession:
                     "invalid_playback_progress",
                     "playback samples must be non-negative",
                 )
-            if played_through_sample < self.played_through_sample:
-                return
             if buffered_through_sample < played_through_sample:
                 raise ResumeProtocolError(
                     "invalid_playback_progress",
                     "buffered_through_sample must be >= played_through_sample",
                 )
-            if buffered_through_sample > self._next_audio_sample:
+            if observed_delivery_seq is None:
+                # Keep older SDKs source-compatible; new SDKs always send the
+                # cumulative delivery sequence so RB can be checked against
+                # the exact replay ledger rather than a byte counter.
+                observed_delivery_seq = self._next_delivery_seq - 1
+            if observed_delivery_seq < 0:
                 raise ResumeProtocolError(
                     "invalid_playback_progress",
-                    "playback progress is ahead of server output",
+                    "observed_delivery_seq must be non-negative",
+                )
+            last_delivery_seq = self._next_delivery_seq - 1
+            if observed_delivery_seq > last_delivery_seq:
+                raise ResumeProtocolError(
+                    "unknown_playback_delivery",
+                    "observed_delivery_seq is ahead of the replay ledger",
+                )
+            delivery_sample_limit = self._audio_end_through_delivery_locked(
+                observed_delivery_seq
+            )
+            if buffered_through_sample > delivery_sample_limit:
+                raise ResumeProtocolError(
+                    "invalid_playback_progress",
+                    "buffered_through_sample is ahead of server output/observed delivery",
+                )
+            completely_old = (
+                played_through_sample <= self.played_through_sample
+                and buffered_through_sample <= self.buffered_through_sample
+            )
+            if completely_old:
+                return
+            if (
+                played_through_sample < self.played_through_sample
+                or buffered_through_sample < self.buffered_through_sample
+            ):
+                raise ResumeProtocolError(
+                    "invalid_playback_progress",
+                    "playback progress cannot partially move backwards",
                 )
             self.played_through_sample = played_through_sample
-            self.buffered_through_sample = max(
-                self.buffered_through_sample, buffered_through_sample
-            )
+            self.buffered_through_sample = buffered_through_sample
+
+    def _audio_end_through_delivery_locked(self, delivery_seq: int) -> int:
+        if delivery_seq <= self._trimmed_through_seq:
+            return self._trimmed_audio_sample
+        if delivery_seq >= self._next_delivery_seq - 1:
+            return self._next_audio_sample
+        for delivery in self._records:
+            if delivery.delivery_seq == delivery_seq:
+                return delivery.end_sample
+        raise ResumeProtocolError(
+            "unknown_playback_delivery",
+            "observed_delivery_seq is no longer in the replay ledger",
+        )
 
     async def resume_info(self) -> dict[str, Any]:
         async with self._lock:

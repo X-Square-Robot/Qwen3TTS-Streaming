@@ -183,7 +183,10 @@ async def test_standard_realtime_tts_lifecycle_and_usage():
             )
             assert progress["segment_id"] == 0
             assert progress["meta"]["text_token_end"] == "1"
-            assert progress["meta"]["output_sample_end"] == "1200"
+            # The stub deliberately emits a legacy event without an
+            # attributed output range. The gateway forwards its EMA fields but
+            # must not infer playback coordinates from sent bytes.
+            assert "output_sample_end" not in progress["meta"]
             assert events.index(progress) > events.index(delta)
             assert event_types[-4:] == [
                 "response.output_audio.done",

@@ -120,6 +120,14 @@ SUPPORTED_VAD_STRATEGIES = frozenset(
     }
 )
 
+SUPPORTED_PROGRESS_FEATURES = frozenset(
+    {
+        "text_progress_anchor_v1",
+        "playback_progress_v1",
+        "qwen.text_progress.v1",
+    }
+)
+
 # ---------------------------------------------------------------------------
 # Capabilities normalization
 # ---------------------------------------------------------------------------
@@ -171,5 +179,13 @@ def normalize_capabilities(raw: dict[str, Any]) -> dict[str, Any]:
             cap["supported_timing_fields"] = sorted(
                 {f for f in existing if f in SUPPORTED_TIMING_FIELDS}
             )
+
+    progress = cap.get("supported_progress_features")
+    if progress is None:
+        cap["supported_progress_features"] = sorted(SUPPORTED_PROGRESS_FEATURES)
+    elif isinstance(progress, (list, set, frozenset, tuple)):
+        cap["supported_progress_features"] = sorted(
+            {feature for feature in progress if feature in SUPPORTED_PROGRESS_FEATURES}
+        )
 
     return cap

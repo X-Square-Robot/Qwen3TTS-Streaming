@@ -1202,14 +1202,11 @@ class FrontendInterface:
                 raw_end = selected[-1]["raw_end"]
         else:
             normalized_start = normalized_end = raw_start = raw_end = 0
-        anchor_seq = session.next_progress_anchor_seq
-        session.next_progress_anchor_seq += 1
         return {
             "type": "text_progress",
             "segment_idx": segment_idx,
             "text": "",
             "meta": {
-                "anchor_seq": str(anchor_seq),
                 "segment_id": str(segment_idx),
                 **estimate.to_meta(),
                 "raw_codepoint_start": str(raw_start),

@@ -29,8 +29,6 @@ import os
 import time
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 from ..core.types import (
     AudioConfig,
     AudioEncoding,
@@ -43,6 +41,7 @@ from ..core.lifecycle import LifecycleLogger
 from ..core import observability as obs
 from ..interface import (
     OutputPipeline,
+    StreamingOutputProcessor,
     SessionStartRequest,
     build_done_event,
     build_forward_event,
@@ -51,7 +50,6 @@ from ..interface import (
     parse_output_policy,
     parse_timing_context,
     serialize_stream_event,
-    stamp_output_anchor,
     to_core_output_policy,
     to_core_timing_context,
 )
@@ -122,15 +120,16 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
         # Store accumulator reference in timing extra for engine thread access
         config.timing.extra["_server_timing_accumulator"] = timing_acc
 
-        pipeline = OutputPipeline(
-            start_request,
-            request_received_monotonic=time.monotonic(),
-            timing_accumulator=timing_acc,
-        )
-
         # Create per-session VAD processor from config
         vad_config = _build_vad_config(config)
         vad_processor = create_vad_processor(vad_config, sample_rate=ENGINE_SAMPLE_RATE)
+        output_processor = StreamingOutputProcessor(
+            start_request,
+            vad_processor=vad_processor,
+            native_sample_rate=ENGINE_SAMPLE_RATE,
+            timing_accumulator=timing_acc,
+        )
+        pipeline = output_processor.pipeline
 
         def _drain_vad_transitions():
             # L2 vad_transition: emit per begin/end transition with session
@@ -210,103 +209,67 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             )
 
         async def on_audio(sid, data):
-            progress_event = getattr(data, "progress_event", None)
-            data = getattr(data, "pcm_bytes", data)
-
-            async def _publish_progress(frame) -> None:
-                if not progress_event:
-                    return
-                progress = dict(progress_event)
-                progress["meta"] = {
-                    **dict(progress.get("meta") or {}),
-                    **frame.meta,
-                }
+            batch = output_processor.process(data)
+            _drain_vad_transitions()
+            if batch.audio is not None and batch.audio.pcm_bytes:
+                log_first_effective_audio(len(batch.audio.pcm_bytes))
+                await audio_queue.put(
+                    (
+                        "audio",
+                        _make_audio_response(
+                            batch.audio.pcm_bytes,
+                            batch.audio.audio,
+                            meta=batch.audio.meta,
+                        ),
+                    )
+                )
+            for event in (*batch.anchors, *batch.events):
                 await audio_queue.put(
                     (
                         "event",
                         _make_event_response_from_contract(
-                            build_forward_event(client_session_id, progress, start_request)
+                            build_forward_event(client_session_id, event, start_request)
                         ),
                     )
                 )
-
-            if not vad_enabled:
-                # Fast path: skip the float32→int16→float32 round-trip that
-                # the VAD detour forces on every chunk.  Besides the per-chunk
-                # loop cost (~2.5k chunks/s at 128 streams), the round-trip
-                # silently quantized f32-encoded sessions to 15-bit fidelity.
-                if not data:
-                    return
-                frame = pipeline.convert_audio_chunk(data)
-                if progress_event:
-                    frame.meta.update(progress_event.get("meta") or {})
-                log_first_effective_audio(len(data))
-                await audio_queue.put(
-                    (
-                        "audio",
-                        _make_audio_response(
-                            frame.pcm_bytes, frame.audio, meta=frame.meta
-                        ),
-                    )
-                )
-                await _publish_progress(frame)
-                return
-            # Apply VAD filtering before output pipeline
-            raw = np.frombuffer(data, dtype=np.float32)
-            if raw.size == 0:
-                return
-            # Convert to int16 for VAD processing
-            audio_int16 = np.clip(raw, -1.0, 1.0)
-            audio_int16 = (audio_int16 * 32767.0).astype(np.int16)
-
-            filtered_int16 = vad_processor.process_chunk(audio_int16)
-            _drain_vad_transitions()
-            if filtered_int16.size == 0:
-                return
-
-            # Convert back to float32 bytes for OutputPipeline
-            filtered_f32 = filtered_int16.astype(np.float32) / 32767.0
-            filtered_bytes = filtered_f32.tobytes()
-
-            frame = pipeline.convert_audio_chunk(filtered_bytes)
-            if progress_event:
-                frame.meta.update(progress_event.get("meta") or {})
-            log_first_effective_audio(len(filtered_bytes))
-            await audio_queue.put(
-                (
-                    "audio",
-                    _make_audio_response(frame.pcm_bytes, frame.audio, meta=frame.meta),
-                )
-            )
-            await _publish_progress(frame)
 
         async def on_event(sid, event: dict):
-            event = stamp_output_anchor(event, pipeline)
-            await audio_queue.put(
-                (
-                    "event",
-                    _make_event_response_from_contract(
-                        build_forward_event(client_session_id, event, start_request)
-                    ),
-                )
-            )
-
-        async def on_done(sid, metrics):
-            # Flush any remaining audio from VAD
-            final_int16 = vad_processor.flush()
-            if final_int16.size > 0:
-                final_f32 = final_int16.astype(np.float32) / 32767.0
-                final_bytes = final_f32.tobytes()
-                frame = pipeline.convert_audio_chunk(final_bytes)
-                log_first_effective_audio(len(final_bytes))
+            batch = output_processor.process_event(event)
+            for item in (*batch.anchors, *batch.events):
                 await audio_queue.put(
                     (
-                        "audio",
-                        _make_audio_response(
-                            frame.pcm_bytes, frame.audio, meta=frame.meta
+                        "event",
+                        _make_event_response_from_contract(
+                            build_forward_event(client_session_id, item, start_request)
                         ),
                     )
                 )
+
+        async def on_done(sid, metrics):
+            for batch in output_processor.finish():
+                if batch.audio is not None and batch.audio.pcm_bytes:
+                    log_first_effective_audio(len(batch.audio.pcm_bytes))
+                    await audio_queue.put(
+                        (
+                            "audio",
+                            _make_audio_response(
+                                batch.audio.pcm_bytes,
+                                batch.audio.audio,
+                                meta=batch.audio.meta,
+                            ),
+                        )
+                    )
+                for event in (*batch.anchors, *batch.events):
+                    await audio_queue.put(
+                        (
+                            "event",
+                            _make_event_response_from_contract(
+                                build_forward_event(
+                                    client_session_id, event, start_request
+                                )
+                            ),
+                        )
+                    )
 
             _drain_vad_transitions()
             # All-silence sessions never cross the first-effective boundary,
