@@ -160,6 +160,26 @@ class WebSocketGateway:
     async def close(self) -> None:
         await self._resume_registry.close()
 
+    async def create_session(
+        self,
+        identity: GatewaySessionIdentity,
+        *,
+        start_request: SessionStartRequest,
+        outbound_queue: asyncio.Queue,
+    ) -> None:
+        """Create one engine session for a protocol-neutral backend.
+
+        The public method is the migration seam for Realtime and Triton
+        adapters.  ``_create_session`` remains as a compatibility alias for
+        older integrations and the native v2 handler.
+        """
+
+        await self._create_session(
+            identity,
+            start_request=start_request,
+            outbound_queue=outbound_queue,
+        )
+
     async def handle_websocket(self, request):
         ws = web.WebSocketResponse(heartbeat=_WEBSOCKET_HEARTBEAT_SEC)
         await ws.prepare(request)
@@ -1242,10 +1262,17 @@ async def serve(
     ws_path = _normalize_ws_path(path)
     gateway = WebSocketGateway(engine)
     from .openai_realtime import OpenAIRealtimeGateway
+    from ..session import SessionService
+    from .session_backend import StandaloneSessionBackend
+
+    # Both public protocols share the same transport-neutral execution
+    # contract.  The native handler keeps its v2 wire loop for compatibility;
+    # Realtime receives typed outputs through this service bridge.
+    session_service = SessionService(StandaloneSessionBackend(gateway, engine))
 
     realtime_gateway = OpenAIRealtimeGateway(
         engine,
-        session_starter=gateway._create_session,
+        session_service=session_service,
         usage_recorder=realtime_usage_recorder,
     )
     app = web.Application()

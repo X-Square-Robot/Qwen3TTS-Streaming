@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
 
 from ..core.lifecycle import LifecycleLogger
 from ..core.types import InputMode
+from ..session import SessionService
 from .session_identity import GatewaySessionIdentity
 from .websocket_server import _start_request_from_ws_message
 
@@ -315,9 +316,16 @@ class OpenAIRealtimeGateway:
         *,
         session_starter: SessionStarter | None = None,
         backend: RealtimeSessionBackend | None = None,
+        session_service: SessionService | None = None,
         usage_recorder: UsageRecorder | None = None,
     ) -> None:
         self._legacy_owner = None
+        self._service_backend = None
+        if backend is None and session_service is not None:
+            from .session_backend import RealtimeSessionServiceBackend
+
+            self._service_backend = RealtimeSessionServiceBackend(session_service)
+            backend = self._service_backend
         if backend is None and session_starter is None:
             if engine is None:
                 raise RuntimeError(
@@ -338,7 +346,9 @@ class OpenAIRealtimeGateway:
         self._usage_recorder = usage_recorder
 
     async def close(self) -> None:
-        if self._legacy_owner is not None:
+        if self._service_backend is not None:
+            await self._service_backend.close()
+        elif self._legacy_owner is not None:
             await self._legacy_owner.close()
 
     async def handle_websocket(self, request):
