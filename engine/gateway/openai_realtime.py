@@ -342,6 +342,7 @@ class _ResponseState:
     task: asyncio.Task | None = None
     ingest_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     finish_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    billing_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     resume_token: str = ""
     reliable: ResumableLogicalSession | None = None
     attachment: Any = None
@@ -1038,11 +1039,9 @@ class _RealtimeConnection:
         elif state.terminal_status == "cancelled":
             state.terminal_cancellation_reason = output.message or "client_cancelled"
         state.terminal_usage = self._usage(state)
-        if not state.billing_recorded:
-            await self._record_usage(
-                state, status=state.terminal_status, usage=state.terminal_usage
-            )
-            state.billing_recorded = True
+        await self._record_usage_once(
+            state, status=state.terminal_status, usage=state.terminal_usage
+        )
 
     async def _append_text(self, event: dict[str, Any]) -> None:
         target = self._active
@@ -1372,9 +1371,7 @@ class _RealtimeConnection:
                 return
             state.finished = True
             usage = state.terminal_usage or self._usage(state)
-            if not state.billing_recorded:
-                await self._record_usage(state, status=status, usage=usage)
-                state.billing_recorded = True
+            await self._record_usage_once(state, status=status, usage=usage)
             item_status = "completed" if status == "completed" else "incomplete"
             if send_events and not self._ws.closed:
                 common = {
@@ -1492,6 +1489,20 @@ class _RealtimeConnection:
             # durable recorder failure is operationally visible but must not
             # suppress the terminal protocol event.
             logger.exception("Realtime usage recorder failed: %s", state.response_id)
+
+    async def _record_usage_once(
+        self, state: _ResponseState, *, status: str, usage: dict[str, Any]
+    ) -> None:
+        """Atomically claim and persist the one billing record for a response."""
+
+        async with state.billing_lock:
+            if state.billing_recorded:
+                return
+            # Claim before the recorder can yield (the JSONL implementation
+            # writes through asyncio.to_thread). This prevents the terminal
+            # observer and wire projector from recording the same response.
+            state.billing_recorded = True
+            await self._record_usage(state, status=status, usage=usage)
 
     def _output_item(
         self, state: _ResponseState, *, status: str, include_content: bool

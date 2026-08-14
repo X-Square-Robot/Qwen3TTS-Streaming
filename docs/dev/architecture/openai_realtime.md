@@ -96,10 +96,13 @@ The Triton sidecar enables the JSONL recorder by default and bind-mounts it as
 ledger, not an invoice system; downstream billing should ingest and deduplicate
 by `response_id`.
 
-- Input text tokens use the model tokenizer for synthesis text, instructions,
-  and reference text; they are not character estimates.
-- Output audio tokens are based on PCM actually emitted: one token per 50 ms,
-  rounded up for a final partial interval.
+- Input text tokens tokenize the canonical logical synthesis text once, plus
+  instructions and reference text, with the model tokenizer. Packetization and
+  idempotent replay do not change the billable count; character-count fallback
+  is forbidden.
+- Output audio tokens are based on PCM generated into the gateway output
+  boundary: one token per 50 ms, rounded up for a final partial interval. This
+  is not a client-received, buffered, or played counter.
 - Cancelled and failed responses retain partial usage.
 - Local prefix KV cache hits are execution optimizations, not OpenAI cached-token
   billing semantics, so cached tokens are currently zero.
@@ -133,7 +136,7 @@ audio flows back. Public IDs never become Triton execution keys.
 For billing, the sidecar loads the tokenizer from the exact mounted model
 package version and counts input locally. This avoids another model request and
 keeps token accounting stable across Triton replicas. Output audio usage remains
-based on PCM samples actually emitted by the gateway.
+based on PCM samples generated into the gateway output boundary.
 
 The old Triton JSON actions can therefore remain an internal adapter during the
 migration and later be replaced without becoming the new public protocol.

@@ -16,6 +16,11 @@ from engine.session import (
     TerminalStatus,
 )
 from engine.gateway.openai_realtime import OpenAIRealtimeGateway
+from engine.gateway.session_backend import (
+    RealtimeSessionServiceBackend,
+    StandaloneSessionBackend,
+    TritonSessionBackend,
+)
 
 
 class _Execution:
@@ -72,6 +77,9 @@ class _Backend:
     async def close(self) -> None:
         return None
 
+    def count_text_tokens(self, text: str) -> int:
+        return len(text) + 10
+
 
 async def _receive_json(ws, *, timeout: float = 1.0) -> dict:
     message = await ws.receive(timeout=timeout)
@@ -118,11 +126,47 @@ async def test_realtime_uses_typed_session_service_outputs():
                     break
             assert any(event["type"] == "response.output_audio.delta" for event in seen)
             delta = next(
-                event for event in seen if event["type"] == "response.output_audio.delta"
+                event
+                for event in seen
+                if event["type"] == "response.output_audio.delta"
             )
             assert len(base64.b64decode(delta["delta"])) == 2400
             assert any(event["type"] == "qwen.text_progress" for event in seen)
             assert seen[-1]["type"] == "response.done"
+            assert seen[-1]["response"]["usage"]["input_tokens"] == 15
             await ws.close()
 
     await gateway.close()
+
+
+def test_session_backend_token_counters_are_forwarded_without_character_fallback():
+    class TokenOwner:
+        def count_text_tokens(self, text: str) -> int:
+            assert text == "hello"
+            return 37
+
+        async def close(self) -> None:
+            return None
+
+    standalone = StandaloneSessionBackend(None, TokenOwner())
+    triton = TritonSessionBackend(TokenOwner())
+
+    assert (
+        RealtimeSessionServiceBackend(SessionService(standalone)).count_text_tokens(
+            "hello"
+        )
+        == 37
+    )
+    assert (
+        RealtimeSessionServiceBackend(SessionService(triton)).count_text_tokens("hello")
+        == 37
+    )
+
+
+def test_realtime_session_backend_rejects_missing_tokenizer_counter():
+    class MissingCounter:
+        async def close(self) -> None:
+            return None
+
+    with pytest.raises(RuntimeError, match="count_text_tokens"):
+        RealtimeSessionServiceBackend(SessionService(MissingCounter()))

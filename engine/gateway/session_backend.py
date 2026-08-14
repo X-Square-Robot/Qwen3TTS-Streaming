@@ -68,7 +68,9 @@ def _raw_frame_to_output(
         meta = {str(k): str(v) for k, v in (audio.get("meta") or {}).items()}
         start = int(meta.get("output_sample_start", sample_cursor) or sample_cursor)
         end = int(
-            meta.get("output_sample_end", start + _sample_count(pcm, encoding, channels))
+            meta.get(
+                "output_sample_end", start + _sample_count(pcm, encoding, channels)
+            )
             or start
         )
         return (
@@ -220,12 +222,24 @@ class StandaloneSessionBackend:
     async def close(self) -> None:
         self._queues.clear()
 
+    def count_text_tokens(self, text: str) -> int:
+        """Use the live standalone frontend tokenizer for billable text."""
+
+        return int(self._engine.count_text_tokens(text))
+
 
 class RealtimeSessionServiceBackend:
     """Expose SessionService through the legacy Realtime backend shape."""
 
     def __init__(self, service: SessionService) -> None:
         self._service = service
+        counter = getattr(service.backend, "count_text_tokens", None)
+        if not callable(counter):
+            raise RuntimeError(
+                "Realtime SessionService backend requires count_text_tokens; "
+                "character-count billing fallback is not allowed"
+            )
+        self._token_counter = counter
         self._handles: dict[str, Any] = {}
         self._forwarders: dict[str, asyncio.Task] = {}
         self._next_seq: dict[str, int] = {}
@@ -276,8 +290,7 @@ class RealtimeSessionServiceBackend:
             await handle.cancel("realtime_cancelled")
 
     def count_text_tokens(self, text: str) -> int:
-        counter = getattr(self._service.backend, "count_text_tokens", None)
-        return int(counter(text)) if callable(counter) else len(text)
+        return int(self._token_counter(text))
 
     async def close(self) -> None:
         for task in list(self._forwarders.values()):
@@ -440,6 +453,11 @@ class TritonSessionBackend:
     async def close(self) -> None:
         self._queues.clear()
         await self._backend.close()
+
+    def count_text_tokens(self, text: str) -> int:
+        """Use the tokenizer loaded by the Triton Realtime sidecar."""
+
+        return int(self._backend.count_text_tokens(text))
 
 
 __all__ = [

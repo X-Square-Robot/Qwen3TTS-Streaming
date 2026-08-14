@@ -87,11 +87,13 @@ Triton sidecar 默认启用 JSONL recorder，并把宿主机文件挂载为
 `workspace/realtime_usage/realtime_usage.jsonl`。它是 append-only 的计费交接账本，
 不是最终出账系统；下游应按 `response_id` 摄取和去重。
 
-- `input_token_details.text_tokens` 使用实际模型 tokenizer 计数合成文本、instructions
-  和 ref_text；不是按字符估算。
-- `output_token_details.audio_tokens` 按已经发出的 PCM 时长计数，每 50 ms 一个 token，
-  最后不足 50 ms 向上取整。
-- `cancelled` 和 `failed` response 也返回并记录已接受输入、已发送音频对应的部分 usage。
+- `input_token_details.text_tokens` 将规范化后的逻辑合成文本整体 tokenize 一次，再加上
+  instructions 和 ref_text；使用实际模型 tokenizer，分包与幂等重放不会改变计费值，
+  禁止退化为字符数估算。
+- `output_token_details.audio_tokens` 按进入 gateway 输出边界的已生成 PCM 时长计数，每
+  50 ms 一个 token，最后不足 50 ms 向上取整；它不是客户端已收到、已缓冲或已播放
+  计数。
+- `cancelled` 和 `failed` response 也返回并记录已接受输入、已生成音频对应的部分 usage。
 - 当前 prefix KV cache 是本地执行优化，不等同于 OpenAI 的 cached-token 计费语义，
   因此 `cached_tokens` 报 0。
 
@@ -120,13 +122,13 @@ Triton streaming-gRPC client stream：`init` 持有 decoupled response，
 
 计费时，sidecar 从当前挂载的同版本模型包加载精确 tokenizer，在本地计算 input token，
 无需额外发起模型请求，也不会因 Triton replica 不同而漂移；output audio token 仍按
-gateway 实际发出的 PCM 样本计数。因此它保证：
+gateway 输出边界已生成的 PCM 样本计数。因此它保证：
 
 1. 一个 Realtime response 映射到一个私有 engine execution ID；
 2. append 与 audio 可以同时在 gRPC stream 两个方向流动；
 3. cancel 能传到同一个 execution；
 4. sidecar 使用模型包同版本 tokenizer 计算输入 token；
-5. gateway 仍以实际发出的 PCM 样本数计算输出 audio token。
+5. gateway 仍以进入输出边界的已生成 PCM 样本数计算输出 audio token。
 
 因此，Triton 的老 JSON action 可以先保留为内部兼容适配，之后再替换；不会把它暴露成
 新的公共协议，也不会阻塞 `/v1/realtime` 的演进。

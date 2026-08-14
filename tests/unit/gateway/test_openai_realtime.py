@@ -422,6 +422,59 @@ async def test_reliable_realtime_validates_absolute_playback_cursor():
 
 
 @pytest.mark.asyncio
+async def test_reliable_realtime_records_async_usage_exactly_once():
+    pytest.importorskip("aiohttp")
+    from aiohttp.test_utils import TestClient, TestServer
+
+    usage_records = []
+    release_recorder = asyncio.Event()
+
+    async def recorder(record):
+        usage_records.append(record)
+        await release_recorder.wait()
+
+    async def release_after_first_record():
+        while not usage_records:
+            await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        release_recorder.set()
+
+    engine = _RealtimeStubEngine()
+    server = TestServer(_test_app(engine, reliable=True, usage_recorder=recorder))
+    async with server:
+        client = TestClient(server)
+        async with client:
+            ws = await client.ws_connect("/v1/realtime")
+            await _receive_json(ws)
+            await ws.send_json(
+                {
+                    "type": "response.create",
+                    "response": {
+                        "metadata": {"qwen_resume_token": "usage-once-token-0123456789"}
+                    },
+                }
+            )
+            for _ in range(3):
+                await _receive_json(ws)
+            await ws.send_json(
+                {
+                    "type": "qwen.input_text_buffer.append",
+                    "sequence": 1,
+                    "text": "hello",
+                }
+            )
+            await ws.send_json({"type": "qwen.input_text_buffer.commit"})
+            release_task = asyncio.create_task(release_after_first_record())
+            done, _ = await _receive_until(ws, "response.done")
+            await release_task
+
+            assert done["response"]["usage"]["input_tokens"] == len("hello")
+            assert len(usage_records) == 1
+            assert usage_records[0]["response_id"] == done["response"]["id"]
+            await ws.close()
+
+
+@pytest.mark.asyncio
 async def test_qwen_text_append_is_full_duplex_and_idempotent():
     pytest.importorskip("aiohttp")
     from aiohttp.test_utils import TestClient, TestServer
