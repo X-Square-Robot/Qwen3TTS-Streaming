@@ -5,6 +5,8 @@ import json
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from engine.core.types import (
     EngineResult,
     GroupPolicy,
@@ -124,7 +126,7 @@ async def _drain_requests(inbox: asyncio.Queue) -> list:
     return requests
 
 
-def test_token_mode_preserves_whitespace_only_chunks():
+def test_token_mode_filters_leading_whitespace_only_chunks():
     async def run():
         inbox = asyncio.Queue(maxsize=16)
         interface = FrontendInterface(
@@ -146,18 +148,171 @@ def test_token_mode_preserves_whitespace_only_chunks():
 
         await interface.push_text_input("space-token", " ")
 
-        requests = []
-        while not inbox.empty():
-            requests.append(await inbox.get())
+        requests = await _drain_requests(inbox)
+        assert [request.type for request in requests] == [RequestType.NEW_SESSION]
+        assert session.text_journal.raw_text == " "
+        assert session.text_journal.normalized_text == ""
+        assert not getattr(session, "_first_text_sent", False)
 
-        assert [request.type for request in requests] == [
-            RequestType.NEW_SESSION,
-            RequestType.START_TOKENS,
+        await interface.mark_input_complete("space-token")
+        completed = await _drain_requests(inbox)
+        assert [request.type for request in completed] == [
+            RequestType.SESSION_TOKENS_DONE
         ]
-        assert requests[-1].token_ids == [ord(" ")]
 
         await session.result_queue.put(
             EngineResult(type=ResultType.SESSION_DONE, session_id="space-token")
+        )
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("input_mode", "group_policy"),
+    [
+        (InputMode.TOKEN, GroupPolicy.NONE),
+        (InputMode.AUTO, GroupPolicy.NONE),
+        (InputMode.CLAUSE, GroupPolicy.NONE),
+        (InputMode.LONG_SEGMENT, GroupPolicy.NONE),
+        (InputMode.LONG_SEGMENT, GroupPolicy.AUTO),
+        (InputMode.FULL_TEXT, GroupPolicy.NONE),
+    ],
+)
+def test_input_modes_filter_only_the_session_leading_whitespace(
+    input_mode: InputMode,
+    group_policy: GroupPolicy,
+):
+    async def run():
+        inbox = asyncio.Queue(maxsize=64)
+        interface = FrontendInterface(
+            engine_inbox=inbox,
+            tokenizer=_CharTokenizer(),
+            max_sessions=2,
+            engine_max_decode_len=64,
+        )
+        session = await interface.create_session(
+            f"prefix-{input_mode.value}-{group_policy.value}",
+            config=SessionConfig(
+                task_type="custom_voice",
+                speaker="Serena",
+                input_mode=input_mode,
+                group_policy=group_policy,
+            ),
+        )
+
+        await interface.push_text_input(session.session_id, " \t\n\u00a0\u2003\u3000")
+        before_text = await _drain_requests(inbox)
+        assert [request.type for request in before_text] == [RequestType.NEW_SESSION]
+        assert session.text_journal.normalized_text == ""
+
+        await interface.push_text_input(session.session_id, "你好。")
+        await interface.mark_input_complete(session.session_id)
+
+        requests = await _drain_requests(inbox)
+        token_text = "".join(
+            chr(token_id)
+            for request in requests
+            for token_id in (request.token_ids or [])
+        )
+        assert token_text == "你好。"
+        assert session.text_journal.normalized_text == "你好。"
+        assert session.text_journal.raw_span(0, 1) == (6, 7)
+
+        await session.result_queue.put(
+            EngineResult(
+                type=ResultType.SESSION_DONE,
+                session_id=session.session_id,
+            )
+        )
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+
+def test_token_mode_preserves_whitespace_after_text_begins():
+    async def run():
+        inbox = asyncio.Queue(maxsize=64)
+        interface = FrontendInterface(
+            engine_inbox=inbox,
+            tokenizer=_CharTokenizer(),
+            max_sessions=2,
+            engine_max_decode_len=64,
+        )
+        session = await interface.create_session(
+            "interior-token",
+            config=SessionConfig(
+                task_type="custom_voice",
+                speaker="Serena",
+                input_mode=InputMode.TOKEN,
+                group_policy=GroupPolicy.NONE,
+            ),
+        )
+
+        await interface.push_text_input(session.session_id, " hello")
+        await interface.push_text_input(session.session_id, " ")
+        await interface.push_text_input(session.session_id, "world。")
+        await interface.mark_input_complete(session.session_id)
+
+        requests = await _drain_requests(inbox)
+        token_text = "".join(
+            chr(token_id)
+            for request in requests
+            for token_id in (request.token_ids or [])
+        )
+        assert token_text == "hello world。"
+        assert session.text_journal.normalized_text == "hello world。"
+        assert session.text_journal.raw_span(5, 6) == (6, 7)
+
+        await session.result_queue.put(
+            EngineResult(
+                type=ResultType.SESSION_DONE,
+                session_id=session.session_id,
+            )
+        )
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+
+def test_full_text_finish_keeps_a_literal_digit_after_leading_whitespace():
+    async def run():
+        inbox = asyncio.Queue(maxsize=16)
+        interface = FrontendInterface(
+            engine_inbox=inbox,
+            tokenizer=_CharTokenizer(),
+            max_sessions=2,
+            engine_max_decode_len=64,
+        )
+        session = await interface.create_session(
+            "full-text-leading-digit",
+            config=SessionConfig(
+                task_type="custom_voice",
+                speaker="Serena",
+                input_mode=InputMode.FULL_TEXT,
+                group_policy=GroupPolicy.NONE,
+            ),
+        )
+
+        await interface.push_text_input(session.session_id, " 1")
+        assert session.text_journal.normalized_text == ""
+        await interface.mark_input_complete(session.session_id)
+
+        requests = await _drain_requests(inbox)
+        token_text = "".join(
+            chr(token_id)
+            for request in requests
+            for token_id in (request.token_ids or [])
+        )
+        assert token_text == "1"
+        assert session.text_journal.normalized_text == "1"
+        assert session.text_journal.raw_span(0, 1) == (1, 2)
+
+        await session.result_queue.put(
+            EngineResult(
+                type=ResultType.SESSION_DONE,
+                session_id=session.session_id,
+            )
         )
         await asyncio.sleep(0)
 

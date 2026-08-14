@@ -166,7 +166,10 @@ class FrontendInterface:
         self._prepare_session_config(config)
 
         session = Session(session_id=session_id, config=config)
-        session.text_journal = CanonicalTextJournal(_normalize_tts_text)
+        session.text_journal = CanonicalTextJournal(
+            _normalize_tts_text,
+            strip_leading_whitespace=True,
+        )
         session.spliter = Spliter(
             engine_max_decode_len=self._engine_max,
             prefill_len=self._prefill_len,
@@ -356,6 +359,12 @@ class FrontendInterface:
         mode = session.config.input_mode
         if mode == InputMode.FULL_TEXT:
             full_text = session.drain_text()
+            # ``finish()`` can release a trailing keycap base that was held
+            # until the transport proved it was a literal digit.  The journal
+            # is the canonical source of truth after finalization; the
+            # incremental buffer may not contain that last character.
+            if session.text_journal is not None:
+                full_text = session.text_journal.normalized_text
             if full_text.strip():
                 await self.feed_full_text(session_id, full_text)
             else:

@@ -24,6 +24,7 @@ class CanonicalTextJournal:
     normalized_to_raw: list[int] = field(default_factory=lambda: [0])
     raw_to_normalized: list[int] = field(default_factory=lambda: [0])
     input_final: bool = False
+    strip_leading_whitespace: bool = False
 
     def append(self, raw_delta: str) -> tuple[str, int]:
         old_normalized = self.normalized_text
@@ -37,27 +38,71 @@ class CanonicalTextJournal:
         committed_raw = self.raw_text
         if not self.input_final:
             committed_raw, _ = split_pending_emoji(committed_raw)
-        normalized = str(self.normalize(committed_raw))
+        normalized, normalized_to_raw, raw_to_normalized = self._project(
+            committed_raw,
+            include_trailing_deleted=self.input_final,
+        )
         if not normalized.startswith(old_normalized):
             raise ValueError("canonical text normalization rewrote committed text")
         self.normalized_text = normalized
-        self.normalized_to_raw, self.raw_to_normalized = _provenance_maps(
-            self.raw_text,
-            normalized,
-            include_trailing_deleted=self.input_final,
-        )
+        self.normalized_to_raw = normalized_to_raw
+        self.raw_to_normalized = raw_to_normalized
         return normalized[len(old_normalized) :], len(old_normalized)
 
     def finish(self) -> None:
         self.input_final = True
         # A non-final append may have held a keycap base.  Recompute the
         # canonical text now that no future packet can complete that sequence.
-        self.normalized_text = str(self.normalize(self.raw_text))
-        self.normalized_to_raw, self.raw_to_normalized = _provenance_maps(
-            self.raw_text,
+        (
             self.normalized_text,
+            self.normalized_to_raw,
+            self.raw_to_normalized,
+        ) = self._project(
+            self.raw_text,
             include_trailing_deleted=True,
         )
+
+    def _project(
+        self,
+        committed_raw: str,
+        *,
+        include_trailing_deleted: bool,
+    ) -> tuple[str, list[int], list[int]]:
+        """Project accumulated raw input into canonical text and coordinates.
+
+        Leading-whitespace filtering is session-global: it is evaluated over
+        the accumulated input rather than independently for each transport
+        packet.  Raw whitespace is removed before normalization so deleted
+        formatting characters retain the correct raw origin.  A second trim
+        after normalization catches whitespace exposed by removing a leading
+        emoji.  Interior whitespace is never affected.
+        """
+
+        raw_prefix = 0
+        if self.strip_leading_whitespace:
+            raw_prefix = len(self.raw_text) - len(self.raw_text.lstrip())
+
+        normalization_input = committed_raw[raw_prefix:]
+        provenance_input = self.raw_text[raw_prefix:]
+        untrimmed = str(self.normalize(normalization_input))
+        normalized_prefix = 0
+        if self.strip_leading_whitespace:
+            normalized_prefix = len(untrimmed) - len(untrimmed.lstrip())
+        normalized = untrimmed[normalized_prefix:]
+
+        untrimmed_to_raw, _ = _provenance_maps(
+            provenance_input,
+            untrimmed,
+            include_trailing_deleted=include_trailing_deleted,
+        )
+        normalized_to_raw = [
+            raw_prefix + boundary for boundary in untrimmed_to_raw[normalized_prefix:]
+        ]
+        raw_to_normalized = _inverse_boundaries(
+            self.raw_text,
+            normalized_to_raw,
+        )
+        return normalized, normalized_to_raw, raw_to_normalized
 
     def trim_normalized(self) -> str:
         """Apply the frontend's full-text outer trim while keeping offsets."""

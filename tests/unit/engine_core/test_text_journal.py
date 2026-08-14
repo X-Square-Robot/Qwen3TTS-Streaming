@@ -70,3 +70,93 @@ def test_finish_releases_a_held_keycap_base():
     journal.finish()
     assert journal.normalized_text == "第1"
     assert journal.raw_span(1, 2) == (1, 2)
+
+
+def test_session_global_trim_drops_incremental_unicode_whitespace_prefix():
+    prefix = " \t\n\r\u00a0\u2003\u3000"
+    journal = CanonicalTextJournal(
+        _normalize_tts_text,
+        strip_leading_whitespace=True,
+    )
+
+    assert journal.append(prefix) == ("", 0)
+    assert journal.normalized_text == ""
+    assert journal.normalized_to_raw == [len(prefix)]
+
+    assert journal.append("你好") == ("你好", 0)
+    assert journal.raw_text == prefix + "你好"
+    assert journal.normalized_text == "你好"
+    assert journal.raw_span(0, 2) == (len(prefix), len(prefix) + 2)
+    assert journal.raw_to_normalized[: len(prefix) + 1] == [0] * (len(prefix) + 1)
+
+
+def test_session_global_trim_preserves_cross_packet_word_space():
+    journal = CanonicalTextJournal(
+        _normalize_tts_text,
+        strip_leading_whitespace=True,
+    )
+
+    assert journal.append(" hello") == ("hello", 0)
+    assert journal.append(" ") == (" ", 5)
+    assert journal.append("world") == ("world", 6)
+
+    assert journal.normalized_text == "hello world"
+    assert journal.raw_span(5, 6) == (6, 7)
+    assert journal.raw_span(6, 11) == (7, 12)
+
+
+def test_session_global_trim_removes_whitespace_exposed_by_leading_emoji():
+    journal = CanonicalTextJournal(
+        _normalize_tts_text,
+        strip_leading_whitespace=True,
+    )
+
+    assert journal.append("\u2003😊 ") == ("", 0)
+    assert journal.append("hello") == ("hello", 0)
+
+    assert journal.normalized_text == "hello"
+    assert journal.raw_span(0, 5) == (3, 8)
+
+
+def test_session_global_trim_is_packetization_invariant_with_emoji_carry():
+    raw = "\t\u00a0😊 hello1️⃣ world"
+
+    whole = CanonicalTextJournal(
+        _normalize_tts_text,
+        strip_leading_whitespace=True,
+    )
+    whole.append(raw)
+
+    split = CanonicalTextJournal(
+        _normalize_tts_text,
+        strip_leading_whitespace=True,
+    )
+    for packet in ("\t\u00a0😊 ", "hello1", "️⃣", " world"):
+        split.append(packet)
+
+    assert split.raw_text == whole.raw_text == raw
+    assert split.normalized_text == whole.normalized_text == "hello world"
+    assert split.normalized_to_raw == whole.normalized_to_raw
+    assert split.raw_to_normalized == whole.raw_to_normalized
+
+    whole.finish()
+    split.finish()
+
+    assert split.normalized_text == whole.normalized_text == "hello world"
+    assert split.normalized_to_raw == whole.normalized_to_raw
+    assert split.raw_to_normalized == whole.raw_to_normalized
+
+
+def test_session_global_trim_finish_releases_held_digit_after_leading_space():
+    journal = CanonicalTextJournal(
+        _normalize_tts_text,
+        strip_leading_whitespace=True,
+    )
+
+    assert journal.append(" 1") == ("", 0)
+    assert journal.normalized_to_raw == [1]
+
+    journal.finish()
+
+    assert journal.normalized_text == "1"
+    assert journal.raw_span(0, 1) == (1, 2)
