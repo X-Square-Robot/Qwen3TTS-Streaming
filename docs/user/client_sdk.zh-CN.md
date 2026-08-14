@@ -226,8 +226,9 @@ append/commit 扩展。传输仍是全双工：音频 delta 下行时可以继�
 
 迁移期继续保留四种旧 transport，并按每进程、每 transport 发出一次
 `FutureWarning`；可用 `QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING=1` 临时静默。
-Realtime 当前尚未实现活动流恢复，断联会明确失败。下文的可恢复连接池行为只适用于
-兼容的 `engine-websocket`。
+当 Realtime 入口声明 `qwen.response_resume.v1` 时，SDK 会从精确的
+delivery/sample 游标恢复，并只重放尚未 ACK 的文本。恢复与 native WebSocket 一样受
+进程内 registry、grace 和缓存上限约束；未声明扩展的旧服务仍保持明确失败。
 
 对于 `engine-websocket` 传输，`timeout` 表示连接建立后请求的接收空闲预算。
 如果网络握手失败时需要更快释放调用线程，可以单独设置 `connect_timeout`；
@@ -273,8 +274,8 @@ WebSocket/gRPC 每次启动都会生成新的私有执行 ID，因此不同请�
 `call_id` 放入 `TimingContext.extra`，无需长期占用某条连接。
 
 - `reconnect_attempts=1`：建立新物理连接或发送首个 `start` 失败时重试一次；
-- `active_stream_resume=True`：gateway 支持时，为活动 WebSocket 流请求安全的
-  进程内断线恢复；
+- `active_stream_resume=True`：入口支持时，为活动 native WebSocket 或 OpenAI
+  Realtime 流请求安全的进程内断线恢复；
 - `stream_resume_attempts=2` / `stream_resume_timeout=10.0`：为活动流使用独立且
   有界的重试次数与恢复总时限；
 - `stream_resume_ack_interval=8`：每 8 个输出 delivery 发送累计 ACK，终态立即

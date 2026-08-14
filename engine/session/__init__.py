@@ -23,6 +23,11 @@ from .reliability import (
     LedgerError,
     ReliableDelivery,
 )
+from .resumable import (
+    ResumableLogicalSession,
+    ResumableSessionError,
+    ResumableSessionRegistry,
+)
 from .types import (
     AudioOutput,
     AudioFormat,
@@ -58,6 +63,9 @@ __all__ = [
     "SessionProtocolError",
     "SessionService",
     "ReliableDelivery",
+    "ResumableLogicalSession",
+    "ResumableSessionError",
+    "ResumableSessionRegistry",
     "StartedOutput",
     "TerminalOutput",
     "TerminalStatus",

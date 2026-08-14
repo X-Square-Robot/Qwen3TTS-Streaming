@@ -252,10 +252,12 @@ authoritative if a client disconnects before receiving the terminal event.
 
 The four older transports remain available during migration and emit one
 `FutureWarning` per process and transport. The temporary environment switch
-`QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING=1` suppresses that warning. Active
-stream resume is not yet implemented for Realtime: an interrupted stream fails
-explicitly. The resumable connection-pool behavior documented below applies
-only to the compatibility `engine-websocket` transport.
+`QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING=1` suppresses that warning. When the
+Realtime endpoint advertises `qwen.response_resume.v1`, the SDK resumes an
+interrupted response from its exact delivery/sample cursor and replays only
+unacknowledged text. Recovery is process-local and bounded by the same grace and
+buffer limits as native WebSocket recovery; a missing extension keeps the
+historical fail-fast behavior.
 
 For the `engine-websocket` transport, `timeout` is the receive-idle budget for
 an established request. Set `connect_timeout` separately when a failed network
@@ -306,7 +308,7 @@ putting its `call_id` in `TimingContext.extra`.
 - `reconnect_attempts=1`: retry a new physical connection or failed initial
   `start` write once;
 - `active_stream_resume=True`: request safe in-process recovery for active
-  WebSocket streams when the gateway supports it;
+  native WebSocket or OpenAI Realtime streams when the endpoint supports it;
 - `stream_resume_attempts=2` / `stream_resume_timeout=10.0`: use a separate,
   bounded retry count and total deadline for an interrupted active stream;
 - `stream_resume_ack_interval=8`: cumulatively acknowledge every eight output

@@ -105,6 +105,10 @@ class SessionHandle:
         return self._next_seq - 1
 
     @property
+    def input_complete(self) -> bool:
+        return self._input_complete
+
+    @property
     def terminal(self) -> TerminalOutput | None:
         return self._terminal
 

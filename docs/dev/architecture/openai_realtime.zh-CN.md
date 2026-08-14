@@ -131,6 +131,26 @@ gateway 实际发出的 PCM 样本计数。因此它保证：
 因此，Triton 的老 JSON action 可以先保留为内部兼容适配，之后再替换；不会把它暴露成
 新的公共协议，也不会阻塞 `/v1/realtime` 的演进。
 
+## 可靠 response 扩展
+
+`qwen.response_resume.v1` 在不改变 OpenAI Realtime 基础生命周期的前提下增加可靠
+投递。客户端在 `response.create.response.metadata.qwen_resume_token` 中提供私有恢复
+token；随后输出事件携带累计 `qwen_delivery_seq` 和绝对 PCM sample 边界。客户端通过
+`qwen.response.ack`、`qwen.response.terminal_ack` 和 `qwen.response.resume` 确认或精确
+回放后缀。增量文本的 seq/幂等 ACK journal 会跨重连保留，新物理 attachment 会 fence
+旧 attachment。
+
+“已生成、客户端已完整收到、本地已缓冲、已经播放”是四个刻意分开的事实。delivery
+ledger 记录已生成输出，delivery ACK 记录客户端完整接收，SDK playback tracker 记录
+缓冲，`qwen.playback.ack` 上报 buffered/played 的绝对 sample 游标。cancel 始终作用于
+私有逻辑 execution，因此上层打断判断不需要把“已发送”误当成“已听到”。
+
+三条入口共同由 transport-neutral `SessionService` 和有界
+`ResumableSessionRegistry` 持有生命周期：standalone `/v1/ws`、standalone Realtime 与
+Triton sidecar 使用同一核心合同，但 wire contract 仍按 endpoint 分开声明。registry
+目前是进程内状态，不能跨进程/GPU 重启；多副本仍需 sticky routing 或按 token 一致
+路由。
+
 ## 下线顺序
 
 1. 已完成：新增 `/v1/realtime`，旧 `/v1/ws` 和 SDK 保持可用，capabilities 同时声明
@@ -138,7 +158,8 @@ gateway 实际发出的 PCM 样本计数。因此它保证：
 2. 已完成：新 SDK 的自动探测优先选择 Realtime；旧 transport 作为显式或自动
    fallback，并发出 deprecation warning。
 3. 已完成：sidecar 接入双向 gRPC backend，Triton JSON action 降为内部协议。
-4. 稳定期：usage ledger、鉴权、配额和断线恢复通过验收后，再公布旧协议删除版本。
+4. 稳定期：usage ledger、鉴权、配额和多副本断线恢复通过验收后，再公布旧协议删除
+   版本。
 
 当前第 1–3 步已经完成。第 4 步仍是验收门槛：durable usage、鉴权、配额与 Realtime
-断线恢复达到生产要求并公布删除版本之前，兼容 transport 继续保留。
+多副本断线恢复达到生产要求并公布删除版本之前，兼容 transport 继续保留。

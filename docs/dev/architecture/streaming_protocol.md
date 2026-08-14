@@ -134,6 +134,13 @@ synthesis. This recovers network/proxy disconnects only. Engine process/GPU
 restarts require a new synthesis, and multi-replica deployments need sticky or
 token-consistent routing so reconnects reach the instance that owns the state.
 
+The reliable lifecycle is shared with the Triton native Session adapter and
+the Realtime `qwen.response_resume.v1` extension. This is a shared internal
+contract, not permission to flatten endpoint capabilities: native WebSocket
+uses JSON headers plus binary PCM, while Realtime uses Base64 audio events and
+namespaced ACK/resume events. Clients must select behavior from the relevant
+entry in the `protocols` capability map.
+
 ### Capability Query
 
 Before opening a synthesis session, the client can call `GetCapabilities`.

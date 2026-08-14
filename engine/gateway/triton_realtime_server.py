@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import resolve_model_package_paths
-from ..session import SessionService
+from ..session import ResumableSessionRegistry, SessionService
 from .openai_realtime import (
     OPENAI_REALTIME_PATH,
     OPENAI_REALTIME_PROTOCOL,
@@ -70,11 +70,14 @@ def create_app(
     # The sidecar uses the same typed logical-session contract as standalone.
     # Triton-specific streaming frames stop at TritonSessionBackend.
     service = SessionService(TritonSessionBackend(backend))
+    resume_registry = ResumableSessionRegistry(service)
     gateway = OpenAIRealtimeGateway(
         None,
         session_service=service,
+        resume_registry=resume_registry,
         usage_recorder=usage_recorder,
     )
+
     def capabilities_payload() -> dict[str, Any]:
         return {
             # Keep the historical flat field stable for one compatibility
@@ -86,12 +89,15 @@ def create_app(
             "supported_realtime_extensions": [
                 QWEN_TEXT_BUFFER_EXTENSION,
                 "qwen.text_progress.v1",
+                "qwen.response_resume.v1",
             ],
             "supported_progress_features": [
                 "text_progress_anchor_v1",
                 "playback_progress_v1",
                 "qwen.text_progress.v1",
             ],
+            "stream_resume_grace_ms": int(resume_registry.grace_seconds * 1000),
+            "stream_resume_max_buffer_bytes": resume_registry.max_buffer_bytes,
             "backend": "triton-grpc",
             "model": backend.model_name,
             "model_version": backend.model_version,
@@ -105,7 +111,11 @@ def create_app(
                     "path": NATIVE_WEBSOCKET_PATH,
                     "current": NATIVE_WEBSOCKET_PROTOCOL,
                     "supported": [NATIVE_WEBSOCKET_PROTOCOL],
-                    "features": ["persistent_sessions_v1"],
+                    "features": [
+                        "persistent_sessions_v1",
+                        "stream_resume_v1",
+                        "playback_progress_v1",
+                    ],
                     "audio_formats": ["pcm_f32", "pcm_s16le"],
                 },
                 "openai_realtime": {
@@ -114,12 +124,14 @@ def create_app(
                     "supported_extensions": [
                         QWEN_TEXT_BUFFER_EXTENSION,
                         "qwen.text_progress.v1",
+                        "qwen.response_resume.v1",
                     ],
                     "extension_protocol": QWEN_REALTIME_EXTENSION_PROTOCOL,
                     "features": [
                         "base64_pcm16",
                         "full_duplex",
                         "serial_responses",
+                        "active_response_resume",
                     ],
                     "audio_formats": ["pcm_s16le"],
                 },
@@ -129,6 +141,7 @@ def create_app(
     native_gateway = NativeSessionGateway(
         service,
         capabilities=capabilities_payload,
+        resume_registry=resume_registry,
     )
     app = web.Application()
 
@@ -148,6 +161,7 @@ def create_app(
         return web.json_response(capabilities_payload())
 
     async def cleanup(_app):
+        await native_gateway.close()
         await gateway.close()
 
     app.router.add_get(OPENAI_REALTIME_PATH, gateway.handle_websocket)

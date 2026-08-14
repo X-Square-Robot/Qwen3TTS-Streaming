@@ -1,10 +1,9 @@
 """Native binary WebSocket projection over the canonical session service.
 
-The standalone gateway has a mature resume-aware handler.  Triton sidecars do
-not own that engine registry, so they use this intentionally small wire
-projector over :class:`SessionService`: the logical session, ordering and
-terminal semantics remain shared while the native v2 JSON/binary frames stay
-independent from OpenAI Realtime events.
+Standalone and Triton sidecars use this wire projector over
+:class:`SessionService`. Logical ownership, ordering, reliability, and terminal
+semantics are shared while native JSON/binary frames remain independent from
+OpenAI Realtime events.
 """
 
 from __future__ import annotations
@@ -16,8 +15,14 @@ from typing import Any, Callable
 from ..core.types import InputMode
 from ..session import (
     AppendText,
+    AttachmentFailure,
+    AttachmentFence,
     AudioOutput,
     CompleteInput,
+    ReliableDelivery,
+    ResumableLogicalSession,
+    ResumableSessionError,
+    ResumableSessionRegistry,
     EventOutput,
     SessionHandle,
     SessionProtocolError,
@@ -26,6 +31,7 @@ from ..session import (
     TerminalStatus,
 )
 from .session_identity import GatewaySessionIdentity
+from .websocket_resume import start_fingerprint
 from .websocket_server import parse_session_start_request
 
 try:
@@ -50,9 +56,24 @@ class NativeSessionGateway:
         service: SessionService,
         *,
         capabilities: Callable[[], dict[str, Any]] | None = None,
+        resume_registry: ResumableSessionRegistry | None = None,
+        stream_resume_grace_seconds: float = 30.0,
+        stream_resume_max_buffer_bytes: int = 16 * 1024 * 1024,
     ) -> None:
         self._service = service
         self._capabilities_provider = capabilities
+        self._resume_registry = resume_registry or ResumableSessionRegistry(
+            service,
+            grace_seconds=stream_resume_grace_seconds,
+            max_buffer_bytes=stream_resume_max_buffer_bytes,
+        )
+
+    @property
+    def resume_registry(self) -> ResumableSessionRegistry:
+        return self._resume_registry
+
+    async def close(self) -> None:
+        await self._resume_registry.close()
 
     async def handle_capabilities(self, _request):
         return web.json_response(self._capabilities())
@@ -61,108 +82,102 @@ class NativeSessionGateway:
         ws = web.WebSocketResponse(heartbeat=_HEARTBEAT_SECONDS)
         await ws.prepare(request)
         handle: SessionHandle | None = None
+        reliable: ResumableLogicalSession | None = None
+        attachment = None
         output_task: asyncio.Task | None = None
         input_closed = False
         output_sample_limit = 0
         playback_played_sample = 0
         playback_buffered_sample = 0
 
+        async def send_projection(output, delivery=None) -> bool:
+            nonlocal output_sample_limit
+            delivery_seq = delivery.delivery_seq if delivery is not None else None
+            if isinstance(output, StartedOutput):
+                payload = {
+                    "type": "event",
+                    "event": {
+                        "type": "start",
+                        "session_id": output.session_id,
+                        "audio": {
+                            "encoding": output.audio.encoding,
+                            "sample_rate": output.audio.sample_rate,
+                            "channels": output.audio.channels,
+                        },
+                        "meta": dict(output.meta),
+                    },
+                }
+                if delivery_seq is not None:
+                    payload["delivery_seq"] = delivery_seq
+                await ws.send_json(payload)
+                return False
+            if isinstance(output, AudioOutput):
+                output_sample_limit = max(output_sample_limit, output.output_sample_end)
+                header = {
+                    "type": "audio_header",
+                    "start_sample": output.output_sample_start,
+                    "end_sample": output.output_sample_end,
+                    "audio": {
+                        "encoding": output.audio.encoding,
+                        "sample_rate": output.audio.sample_rate,
+                        "channels": output.audio.channels,
+                        "meta": {
+                            **dict(output.meta),
+                            "output_sample_start": str(output.output_sample_start),
+                            "output_sample_end": str(output.output_sample_end),
+                            "output_sample_rate": str(output.audio.sample_rate),
+                        },
+                    },
+                }
+                if delivery_seq is not None:
+                    header["delivery_seq"] = delivery_seq
+                await ws.send_json(header)
+                await ws.send_bytes(output.pcm_bytes)
+                return False
+            if isinstance(output, EventOutput):
+                payload = {
+                    "type": "event",
+                    "event": {
+                        "type": output.event_type,
+                        "session_id": output.session_id,
+                        "segment_id": output.segment_id,
+                        "text": output.text,
+                        "message": output.message,
+                        "meta": dict(output.meta),
+                    },
+                }
+                if delivery_seq is not None:
+                    payload["delivery_seq"] = delivery_seq
+                await ws.send_json(payload)
+                return False
+            event_type = "error" if output.status == TerminalStatus.FAILED else "done"
+            meta = {str(k): str(v) for k, v in output.metrics.items()}
+            meta.setdefault("terminal_reason", output.status.value)
+            meta.setdefault("websocket_connection_reusable", "true")
+            payload = {
+                "type": "event",
+                "event": {
+                    "type": event_type,
+                    "session_id": output.session_id,
+                    "message": output.message,
+                    "meta": meta,
+                },
+            }
+            if delivery_seq is not None:
+                payload["delivery_seq"] = delivery_seq
+            await ws.send_json(payload)
+            return True
+
         async def send_output(active: SessionHandle) -> None:
-            nonlocal handle, output_task, input_closed, output_sample_limit
+            nonlocal handle, output_task, input_closed
             try:
                 async for output in active.outputs():
-                    if isinstance(output, StartedOutput):
-                        await ws.send_json(
-                            {
-                                "type": "event",
-                                "event": {
-                                    "type": "start",
-                                    "session_id": output.session_id,
-                                    "audio": {
-                                        "encoding": output.audio.encoding,
-                                        "sample_rate": output.audio.sample_rate,
-                                        "channels": output.audio.channels,
-                                    },
-                                    "meta": dict(output.meta),
-                                },
-                            }
-                        )
-                    elif isinstance(output, AudioOutput):
-                        output_sample_limit = max(
-                            output_sample_limit, output.output_sample_end
-                        )
-                        # Header + binary is one logical audio delivery.  The
-                        # absolute sample range is based on final output PCM,
-                        # so SDKs can join it to text anchors without using
-                        # send-time byte guesses.
-                        await ws.send_json(
-                            {
-                                "type": "audio_header",
-                                "start_sample": output.output_sample_start,
-                                "end_sample": output.output_sample_end,
-                                "audio": {
-                                    "encoding": output.audio.encoding,
-                                    "sample_rate": output.audio.sample_rate,
-                                    "channels": output.audio.channels,
-                                    "meta": {
-                                        **dict(output.meta),
-                                        "output_sample_start": str(
-                                            output.output_sample_start
-                                        ),
-                                        "output_sample_end": str(
-                                            output.output_sample_end
-                                        ),
-                                        "output_sample_rate": str(
-                                            output.audio.sample_rate
-                                        ),
-                                    },
-                                },
-                            }
-                        )
-                        await ws.send_bytes(output.pcm_bytes)
-                    elif isinstance(output, EventOutput):
-                        await ws.send_json(
-                            {
-                                "type": "event",
-                                "event": {
-                                    "type": output.event_type,
-                                    "session_id": output.session_id,
-                                    "segment_id": output.segment_id,
-                                    "text": output.text,
-                                    "message": output.message,
-                                    "meta": dict(output.meta),
-                                },
-                            }
-                        )
-                    else:
-                        event_type = (
-                            "error"
-                            if output.status == TerminalStatus.FAILED
-                            else "done"
-                        )
-                        meta = {str(k): str(v) for k, v in output.metrics.items()}
-                        meta.setdefault("terminal_reason", output.status.value)
-                        # The marker is harmless to clients and allows a native
-                        # SDK to keep a healthy Triton socket for serial calls.
-                        meta.setdefault("websocket_connection_reusable", "true")
-                        await ws.send_json(
-                            {
-                                "type": "event",
-                                "event": {
-                                    "type": event_type,
-                                    "session_id": output.session_id,
-                                    "message": output.message,
-                                    "meta": meta,
-                                },
-                            }
-                        )
+                    if await send_projection(output):
+                        break
                 await self._service.close_session(active.internal_session_id)
                 input_closed = False
                 handle = None
             except (ConnectionError, RuntimeError):
-                # The receive loop owns connection teardown.  A peer may close
-                # between two output frames; do not turn that normal transport
-                # race into an unhandled task exception.
                 logger.debug("native websocket output detached", exc_info=True)
             except asyncio.CancelledError:
                 raise
@@ -170,10 +185,46 @@ class NativeSessionGateway:
                 if output_task is asyncio.current_task():
                     output_task = None
 
+        async def send_reliable_output(
+            session: ResumableLogicalSession, active_attachment
+        ) -> None:
+            nonlocal output_task
+            try:
+                while True:
+                    message = await active_attachment.queue.get()
+                    if isinstance(message, AttachmentFence):
+                        if not ws.closed:
+                            await ws.close()
+                        return
+                    if isinstance(message, AttachmentFailure):
+                        await ws.send_json(
+                            {
+                                "type": "resume_error",
+                                "code": message.code,
+                                "message": message.message,
+                            }
+                        )
+                        return
+                    if not isinstance(message, ReliableDelivery):
+                        raise RuntimeError("invalid reliable delivery")
+                    if await send_projection(message.payload, message):
+                        return
+            except (ConnectionError, RuntimeError):
+                logger.debug("native resumable websocket detached", exc_info=True)
+            except asyncio.CancelledError:
+                raise
+            finally:
+                if output_task is asyncio.current_task():
+                    output_task = None
+
         async def stop_active(reason: str = "") -> None:
-            nonlocal handle, output_task, input_closed
+            nonlocal handle, output_task, input_closed, reliable, attachment
             active = handle
             if active is None:
+                return
+            if reliable is not None and attachment is not None:
+                await reliable.cancel(attachment.generation, reason)
+                input_closed = True
                 return
             try:
                 await active.cancel(reason)
@@ -186,12 +237,21 @@ class NativeSessionGateway:
                     pass
             await self._service.close_session(active.internal_session_id)
             handle = None
+            reliable = None
+            attachment = None
             output_task = None
             input_closed = False
 
         async def send_error(exc: Exception) -> None:
-            code = getattr(exc, "code", "invalid_request")
+            code = _native_resume_error_code(
+                str(getattr(exc, "code", "invalid_request"))
+            )
             if not ws.closed:
+                if isinstance(exc, ResumableSessionError):
+                    await ws.send_json(
+                        {"type": "resume_error", "code": code, "message": str(exc)}
+                    )
+                    return
                 await ws.send_json(
                     {
                         "type": "event",
@@ -235,23 +295,44 @@ class NativeSessionGateway:
                         payload, "buffered_through_sample", positive=False
                     )
                     try:
-                        if buffered < played:
+                        if reliable is not None and attachment is not None:
+                            observed_delivery_seq = _required_int(
+                                payload,
+                                "observed_delivery_seq",
+                                positive=False,
+                                default=reliable.ledger.last_delivery_seq,
+                            )
+                            await reliable.record_playback_progress(
+                                attachment.generation,
+                                played_through_sample=played,
+                                buffered_through_sample=buffered,
+                                observed_delivery_seq=observed_delivery_seq,
+                            )
+                        elif buffered < played:
                             raise ValueError(
                                 "buffered_through_sample must be >= played_through_sample"
                             )
-                        if played <= playback_played_sample and buffered <= playback_buffered_sample:
+                        elif (
+                            played <= playback_played_sample
+                            and buffered <= playback_buffered_sample
+                        ):
                             continue
-                        if played < playback_played_sample:
-                            raise ValueError("played_through_sample cannot move backwards")
-                        if buffered < playback_buffered_sample:
-                            raise ValueError("buffered_through_sample cannot move backwards")
-                        if buffered > output_sample_limit:
+                        elif played < playback_played_sample:
+                            raise ValueError(
+                                "played_through_sample cannot move backwards"
+                            )
+                        elif buffered < playback_buffered_sample:
+                            raise ValueError(
+                                "buffered_through_sample cannot move backwards"
+                            )
+                        elif buffered > output_sample_limit:
                             raise ValueError(
                                 "buffered_through_sample is ahead of server output"
                             )
-                        playback_played_sample = played
-                        playback_buffered_sample = buffered
-                    except ValueError as exc:
+                        else:
+                            playback_played_sample = played
+                            playback_buffered_sample = buffered
+                    except (ValueError, ResumableSessionError) as exc:
                         await ws.send_json(
                             {
                                 "type": "playback_progress_error",
@@ -264,22 +345,82 @@ class NativeSessionGateway:
                 if message_type == "start":
                     if handle is not None:
                         raise SessionProtocolError(
-                            "session_active", "websocket session has already been started"
+                            "session_active",
+                            "websocket session has already been started",
                         )
                     start_request = parse_session_start_request(
                         payload, default_mode=InputMode.AUTO
                     )
                     identity = GatewaySessionIdentity.create(payload.get("session_id"))
-                    handle = await self._service.create(
-                        identity, start_request=start_request
+                    resume_spec = _resume_start_spec(payload)
+                    if resume_spec is None:
+                        handle = await self._service.create(
+                            identity, start_request=start_request
+                        )
+                        output_task = asyncio.create_task(send_output(handle))
+                    else:
+                        token, last_delivery_seq, audio_sample = resume_spec
+                        reliable, created = await self._resume_registry.claim_start(
+                            token=token,
+                            config_fingerprint=start_fingerprint(payload),
+                            protocol=NATIVE_WEBSOCKET_PROTOCOL,
+                            identity=identity,
+                            start_request=start_request,
+                        )
+                        attachment = await reliable.attach(
+                            last_delivery_seq=last_delivery_seq,
+                            audio_through_sample=audio_sample,
+                        )
+                        handle = reliable.handle
+                        input_closed = reliable.input_closed
+                        if not created:
+                            await ws.send_json(
+                                {
+                                    "type": "resumed",
+                                    "session_id": reliable.client_session_id,
+                                    **reliable.resume_info(),
+                                }
+                            )
+                        output_task = asyncio.create_task(
+                            send_reliable_output(reliable, attachment)
+                        )
+                    continue
+
+                if message_type == "resume":
+                    if handle is not None:
+                        raise SessionProtocolError(
+                            "session_active",
+                            "websocket session has already been started",
+                        )
+                    token, last_delivery_seq, audio_sample = _resume_request_spec(
+                        payload
                     )
-                    output_task = asyncio.create_task(send_output(handle))
+                    reliable = await self._resume_registry.find(
+                        token, protocol=NATIVE_WEBSOCKET_PROTOCOL
+                    )
+                    attachment = await reliable.attach(
+                        last_delivery_seq=last_delivery_seq,
+                        audio_through_sample=audio_sample,
+                    )
+                    handle = reliable.handle
+                    input_closed = reliable.input_closed
+                    await ws.send_json(
+                        {
+                            "type": "resumed",
+                            "session_id": reliable.client_session_id,
+                            **reliable.resume_info(),
+                        }
+                    )
+                    output_task = asyncio.create_task(
+                        send_reliable_output(reliable, attachment)
+                    )
                     continue
 
                 if message_type == "oneshot":
                     if handle is not None:
                         raise SessionProtocolError(
-                            "session_active", "websocket session has already been started"
+                            "session_active",
+                            "websocket session has already been started",
                         )
                     start_request = parse_session_start_request(
                         payload, default_mode=InputMode.FULL_TEXT
@@ -302,17 +443,33 @@ class NativeSessionGateway:
                         "session_not_started", "received input before 'start'"
                     )
                 if message_type == "text":
-                    seq_no = _required_int(payload, "seq_no", positive=True)
-                    ack = await handle.append_text(
-                        AppendText(seq_no=seq_no, text=str(payload.get("text") or ""))
-                    )
-                    await ws.send_json(
-                        {
-                            "type": "text_ack",
-                            "through_seq": ack.seq_no,
-                            "duplicate": ack.duplicate,
-                        }
-                    )
+                    raw_seq = payload.get("seq_no")
+                    if reliable is not None and attachment is not None:
+                        seq_no = _required_int(payload, "seq_no", positive=True)
+                        ack = await reliable.append_text(
+                            attachment.generation,
+                            seq_no=seq_no,
+                            text=str(payload.get("text") or ""),
+                        )
+                    else:
+                        seq_no = (
+                            handle.accepted_text_seq + 1
+                            if raw_seq in (None, 0, "0", "")
+                            else _required_int(payload, "seq_no", positive=True)
+                        )
+                        ack = await handle.append_text(
+                            AppendText(
+                                seq_no=seq_no, text=str(payload.get("text") or "")
+                            )
+                        )
+                    if reliable is not None or raw_seq not in (None, 0, "0", ""):
+                        await ws.send_json(
+                            {
+                                "type": "text_ack",
+                                "through_seq": ack.seq_no,
+                                "duplicate": ack.duplicate,
+                            }
+                        )
                 elif message_type in {"end", "stop"}:
                     final_seq = _required_int(
                         payload,
@@ -320,17 +477,57 @@ class NativeSessionGateway:
                         positive=False,
                         default=handle.accepted_text_seq,
                     )
-                    ack = await handle.complete_input(
-                        CompleteInput(final_seq_no=final_seq)
-                    )
+                    if reliable is not None and attachment is not None:
+                        ack = await reliable.complete_input(
+                            attachment.generation, final_seq_no=final_seq
+                        )
+                    else:
+                        ack = await handle.complete_input(
+                            CompleteInput(final_seq_no=final_seq)
+                        )
                     input_closed = True
-                    await ws.send_json(
-                        {
-                            "type": "input_ack",
-                            "final_seq_no": ack.seq_no,
-                            "duplicate": ack.duplicate,
-                        }
+                    if reliable is not None or "final_seq_no" in payload:
+                        await ws.send_json(
+                            {
+                                "type": "input_ack",
+                                "final_seq_no": ack.seq_no,
+                                "duplicate": ack.duplicate,
+                            }
+                        )
+                elif message_type == "ack":
+                    if reliable is None or attachment is None:
+                        raise ResumableSessionError(
+                            "resume_not_enabled",
+                            "delivery ACK is only valid for a resumable stream",
+                        )
+                    await reliable.acknowledge(
+                        attachment.generation,
+                        through_delivery_seq=_required_int(
+                            payload, "through_delivery_seq", positive=False
+                        ),
+                        audio_through_sample=_required_int(
+                            payload, "audio_through_sample", positive=False
+                        ),
                     )
+                elif message_type == "terminal_ack":
+                    if reliable is None or attachment is None:
+                        raise ResumableSessionError(
+                            "resume_not_enabled",
+                            "terminal ACK is only valid for a resumable stream",
+                        )
+                    await reliable.terminal_ack(
+                        attachment.generation,
+                        through_delivery_seq=_required_int(
+                            payload, "through_delivery_seq", positive=False
+                        ),
+                        audio_through_sample=_required_int(
+                            payload, "audio_through_sample", positive=False
+                        ),
+                    )
+                    handle = None
+                    reliable = None
+                    attachment = None
+                    input_closed = False
                 elif message_type == "cancel":
                     await stop_active(str(payload.get("reason") or ""))
                 else:
@@ -343,7 +540,9 @@ class NativeSessionGateway:
             logger.warning("native websocket request failed: %s", exc)
             await send_error(exc)
         finally:
-            if handle is not None:
+            if reliable is not None and attachment is not None:
+                await reliable.detach(attachment.generation)
+            elif handle is not None:
                 await stop_active("websocket_closed")
             if output_task is not None and not output_task.done():
                 output_task.cancel()
@@ -357,17 +556,43 @@ class NativeSessionGateway:
 
     def _capabilities(self) -> dict[str, Any]:
         if self._capabilities_provider is None:
-            return {
+            capabilities = {
                 "protocols": {
                     "native_websocket": {
                         "path": NATIVE_WEBSOCKET_PATH,
                         "current": NATIVE_WEBSOCKET_PROTOCOL,
                         "supported": [NATIVE_WEBSOCKET_PROTOCOL],
-                        "features": ["persistent_sessions_v1"],
+                        "features": [],
                     }
                 }
             }
-        return dict(self._capabilities_provider())
+        else:
+            capabilities = dict(self._capabilities_provider())
+        protocols = capabilities.setdefault("protocols", {})
+        native = protocols.setdefault(
+            "native_websocket",
+            {
+                "path": NATIVE_WEBSOCKET_PATH,
+                "current": NATIVE_WEBSOCKET_PROTOCOL,
+                "supported": [NATIVE_WEBSOCKET_PROTOCOL],
+            },
+        )
+        features = list(native.get("features") or [])
+        for feature in (
+            "persistent_sessions_v1",
+            "stream_resume_v1",
+            "playback_progress_v1",
+        ):
+            if feature not in features:
+                features.append(feature)
+        native["features"] = features
+        capabilities["stream_resume_grace_ms"] = int(
+            round(self._resume_registry.grace_seconds * 1000.0)
+        )
+        capabilities["stream_resume_max_buffer_bytes"] = (
+            self._resume_registry.max_buffer_bytes
+        )
+        return capabilities
 
 
 def _json_object(raw: Any) -> dict[str, Any]:
@@ -395,10 +620,47 @@ def _required_int(
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{key} must be an integer") from exc
     if (positive and value <= 0) or (not positive and value < 0):
-        raise ValueError(
-            f"{key} must be {'positive' if positive else 'non-negative'}"
-        )
+        raise ValueError(f"{key} must be {'positive' if positive else 'non-negative'}")
     return value
+
+
+def _resume_start_spec(payload: dict[str, Any]) -> tuple[str, int, int] | None:
+    raw = payload.get("resume")
+    if not isinstance(raw, dict) or not bool(raw.get("enabled", False)):
+        return None
+    token = str(raw.get("token") or "")
+    if len(token) < 16:
+        raise ResumableSessionError(
+            "invalid_resume_token", "resume token must contain at least 16 characters"
+        )
+    return (
+        token,
+        _required_int(raw, "last_delivery_seq", positive=False, default=0),
+        _required_int(raw, "audio_through_sample", positive=False, default=0),
+    )
+
+
+def _resume_request_spec(payload: dict[str, Any]) -> tuple[str, int, int]:
+    token = str(payload.get("token") or "")
+    if len(token) < 16:
+        raise ResumableSessionError(
+            "invalid_resume_token", "resume token must contain at least 16 characters"
+        )
+    return (
+        token,
+        _required_int(payload, "last_delivery_seq", positive=False, default=0),
+        _required_int(payload, "audio_through_sample", positive=False, default=0),
+    )
+
+
+def _native_resume_error_code(code: str) -> str:
+    return {
+        "invalid_cursor": "invalid_resume_cursor",
+        "cursor_ahead": "invalid_resume_cursor",
+        "cursor_expired": "resume_window_exceeded",
+        "cursor_mismatch": "resume_audio_cursor_mismatch",
+        "stale_attachment": "resume_attachment_superseded",
+    }.get(code, code)
 
 
 __all__ = [

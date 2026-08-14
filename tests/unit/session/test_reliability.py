@@ -22,9 +22,7 @@ async def test_typed_delivery_ledger_replays_and_fences_attachments():
         config_fingerprint="fingerprint",
         protocol="openai-realtime-v1",
     )
-    await ledger.publish(
-        StartedOutput("sid", AudioFormat("pcm_s16le", 24000, 1))
-    )
+    await ledger.publish(StartedOutput("sid", AudioFormat("pcm_s16le", 24000, 1)))
     await ledger.publish(
         AudioOutput(
             "sid",
@@ -74,3 +72,31 @@ async def test_typed_delivery_ledger_rejects_invalid_cursors_and_counts_terminal
         await ledger.publish(EventOutput("sid", "late"))
     await ledger.terminal_ack(attachment.generation)
     assert ledger.terminal is not None
+
+
+@pytest.mark.asyncio
+async def test_replay_cursor_does_not_skip_non_audio_delivery_at_same_sample():
+    ledger = DeliveryLedger(
+        token="secret",
+        config_fingerprint="fingerprint",
+        protocol="openai-realtime-v1",
+    )
+    await ledger.publish(
+        AudioOutput(
+            "sid",
+            b"\0\0" * 1200,
+            AudioFormat("pcm_s16le", 24000, 1),
+            0,
+            1200,
+        )
+    )
+    await ledger.publish(EventOutput("sid", "text_progress"))
+
+    attachment = await ledger.attach(
+        last_delivery_seq=1,
+        audio_through_sample=1200,
+    )
+
+    replay = attachment.queue.get_nowait()
+    assert replay.delivery_seq == 2
+    assert isinstance(replay.payload, EventOutput)

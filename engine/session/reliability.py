@@ -90,6 +90,7 @@ class DeliveryLedger:
         self._attachment: DeliveryAttachment[SessionOutput] | None = None
         self._terminal: TerminalOutput | None = None
         self._terminal_acked = False
+        self._failure: AttachmentFailure | None = None
 
     @property
     def terminal(self) -> TerminalOutput | None:
@@ -104,6 +105,18 @@ class DeliveryLedger:
         return self._next_audio_sample
 
     @property
+    def last_delivery_seq(self) -> int:
+        return self._next_delivery_seq - 1
+
+    @property
+    def failure(self) -> AttachmentFailure | None:
+        return self._failure
+
+    @property
+    def terminal_acked(self) -> bool:
+        return self._terminal_acked
+
+    @property
     def retained_bytes(self) -> int:
         return self._retained_bytes
 
@@ -116,6 +129,8 @@ class DeliveryLedger:
         if last_delivery_seq < 0 or audio_through_sample < 0:
             raise LedgerError("invalid_cursor", "resume cursors must be non-negative")
         async with self._lock:
+            if self._failure is not None:
+                raise LedgerError(self._failure.code, self._failure.message)
             self._validate_cursor(last_delivery_seq, audio_through_sample)
             old = self._attachment
             self._generation += 1
@@ -129,15 +144,22 @@ class DeliveryLedger:
             for record in self._records:
                 if record.delivery_seq <= last_delivery_seq:
                     continue
-                if record.end_sample and record.end_sample <= audio_through_sample:
-                    continue
                 self._put_control(attachment.queue, record)
             return attachment
 
-    async def detach(self, generation: int) -> None:
+    async def detach(self, generation: int) -> bool:
         async with self._lock:
-            if self._attachment is not None and self._attachment.generation == generation:
+            if (
+                self._attachment is not None
+                and self._attachment.generation == generation
+            ):
                 self._attachment = None
+                return True
+            return False
+
+    async def has_attachment(self) -> bool:
+        async with self._lock:
+            return self._attachment is not None
 
     async def publish(self, payload: SessionOutput) -> ReliableDelivery:
         async with self._lock:
@@ -165,6 +187,7 @@ class DeliveryLedger:
                     "resume_buffer_exceeded",
                     "logical output exceeded the replay window",
                 )
+                self._failure = failure
                 attachment = self._attachment
                 if attachment is not None:
                     self._put_control(attachment.queue, failure)
@@ -198,6 +221,11 @@ class DeliveryLedger:
             raise LedgerError("invalid_ack", "ACK values must be non-negative")
         async with self._lock:
             self._require_generation(generation)
+            if (
+                through_delivery_seq <= self._acked_delivery_seq
+                and audio_through_sample <= self._acked_audio_sample
+            ):
+                return
             self._validate_cursor(through_delivery_seq, audio_through_sample)
             if through_delivery_seq < self._acked_delivery_seq:
                 raise LedgerError("ack_regression", "delivery ACK moved backwards")
@@ -225,13 +253,53 @@ class DeliveryLedger:
                 raise LedgerError("terminal_not_ready", "terminal output is not ready")
             self._terminal_acked = True
 
+    async def close(self, *, fence: bool = True) -> None:
+        """Release retained output and optionally wake the active attachment."""
+
+        async with self._lock:
+            attachment = self._attachment
+            self._attachment = None
+            self._records.clear()
+            self._retained_bytes = 0
+            if fence and attachment is not None:
+                self._put_control(
+                    attachment.queue, AttachmentFence(self._generation + 1)
+                )
+
+    async def require_generation(self, generation: int) -> None:
+        """Fence transport commands from superseded physical attachments."""
+
+        async with self._lock:
+            self._require_generation(generation)
+
+    async def audio_end_through_delivery(self, delivery_seq: int) -> int:
+        """Return the canonical audio tail visible through one delivery."""
+
+        async with self._lock:
+            if delivery_seq < 0 or delivery_seq > self._next_delivery_seq - 1:
+                raise LedgerError("cursor_ahead", "delivery cursor is ahead of output")
+            if delivery_seq == self._trimmed_through_seq:
+                return self._trimmed_audio_sample
+            if delivery_seq < self._trimmed_through_seq:
+                raise LedgerError(
+                    "cursor_expired", "delivery cursor is outside replay window"
+                )
+            if delivery_seq == self._next_delivery_seq - 1:
+                return self._next_audio_sample
+            for record in self._records:
+                if record.delivery_seq == delivery_seq:
+                    return record.end_sample
+            raise LedgerError("cursor_expired", "delivery cursor is no longer retained")
+
     def _validate_cursor(self, delivery_seq: int, audio_sample: int) -> None:
         if delivery_seq > self._next_delivery_seq - 1:
             raise LedgerError("cursor_ahead", "delivery cursor is ahead of output")
         if audio_sample > self._next_audio_sample:
             raise LedgerError("cursor_ahead", "audio cursor is ahead of output")
         if delivery_seq < self._trimmed_through_seq:
-            raise LedgerError("cursor_expired", "delivery cursor is outside replay window")
+            raise LedgerError(
+                "cursor_expired", "delivery cursor is outside replay window"
+            )
         if audio_sample < self._trimmed_audio_sample:
             raise LedgerError("cursor_expired", "audio cursor is outside replay window")
         if delivery_seq == self._trimmed_through_seq:
@@ -262,7 +330,9 @@ class DeliveryLedger:
         try:
             queue.put_nowait(message)
         except asyncio.QueueFull as exc:
-            raise LedgerError("attachment_overflow", "attachment queue is full") from exc
+            raise LedgerError(
+                "attachment_overflow", "attachment queue is full"
+            ) from exc
 
 
 def _payload_size(payload: SessionOutput) -> int:

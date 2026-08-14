@@ -163,6 +163,7 @@ class WebSocketGateway:
         capabilities["supported_realtime_extensions"] = [
             "qwen.input_text_buffer.v1",
             "qwen.text_progress.v1",
+            "qwen.response_resume.v1",
         ]
         # Keep the historical flat fields for one compatibility release while
         # making endpoint-specific capabilities explicit.  Consumers must not
@@ -183,8 +184,14 @@ class WebSocketGateway:
                 "supported_extensions": [
                     "qwen.input_text_buffer.v1",
                     "qwen.text_progress.v1",
+                    "qwen.response_resume.v1",
                 ],
-                "features": ["base64_pcm16", "full_duplex", "serial_responses"],
+                "features": [
+                    "base64_pcm16",
+                    "full_duplex",
+                    "serial_responses",
+                    "active_response_resume",
+                ],
                 "audio_formats": ["pcm_s16le"],
             },
         }
@@ -288,9 +295,12 @@ class WebSocketGateway:
             if frame.get("type") == "audio":
                 playback_output_sample = max(
                     playback_output_sample,
-                    int((frame.get("audio") or {}).get("meta", {}).get(
-                        "output_sample_end", playback_output_sample
-                    ) or playback_output_sample),
+                    int(
+                        (frame.get("audio") or {})
+                        .get("meta", {})
+                        .get("output_sample_end", playback_output_sample)
+                        or playback_output_sample
+                    ),
                 )
             if not terminal:
                 return False
@@ -1054,9 +1064,7 @@ class WebSocketGateway:
                 for event in (*batch.anchors, *batch.events):
                     frames.append(
                         _make_event_frame_from_contract(
-                            build_forward_event(
-                                client_session_id, event, start_request
-                            )
+                            build_forward_event(client_session_id, event, start_request)
                         )
                     )
                 await _enqueue_frames(frames)
@@ -1066,11 +1074,13 @@ class WebSocketGateway:
             snapshot_prefix_bypass()
             # Inject VAD observability into metrics
             _inject_vad_metrics(vad_processor, pipeline, metrics)
-            await _enqueue_frames([
-                _make_event_frame_from_contract(
-                    build_done_event(client_session_id, metrics, pipeline)
-                )
-            ])
+            await _enqueue_frames(
+                [
+                    _make_event_frame_from_contract(
+                        build_done_event(client_session_id, metrics, pipeline)
+                    )
+                ]
+            )
 
         await self._engine.start_session(
             internal_session_id,
@@ -1305,19 +1315,29 @@ async def serve(
 
     ws_path = _normalize_ws_path(path)
     gateway = WebSocketGateway(engine)
+    from ..session import ResumableSessionRegistry
+    from .native_session_gateway import NativeSessionGateway
     from .openai_realtime import OpenAIRealtimeGateway
+
     # Both public protocols share the same transport-neutral execution
-    # contract.  The native handler keeps its v2 wire loop for compatibility;
-    # Realtime receives typed outputs through this service bridge.
+    # contract. Native delivery reliability is owned by the typed projector,
+    # not by the standalone engine adapter.
+    resume_registry = ResumableSessionRegistry(gateway.session_service)
+    native_gateway = NativeSessionGateway(
+        gateway.session_service,
+        capabilities=gateway._capabilities,
+        resume_registry=resume_registry,
+    )
     realtime_gateway = OpenAIRealtimeGateway(
         engine,
         session_service=gateway.session_service,
+        resume_registry=resume_registry,
         usage_recorder=realtime_usage_recorder,
     )
     app = web.Application()
     app.router.add_get(_CAPABILITIES_PATH, gateway.handle_capabilities)
     app.router.add_get(_OPENAI_REALTIME_PATH, realtime_gateway.handle_websocket)
-    app.router.add_get(ws_path, gateway.handle_websocket)
+    app.router.add_get(ws_path, native_gateway.handle_websocket)
     if health_state is not None:
         add_health_routes(app, health_state)
 
@@ -1338,6 +1358,7 @@ async def serve(
         await stop_event.wait()
     finally:
         await runner.cleanup()
+        await native_gateway.close()
         await gateway.close()
 
 

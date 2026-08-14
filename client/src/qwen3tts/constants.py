@@ -19,6 +19,7 @@ OPENAI_REALTIME_PROTOCOL = "openai-realtime-v1"
 QWEN_REALTIME_EXTENSION_PROTOCOL = "qwen-realtime-v1"
 QWEN_TEXT_BUFFER_EXTENSION = "qwen.input_text_buffer.v1"
 QWEN_TEXT_PROGRESS_EXTENSION = "qwen.text_progress.v1"
+QWEN_RESPONSE_RESUME_EXTENSION = "qwen.response_resume.v1"
 
 TRANSPORT_OPENAI_REALTIME = "openai-realtime"
 TRANSPORT_ENGINE_WEBSOCKET = "engine-websocket"

@@ -194,8 +194,8 @@ result = await client.synthesize_bytes("你好。", request=SynthesisConfig(task
 
 四种旧 transport 当前不会删除，但每个进程、每种 transport 会发出一次
 `FutureWarning`。迁移期间可用 `QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING=1` 临时
-静默。活动流透明恢复目前只属于兼容的 `engine-websocket`；Realtime 流断开时明确
-失败，不会静默地从头重新合成。
+静默。native WebSocket 通过 `stream_resume_v1`、Realtime 通过
+`qwen.response_resume.v1` 声明活动流恢复；未声明对应能力时仍明确失败。
 
 ### 鉴权与 WebSocket 长连接
 
@@ -218,12 +218,12 @@ gateway 没有长连接协议标识，SDK 会安全丢弃而不复用该 socket�
 `active_stream_resume=True`、`stream_resume_attempts=2`、
 `stream_resume_timeout=10.0`、`stream_resume_ack_interval=8`。
 
-当 gateway 声明支持恢复时，瞬时断联不会重启逻辑 engine session。文本通过累计序号
-ACK 去重，输出从已确认的 delivery/sample 游标继续，因此 SDK 不会从头重新合成，也
-不会把同一段音频重复放入消息队列。恢复受服务端声明的 grace 与回放窗口约束；token
-过期、重试耗尽、协议缺口、服务进程重启或新连接被路由到另一副本都会明确失败。旧
-gateway 会自动保持原先的快速失败行为。使用完客户端后调用 `client.close()`，或使用
-上下文管理器。
+当 native WebSocket 或 OpenAI Realtime gateway 声明支持恢复时，瞬时断联不会重启
+逻辑 engine session。文本通过累计序号 ACK 去重，输出从已确认的 delivery/sample
+游标继续，因此 SDK 不会从头重新合成，也不会把同一段音频重复放入消息队列。恢复受
+服务端声明的 grace 与回放窗口约束；token 过期、重试耗尽、协议缺口、服务进程重启或
+新连接被路由到另一副本都会明确失败。旧 gateway 会自动保持原先的快速失败行为。
+使用完客户端后调用 `client.close()`，或使用上下文管理器。
 
 ## 示例
 

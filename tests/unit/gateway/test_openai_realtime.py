@@ -96,18 +96,30 @@ async def _receive_until(
     )
 
 
-def _test_app(engine, *, usage_recorder=None):
+def _test_app(engine, *, usage_recorder=None, reliable=False):
     pytest.importorskip("aiohttp")
     from aiohttp import web
 
     legacy = WebSocketGateway(engine)
-    realtime = OpenAIRealtimeGateway(
-        engine,
-        session_starter=legacy._create_session,
-        usage_recorder=usage_recorder,
-    )
+    if reliable:
+        realtime = OpenAIRealtimeGateway(
+            engine,
+            session_service=legacy.session_service,
+            usage_recorder=usage_recorder,
+        )
+    else:
+        realtime = OpenAIRealtimeGateway(
+            engine,
+            session_starter=legacy._create_session,
+            usage_recorder=usage_recorder,
+        )
     app = web.Application()
     app.router.add_get("/v1/realtime", realtime.handle_websocket)
+
+    async def close_gateway(_app):
+        await realtime.close()
+
+    app.on_cleanup.append(close_gateway)
     return app
 
 
@@ -276,16 +288,18 @@ async def test_new_sdk_incremental_realtime_is_full_duplex_and_exposes_usage():
             await asyncio.to_thread(session.send_text, "lo")
             await asyncio.to_thread(session.end)
             messages = await asyncio.to_thread(
-                lambda: list(
-                    session.iter_messages(post_send_idle_timeout=1.0)
-                )
+                lambda: list(session.iter_messages(post_send_idle_timeout=1.0))
             )
         finally:
             await asyncio.to_thread(client.close)
 
-    assert len([message for message in messages if isinstance(message, AudioChunk)]) == 2
+    assert (
+        len([message for message in messages if isinstance(message, AudioChunk)]) == 2
+    )
     progress_events = [
-        message for message in messages if getattr(message, "type", "") == "text_progress"
+        message
+        for message in messages
+        if getattr(message, "type", "") == "text_progress"
     ]
     assert len(progress_events) == 2
     assert progress_events[0].meta["progress_basis"] == "ema_frame_ratio_v1"
@@ -293,6 +307,118 @@ async def test_new_sdk_incremental_realtime_is_full_duplex_and_exposes_usage():
     assert session.usage["input_tokens"] == len("hello")
     assert session.usage["output_token_details"]["audio_tokens"] == 2
     assert [text for _, text in engine.pushed] == ["hel", "lo"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_resumes_realtime_response_without_restarting_execution():
+    pytest.importorskip("aiohttp")
+    from aiohttp.test_utils import TestServer
+    from qwen3tts._internal.raw_websocket import ws_close
+
+    engine = _RealtimeStubEngine()
+    server = TestServer(_test_app(engine, reliable=True))
+    async with server:
+        endpoint = str(server.make_url("/v1/realtime")).replace("http://", "ws://")
+        client = await asyncio.to_thread(
+            TTSClient.connect,
+            endpoint,
+            transport=TRANSPORT_OPENAI_REALTIME,
+            verify=False,
+        )
+        try:
+            session = await asyncio.to_thread(
+                client.open_stream,
+                SessionStartRequest(
+                    session_id="sdk-realtime-resume",
+                    config=SynthesisConfig(task_type="custom_voice"),
+                ),
+            )
+            messages = session.iter_messages(post_send_idle_timeout=2.0)
+            await asyncio.to_thread(session.send_text, "hel")
+
+            first_audio = None
+            while first_audio is None:
+                candidate = await asyncio.to_thread(next, messages)
+                if isinstance(candidate, AudioChunk):
+                    first_audio = candidate
+            ws_close(session._conn)
+
+            await asyncio.to_thread(session.send_text, "lo")
+            await asyncio.to_thread(session.end)
+            tail = await asyncio.to_thread(lambda: list(messages))
+        finally:
+            await asyncio.to_thread(client.close)
+
+    audio = [first_audio] + [item for item in tail if isinstance(item, AudioChunk)]
+    assert len(audio) == 2
+    assert [item.output_sample_start for item in audio] == [0, 1200]
+    assert [item.output_sample_end for item in audio] == [1200, 2400]
+    assert session.response_status == "completed"
+    assert len(engine.configs) == 1
+    assert [text for _, text in engine.pushed] == ["hel", "lo"]
+
+
+@pytest.mark.asyncio
+async def test_reliable_realtime_validates_absolute_playback_cursor():
+    pytest.importorskip("aiohttp")
+    from aiohttp.test_utils import TestClient, TestServer
+
+    engine = _RealtimeStubEngine()
+    server = TestServer(_test_app(engine, reliable=True))
+    async with server:
+        client = TestClient(server)
+        async with client:
+            ws = await client.ws_connect("/v1/realtime")
+            created = await _receive_json(ws)
+            assert created["session"]["qwen"]["response_resume_extension"] == (
+                "qwen.response_resume.v1"
+            )
+            await ws.send_json(
+                {
+                    "type": "response.create",
+                    "response": {
+                        "metadata": {"qwen_resume_token": "resume-token-0123456789"}
+                    },
+                }
+            )
+            for _ in range(3):
+                await _receive_json(ws)
+            await ws.send_json(
+                {
+                    "type": "qwen.input_text_buffer.append",
+                    "sequence": 1,
+                    "text": "hello",
+                }
+            )
+            delta, _ = await _receive_until(ws, "response.output_audio.delta")
+            assert delta["qwen_output_sample_start"] == 0
+            assert delta["qwen_output_sample_end"] == 1200
+
+            await ws.send_json(
+                {
+                    "type": "qwen.playback.ack",
+                    "response_id": delta["response_id"],
+                    "played_through_sample": 100,
+                    "buffered_through_sample": 1200,
+                    "observed_delivery_seq": delta["qwen_delivery_seq"],
+                }
+            )
+            accepted, _ = await _receive_until(ws, "qwen.playback.ack")
+            assert accepted["accepted"] is True
+            assert accepted["played_through_sample"] == 100
+
+            await ws.send_json(
+                {
+                    "type": "qwen.playback.ack",
+                    "response_id": delta["response_id"],
+                    "played_through_sample": 100,
+                    "buffered_through_sample": 1201,
+                    "observed_delivery_seq": delta["qwen_delivery_seq"],
+                }
+            )
+            rejected, _ = await _receive_until(ws, "error")
+            assert rejected["error"]["code"] == "invalid_playback_progress"
+            await ws.close()
 
 
 @pytest.mark.asyncio

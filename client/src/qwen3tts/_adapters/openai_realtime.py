@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 import weakref
+from collections import deque
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
@@ -42,9 +43,10 @@ from ..constants import (
     OPENAI_REALTIME_PROTOCOL,
     QWEN_TEXT_BUFFER_EXTENSION,
     QWEN_TEXT_PROGRESS_EXTENSION,
+    QWEN_RESPONSE_RESUME_EXTENSION,
     TRANSPORT_OPENAI_REALTIME,
 )
-from ..exceptions import ProtocolError, StreamClosedError
+from ..exceptions import ProtocolError, StreamClosedError, StreamRecoveryError
 from ..exceptions import PoolAcquireTimeoutError, PoolSaturatedError
 
 
@@ -87,8 +89,13 @@ class OpenAIRealtimeAdapter:
         self.stream_resume_ack_interval = max(1, int(stream_resume_ack_interval))
         self.max_connections = int(max_connections)
         self.max_idle_connections = int(max_idle_connections)
-        if self.max_idle_connections < 0 or self.max_idle_connections > self.max_connections:
-            raise ValueError("max_idle_connections must be between 0 and max_connections")
+        if (
+            self.max_idle_connections < 0
+            or self.max_idle_connections > self.max_connections
+        ):
+            raise ValueError(
+                "max_idle_connections must be between 0 and max_connections"
+            )
         self.max_pending_acquires = int(max_pending_acquires)
         if self.max_connections <= 0:
             raise ValueError("max_connections must be greater than zero")
@@ -173,7 +180,9 @@ class OpenAIRealtimeAdapter:
         """Establish idle Realtime sockets for short logical responses."""
         target = max(0, int(connections))
         if self.max_idle_connections == 0:
-            raise ValueError("OpenAI Realtime pooling is disabled (max_idle_connections=0)")
+            raise ValueError(
+                "OpenAI Realtime pooling is disabled (max_idle_connections=0)"
+            )
         target = min(target, self.max_idle_connections)
         deadline = time.monotonic() + (
             self.connect_timeout if timeout is None else max(0.1, float(timeout))
@@ -284,7 +293,11 @@ class OpenAIRealtimeAdapter:
         if self.max_idle_connections == 0:
             self._acquire_slot()
             return None, False
-        deadline = None if self.acquire_timeout is None else time.monotonic() + self.acquire_timeout
+        deadline = (
+            None
+            if self.acquire_timeout is None
+            else time.monotonic() + self.acquire_timeout
+        )
         with self._pool_lock:
             while True:
                 if self._idle_connections:
@@ -298,7 +311,9 @@ class OpenAIRealtimeAdapter:
                     )
                 self._pending_acquires += 1
                 try:
-                    remaining = None if deadline is None else deadline - time.monotonic()
+                    remaining = (
+                        None if deadline is None else deadline - time.monotonic()
+                    )
                     if remaining is not None and remaining <= 0:
                         raise PoolAcquireTimeoutError(
                             "timed out waiting for a Realtime websocket connection"
@@ -377,6 +392,7 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
         session_id = start_request.session_id or f"client_{uuid.uuid4().hex}"
         super().__init__(session_id=session_id, transport=adapter.transport_name)
         self._adapter = adapter
+        self._start_request = start_request
         self._conn = conn
         self._send_lock = threading.Lock()
         self._transport_lock = threading.Lock()
@@ -388,6 +404,18 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
         self._audio_sample_cursor = 0
         self._last_error = ""
         self._response_terminal = False
+        self._terminal_ack_sent = False
+        self._resume_token = uuid.uuid4().hex
+        self._resume_supported = False
+        self._last_delivery_seq = 0
+        self._audio_through_sample = 0
+        self._deliveries_since_ack = 0
+        self._acked_text_seq = 0
+        self._text_journal: deque[tuple[int, dict]] = deque()
+        self._commit_sent = False
+        self._recovery_lock = threading.Lock()
+        self._hard_closed = False
+        self._recovery_error: StreamRecoveryError | None = None
         self.realtime_session_id = ""
         self.response_id = ""
         self.response_status = "in_progress"
@@ -425,9 +453,8 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
                 ((updated.get("session") or {}).get("id") or "")
             )
         if initial_text is None:
-            extensions = ((updated.get("session") or {}).get("qwen") or {}).get(
-                "text_buffer_extension"
-            )
+            qwen_extensions = (updated.get("session") or {}).get("qwen") or {}
+            extensions = qwen_extensions.get("text_buffer_extension")
             if extensions != QWEN_TEXT_BUFFER_EXTENSION:
                 raise ProtocolError(
                     "incremental text streaming requires server extension "
@@ -436,13 +463,15 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
             # The extension is additive. Older servers may not advertise it;
             # the session remains usable, but its tracker stays unavailable
             # until an anchor carrying output samples is received.
-            self._text_progress_supported = (
-                QWEN_TEXT_PROGRESS_EXTENSION
-                == ((updated.get("session") or {}).get("qwen") or {}).get(
-                    "text_progress_extension"
-                )
+            self._text_progress_supported = QWEN_TEXT_PROGRESS_EXTENSION == (
+                (updated.get("session") or {}).get("qwen") or {}
+            ).get("text_progress_extension")
+            self._resume_supported = (
+                adapter.active_stream_resume
+                and qwen_extensions.get("response_resume_extension")
+                == QWEN_RESPONSE_RESUME_EXTENSION
             )
-            ws_send_json(conn, {"type": "response.create"})
+            ws_send_json(conn, self._response_create_payload())
         else:
             ws_send_json(
                 conn,
@@ -455,7 +484,13 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
                     },
                 },
             )
-            ws_send_json(conn, {"type": "response.create"})
+            qwen_extensions = (updated.get("session") or {}).get("qwen") or {}
+            self._resume_supported = (
+                adapter.active_stream_resume
+                and qwen_extensions.get("response_resume_extension")
+                == QWEN_RESPONSE_RESUME_EXTENSION
+            )
+            ws_send_json(conn, self._response_create_payload())
             self._mark_send_closed()
 
         self._reader = threading.Thread(
@@ -466,6 +501,14 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
 
     def _start_reader(self) -> None:
         self._reader.start()
+
+    def _response_create_payload(self) -> dict:
+        payload: dict = {"type": "response.create"}
+        if self._resume_supported:
+            payload["response"] = {
+                "metadata": {"qwen_resume_token": self._resume_token}
+            }
+        return payload
 
     def send_text(
         self,
@@ -486,23 +529,32 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
                     f"text seq_no must be contiguous: expected "
                     f"{self._next_sequence}, got {sequence}"
                 )
-            ws_send_json(
-                self._conn,
-                {
-                    "type": "qwen.input_text_buffer.append",
-                    "sequence": sequence,
-                    "text": value,
-                },
-            )
+            payload = {
+                "type": "qwen.input_text_buffer.append",
+                "sequence": sequence,
+                "text": value,
+            }
+            if self._resume_supported:
+                self._text_journal.append((sequence, dict(payload)))
             self._next_sequence += 1
+            try:
+                ws_send_json(self._conn, payload)
+            except (OSError, RawWebSocketError) as exc:
+                if not self._recover_connection(exc):
+                    raise
 
     def end(self, *, client_timestamp_ms: int | None = None) -> None:
         del client_timestamp_ms
         with self._send_lock:
             self._check_input_open()
             self._input_closed = True
+            self._commit_sent = True
             self._mark_send_closed()
-            ws_send_json(self._conn, {"type": "qwen.input_text_buffer.commit"})
+            try:
+                ws_send_json(self._conn, {"type": "qwen.input_text_buffer.commit"})
+            except (OSError, RawWebSocketError) as exc:
+                if not self._recover_connection(exc):
+                    raise
 
     def stop(self, *, client_timestamp_ms: int | None = None) -> None:
         self.end(client_timestamp_ms=client_timestamp_ms)
@@ -516,16 +568,60 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
             self._mark_send_closed()
             try:
                 ws_send_json(self._conn, {"type": "response.cancel"})
-            except (OSError, RawWebSocketError):
-                self._finish_transport()
+            except (OSError, RawWebSocketError) as exc:
+                if self._recover_connection(exc):
+                    ws_send_json(self._conn, {"type": "response.cancel"})
+                else:
+                    self._finish_transport()
 
     def close(self, reason: str = "client closed") -> None:
         del reason
         try:
             self.cancel()
         finally:
+            self._hard_closed = True
             self._finish_transport()
             self._close_message_queue()
+
+    def update_playback_progress(
+        self,
+        *,
+        played_through_sample: int,
+        buffered_through_sample: int | None = None,
+        report: bool = False,
+    ):
+        progress = super().update_playback_progress(
+            played_through_sample=played_through_sample,
+            buffered_through_sample=buffered_through_sample,
+            report=False,
+        )
+        if not report or not self.response_id:
+            return progress
+        buffered = (
+            played_through_sample
+            if buffered_through_sample is None
+            else buffered_through_sample
+        )
+        with self._transport_lock:
+            if self._transport_closed or self._hard_closed:
+                return progress
+            try:
+                ws_send_json(
+                    self._conn,
+                    {
+                        "type": "qwen.playback.ack",
+                        "response_id": self.response_id,
+                        "played_through_sample": int(played_through_sample),
+                        "buffered_through_sample": int(buffered),
+                        "observed_delivery_seq": int(self._last_delivery_seq),
+                        "client_monotonic_ms": int(time.monotonic() * 1000),
+                    },
+                )
+            except (OSError, RawWebSocketError):
+                # Telemetry is best effort. Recovery remains driven by the
+                # synthesis stream, not by a lost playback report.
+                pass
+        return progress
 
     def _check_input_open(self) -> None:
         if self._input_closed or self._transport_closed:
@@ -537,40 +633,45 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
         idle_deadline = time.perf_counter() + self._adapter.timeout
         try:
             while not self._transport_closed:
-                remaining = idle_deadline - time.perf_counter()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        f"Realtime stream idle for {self._adapter.timeout:.0f}s"
-                    )
-                self._conn.settimeout(max(0.02, min(0.5, remaining)))
                 try:
+                    remaining = idle_deadline - time.perf_counter()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            f"Realtime stream idle for {self._adapter.timeout:.0f}s"
+                        )
+                    self._conn.settimeout(max(0.02, min(0.5, remaining)))
                     opcode, payload = ws_recv_frame(self._conn)
+                    idle_deadline = time.perf_counter() + self._adapter.timeout
+                    if opcode == 0x8:
+                        raise RawWebSocketError(
+                            "Realtime connection closed without response.done"
+                        )
+                    if opcode != 0x1:
+                        continue
+                    event = json.loads(payload.decode("utf-8"))
+                    if not isinstance(event, dict):
+                        continue
+                    if self._handle_event(event):
+                        return
                 except socket.timeout:
                     continue
-                idle_deadline = time.perf_counter() + self._adapter.timeout
-                if opcode == 0x8:
-                    raise RawWebSocketError(
-                        "Realtime connection closed without response.done"
-                    )
-                if opcode != 0x1:
-                    continue
-                event = json.loads(payload.decode("utf-8"))
-                if not isinstance(event, dict):
-                    continue
-                if self._handle_event(event):
+                except Exception as exc:
+                    if self._recover_connection(exc):
+                        idle_deadline = time.perf_counter() + self._adapter.timeout
+                        continue
+                    if self.response_status == "in_progress":
+                        self.response_status = "failed"
+                        failure = self._recovery_error or exc
+                        self._put_message(
+                            StreamEvent(
+                                type="error",
+                                session_id=self.session_id,
+                                message=str(failure),
+                                audio=self.audio_format,
+                                meta={"response_id": self.response_id},
+                            )
+                        )
                     return
-        except Exception as exc:
-            if self.response_status == "in_progress":
-                self.response_status = "failed"
-                self._put_message(
-                    StreamEvent(
-                        type="error",
-                        session_id=self.session_id,
-                        message=str(exc),
-                        audio=self.audio_format,
-                        meta={"response_id": self.response_id},
-                    )
-                )
         finally:
             self._finish_transport()
 
@@ -578,7 +679,10 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
         event_type = str(event.get("type") or "")
         if event_type == "response.created":
             response = event.get("response") or {}
-            self.response_id = str(response.get("id") or "")
+            response_id = str(response.get("id") or "")
+            if self.response_id and response_id == self.response_id:
+                return False
+            self.response_id = response_id
             self._put_message(
                 StreamEvent(
                     type="start",
@@ -588,16 +692,58 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
                 )
             )
             return False
+        if event_type == "qwen.input_text_buffer.ack":
+            self._handle_text_ack(event)
+            return False
+        if event_type == "qwen.response.delivery":
+            delivery_seq = self._begin_delivery(event)
+            if delivery_seq is not None:
+                self._commit_delivery(
+                    delivery_seq,
+                    int(
+                        event.get("qwen_output_sample_end", self._audio_through_sample)
+                    ),
+                )
+            return False
+        if event_type == "qwen.session.event":
+            delivery_seq = self._begin_delivery(event)
+            if delivery_seq is not None:
+                self._commit_delivery(
+                    delivery_seq,
+                    int(
+                        event.get("qwen_output_sample_end", self._audio_through_sample)
+                    ),
+                )
+            return False
         if event_type == "response.output_audio.delta":
+            delivery_seq = self._begin_delivery(event)
+            if self._resume_supported and delivery_seq is None:
+                return False
             try:
                 pcm = base64.b64decode(str(event.get("delta") or ""), validate=True)
             except (ValueError, binascii.Error) as exc:
                 raise ProtocolError("invalid Base64 Realtime audio delta") from exc
             if pcm:
-                sample_start = self._audio_sample_cursor
-                sample_end = sample_start + len(pcm) // (
+                sample_start = int(
+                    event.get("qwen_output_sample_start", self._audio_sample_cursor)
+                )
+                sample_end = int(
+                    event.get(
+                        "qwen_output_sample_end",
+                        sample_start
+                        + len(pcm) // (2 * max(1, self.audio_format.channels)),
+                    )
+                )
+                expected_end = sample_start + len(pcm) // (
                     2 * max(1, self.audio_format.channels)
                 )
+                if (
+                    sample_start != self._audio_sample_cursor
+                    or sample_end != expected_end
+                ):
+                    raise ProtocolError(
+                        "Realtime audio sample cursor is not contiguous"
+                    )
                 self._audio_sample_cursor = sample_end
                 self._chunk_index += 1
                 self._put_message(
@@ -613,6 +759,8 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
                         output_sample_end=sample_end,
                     )
                 )
+                if delivery_seq is not None:
+                    self._commit_delivery(delivery_seq, sample_end)
             return False
         if event_type == "error":
             error = event.get("error") or {}
@@ -634,6 +782,9 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
             "qwen.text_boundary_commit",
             "qwen.text_progress",
         }:
+            delivery_seq = self._begin_delivery(event)
+            if self._resume_supported and delivery_seq is None:
+                return False
             meta = {
                 str(key): str(value)
                 for key, value in dict(event.get("meta") or {}).items()
@@ -649,11 +800,21 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
                     meta=meta,
                 )
             )
+            if delivery_seq is not None:
+                self._commit_delivery(
+                    delivery_seq,
+                    int(
+                        event.get("qwen_output_sample_end", self._audio_through_sample)
+                    ),
+                )
             return False
         if event_type != "response.done":
             return False
 
         response = event.get("response") or {}
+        delivery_seq = self._begin_delivery(event)
+        if self._resume_supported and delivery_seq is None:
+            return False
         self.response_id = str(response.get("id") or self.response_id)
         self.response_status = str(response.get("status") or "completed")
         self._response_terminal = True
@@ -689,18 +850,199 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
                 },
             )
         )
+        if delivery_seq is not None:
+            self._commit_delivery(
+                delivery_seq,
+                int(event.get("qwen_output_sample_end", self._audio_sample_cursor)),
+                terminal=True,
+            )
         return True
+
+    def _begin_delivery(self, event: dict) -> int | None:
+        raw = event.get("qwen_delivery_seq")
+        if raw is None:
+            if self._resume_supported:
+                raise ProtocolError(
+                    "resumable Realtime event is missing delivery sequence"
+                )
+            return None
+        try:
+            delivery_seq = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ProtocolError("qwen_delivery_seq must be an integer") from exc
+        if delivery_seq <= self._last_delivery_seq:
+            return None
+        if delivery_seq != self._last_delivery_seq + 1:
+            raise ProtocolError(
+                f"Realtime delivery gap: expected {self._last_delivery_seq + 1}, "
+                f"got {delivery_seq}"
+            )
+        return delivery_seq
+
+    def _commit_delivery(
+        self, delivery_seq: int, audio_sample: int, *, terminal: bool = False
+    ) -> None:
+        self._last_delivery_seq = delivery_seq
+        self._audio_through_sample = audio_sample
+        if terminal:
+            self._send_delivery_ack(terminal=True)
+            return
+        self._deliveries_since_ack += 1
+        if self._deliveries_since_ack >= self._adapter.stream_resume_ack_interval:
+            self._send_delivery_ack(terminal=False)
+
+    def _send_delivery_ack(self, *, terminal: bool) -> None:
+        if not self._resume_supported:
+            return
+        ws_send_json(
+            self._conn,
+            {
+                "type": (
+                    "qwen.response.terminal_ack" if terminal else "qwen.response.ack"
+                ),
+                "resume_token": self._resume_token,
+                "through_delivery_seq": self._last_delivery_seq,
+                "audio_through_sample": self._audio_through_sample,
+            },
+        )
+        if terminal:
+            self._terminal_ack_sent = True
+        self._deliveries_since_ack = 0
+
+    def _handle_text_ack(self, event: dict) -> None:
+        try:
+            sequence = int(event.get("sequence", 0))
+        except (TypeError, ValueError) as exc:
+            raise ProtocolError(
+                "Realtime text ACK sequence must be an integer"
+            ) from exc
+        if sequence < self._acked_text_seq or sequence >= self._next_sequence:
+            raise ProtocolError("Realtime text ACK is outside the sent sequence range")
+        self._acked_text_seq = sequence
+        while self._text_journal and self._text_journal[0][0] <= sequence:
+            self._text_journal.popleft()
+
+    def _recover_connection(self, cause: BaseException) -> bool:
+        if (
+            not self._resume_supported
+            or self._adapter.stream_resume_attempts <= 0
+            or self._response_terminal
+            or self._hard_closed
+        ):
+            return False
+        failed_conn = self._conn
+        with self._recovery_lock:
+            if self._conn is not failed_conn:
+                return True
+            deadline = time.monotonic() + self._adapter.stream_resume_timeout
+            last_error: BaseException = cause
+            ws_close(failed_conn)
+            for attempt in range(self._adapter.stream_resume_attempts):
+                replacement = None
+                try:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("Realtime resume deadline expired")
+                    replacement = ws_connect(
+                        self._adapter.endpoint,
+                        timeout=min(self._adapter.connect_timeout, remaining),
+                        headers=self._adapter.headers,
+                    )
+                    _receive_event(
+                        replacement,
+                        expected_type="session.created",
+                        timeout=min(self._adapter.connect_timeout, remaining),
+                    )
+                    ws_send_json(
+                        replacement,
+                        _session_update(self._start_request, self._adapter.model_name),
+                    )
+                    updated = _receive_event(
+                        replacement,
+                        expected_type="session.updated",
+                        timeout=min(self._adapter.connect_timeout, remaining),
+                    )
+                    extension = ((updated.get("session") or {}).get("qwen") or {}).get(
+                        "response_resume_extension"
+                    )
+                    if extension != QWEN_RESPONSE_RESUME_EXTENSION:
+                        raise StreamRecoveryError(
+                            "replacement Realtime connection does not support response resume"
+                        )
+                    ws_send_json(
+                        replacement,
+                        {
+                            "type": "qwen.response.resume",
+                            "resume_token": self._resume_token,
+                            "last_delivery_seq": self._last_delivery_seq,
+                            "audio_through_sample": self._audio_through_sample,
+                        },
+                    )
+                    resumed = _receive_event(
+                        replacement,
+                        expected_type="qwen.response.resumed",
+                        timeout=min(self._adapter.connect_timeout, remaining),
+                    )
+                    self._replay_unacked_input(replacement, resumed)
+                    self._conn = replacement
+                    self.realtime_session_id = str(
+                        ((updated.get("session") or {}).get("id") or "")
+                    )
+                    self._deliveries_since_ack = 0
+                    self._recovery_error = None
+                    return True
+                except StreamRecoveryError as exc:
+                    last_error = exc
+                    if replacement is not None:
+                        ws_close(replacement)
+                    break
+                except (OSError, RawWebSocketError, TimeoutError, ProtocolError) as exc:
+                    last_error = exc
+                    if replacement is not None:
+                        ws_close(replacement)
+                    if attempt + 1 < self._adapter.stream_resume_attempts:
+                        time.sleep(min(0.2, 0.05 * (2**attempt)))
+            self._recovery_error = StreamRecoveryError(
+                f"Realtime response resume failed: {last_error}"
+            )
+            return False
+
+    def _replay_unacked_input(
+        self, conn: RawWebSocketConnection, resumed: dict
+    ) -> None:
+        try:
+            acked = int(resumed.get("acked_text_seq", 0))
+        except (TypeError, ValueError) as exc:
+            raise ProtocolError("resumed acked_text_seq must be an integer") from exc
+        highest_sent = self._next_sequence - 1
+        if acked < self._acked_text_seq or acked > highest_sent:
+            raise ProtocolError(
+                f"invalid resumed text ACK {acked}; sent through {highest_sent}"
+            )
+        self._acked_text_seq = acked
+        while self._text_journal and self._text_journal[0][0] <= acked:
+            self._text_journal.popleft()
+        for _sequence, payload in self._text_journal:
+            ws_send_json(conn, payload)
+        server_input_closed = bool(resumed.get("input_closed", False))
+        if self._commit_sent and not server_input_closed:
+            ws_send_json(conn, {"type": "qwen.input_text_buffer.commit"})
 
     def _finish_transport(self) -> None:
         with self._transport_lock:
             if self._transport_closed:
                 return
             self._transport_closed = True
-        if self._response_terminal and self._adapter.max_idle_connections > 0:
+        reusable_terminal = self._response_terminal and (
+            not self._resume_supported or self._terminal_ack_sent
+        )
+        if reusable_terminal and self._adapter.max_idle_connections > 0:
             self._adapter._release_connection(self._conn)
             self._adapter._retire(self)
         else:
             ws_close(self._conn)
+            if self._adapter.max_idle_connections > 0:
+                self._adapter._discard_connection(self._conn)
             self._adapter._retire(self)
 
 

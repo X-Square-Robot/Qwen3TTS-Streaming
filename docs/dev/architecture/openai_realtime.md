@@ -138,6 +138,31 @@ based on PCM samples actually emitted by the gateway.
 The old Triton JSON actions can therefore remain an internal adapter during the
 migration and later be replaced without becoming the new public protocol.
 
+## Reliable Response Extension
+
+`qwen.response_resume.v1` adds reliable delivery without changing the OpenAI
+Realtime base lifecycle. A client supplies a private resume token in
+`response.create.response.metadata.qwen_resume_token`; output events then carry
+a cumulative `qwen_delivery_seq` and absolute PCM sample bounds. The client
+uses `qwen.response.ack`, `qwen.response.terminal_ack`, and
+`qwen.response.resume` to acknowledge or replay an exact suffix. Incremental
+text keeps its sequence/idempotency ACK journal across reconnection, and a new
+physical attachment fences the old one.
+
+Generation, client receipt, local buffering, and playback are deliberately
+separate facts. The delivery ledger records generated output; delivery ACKs
+record complete client receipt; the SDK's playback tracker records buffering;
+`qwen.playback.ack` reports buffered and played absolute sample cursors. Cancel
+still targets the private logical execution, so these states can support an
+interrupt decision without treating "sent" as "heard".
+
+The common owner is the transport-neutral `SessionService` plus a bounded
+`ResumableSessionRegistry`. Standalone `/v1/ws`, standalone Realtime, and the
+Triton sidecar use that same lifecycle, but their wire contracts remain
+endpoint-specific. The registry is process-local: process/GPU restarts are not
+recoverable, and multi-replica deployments still require sticky or
+token-consistent routing.
+
 ## Migration Order
 
 1. Implemented: add `/v1/realtime`; keep `/v1/ws` and the old SDK available.
@@ -147,8 +172,9 @@ migration and later be replaced without becoming the new public protocol.
 3. Implemented: add the bidirectional Triton backend adapter and make JSON
    actions internal.
 4. Announce a legacy removal release only after durable usage, auth, quotas,
-   and reconnect behavior pass acceptance tests.
+   and multi-replica reconnect behavior pass acceptance tests.
 
 Steps 1–3 are implemented. Step 4 remains the acceptance gate: the compatibility
-transports stay available until durable usage, auth, quotas, and Realtime
-reconnect behavior are production-ready and a removal release is announced.
+transports stay available until durable usage, auth, quotas, and multi-replica
+Realtime reconnect behavior are production-ready and a removal release is
+announced.

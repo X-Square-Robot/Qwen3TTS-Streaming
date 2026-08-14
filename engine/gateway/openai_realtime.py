@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import inspect
 import json
 import logging
@@ -27,7 +28,21 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
 
 from ..core.lifecycle import LifecycleLogger
 from ..core.types import InputMode
-from ..session import SessionService
+from ..session import (
+    AttachmentFailure,
+    AttachmentFence,
+    AudioOutput,
+    EventOutput,
+    ReliableDelivery,
+    ResumableLogicalSession,
+    ResumableSessionError,
+    ResumableSessionRegistry,
+    SessionProtocolError,
+    SessionService,
+    StartedOutput,
+    TerminalOutput,
+    TerminalStatus,
+)
 from .session_identity import GatewaySessionIdentity
 from .websocket_server import parse_session_start_request
 
@@ -50,6 +65,7 @@ QWEN_REALTIME_EXTENSION_PROTOCOL = "qwen-realtime-v1"
 QWEN_TEXT_BUFFER_EXTENSION = "qwen.input_text_buffer.v1"
 QWEN_TEXT_PROGRESS_EXTENSION = "qwen.text_progress.v1"
 QWEN_PLAYBACK_ACK_EXTENSION = "qwen.playback_ack.v1"
+QWEN_RESPONSE_RESUME_EXTENSION = "qwen.response_resume.v1"
 _HEARTBEAT_SECONDS = float(
     os.environ.get("ENGINE_WEBSOCKET_HEARTBEAT_SEC", "30") or "30"
 )
@@ -132,11 +148,21 @@ class _SessionSettings:
     voice: str = ""
     sample_rate: int = 24000
     qwen: dict[str, Any] = field(default_factory=dict)
+    response_resume_supported: bool = False
 
     def public_payload(self) -> dict[str, Any]:
         public_qwen = {
             key: value for key, value in self.qwen.items() if key not in {"ref_audio"}
         }
+        qwen_payload = {
+            **public_qwen,
+            "protocol_version": QWEN_REALTIME_EXTENSION_PROTOCOL,
+            "text_buffer_extension": QWEN_TEXT_BUFFER_EXTENSION,
+            "text_progress_extension": QWEN_TEXT_PROGRESS_EXTENSION,
+            "playback_ack_extension": QWEN_PLAYBACK_ACK_EXTENSION,
+        }
+        if self.response_resume_supported:
+            qwen_payload["response_resume_extension"] = QWEN_RESPONSE_RESUME_EXTENSION
         return {
             "type": "realtime",
             "object": "realtime.session",
@@ -153,13 +179,7 @@ class _SessionSettings:
                     "voice": self.voice or None,
                 }
             },
-            "qwen": {
-                **public_qwen,
-                "protocol_version": QWEN_REALTIME_EXTENSION_PROTOCOL,
-                "text_buffer_extension": QWEN_TEXT_BUFFER_EXTENSION,
-                "text_progress_extension": QWEN_TEXT_PROGRESS_EXTENSION,
-                "playback_ack_extension": QWEN_PLAYBACK_ACK_EXTENSION,
-            },
+            "qwen": qwen_payload,
         }
 
     def apply_update(self, update: Any, *, voice_locked: bool) -> None:
@@ -322,6 +342,16 @@ class _ResponseState:
     task: asyncio.Task | None = None
     ingest_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     finish_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    resume_token: str = ""
+    reliable: ResumableLogicalSession | None = None
+    attachment: Any = None
+    accepted_text: dict[int, str] = field(default_factory=dict)
+    billing_recorded: bool = False
+    terminal_status: str = ""
+    terminal_failure_message: str = ""
+    terminal_cancellation_reason: str = ""
+    terminal_usage: dict[str, Any] = field(default_factory=dict)
+    terminal_delivery_seq: int = 0
 
 
 class OpenAIRealtimeGateway:
@@ -334,15 +364,21 @@ class OpenAIRealtimeGateway:
         session_starter: SessionStarter | None = None,
         backend: RealtimeSessionBackend | None = None,
         session_service: SessionService | None = None,
+        resume_registry: ResumableSessionRegistry | None = None,
         usage_recorder: UsageRecorder | None = None,
     ) -> None:
         self._legacy_owner = None
         self._service_backend = None
+        self._resume_registry = resume_registry
+        self._owns_resume_registry = False
         if backend is None and session_service is not None:
             from .session_backend import RealtimeSessionServiceBackend
 
             self._service_backend = RealtimeSessionServiceBackend(session_service)
             backend = self._service_backend
+            if self._resume_registry is None:
+                self._resume_registry = ResumableSessionRegistry(session_service)
+                self._owns_resume_registry = True
         if backend is None and session_starter is None:
             if engine is None:
                 raise RuntimeError(
@@ -363,6 +399,8 @@ class OpenAIRealtimeGateway:
         self._usage_recorder = usage_recorder
 
     async def close(self) -> None:
+        if self._owns_resume_registry and self._resume_registry is not None:
+            await self._resume_registry.close()
         if self._service_backend is not None:
             await self._service_backend.close()
         elif self._legacy_owner is not None:
@@ -374,6 +412,7 @@ class OpenAIRealtimeGateway:
         connection = _RealtimeConnection(
             backend=self._backend,
             usage_recorder=self._usage_recorder,
+            resume_registry=self._resume_registry,
             ws=ws,
             model=str(request.query.get("model") or "qwen3-tts-realtime"),
         )
@@ -387,18 +426,23 @@ class _RealtimeConnection:
         *,
         backend: RealtimeSessionBackend,
         usage_recorder: UsageRecorder | None,
+        resume_registry: ResumableSessionRegistry | None,
         ws: Any,
         model: str,
     ) -> None:
         self._backend = backend
         self._usage_recorder = usage_recorder
+        self._resume_registry = resume_registry
         self._ws = ws
         self._settings = _SessionSettings(
-            session_id=f"sess_{uuid.uuid4().hex}", model=model
+            session_id=f"sess_{uuid.uuid4().hex}",
+            model=model,
+            response_resume_supported=resume_registry is not None,
         )
         self._conversation_text: list[str] = []
         self._buffer = _TextBuffer()
         self._active: _ResponseState | None = None
+        self._last_terminal: _ResponseState | None = None
         self._voice_locked = False
 
     async def run(self) -> None:
@@ -426,6 +470,11 @@ class _RealtimeConnection:
                         )
                     except RealtimeProtocolError as exc:
                         await self._send_error(exc, client_event_id=client_event_id)
+                    except SessionProtocolError as exc:
+                        await self._send_error(
+                            RealtimeProtocolError(exc.code, str(exc)),
+                            client_event_id=client_event_id,
+                        )
                     except Exception as exc:  # keep request errors non-fatal
                         logger.exception("Realtime client event failed")
                         await self._send_error(
@@ -445,7 +494,36 @@ class _RealtimeConnection:
                 if message.type in (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR):
                     break
         finally:
-            await self._cancel_active(reason="connection_closed", send_events=False)
+            state = self._active
+            if (
+                state is not None
+                and not state.finished
+                and state.reliable is not None
+                and state.attachment is not None
+            ):
+                task = state.task
+                if task is not None and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                await state.reliable.detach(state.attachment.generation)
+                state.task = None
+                state.attachment = None
+                self._active = None
+            else:
+                await self._cancel_active(reason="connection_closed", send_events=False)
+            terminal_state = self._last_terminal
+            if (
+                terminal_state is not None
+                and terminal_state.reliable is not None
+                and terminal_state.attachment is not None
+            ):
+                await terminal_state.reliable.detach(
+                    terminal_state.attachment.generation
+                )
+                terminal_state.attachment = None
             if not self._ws.closed:
                 await self._ws.close()
 
@@ -459,6 +537,7 @@ class _RealtimeConnection:
                 voice=self._settings.voice,
                 sample_rate=self._settings.sample_rate,
                 qwen=dict(self._settings.qwen),
+                response_resume_supported=self._settings.response_resume_supported,
             )
             candidate.apply_update(
                 event.get("session"), voice_locked=self._voice_locked
@@ -488,6 +567,15 @@ class _RealtimeConnection:
             return
         if event_type == "qwen.playback.ack":
             await self._ack_playback(event)
+            return
+        if event_type == "qwen.response.resume":
+            await self._resume_response(event)
+            return
+        if event_type == "qwen.response.ack":
+            await self._ack_response(event, terminal=False)
+            return
+        if event_type == "qwen.response.terminal_ack":
+            await self._ack_response(event, terminal=True)
             return
         raise RealtimeProtocolError(
             "unsupported_event",
@@ -585,6 +673,61 @@ class _RealtimeConnection:
             commit_requested=commit_requested,
             input_chunks=list(initial_chunks),
         )
+        response_metadata = response_options.get("metadata") or {}
+        if not isinstance(response_metadata, dict):
+            raise RealtimeProtocolError(
+                "invalid_response",
+                "response.metadata must be an object",
+                param="response.metadata",
+            )
+        resume_token = str(response_metadata.get("qwen_resume_token") or "")
+        if resume_token:
+            if self._resume_registry is None:
+                raise RealtimeProtocolError(
+                    "resume_not_supported",
+                    "this Realtime endpoint does not support active response resume",
+                    param="response.metadata.qwen_resume_token",
+                )
+            if len(resume_token) < 16:
+                raise RealtimeProtocolError(
+                    "invalid_resume_token",
+                    "qwen_resume_token must contain at least 16 characters",
+                    param="response.metadata.qwen_resume_token",
+                )
+            state.resume_token = resume_token
+            reliable, created = await self._resume_registry.claim_start(
+                token=resume_token,
+                config_fingerprint=_response_fingerprint(
+                    self._settings.public_payload(), response_options
+                ),
+                protocol=OPENAI_REALTIME_PROTOCOL,
+                identity=identity,
+                start_request=start_request,
+                metadata={"realtime_state": state},
+                output_observer=lambda output: self._observe_reliable_output(
+                    state, output
+                ),
+            )
+            if not created:
+                raise RealtimeProtocolError(
+                    "resume_token_conflict",
+                    "resume token already owns a response; use qwen.response.resume",
+                    param="response.metadata.qwen_resume_token",
+                )
+            state.reliable = reliable
+            state.attachment = await reliable.attach()
+            state.engine_started = True
+            for seq, text in enumerate(initial_chunks, 1):
+                ack = await reliable.append_text(
+                    state.attachment.generation, seq_no=seq, text=text
+                )
+                state.accepted_text[ack.seq_no] = text
+            if commit_requested:
+                await reliable.complete_input(
+                    state.attachment.generation,
+                    final_seq_no=reliable.accepted_text_seq,
+                )
+                state.input_complete = True
         self._active = state
 
         # The chunks above belong to this response.  Future incremental input
@@ -650,6 +793,9 @@ class _RealtimeConnection:
         )
 
     async def _run_response(self, state: _ResponseState) -> None:
+        if state.reliable is not None:
+            await self._run_reliable_response(state)
+            return
         try:
             await self._backend.start(
                 state.identity,
@@ -707,7 +853,10 @@ class _RealtimeConnection:
                     # namespaced events; Qwen clients use them to render the
                     # source text cursor and future ASR/alignment revisions.
                     event_meta = dict(event.get("meta") or {})
-                    if event_type == "text_progress" and "output_sample_end" not in event_meta:
+                    if (
+                        event_type == "text_progress"
+                        and "output_sample_end" not in event_meta
+                    ):
                         # A legacy backend may still emit the coarse EMA
                         # percentage, but bytes sent on this facade are not a
                         # playback/alignment coordinate. Forward the legacy
@@ -757,8 +906,177 @@ class _RealtimeConnection:
                 state, status="failed", failure_message=str(exc)
             )
 
+    async def _run_reliable_response(self, state: _ResponseState) -> None:
+        attachment = state.attachment
+        if state.reliable is None or attachment is None:
+            raise RuntimeError("resumable Realtime response has no attachment")
+        try:
+            while True:
+                message = await attachment.queue.get()
+                if isinstance(message, AttachmentFence):
+                    if not self._ws.closed:
+                        await self._ws.close()
+                    return
+                if isinstance(message, AttachmentFailure):
+                    await self._send_error(
+                        RealtimeProtocolError(message.code, message.message),
+                        error_type="server_error",
+                    )
+                    await self._finish_response(
+                        state, status="failed", failure_message=message.message
+                    )
+                    return
+                if not isinstance(message, ReliableDelivery):
+                    raise RuntimeError("invalid reliable Realtime delivery")
+                output = message.payload
+                if isinstance(output, StartedOutput):
+                    await self._send(
+                        {
+                            "type": "qwen.response.delivery",
+                            "response_id": state.response_id,
+                            "qwen_delivery_seq": message.delivery_seq,
+                            "qwen_output_sample_end": message.end_sample,
+                        }
+                    )
+                    continue
+                if isinstance(output, AudioOutput):
+                    self._voice_locked = True
+                    await self._send(
+                        {
+                            "type": "response.output_audio.delta",
+                            "response_id": state.response_id,
+                            "item_id": state.item_id,
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": base64.b64encode(output.pcm_bytes).decode("ascii"),
+                            "qwen_delivery_seq": message.delivery_seq,
+                            "qwen_output_sample_start": message.start_sample,
+                            "qwen_output_sample_end": message.end_sample,
+                        }
+                    )
+                    continue
+                if isinstance(output, EventOutput):
+                    if output.event_type in {
+                        "text_token",
+                        "text_boundary_commit",
+                        "text_progress",
+                    }:
+                        await self._send(
+                            {
+                                "type": f"qwen.{output.event_type}",
+                                "response_id": state.response_id,
+                                "item_id": state.item_id,
+                                "output_index": 0,
+                                "content_index": 0,
+                                "segment_id": output.segment_id,
+                                "text": output.text,
+                                "meta": dict(output.meta),
+                                "qwen_delivery_seq": message.delivery_seq,
+                                "qwen_output_sample_end": message.end_sample,
+                            }
+                        )
+                    else:
+                        await self._send(
+                            {
+                                "type": "qwen.session.event",
+                                "response_id": state.response_id,
+                                "event_type": output.event_type,
+                                "segment_id": output.segment_id,
+                                "text": output.text,
+                                "message": output.message,
+                                "meta": dict(output.meta),
+                                "qwen_delivery_seq": message.delivery_seq,
+                                "qwen_output_sample_end": message.end_sample,
+                            }
+                        )
+                    continue
+                if not isinstance(output, TerminalOutput):
+                    continue
+                status = state.terminal_status or _realtime_terminal_status(output)
+                if status == "failed":
+                    await self._send_error(
+                        RealtimeProtocolError(
+                            "synthesis_failed",
+                            state.terminal_failure_message
+                            or output.message
+                            or "engine synthesis failed",
+                        ),
+                        error_type="server_error",
+                    )
+                state.terminal_delivery_seq = message.delivery_seq
+                await self._finish_response(
+                    state,
+                    status=status,
+                    failure_message=state.terminal_failure_message,
+                    cancellation_reason=state.terminal_cancellation_reason,
+                )
+                self._last_terminal = state
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Resumable Realtime projection failed: %s", state.response_id
+            )
+            if not self._ws.closed:
+                await self._send_error(
+                    RealtimeProtocolError("resume_projection_failed", str(exc)),
+                    error_type="server_error",
+                )
+
+    async def _observe_reliable_output(
+        self, state: _ResponseState, output: Any
+    ) -> None:
+        if isinstance(output, AudioOutput):
+            state.audio_samples = max(state.audio_samples, output.output_sample_end)
+            return
+        if not isinstance(output, TerminalOutput):
+            return
+        state.terminal_status = _realtime_terminal_status(output)
+        if state.terminal_status == "failed":
+            state.terminal_failure_message = output.message
+        elif state.terminal_status == "cancelled":
+            state.terminal_cancellation_reason = output.message or "client_cancelled"
+        state.terminal_usage = self._usage(state)
+        if not state.billing_recorded:
+            await self._record_usage(
+                state, status=state.terminal_status, usage=state.terminal_usage
+            )
+            state.billing_recorded = True
+
     async def _append_text(self, event: dict[str, Any]) -> None:
         target = self._active
+        if (
+            target is not None
+            and not target.finished
+            and target.reliable is not None
+            and target.attachment is not None
+        ):
+            text = str(event.get("text") or "")
+            try:
+                sequence = int(event.get("sequence"))
+            except (TypeError, ValueError) as exc:
+                raise RealtimeProtocolError(
+                    "invalid_sequence", "sequence must be an integer", param="sequence"
+                ) from exc
+            async with target.ingest_lock:
+                ack = await target.reliable.append_text(
+                    target.attachment.generation,
+                    seq_no=sequence,
+                    text=text,
+                )
+                if not ack.duplicate:
+                    target.input_chunks.append(text)
+                    target.accepted_text[sequence] = text
+            await self._send(
+                {
+                    "type": "qwen.input_text_buffer.ack",
+                    "sequence": ack.seq_no,
+                    "duplicate": ack.duplicate,
+                    "response_id": target.response_id,
+                }
+            )
+            return
         if target is None or target.finished:
             seq, duplicate = self._buffer.append(
                 event.get("text"), event.get("sequence")
@@ -804,6 +1122,22 @@ class _RealtimeConnection:
             self._buffer.committed = True
             await self._send({"type": "qwen.input_text_buffer.committed"})
             return
+        if state.reliable is not None and state.attachment is not None:
+            async with state.ingest_lock:
+                if not state.input_complete:
+                    await state.reliable.complete_input(
+                        state.attachment.generation,
+                        final_seq_no=state.reliable.accepted_text_seq,
+                    )
+                    state.input_complete = True
+            await self._send(
+                {
+                    "type": "qwen.input_text_buffer.committed",
+                    "response_id": state.response_id,
+                    "final_sequence": state.reliable.accepted_text_seq,
+                }
+            )
+            return
         async with state.ingest_lock:
             if not state.input_complete:
                 state.commit_requested = True
@@ -827,24 +1161,165 @@ class _RealtimeConnection:
                 "qwen.playback.ack requires response_id",
                 param="response_id",
             )
-        for name in ("played_audio_sample_end", "played_text_char_end"):
-            value = event.get(name, 0)
+        played = event.get(
+            "played_through_sample", event.get("played_audio_sample_end", 0)
+        )
+        buffered = event.get("buffered_through_sample", played)
+        for name, value in (
+            ("played_through_sample", played),
+            ("buffered_through_sample", buffered),
+        ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise RealtimeProtocolError(
                     "invalid_playback_ack",
                     f"{name} must be a non-negative integer",
                     param=name,
                 )
+        state = self._active or self._last_terminal
+        if (
+            state is not None
+            and state.reliable is not None
+            and state.attachment is not None
+        ):
+            try:
+                await state.reliable.record_playback_progress(
+                    state.attachment.generation,
+                    played_through_sample=int(played),
+                    buffered_through_sample=int(buffered),
+                    observed_delivery_seq=int(
+                        event.get(
+                            "observed_delivery_seq",
+                            state.reliable.ledger.last_delivery_seq,
+                        )
+                    ),
+                )
+            except ResumableSessionError as exc:
+                raise RealtimeProtocolError(exc.code, str(exc)) from exc
         await self._send(
             {
                 "type": "qwen.playback.ack",
                 "response_id": response_id,
-                "played_audio_sample_end": int(event.get("played_audio_sample_end", 0)),
+                "played_audio_sample_end": int(played),
                 "played_text_char_end": int(event.get("played_text_char_end", 0)),
+                "played_through_sample": int(played),
+                "buffered_through_sample": int(buffered),
                 "is_estimate": bool(event.get("is_estimate", True)),
                 "accepted": True,
             }
         )
+
+    async def _resume_response(self, event: dict[str, Any]) -> None:
+        if self._resume_registry is None:
+            raise RealtimeProtocolError(
+                "resume_not_supported",
+                "this Realtime endpoint does not support active response resume",
+            )
+        if self._active is not None and not self._active.finished:
+            raise RealtimeProtocolError(
+                "response_in_progress", "cannot resume while another response is active"
+            )
+        token = str(event.get("resume_token") or "")
+        if len(token) < 16:
+            raise RealtimeProtocolError(
+                "invalid_resume_token",
+                "resume_token must contain at least 16 characters",
+            )
+        try:
+            last_delivery_seq = int(event.get("last_delivery_seq", 0))
+            audio_through_sample = int(event.get("audio_through_sample", 0))
+        except (TypeError, ValueError) as exc:
+            raise RealtimeProtocolError(
+                "invalid_resume_cursor", "resume cursors must be integers"
+            ) from exc
+        try:
+            reliable = await self._resume_registry.find(
+                token, protocol=OPENAI_REALTIME_PROTOCOL
+            )
+            attachment = await reliable.attach(
+                last_delivery_seq=last_delivery_seq,
+                audio_through_sample=audio_through_sample,
+            )
+        except ResumableSessionError as exc:
+            raise RealtimeProtocolError(exc.code, str(exc)) from exc
+        state = reliable.metadata.get("realtime_state")
+        if not isinstance(state, _ResponseState):
+            raise RealtimeProtocolError(
+                "resume_state_lost", "Realtime response metadata is unavailable"
+            )
+        state.reliable = reliable
+        state.attachment = attachment
+        state.task = None
+        state.finished = False
+        self._active = state
+        self._voice_locked = state.audio_samples > 0
+        info = reliable.resume_info()
+        await self._send(
+            {
+                "type": "qwen.response.resumed",
+                "response_id": state.response_id,
+                "acked_text_seq": info["acked_text_seq"],
+                "input_closed": info["input_closed"],
+                "last_delivery_seq": info["last_delivery_seq"],
+                "audio_through_sample": info["audio_through_sample"],
+            }
+        )
+        await self._send(
+            {"type": "response.created", "response": self._response_payload(state)}
+        )
+        await self._send(
+            {
+                "type": "response.output_item.added",
+                "response_id": state.response_id,
+                "output_index": 0,
+                "item": self._output_item(
+                    state, status="in_progress", include_content=False
+                ),
+            }
+        )
+        await self._send(
+            {
+                "type": "response.content_part.added",
+                "response_id": state.response_id,
+                "item_id": state.item_id,
+                "output_index": 0,
+                "content_index": 0,
+                "part": {"type": "audio", "audio": "", "transcript": ""},
+            }
+        )
+        state.task = asyncio.create_task(self._run_reliable_response(state))
+
+    async def _ack_response(self, event: dict[str, Any], *, terminal: bool) -> None:
+        state = self._active or self._last_terminal
+        if state is None or state.reliable is None or state.attachment is None:
+            raise RealtimeProtocolError(
+                "resume_not_enabled", "there is no resumable response to acknowledge"
+            )
+        token = str(event.get("resume_token") or "")
+        if token and token != state.resume_token:
+            raise RealtimeProtocolError(
+                "resume_token_conflict", "resume token does not own this response"
+            )
+        try:
+            delivery_seq = int(event.get("through_delivery_seq", 0))
+            audio_sample = int(event.get("audio_through_sample", 0))
+            if terminal:
+                await state.reliable.terminal_ack(
+                    state.attachment.generation,
+                    through_delivery_seq=delivery_seq,
+                    audio_through_sample=audio_sample,
+                )
+                state.attachment = None
+                if self._last_terminal is state:
+                    self._last_terminal = None
+            else:
+                await state.reliable.acknowledge(
+                    state.attachment.generation,
+                    through_delivery_seq=delivery_seq,
+                    audio_through_sample=audio_sample,
+                )
+        except (TypeError, ValueError, ResumableSessionError) as exc:
+            code = getattr(exc, "code", "invalid_resume_cursor")
+            raise RealtimeProtocolError(str(code), str(exc)) from exc
 
     async def _cancel_active(self, *, reason: str, send_events: bool) -> None:
         state = self._active
@@ -855,6 +1330,13 @@ class _RealtimeConnection:
                         "no_active_response", "there is no active response to cancel"
                     )
                 )
+            return
+        if state.reliable is not None and state.attachment is not None:
+            await state.reliable.cancel(state.attachment.generation, reason)
+            state.input_complete = True
+            task = state.task
+            if send_events and task is not None and task is not asyncio.current_task():
+                await task
             return
         task = state.task
         if task is not None and task is not asyncio.current_task() and not task.done():
@@ -889,8 +1371,10 @@ class _RealtimeConnection:
             if state.finished:
                 return
             state.finished = True
-            usage = self._usage(state)
-            await self._record_usage(state, status=status, usage=usage)
+            usage = state.terminal_usage or self._usage(state)
+            if not state.billing_recorded:
+                await self._record_usage(state, status=status, usage=usage)
+                state.billing_recorded = True
             item_status = "completed" if status == "completed" else "incomplete"
             if send_events and not self._ws.closed:
                 common = {
@@ -917,18 +1401,24 @@ class _RealtimeConnection:
                         ),
                     }
                 )
-                await self._send(
-                    {
-                        "type": "response.done",
-                        "response": self._response_payload(
-                            state,
-                            status=status,
-                            usage=usage,
-                            failure_message=failure_message,
-                            cancellation_reason=cancellation_reason,
-                        ),
-                    }
-                )
+                done_payload = {
+                    "type": "response.done",
+                    "response": self._response_payload(
+                        state,
+                        status=status,
+                        usage=usage,
+                        failure_message=failure_message,
+                        cancellation_reason=cancellation_reason,
+                    ),
+                }
+                if state.reliable is not None:
+                    done_payload.update(
+                        {
+                            "qwen_delivery_seq": state.terminal_delivery_seq,
+                            "qwen_output_sample_end": state.audio_samples,
+                        }
+                    )
+                await self._send(done_payload)
             if self._active is state:
                 self._active = None
                 # Voice locking protects one response after its first audio;
@@ -1166,11 +1656,33 @@ def _optional_id(value: Any) -> str | None:
     return str(value)
 
 
+def _response_fingerprint(
+    session_payload: dict[str, Any], response_options: dict[str, Any]
+) -> str:
+    encoded = json.dumps(
+        {"session": session_payload, "response": response_options},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _realtime_terminal_status(output: TerminalOutput) -> str:
+    if output.status == TerminalStatus.CANCELLED:
+        return "cancelled"
+    if output.status == TerminalStatus.FAILED:
+        return "failed"
+    return "completed"
+
+
 __all__ = [
     "EngineRealtimeBackend",
     "OPENAI_REALTIME_PATH",
     "OPENAI_REALTIME_PROTOCOL",
     "QWEN_TEXT_BUFFER_EXTENSION",
+    "QWEN_RESPONSE_RESUME_EXTENSION",
     "OpenAIRealtimeGateway",
     "RealtimeSessionBackend",
 ]

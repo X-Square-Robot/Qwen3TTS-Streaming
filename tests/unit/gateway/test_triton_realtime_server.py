@@ -61,6 +61,20 @@ async def test_sidecar_health_and_capabilities_routes():
             assert capabilities["openai_realtime_path"] == "/v1/realtime"
             assert capabilities["model_version"] == "7"
             assert capabilities["usage"]["output_audio_token_ms"] == 50
+            assert capabilities["stream_resume_grace_ms"] == 30000
+            assert capabilities["protocols"]["native_websocket"]["features"] == [
+                "persistent_sessions_v1",
+                "stream_resume_v1",
+                "playback_progress_v1",
+            ]
+            assert (
+                "qwen.response_resume.v1"
+                in capabilities["protocols"]["openai_realtime"]["supported_extensions"]
+            )
+            assert (
+                "active_response_resume"
+                in capabilities["protocols"]["openai_realtime"]["features"]
+            )
     assert backend.closed is True
 
 

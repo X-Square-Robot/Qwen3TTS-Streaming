@@ -258,15 +258,16 @@ setup; active streams have a separate recovery budget. By default,
 `active_stream_resume=True`, `stream_resume_attempts=2`,
 `stream_resume_timeout=10.0`, and `stream_resume_ack_interval=8`.
 
-On a resume-capable gateway, a transient disconnect keeps the same logical
-engine session alive. Text is de-duplicated with cumulative sequence ACKs and
-output is resumed from an acknowledged delivery/sample cursor, so the SDK does
-not re-synthesize from the beginning or enqueue audio twice. Recovery is
-bounded by the gateway's advertised grace period and replay window. Expired
-tokens, exhausted retries, protocol gaps, server restarts, and routing to a
-different replica fail explicitly. A legacy gateway automatically retains the
-historical fail-fast behavior. Call `client.close()` when finished, or use
-`TTSClient` as a context manager.
+On a resume-capable native WebSocket or OpenAI Realtime gateway, a transient
+disconnect keeps the same logical engine session alive. Text is de-duplicated
+with cumulative sequence ACKs and output resumes from an acknowledged
+delivery/sample cursor, so the SDK does not re-synthesize from the beginning or
+enqueue audio twice. Native WebSocket advertises `stream_resume_v1`; Realtime
+advertises `qwen.response_resume.v1`. Recovery is bounded by the gateway's
+grace period and replay window. Expired tokens, exhausted retries, protocol
+gaps, server restarts, and routing to a different replica fail explicitly. A
+legacy gateway retains the historical fail-fast behavior. Call `client.close()`
+when finished, or use `TTSClient` as a context manager.
 
 ## Examples
 

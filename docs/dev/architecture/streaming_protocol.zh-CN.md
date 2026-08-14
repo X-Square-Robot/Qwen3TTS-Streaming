@@ -125,6 +125,12 @@ WebSocket capabilities 还会声明 `stream_resume_v1`。客户端通过在
 进程或 GPU 重启；多副本部署还需要 sticky routing 或按 token 的一致性路由，使重连
 回到持有状态的实例。
 
+这套可靠生命周期也供 Triton native Session adapter 与 Realtime
+`qwen.response_resume.v1` 扩展复用。它是共享的内部合同，不代表可以抹平 endpoint
+capability：native WebSocket 使用 JSON header 加 binary PCM，Realtime 使用 Base64
+audio event 与 namespaced ACK/resume event。客户端必须读取 `protocols` capability map
+中对应入口的声明来选择行为。
+
 ### 能力查询
 
 在打开合成会话之前，客户端可以调用 `GetCapabilities`。
