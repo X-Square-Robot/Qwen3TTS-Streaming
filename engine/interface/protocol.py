@@ -16,6 +16,7 @@ from qwen3tts_protocol.protocol import (
     normalize_capabilities,
     parse_output_policy,
     parse_timing_context,
+    resolve_vad_tuning,
     serialize_output_policy,
     serialize_timing_context,
 )
@@ -57,18 +58,19 @@ def to_core_output_policy(policy: OutputPolicy) -> OutputPolicyConfig:
     def _value_or_default(value, default):
         return default if value is None else value
 
+    vad_tuning = resolve_vad_tuning(policy.vad)
     return OutputPolicyConfig(
         vad=VADConfig(
             enabled=bool(policy.vad.enabled),
             strategy=str(policy.vad.strategy or "disabled"),
             implementation=str(policy.vad.implementation or ""),
             config={str(k): v for k, v in dict(policy.vad.config or {}).items()},
-            chunk_ms=int(_value_or_default(policy.vad.chunk_ms, 16)),
-            begin_threshold=float(_value_or_default(policy.vad.begin_threshold, 0.6)),
-            begin_count=int(_value_or_default(policy.vad.begin_count, 5)),
-            end_threshold=float(_value_or_default(policy.vad.end_threshold, 0.35)),
-            end_count=int(_value_or_default(policy.vad.end_count, 31)),
-            start_margin_ms=int(_value_or_default(policy.vad.start_margin_ms, 20)),
+            chunk_ms=int(vad_tuning["chunk_ms"]),
+            begin_threshold=float(vad_tuning["begin_threshold"]),
+            begin_count=int(vad_tuning["begin_count"]),
+            end_threshold=float(vad_tuning["end_threshold"]),
+            end_count=int(vad_tuning["end_count"]),
+            start_margin_ms=int(vad_tuning["start_margin_ms"]),
         ),
         chunk_ms=int(_value_or_default(policy.chunk_ms, 0)),
         packet_format=str(policy.packet_format or "raw_pcm"),

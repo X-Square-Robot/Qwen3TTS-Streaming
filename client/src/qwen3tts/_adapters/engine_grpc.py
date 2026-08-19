@@ -9,6 +9,7 @@ from qwen3tts_protocol import (
     AudioFormat,
     BytesResult,
     Capabilities,
+    resolve_vad_tuning,
     SessionStartRequest,
     StreamEvent,
 )
@@ -374,8 +375,9 @@ def _output_policy_to_proto(policy):
     # otherwise a gRPC client tuning thresholds silently gets engine defaults
     # (the WebSocket path transmits them, so this keeps transports consistent).
     if str(vad.strategy or "disabled") not in ("disabled", ""):
+        resolved_tuning = resolve_vad_tuning(vad)
         for field_name in _VAD_TUNING_FIELDS:
-            vad_config[field_name] = str(getattr(vad, field_name))
+            vad_config[field_name] = str(resolved_tuning[field_name])
     return tts_pb2.OutputPolicy(
         vad_policy=tts_pb2.VADPolicy(
             enabled=bool(vad.enabled),

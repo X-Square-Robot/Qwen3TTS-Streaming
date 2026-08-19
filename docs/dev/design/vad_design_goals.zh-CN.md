@@ -236,9 +236,9 @@ class VADConfig:
     enabled: bool = False
     mode: str = "disabled"      # "disabled" | "energy" | "tenvad"
     chunk_ms: int = 16          # 每帧时长
-    begin_threshold: float = 0.6  # 0~1
+    begin_threshold: float | None = None  # 按检测器解析默认值
     begin_count: int = 5        # 连续 N 帧高于 begin_threshold 触发 begin
-    end_threshold: float = 0.35  # 0~1
+    end_threshold: float | None = None  # 按检测器解析默认值
     end_count: int = 31         # 连续 N 帧低于 end_threshold 触发 end (~500ms)
     start_margin_ms: int = 20   # begin 后向前回溯
 ```

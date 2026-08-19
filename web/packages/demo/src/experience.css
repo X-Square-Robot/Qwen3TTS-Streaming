@@ -174,6 +174,8 @@
 }
 
 .action-panel.is-live .monitor-status i { background: var(--copper); box-shadow: 0 0 0 3px rgb(233 110 69 / 0.16); animation: status-pulse 950ms ease-in-out infinite; }
+.monitor-status.has-warning { color: #ffab89; }
+.monitor-status.has-warning i { background: var(--copper); }
 
 .monitor-display {
   min-height: 236px;
@@ -209,6 +211,7 @@
 
 .waveform i:nth-child(6n) { background: var(--copper); box-shadow: none; }
 .monitor-empty { margin: 17px 0 0; color: #7487a3; font-size: 11px; line-height: 1.55; }
+.monitor-warning { color: #ffab89; }
 .text-progress { margin: 14px 0 0; color: #d4deeE; font-size: 12px; line-height: 1.55; white-space: pre-wrap; }
 .text-progress small { display: block; margin-top: 5px; color: #6f82a0; font: 8px/1 var(--utility); }
 .stage-actions { margin-top: 18px; }

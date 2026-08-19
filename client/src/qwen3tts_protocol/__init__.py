@@ -38,11 +38,61 @@ class VADPolicy:
     config: dict[str, Any] = field(default_factory=dict)
     # Direct VAD parameters
     chunk_ms: int = 16
-    begin_threshold: float = 0.6
+    # Threshold defaults depend on the detector.  ``None`` means "use the
+    # strategy preset"; serializers and parsers always resolve it before the
+    # value crosses a transport boundary.
+    begin_threshold: float | None = None
     begin_count: int = 5
-    end_threshold: float = 0.35
+    end_threshold: float | None = None
     end_count: int = 31
     start_margin_ms: int = 20
+
+
+_ENERGY_VAD_THRESHOLDS = (0.3, 0.2)
+_TENVAD_THRESHOLDS = (0.6, 0.35)
+
+
+def vad_threshold_defaults(
+    strategy: str,
+    implementation: str = "",
+) -> tuple[float, float]:
+    """Return detector-appropriate ``(begin, end)`` defaults.
+
+    Energy scores are absolute log-energy values and are materially lower
+    than TenVAD speech probabilities.  Treating both scales as equivalent can
+    classify a complete, normal TTS result as silence.
+    """
+
+    normalized = str(strategy or "disabled").strip().lower()
+    detector = str(implementation or "").strip().lower()
+    if normalized == "energy" or (
+        normalized == "prefix_trim" and detector != "tenvad"
+    ):
+        return _ENERGY_VAD_THRESHOLDS
+    return _TENVAD_THRESHOLDS
+
+
+def resolve_vad_tuning(policy: VADPolicy) -> dict[str, int | float]:
+    """Resolve a VAD policy into complete numeric tuning parameters."""
+
+    default_begin, default_end = vad_threshold_defaults(
+        policy.strategy,
+        policy.implementation,
+    )
+    return {
+        "chunk_ms": int(policy.chunk_ms),
+        "begin_threshold": float(
+            default_begin
+            if policy.begin_threshold is None
+            else policy.begin_threshold
+        ),
+        "begin_count": int(policy.begin_count),
+        "end_threshold": float(
+            default_end if policy.end_threshold is None else policy.end_threshold
+        ),
+        "end_count": int(policy.end_count),
+        "start_margin_ms": int(policy.start_margin_ms),
+    }
 
 
 @dataclass
@@ -268,16 +318,7 @@ def serialize_output_policy(policy: OutputPolicy) -> dict[str, Any]:
         "config": dict(policy.vad.config),
     }
     if policy.vad.strategy not in ("disabled", ""):
-        vad_dict.update(
-            {
-                "chunk_ms": int(policy.vad.chunk_ms),
-                "begin_threshold": float(policy.vad.begin_threshold),
-                "begin_count": int(policy.vad.begin_count),
-                "end_threshold": float(policy.vad.end_threshold),
-                "end_count": int(policy.vad.end_count),
-                "start_margin_ms": int(policy.vad.start_margin_ms),
-            }
-        )
+        vad_dict.update(resolve_vad_tuning(policy.vad))
     return {
         "vad_policy": vad_dict,
         "chunk_ms": int(policy.chunk_ms),
@@ -291,6 +332,9 @@ def parse_output_policy(raw: Any) -> OutputPolicy:
     if not isinstance(raw, dict):
         return OutputPolicy()
     vad_raw = raw.get("vad_policy") or raw.get("vad") or {}
+    strategy = str(vad_raw.get("strategy", "disabled"))
+    implementation = str(vad_raw.get("implementation", ""))
+    default_begin, default_end = vad_threshold_defaults(strategy, implementation)
 
     # ``or default`` is incorrect for numeric policy fields because zero is a
     # meaningful value (for example ``start_margin_ms=0`` disables lookback
@@ -303,13 +347,17 @@ def parse_output_policy(raw: Any) -> OutputPolicy:
     return OutputPolicy(
         vad=VADPolicy(
             enabled=bool(vad_raw.get("enabled", False)),
-            strategy=str(vad_raw.get("strategy", "disabled")),
-            implementation=str(vad_raw.get("implementation", "")),
+            strategy=strategy,
+            implementation=implementation,
             config=dict(vad_raw.get("config") or {}),
             chunk_ms=int(_numeric_value(vad_raw, "chunk_ms", 16)),
-            begin_threshold=float(_numeric_value(vad_raw, "begin_threshold", 0.6)),
+            begin_threshold=float(
+                _numeric_value(vad_raw, "begin_threshold", default_begin)
+            ),
             begin_count=int(_numeric_value(vad_raw, "begin_count", 5)),
-            end_threshold=float(_numeric_value(vad_raw, "end_threshold", 0.35)),
+            end_threshold=float(
+                _numeric_value(vad_raw, "end_threshold", default_end)
+            ),
             end_count=int(_numeric_value(vad_raw, "end_count", 31)),
             start_margin_ms=int(_numeric_value(vad_raw, "start_margin_ms", 20)),
         ),
@@ -363,6 +411,8 @@ __all__ = [
     "capabilities_from_mapping",
     "parse_output_policy",
     "parse_timing_context",
+    "resolve_vad_tuning",
     "serialize_output_policy",
     "serialize_timing_context",
+    "vad_threshold_defaults",
 ]

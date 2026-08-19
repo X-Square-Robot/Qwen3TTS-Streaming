@@ -64,9 +64,9 @@ class VADConfig:
     config: dict[str, Any] = field(default_factory=dict)
     # Direct VAD parameters (populated from protocol layer)
     chunk_ms: int = 16
-    begin_threshold: float = 0.6
+    begin_threshold: float | None = None
     begin_count: int = 5
-    end_threshold: float = 0.35
+    end_threshold: float | None = None
     end_count: int = 31
     start_margin_ms: int = 20
 

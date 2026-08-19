@@ -76,9 +76,13 @@ class TestCreateVADProcessor:
         cfg = TTSVADConfig(mode=VADMode.ENERGY)
         proc = create_vad_processor(cfg)
         assert isinstance(proc, EnergyVADProcessor)
+        assert cfg.begin_threshold == 0.3
+        assert cfg.end_threshold == 0.2
 
     def test_tenvad_mode_missing_package(self):
         cfg = TTSVADConfig(mode=VADMode.TENVAD)
+        assert cfg.begin_threshold == 0.6
+        assert cfg.end_threshold == 0.35
         with patch("engine.interface.vad._TenVadClass", None):
             with pytest.raises(ImportError, match="ten_vad"):
                 create_vad_processor(cfg)

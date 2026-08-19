@@ -17,8 +17,10 @@ from typing import Any
 from qwen3tts_protocol import (  # noqa: F401
     parse_output_policy,
     parse_timing_context,
+    resolve_vad_tuning,
     serialize_output_policy,
     serialize_timing_context,
+    vad_threshold_defaults,
 )
 
 # ---------------------------------------------------------------------------

@@ -31,7 +31,11 @@ import {loadDemoConfig, type LoadedDemoConfig} from "./config";
 import {DocsPage} from "./DocsPage";
 import {ExperimentLab} from "./ExperimentLab";
 import {SdkPage} from "./SdkPage";
-import {DEFAULT_DEMO_SETTINGS, type DemoSynthesisSettings} from "./demo-settings";
+import {
+  DEFAULT_DEMO_SETTINGS,
+  defaultVadTuning,
+  type DemoSynthesisSettings,
+} from "./demo-settings";
 import {startReferenceRecorder, type ReferenceRecorder} from "./reference-recorder";
 
 type Route = "experience" | "sdk" | "docs" | "lab";
@@ -111,12 +115,12 @@ function Experience({loaded, onCapabilities, onSettings}: {
   const [vad, setVad] = useState(VadStrategy.Disabled);
   const [delivery, setDelivery] = useState(DeliveryPolicy.Guarded);
   const [sampleRate, setSampleRate] = useState(24_000);
-  const [vadBeginThreshold, setVadBeginThreshold] = useState(0.6);
-  const [vadEndThreshold, setVadEndThreshold] = useState(0.35);
-  const [vadBeginCount, setVadBeginCount] = useState(5);
-  const [vadEndCount, setVadEndCount] = useState(31);
-  const [vadChunkMs, setVadChunkMs] = useState(16);
-  const [vadStartMarginMs, setVadStartMarginMs] = useState(20);
+  const [vadBeginThreshold, setVadBeginThreshold] = useState(DEFAULT_DEMO_SETTINGS.vadBeginThreshold);
+  const [vadEndThreshold, setVadEndThreshold] = useState(DEFAULT_DEMO_SETTINGS.vadEndThreshold);
+  const [vadBeginCount, setVadBeginCount] = useState(DEFAULT_DEMO_SETTINGS.vadBeginCount);
+  const [vadEndCount, setVadEndCount] = useState(DEFAULT_DEMO_SETTINGS.vadEndCount);
+  const [vadChunkMs, setVadChunkMs] = useState(DEFAULT_DEMO_SETTINGS.vadChunkMs);
+  const [vadStartMarginMs, setVadStartMarginMs] = useState(DEFAULT_DEMO_SETTINGS.vadStartMarginMs);
   const [deliveryWindowMs, setDeliveryWindowMs] = useState(160);
   const [outputChunkMs, setOutputChunkMs] = useState(0);
   const [emitTextEvents, setEmitTextEvents] = useState(true);
@@ -133,6 +137,7 @@ function Experience({loaded, onCapabilities, onSettings}: {
   const [busy, setBusy] = useState(false);
   const [paused, setPaused] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState("");
+  const [outputIssue, setOutputIssue] = useState("");
   const downloadUrlRef = useRef("");
   const clientRef = useRef<RealtimeTTSClient | null>(null);
   const playerRef = useRef<BrowserAudioPlayer | null>(null);
@@ -193,6 +198,7 @@ function Experience({loaded, onCapabilities, onSettings}: {
     setBusy(true);
     setTiming({ttfb: 0, firstAudio: 0, firstAudible: 0, total: 0});
     setServerTiming({ttft: 0, total: 0, prefixTrimmed: 0, prefixApplied: false, vad: ""});
+    setOutputIssue("");
     if (downloadUrlRef.current) URL.revokeObjectURL(downloadUrlRef.current);
     downloadUrlRef.current = "";
     setDownloadUrl("");
@@ -308,6 +314,17 @@ function Experience({loaded, onCapabilities, onSettings}: {
           prefixApplied: event.server?.prefix_trim_applied ?? false,
           vad: event.server?.vad_strategy ?? "",
         });
+        const collector = collectorRef.current;
+        if (
+          collector?.snapshot().samples === 0
+          && event.server?.prefix_trim_applied
+          && event.server.vad_strategy
+          && event.server.vad_strategy !== VadStrategy.Disabled
+        ) {
+          const message = `输出 VAD（${event.server.vad_strategy}）过滤了整段音频；请降低 Begin threshold 或关闭 VAD 后重试。`;
+          setOutputIssue(message);
+          setEvents((current) => [...current.slice(-199), {type: "warning", message}]);
+        }
       }
       streamGeneration.current += 1;
       setTiming((current) => ({...current, total: performance.now() - startedAt.current}));
@@ -348,6 +365,18 @@ function Experience({loaded, onCapabilities, onSettings}: {
   const audioDuration = receivedSamples / sampleRate;
   const textProgress = [...events].reverse().find((event) => event.type === "progress");
   const selectedTaskStatus = caps?.task_status.find((status) => status.task === task);
+
+  function selectVadStrategy(strategy: VadStrategy) {
+    setVad(strategy);
+    if (strategy === VadStrategy.Disabled) return;
+    const tuning = defaultVadTuning(strategy);
+    setVadChunkMs(tuning.vadChunkMs);
+    setVadBeginThreshold(tuning.vadBeginThreshold);
+    setVadBeginCount(tuning.vadBeginCount);
+    setVadEndThreshold(tuning.vadEndThreshold);
+    setVadEndCount(tuning.vadEndCount);
+    setVadStartMarginMs(tuning.vadStartMarginMs);
+  }
 
   async function selectReference(file: File | undefined) {
     if (!file) return setReference(null);
@@ -451,7 +480,7 @@ function Experience({loaded, onCapabilities, onSettings}: {
         <section className="panel policy-panel">
           <div className="panel-heading"><div><p className="panel-kicker">OUTPUT SHAPING</p><h2>输出策略</h2></div><p>控制交付节奏与输出端静音裁剪。</p></div>
           <div className="grid controls">
-            <label>输出 VAD<select disabled={vadStrategies.length === 0} value={vad} onChange={(event) => setVad(event.target.value as VadStrategy)}>
+            <label>输出 VAD<select disabled={vadStrategies.length === 0} value={vad} onChange={(event) => selectVadStrategy(event.target.value as VadStrategy)}>
               {vadStrategies.map((value) => <option key={value}>{value}</option>)}</select></label>
             <label>交付模式<select value={delivery} onChange={(event) => setDelivery(event.target.value as DeliveryPolicy)}>
               <option value={DeliveryPolicy.Guarded}>guarded</option><option value={DeliveryPolicy.Firehose}>firehose</option></select></label>
@@ -467,15 +496,17 @@ function Experience({loaded, onCapabilities, onSettings}: {
             <NumberInput label="End count" value={vadEndCount} min={1} max={1000} onChange={setVadEndCount}/>
             <NumberInput label="Start margin (ms)" value={vadStartMarginMs} min={0} max={10_000} onChange={setVadStartMarginMs}/>
           </div>}
-          <p className="hint inline-note">VAD 只过滤 TTS 输出静音，不参与麦克风 endpointing；可选项来自当前实例。</p>
+          <p className="hint inline-note">VAD 只过滤 TTS 输出静音，不参与麦克风 endpointing；切换算法会载入对应推荐阈值，仍可继续微调。</p>
         </section>
       </div>
 
       <aside className="playback-stack">
         <section className={`panel action-panel${busy ? " is-live" : ""}`}>
-          <div className="panel-heading stage-heading"><div><p className="panel-kicker">LISTENING STAGE</p><h2>监听台</h2></div><span className="monitor-status"><i/>{busy ? paused ? "已暂停" : "正在合成" : downloadUrl ? "可重放" : "等待输入"}</span></div>
+          <div className="panel-heading stage-heading"><div><p className="panel-kicker">LISTENING STAGE</p><h2>监听台</h2></div><span className={`monitor-status${outputIssue ? " has-warning" : ""}`}><i/>{busy ? paused ? "已暂停" : "正在合成" : downloadUrl ? "可重放" : outputIssue ? "无有效音频" : "等待输入"}</span></div>
           <div className="monitor-display"><div className="monitor-head"><span>OUTPUT MONITOR</span><span>{sampleRate / 1000} kHz</span></div><Waveform events={events}/>
-            {textProgress?.type === "progress" ? <p className="text-progress">{textProgress.text}<small>sample {textProgress.sample.toString()}</small></p> : <p className="monitor-empty">合成后，音频波形与文本进度会出现在这里。</p>}</div>
+            {outputIssue
+              ? <p className="monitor-empty monitor-warning" role="status">{outputIssue}</p>
+              : textProgress?.type === "progress" ? <p className="text-progress">{textProgress.text}<small>sample {textProgress.sample.toString()}</small></p> : <p className="monitor-empty">合成后，音频波形与文本进度会出现在这里。</p>}</div>
           <div className="actions stage-actions">
             <button className="primary" disabled={!canSynthesize || busy || !text.trim()} onClick={() => void connectAndPlay()}><Play size={17}/>合成并播放</button>
             <button disabled={!busy} onClick={() => void togglePause()}><Pause size={17}/>{paused ? "继续" : "暂停"}</button>

@@ -39,6 +39,40 @@ def _vad_policy(strategy: str) -> OutputPolicy:
 
 
 class TestSerializeOutputPolicyVad:
+    def test_strategy_defaults_use_the_detector_scale(self):
+        energy = serialize_output_policy(
+            OutputPolicy(vad=VADPolicy(enabled=True, strategy="energy"))
+        )["vad_policy"]
+        tenvad = serialize_output_policy(
+            OutputPolicy(vad=VADPolicy(enabled=True, strategy="tenvad"))
+        )["vad_policy"]
+
+        assert (energy["begin_threshold"], energy["end_threshold"]) == (0.3, 0.2)
+        assert (tenvad["begin_threshold"], tenvad["end_threshold"]) == (
+            0.6,
+            0.35,
+        )
+
+    def test_wire_parser_uses_energy_defaults_only_when_thresholds_are_omitted(self):
+        defaulted = parse_output_policy(
+            {"vad_policy": {"enabled": True, "strategy": "energy"}}
+        )
+        explicit = parse_output_policy(
+            {
+                "vad_policy": {
+                    "enabled": True,
+                    "strategy": "energy",
+                    "begin_threshold": 0.55,
+                    "end_threshold": 0.25,
+                }
+            }
+        )
+
+        assert defaulted.vad.begin_threshold == 0.3
+        assert defaulted.vad.end_threshold == 0.2
+        assert explicit.vad.begin_threshold == 0.55
+        assert explicit.vad.end_threshold == 0.25
+
     @pytest.mark.parametrize("strategy", ["energy", "tenvad"])
     def test_non_disabled_strategy_carries_tuning_fields(self, strategy):
         vad = serialize_output_policy(_vad_policy(strategy))["vad_policy"]

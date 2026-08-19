@@ -28,6 +28,7 @@ from enum import Enum, auto
 from typing import Any, Optional
 
 import numpy as np
+from qwen3tts_protocol import vad_threshold_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +50,9 @@ class TTSVADConfig:
 
     mode: VADMode = VADMode.DISABLED
     chunk_ms: int = 16
-    begin_threshold: float = 0.6  # 0~1, mapped internally
+    begin_threshold: float | None = None  # 0~1, resolved per detector
     begin_count: int = 5  # consecutive frames above begin_threshold
-    end_threshold: float = 0.35  # 0~1, mapped internally
+    end_threshold: float | None = None  # 0~1, resolved per detector
     end_count: int = 31  # consecutive frames below end_threshold (~500ms)
     start_margin_ms: int = 20  # lookback on begin trigger
 
@@ -61,6 +62,14 @@ class TTSVADConfig:
     # TenVAD-mode internals
     tenvad_hop_size: int = 256  # 256 samples @ 16kHz = 16ms
     tenvad_threshold: float = 0.5  # inner model threshold
+
+    def __post_init__(self) -> None:
+        mode = self.mode.value if isinstance(self.mode, VADMode) else str(self.mode)
+        default_begin, default_end = vad_threshold_defaults(mode)
+        if self.begin_threshold is None:
+            self.begin_threshold = default_begin
+        if self.end_threshold is None:
+            self.end_threshold = default_end
 
     @property
     def enabled(self) -> bool:
@@ -862,9 +871,9 @@ def vad_config_from_dict(d: dict) -> TTSVADConfig:
     return TTSVADConfig(
         mode=mode,
         chunk_ms=_num("chunk_ms", 16, int),
-        begin_threshold=_num("begin_threshold", 0.6, float),
+        begin_threshold=_num("begin_threshold", None, float),
         begin_count=_num("begin_count", 5, int),
-        end_threshold=_num("end_threshold", 0.35, float),
+        end_threshold=_num("end_threshold", None, float),
         end_count=_num("end_count", 31, int),
         start_margin_ms=_num("start_margin_ms", 20, int),
         preemphasis=_num("preemphasis", 0.97, float),

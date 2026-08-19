@@ -1,6 +1,6 @@
-import {expect, test} from "@playwright/test";
+import {expect, test, type Page} from "@playwright/test";
 
-test("synthesizes mock PCM through the browser playback contract and exports WAV", async ({page}) => {
+async function installFakeAudio(page: Page) {
   await page.addInitScript(() => {
     Object.defineProperty(globalThis.crypto, "randomUUID", {
       configurable: true,
@@ -29,6 +29,10 @@ test("synthesizes mock PCM through the browser playback contract and exports WAV
     }
     Object.assign(globalThis, {AudioContext: FakeContext, AudioWorkletNode: undefined});
   });
+}
+
+test("synthesizes mock PCM through the browser playback contract and exports WAV", async ({page}) => {
+  await installFakeAudio(page);
   let route: Parameters<Parameters<typeof page.routeWebSocket>[1]>[0] | undefined;
   const messages: Array<{type: string}> = [];
   await page.routeWebSocket(/\/infer\/instance\/v1\/realtime$/, (socket) => {
@@ -63,6 +67,43 @@ test("synthesizes mock PCM through the browser playback contract and exports WAV
   await expect(page.getByText("12.0 ms · energy")).toBeVisible();
 });
 
+test("explains when output VAD filters the complete result", async ({page}) => {
+  await installFakeAudio(page);
+  await page.routeWebSocket(/\/infer\/instance\/v1\/realtime$/, (socket) => {
+    socket.send(JSON.stringify({type: "session.created", session: {id: "sess_vad"}}));
+    socket.onMessage((message) => {
+      const event = JSON.parse(String(message)) as {type: string};
+      if (event.type === "session.update") {
+        socket.send(JSON.stringify({type: "session.updated", session: {id: "sess_vad"}}));
+      }
+      if (event.type === "response.create") {
+        socket.send(JSON.stringify({type: "response.created", response: {id: "resp_vad"}}));
+        socket.send(JSON.stringify({
+          type: "response.done",
+          qwen_delivery_seq: 1,
+          response: {
+            id: "resp_vad",
+            status: "completed",
+            metadata: {
+              server_prefix_trimmed_ms: "4000",
+              server_prefix_trim_applied: "true",
+              vad_strategy: "energy",
+            },
+          },
+        }));
+      }
+    });
+  });
+  await page.goto("/infer/instance/demo/");
+  await page.getByLabel("输出 VAD").selectOption("energy");
+  await expect(page.getByLabel("Begin threshold")).toHaveValue("0.3");
+  await expect(page.getByLabel("End threshold")).toHaveValue("0.2");
+  await page.getByRole("button", {name: "合成并播放"}).click();
+  await expect(page.getByText("无有效音频", {exact: true})).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("输出 VAD（energy）过滤了整段音频");
+  await expect(page.getByRole("link", {name: "下载 WAV"})).toHaveCount(0);
+});
+
 test("keeps an instance prefix and gates controls from capabilities", async ({page}) => {
   await page.goto("/infer/instance/demo/");
   await expect(page.getByRole("heading", {name: "让文字，即刻成为声音。"})).toBeVisible();
@@ -70,6 +111,8 @@ test("keeps an instance prefix and gates controls from capabilities", async ({pa
   await expect(page.getByLabel("输出 VAD").locator("option")).toHaveCount(2);
   await page.getByLabel("输出 VAD").selectOption("energy");
   await expect(page.getByLabel("Begin threshold")).toBeVisible();
+  await expect(page.getByLabel("Begin threshold")).toHaveValue("0.3");
+  await expect(page.getByLabel("End threshold")).toHaveValue("0.2");
   await page.getByLabel("任务").selectOption("voice_design");
   await page.getByLabel("输入方式").selectOption("incremental");
   await expect(page.getByText(/工程预览能力/)).toBeVisible();

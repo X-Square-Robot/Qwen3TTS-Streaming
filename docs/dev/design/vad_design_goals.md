@@ -236,9 +236,9 @@ class VADConfig:
     enabled: bool = False
     mode: str = "disabled"      # "disabled" | "energy" | "tenvad"
     chunk_ms: int = 16          # per-frame duration
-    begin_threshold: float = 0.6  # 0~1
+    begin_threshold: float | None = None  # resolved per detector
     begin_count: int = 5        # N consecutive frames above begin_threshold triggers begin
-    end_threshold: float = 0.35  # 0~1
+    end_threshold: float | None = None  # resolved per detector
     end_count: int = 31         # N consecutive frames below end_threshold triggers end (~500ms)
     start_margin_ms: int = 20   # look back after begin
 ```
