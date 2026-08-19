@@ -170,11 +170,11 @@ async def test_sidecar_health_is_503_while_triton_is_unavailable():
 
 
 @pytest.mark.asyncio
-async def test_demo_config_is_404_until_explicitly_enabled(tmp_path, monkeypatch):
+async def test_demo_config_is_404_when_explicitly_disabled(tmp_path, monkeypatch):
     pytest.importorskip("aiohttp")
     from aiohttp.test_utils import TestClient, TestServer
 
-    monkeypatch.delenv("DEMO_ENABLED", raising=False)
+    monkeypatch.setenv("DEMO_ENABLED", "false")
     server = TestServer(create_app(_Backend(), sdk_dir=tmp_path))
     async with server:
         async with TestClient(server) as client:

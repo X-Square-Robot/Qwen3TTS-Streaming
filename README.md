@@ -349,9 +349,10 @@ mamba run -n qwen3-tts python tools/validation/serving_endpoints.py \
 
 ## Built-in Demo and documentation
 
-Every release runtime image contains one version-matched portal at `/demo/`. Set
-`DEMO_ENABLED=true` to expose it on the same public port as `/v1/realtime` and
-`/sdk/`. The portal discovers the current instance, synthesizes through the
+Every release runtime image contains one version-matched portal at `/demo/`.
+It is enabled by default on the same public port as `/v1/realtime` and `/sdk/`;
+set `DEMO_ENABLED=false` at startup to disable it. The portal discovers the
+current instance and synthesizes through the
 Browser SDK, plays PCM through the system speaker, exposes capability-gated VAD
 and delivery controls, downloads WAV, and renders this repository's Markdown.
 No separate Demo API is required for the normal experience.
@@ -374,7 +375,7 @@ Full screen recording: [演示视频.mp4](docs/videos/演示视频.mp4)
 Standalone startup:
 
 ```bash
-DEMO_ENABLED=true bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
+bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 ```
 
 Open `http://localhost:50052/demo/`. For the Triton deployment, use
@@ -383,7 +384,7 @@ mount the service below `/infer/<instance>`; all portal, SDK, WebSocket and asse
 links remain relative to that prefix.
 
 When Kubernetes permits only one public port, set
-`PORT=8000 HEALTH_PORT=0 DEMO_ENABLED=true` on the engine container and expose
+`PORT=8000 HEALTH_PORT=0` on the engine container and expose
 only `8000` in the Service. `/demo/`, `/sdk/`, `/health`, and `/v1/realtime` then
 share that port. See the [deployment guide](docs/user/deployment.md#single-port-kubernetes-deployment)
 for complete probe and Service examples.

@@ -339,8 +339,9 @@ mamba run -n qwen3-tts python tools/validation/serving_endpoints.py \
 
 ## 内置 Demo 与统一文档
 
-每个正式运行时镜像都在 `/demo/` 内置与该版本匹配的实例门户。设置
-`DEMO_ENABLED=true` 后，它与 `/v1/realtime`、`/sdk/` 使用同一个公共端口。
+每个正式运行时镜像都在 `/demo/` 内置与该版本匹配的实例门户。Demo 默认开启，
+与 `/v1/realtime`、`/sdk/` 使用同一个公共端口；启动时设置
+`DEMO_ENABLED=false` 可将其关闭。
 门户会发现当前实例的能力，通过 Browser SDK 合成，通过系统扬声器播放，并提供由
 capabilities 门控的 VAD/交付参数、WAV 下载和本仓库 Markdown 文档；普通体验不依赖
 独立 Demo API。
@@ -362,7 +363,7 @@ capabilities 门控的 VAD/交付参数、WAV 下载和本仓库 Markdown 文档
 Standalone 启动：
 
 ```bash
-DEMO_ENABLED=true bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
+bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 ```
 
 浏览器打开 `http://localhost:50052/demo/`。Triton 部署改用 `--gateway triton`，
@@ -370,7 +371,7 @@ DEMO_ENABLED=true bash scripts/bash/compose.sh up --build --gateway engine --var
 时，门户、SDK、WebSocket 和静态资源链接仍会保留该前缀。
 
 Kubernetes 只允许一个公开端口时，engine 容器设置
-`PORT=8000 HEALTH_PORT=0 DEMO_ENABLED=true`，Service 只映射 `8000`；此时
+`PORT=8000 HEALTH_PORT=0`，Service 只映射 `8000`；此时
 `/demo/`、`/sdk/`、`/health` 和 `/v1/realtime` 全部共用该端口。完整探针和 Service
 示例见[部署说明](docs/user/deployment.zh-CN.md#kubernetes-单端口部署)。
 

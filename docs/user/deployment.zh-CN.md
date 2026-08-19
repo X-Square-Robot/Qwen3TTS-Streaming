@@ -511,10 +511,11 @@ tar -C "${QWEN_LOG_DIR:-/var/log/qwen3tts}" \
 ## 内置 Demo 与统一文档
 
 正式镜像已经包含同版本的产品 Demo、Browser SDK、Python wheel 索引和精选 Markdown
-文档。将它启用在 Realtime 的同一个公共入口即可，不需要独立 Demo API 或 Node 进程：
+文档，并默认启用在 Realtime 的同一个公共入口，不需要独立 Demo API 或 Node 进程。
+启动时设置 `DEMO_ENABLED=false` 可将其关闭：
 
 ```bash
-DEMO_ENABLED=true bash scripts/bash/compose.sh up --build \
+bash scripts/bash/compose.sh up --build \
   --gateway engine --variant custom-1.7b
 # 打开 http://localhost:50052/demo/
 ```
@@ -525,10 +526,16 @@ DEMO_ENABLED=true bash scripts/bash/compose.sh up --build \
 TLS。证书与私钥只读挂载到容器，必须同时配置：
 
 ```bash
+SAN_EXTRA_DNS=demo.example.test ./tools/generate_demo_local_cert.sh
+bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
+```
+
+使用 CA 签发的证书时，显式挂载证书目录：
+
+```bash
 TLS_HOST_DIR=/host/path/to/certificate \
 TLS_CERT_FILE=/app/tls/fullchain.pem \
 TLS_KEY_FILE=/app/tls/privkey.pem \
-DEMO_ENABLED=true \
 bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 ```
 
@@ -545,8 +552,8 @@ bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 Triton 部署把 `--gateway engine` 改成 `--gateway triton`，然后打开
 `http://localhost:50053/demo/`。门户全部使用相对 URL，因此服务部署在
 `/infer/<instance>` 下时，Demo 资源、`/sdk/`、`/v1/capabilities` 和
-`/v1/realtime` 都会保留该前缀。不应公开门户时，让 `DEMO_ENABLED` 保持未设置或
-false，此时 `/demo/` 返回 404。
+`/v1/realtime` 都会保留该前缀。不应公开门户时设置 `DEMO_ENABLED=false`，
+此时 `/demo/` 返回 404。
 
 `demo_api` 仅作为详细 trace 的可选工程实验后端；仓库不再保留第二套 WebUI。LLM PK、
 并发和 trace 均从同一个 `/demo/#/lab` 门户进入，仅在确有需要时显式启用 Compose 的

@@ -526,11 +526,12 @@ if logs must survive container replacement.
 ## Built-in Demo and documentation
 
 The release image already contains the version-matched product Demo, Browser
-SDK, Python wheel index, and selected Markdown documentation. Enable it on the
-same public endpoint as Realtime; no separate Demo API or Node process is used:
+SDK, Python wheel index, and selected Markdown documentation. It is enabled by
+default on the same public endpoint as Realtime; no separate Demo API or Node
+process is used. Set `DEMO_ENABLED=false` at startup to disable it:
 
 ```bash
-DEMO_ENABLED=true bash scripts/bash/compose.sh up --build \
+bash scripts/bash/compose.sh up --build \
   --gateway engine --variant custom-1.7b
 # Open http://localhost:50052/demo/
 ```
@@ -542,10 +543,16 @@ terminate TLS directly on the public WebSocket port. Mount the certificate and
 private key read-only and configure both together:
 
 ```bash
+SAN_EXTRA_DNS=demo.example.test ./tools/generate_demo_local_cert.sh
+bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
+```
+
+For a CA-issued certificate, mount it explicitly:
+
+```bash
 TLS_HOST_DIR=/host/path/to/certificate \
 TLS_CERT_FILE=/app/tls/fullchain.pem \
 TLS_KEY_FILE=/app/tls/privkey.pem \
-DEMO_ENABLED=true \
 bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 ```
 
@@ -564,8 +571,8 @@ Pod's HTTP port. Both modes still expose only one public service port.
 For Triton, replace `--gateway engine` with `--gateway triton` and open
 `http://localhost:50053/demo/`. The portal uses relative URLs, so a deployment
 below `/infer/<instance>` keeps that prefix for Demo assets, `/sdk/`,
-`/v1/capabilities`, and `/v1/realtime`. Keep `DEMO_ENABLED` unset or false when
-the portal must not be public; `/demo/` then returns 404.
+`/v1/capabilities`, and `/v1/realtime`. Set `DEMO_ENABLED=false` when the portal
+must not be public; `/demo/` then returns 404.
 
 `demo_api` remains an optional engineering backend for detailed traces; the
 repository no longer carries a second WebUI. LLM PK, concurrency, and traces

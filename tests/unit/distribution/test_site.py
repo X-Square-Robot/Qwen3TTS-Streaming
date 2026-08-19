@@ -17,11 +17,24 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 WHEEL_NAME = "qwen3_tts_client-0.2.0-py3-none-any.whl"
 
 
-def test_demo_is_enabled_only_by_explicit_true():
-    assert demo_enabled({}) is False
-    assert demo_enabled({"DEMO_ENABLED": "1"}) is False
-    assert demo_enabled({"DEMO_ENABLED": "true"}) is True
-    assert demo_enabled({"DEMO_ENABLED": "TRUE"}) is True
+def test_demo_is_enabled_by_default_and_can_be_disabled():
+    for environ in (
+        {},
+        {"DEMO_ENABLED": ""},
+        {"DEMO_ENABLED": "1"},
+        {"DEMO_ENABLED": "true"},
+        {"DEMO_ENABLED": "YES"},
+        {"DEMO_ENABLED": "on"},
+    ):
+        assert demo_enabled(environ) is True
+
+    for value in ("0", "false", "FALSE", "no", "off"):
+        assert demo_enabled({"DEMO_ENABLED": value}) is False
+
+
+def test_demo_rejects_invalid_environment_value():
+    with pytest.raises(ValueError, match="DEMO_ENABLED"):
+        demo_enabled({"DEMO_ENABLED": "sometimes"})
 
 
 def test_demo_config_contains_prefix_neutral_sdk_metadata(tmp_path):

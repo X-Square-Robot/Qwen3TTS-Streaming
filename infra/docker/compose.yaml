@@ -43,7 +43,7 @@ services:
       TLS_CERT_FILE: ${TLS_CERT_FILE:-}
       TLS_KEY_FILE: ${TLS_KEY_FILE:-}
       TLS_DIR: /app/tls
-      DEMO_ENABLED: ${DEMO_ENABLED:-false}
+      DEMO_ENABLED: ${DEMO_ENABLED:-true}
       DEMO_LAB_URL: ${DEMO_LAB_URL:-}
       ENGINE_MAX_BATCH_SIZE: ${ENGINE_MAX_BATCH_SIZE:-128}
       ENGINE_MAX_SESSIONS: ${ENGINE_MAX_SESSIONS:-128}
@@ -197,7 +197,7 @@ services:
       TRITON_REALTIME_HOST: 0.0.0.0
       TRITON_REALTIME_PORT: 50052
       TRITON_REALTIME_USAGE_LOG: /var/lib/qwen3tts/realtime_usage.jsonl
-      DEMO_ENABLED: ${DEMO_ENABLED:-false}
+      DEMO_ENABLED: ${DEMO_ENABLED:-true}
       DEMO_LAB_URL: ${DEMO_LAB_URL:-}
       TRITON_GRPC_AUTH_TOKEN: ${TRITON_GRPC_AUTH_TOKEN:-}
       QWEN_LOG_DIR: ${QWEN_LOG_DIR:-/var/log/qwen3tts}

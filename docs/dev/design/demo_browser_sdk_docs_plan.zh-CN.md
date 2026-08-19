@@ -19,8 +19,8 @@
 ```
 
 首版以 `/v1/realtime` 为唯一主体验链路；`/v1/ws` 保留给兼容性验证和工程诊断，
-不在产品首页与 Realtime 并列宣传。Demo 默认关闭，通过 `DEMO_ENABLED=true`
-显式启用。页面只连接当前实例，不接受跨域 API Key，不把凭据写入浏览器存储。
+不在产品首页与 Realtime 并列宣传。Demo 默认开启，通过 `DEMO_ENABLED=false`
+显式关闭。页面只连接当前实例，不接受跨域 API Key，不把凭据写入浏览器存储。
 认证、WebSocket Origin、租户配额和公网限流由同源部署网关统一负责。
 
 稳定文档站发布到 GitLab Pages；实例内文档与 Pages 使用同一份构建产物，正文直接

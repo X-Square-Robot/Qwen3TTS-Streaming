@@ -21,7 +21,15 @@ def test_engine_compose_publishes_demo_on_websocket_port_only():
         "${ENGINE_WEBSOCKET_PORT:-50052}:${ENGINE_WEBSOCKET_PORT:-50052}",
     ]
     assert engine["environment"]["ENGINE_HEALTH_PORT"] == "${ENGINE_HEALTH_PORT:-8080}"
+    assert engine["environment"]["DEMO_ENABLED"] == "${DEMO_ENABLED:-true}"
     assert "ENGINE_HEALTH_PORT" in engine["healthcheck"]["test"][1]
+
+
+def test_triton_realtime_demo_is_also_enabled_by_default():
+    compose = yaml.safe_load(_read("infra/docker/compose.yaml"))
+    realtime = compose["services"]["realtime-gateway"]
+
+    assert realtime["environment"]["DEMO_ENABLED"] == "${DEMO_ENABLED:-true}"
 
 
 def test_compose_wrapper_uses_container_health_without_publishing_health_port():

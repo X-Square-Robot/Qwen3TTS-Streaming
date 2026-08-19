@@ -13,6 +13,8 @@ from .sdk import SdkDistribution
 
 DEMO_CONFIG_SCHEMA_VERSION = "qwen.tts.demo-config.v1"
 _DEFAULT_DEMO_DIR = "/app/demo"
+_TRUE_VALUES = {"", "1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
 
 
 def _security_headers() -> dict[str, str]:
@@ -37,7 +39,14 @@ def _security_headers() -> dict[str, str]:
 
 def demo_enabled(environ: Mapping[str, str] | None = None) -> bool:
     values = os.environ if environ is None else environ
-    return str(values.get("DEMO_ENABLED", "")).strip().lower() == "true"
+    raw = str(values.get("DEMO_ENABLED", "true")).strip().lower()
+    if raw in _TRUE_VALUES:
+        return True
+    if raw in _FALSE_VALUES:
+        return False
+    raise ValueError(
+        "DEMO_ENABLED must be one of true/false, 1/0, yes/no, or on/off"
+    )
 
 
 def _lab_url() -> str:
@@ -95,7 +104,7 @@ def mount_demo_config_route(
     enabled: bool | None = None,
     site_dir: str | os.PathLike[str] | None = None,
 ) -> bool:
-    """Mount the Demo and config only when explicitly enabled."""
+    """Mount the Demo and config unless explicitly disabled."""
 
     if enabled is None:
         enabled = demo_enabled()
