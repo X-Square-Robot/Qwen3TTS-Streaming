@@ -26,12 +26,18 @@ esac
 export DOCS_SOURCE_BASE="${DOCS_SOURCE_BASE:-https://github.com/X-Square-Robot/Qwen3TTS-Streaming/blob/v${release_version}}"
 cd "$repo_root/web"
 npm ci
-npm version "$semver" --workspace @xmultimodalinteraction/qwen3tts-browser --no-git-tag-version
-npm version "$semver" --workspace @xmultimodalinteraction/qwen3tts-demo --no-git-tag-version
 npm run typecheck
 npm run lint
 npm test
 npm run build
+# Stamp only the package that is actually published.  The private Demo keeps
+# its workspace development version, so npm never tries to resolve the
+# unpublished 0.0.0-dev.0 Browser SDK from the public Registry.  Disabling
+# workspace dependency updates also makes this step network-independent.
+npm version "$semver" \
+    --workspace @xmultimodalinteraction/qwen3tts-browser \
+    --no-git-tag-version \
+    --workspaces-update=false
 npm run pack:browser
 
 mkdir -p dist

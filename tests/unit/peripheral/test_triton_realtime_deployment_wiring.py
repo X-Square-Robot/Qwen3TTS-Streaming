@@ -81,6 +81,16 @@ def test_release_pipelines_build_both_version_matched_runtime_images():
     assert "TRITON_RELEASE_IMAGE" in gitlab
 
 
+def test_web_release_stamps_only_the_publishable_workspace_without_registry_resolution():
+    script = _read("scripts/bash/release_web.sh")
+
+    assert "--workspace @xmultimodalinteraction/qwen3tts-browser" in script
+    assert "--workspaces-update=false" in script
+    assert "--workspace @xmultimodalinteraction/qwen3tts-demo" not in script
+    assert script.index("npm run build") < script.index('npm version "$semver"')
+    assert script.index('npm version "$semver"') < script.index("npm run pack:browser")
+
+
 def test_local_compose_uses_reproducible_node_builder_for_web_artifacts():
     compose_script = _read("scripts/bash/compose.sh")
     dockerfile = _read("infra/docker/Dockerfile.web-builder")

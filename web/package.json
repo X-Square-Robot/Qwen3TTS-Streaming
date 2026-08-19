@@ -9,6 +9,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
+    "pretest": "npm run build --workspace @xmultimodalinteraction/qwen3tts-browser",
     "test": "vitest run scripts && npm run test --workspaces --if-present",
     "lint": "eslint .",
     "test:e2e": "playwright test",
