@@ -49,6 +49,32 @@ describe("WavCollector", () => {
 });
 
 describe("BrowserAudioPlayer float input", () => {
+  it("accepts a self-hosted AudioWorklet module URL", async () => {
+    const originalContext = globalThis.AudioContext;
+    const originalNode = globalThis.AudioWorkletNode;
+    let addedModule = "";
+    class FakeNode {
+      port = {onmessage: null, postMessage() {}};
+      connect() { return {connect() {}}; }
+      disconnect() {}
+    }
+    class FakeContext {
+      sampleRate = 48_000; currentTime = 0; destination = {};
+      audioWorklet = {addModule: async (url: string) => { addedModule = url; }};
+      createGain() { return {gain: {setValueAtTime() {}}, connect: () => this.destination, disconnect() {}}; }
+      async resume() {} async suspend() {} async close() {}
+    }
+    Object.assign(globalThis, {AudioContext: FakeContext, AudioWorkletNode: FakeNode});
+    try {
+      const player = new BrowserAudioPlayer({workletModuleUrl: "/assets/qwen-pcm-worklet.js"});
+      await player.start();
+      expect(addedModule).toBe("/assets/qwen-pcm-worklet.js");
+      await player.close();
+    } finally {
+      Object.assign(globalThis, {AudioContext: originalContext, AudioWorkletNode: originalNode});
+    }
+  });
+
   it("accepts bounded PCM float and rejects invalid samples before queueing", async () => {
     const originalContext = globalThis.AudioContext;
     const originalNode = globalThis.AudioWorkletNode;

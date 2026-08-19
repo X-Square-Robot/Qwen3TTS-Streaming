@@ -1,4 +1,5 @@
 import {PlaybackCursorQueue} from "./playback-cursor.js";
+import {PCM_PLAYER_WORKLET_SOURCE} from "./pcm-player-worklet.js";
 import {ContinuousResampler, pcm16ToFloat32} from "./resampler.js";
 
 export interface BrowserAudioPlayerOptions {
@@ -7,6 +8,7 @@ export interface BrowserAudioPlayerOptions {
   onUnderrun?: () => void;
   onError?: (error: Error) => void;
   startupTimeoutMs?: number;
+  workletModuleUrl?: string | URL;
 }
 
 export interface AudioPlayerSnapshot {
@@ -45,15 +47,22 @@ export class BrowserAudioPlayer {
       return;
     }
     const context = new AudioContext();
+    const configuredModule = this.options.workletModuleUrl;
+    const ownedModuleUrl = configuredModule ? "" : URL.createObjectURL(
+      new Blob([PCM_PLAYER_WORKLET_SOURCE], {type: "text/javascript"}),
+    );
+    const moduleUrl = configuredModule?.toString() || ownedModuleUrl;
     try {
       await withTimeout(
-        context.audioWorklet.addModule(new URL("./pcm-player-worklet.js", import.meta.url)),
+        context.audioWorklet.addModule(moduleUrl),
         this.options.startupTimeoutMs ?? 10_000,
         "AudioWorklet startup timed out",
       );
     } catch (error) {
       await context.close();
       throw error;
+    } finally {
+      if (ownedModuleUrl) URL.revokeObjectURL(ownedModuleUrl);
     }
     const node = new AudioWorkletNode(context, "qwen3tts-pcm-player", {
       outputChannelCount: [1],

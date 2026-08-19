@@ -1,23 +1,17 @@
-declare abstract class AudioWorkletProcessor {
-  readonly port: MessagePort;
-  abstract process(inputs: Float32Array[][], outputs: Float32Array[][]): boolean;
-}
-declare function registerProcessor(name: string, processor: typeof AudioWorkletProcessor): void;
-
+export const PCM_PLAYER_WORKLET_SOURCE = String.raw`
 const MAX_QUEUED_FRAMES = 48_000 * 10;
 
 class QwenPcmPlayerProcessor extends AudioWorkletProcessor {
-  private chunks: Float32Array[] = [];
-  private chunkOffset = 0;
-  private queuedFrames = 0;
-  private consumedSinceReport = 0;
-  private paused = false;
-  private underrunReported = false;
-
   constructor() {
     super();
-    this.port.onmessage = (message: MessageEvent) => {
-      const payload = message.data as {type?: string; samples?: ArrayBuffer};
+    this.chunks = [];
+    this.chunkOffset = 0;
+    this.queuedFrames = 0;
+    this.consumedSinceReport = 0;
+    this.paused = false;
+    this.underrunReported = false;
+    this.port.onmessage = (message) => {
+      const payload = message.data;
       if (payload.type === "push" && payload.samples instanceof ArrayBuffer) {
         const samples = new Float32Array(payload.samples);
         if (this.queuedFrames + samples.length > MAX_QUEUED_FRAMES) {
@@ -39,7 +33,7 @@ class QwenPcmPlayerProcessor extends AudioWorkletProcessor {
     };
   }
 
-  process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
+  process(_inputs, outputs) {
     const output = outputs[0]?.[0];
     if (!output || this.paused) return true;
     let outputOffset = 0;
@@ -70,3 +64,4 @@ class QwenPcmPlayerProcessor extends AudioWorkletProcessor {
 }
 
 registerProcessor("qwen3tts-pcm-player", QwenPcmPlayerProcessor);
+`;
