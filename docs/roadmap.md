@@ -2,6 +2,11 @@
 
 # Roadmap
 
+The frontend references below describe the historical v0.1 plan. The former
+standalone WebUI has since been consolidated into the capability-gated built-in
+Demo; current implementation and acceptance are tracked in
+[`demo_browser_sdk_docs_plan.zh-CN.md`](dev/design/demo_browser_sdk_docs_plan.zh-CN.md).
+
 Goal: evolve the current high-performance engineering prototype into a trustworthy, reproducible, collaboration-friendly, high-quality open-source project.
 
 ## v0.1: Engineering Preview
@@ -9,11 +14,11 @@ Goal: evolve the current high-performance engineering prototype into a trustwort
 Scope:
 
 - `custom-1.7b` / `custom_voice` as the only recommended stable path.
-- README, WebUI, and demo API clearly state the engineering preview positioning.
+- README, built-in Demo, and demo API clearly state the engineering preview positioning.
 - Only publish benchmark numbers that carry complete conditions.
 - autorun/build/deploy wire up max batch, max input len, max seq len, dtype, and engine mode.
 - The manifest records the engine profile, and the runtime validates the profile limits before startup.
-- The WebUI supports fixture/live source differentiation and risk notices.
+- The built-in Demo supports live capability gating and risk notices.
 - Complete Chinese documentation.
 
 Exit criteria:
@@ -21,7 +26,7 @@ Exit criteria:
 - `custom-1.7b` passes minimal end-to-end acceptance.
 - Key scripts pass `bash -n`.
 - Python unit tests pass, or blocking reasons are recorded.
-- The WebUI builds.
+- The built-in Demo builds.
 - The README no longer advertises untested paths as stable and ready to use.
 
 ## v0.2: Stability Focus
@@ -48,7 +53,7 @@ Focus:
 - Wire up speaker embedding, ref codes, and ref codec sum vec into the prefill/build plan.
 - Distinguish the request protocols for x-vector clone and ICL clone.
 - Add base/ICL end-to-end tests.
-- Add reference audio upload and ref text input to the WebUI, but still mark it experimental by default.
+- Add reference audio upload and ref text input to the built-in Demo, but still mark it experimental by default.
 
 Exit criteria:
 
@@ -77,13 +82,13 @@ Focus:
 - Optimize the environment-layer/code-layer experience of engine Docker.
 - Add K8s/Helm or production compose examples.
 - Add health checks, rate limiting, logging, metrics, and trace ids.
-- Improve CI: Python unit tests, manifest schema validation, bash syntax, WebUI build.
+- Improve CI: Python unit tests, manifest schema validation, bash syntax, built-in Demo build.
 - Publish versioned artifacts and release notes.
 
 Exit criteria:
 
 - Development no longer requires rebuilding the dependency image for ordinary code changes.
-- CI can block README convention, manifest schema, WebUI type errors, and core unit test regressions.
+- CI can block README convention, manifest schema, Demo type errors, and core unit test regressions.
 
 ## English Documentation
 

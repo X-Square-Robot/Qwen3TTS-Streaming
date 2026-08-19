@@ -42,21 +42,20 @@ curl http://<engine-host>:<ws-port>/v1/capabilities
 ```
 
 **Channel 1 — GitHub/GitLab Release.** Install the wheel attached to the
-matching tag (a private GitLab project requires credentials):
-
-```bash
-pip install "qwen3-tts-client[all] @ https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases/download/v0.1.0/qwen3_tts_client-0.1.0-py3-none-any.whl"
-```
+matching [GitHub Release](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases)
+or GitLab Release (a private project requires credentials). The deployed
+instance's `/demo/#/sdk` page supplies the exact command without a stale
+version or filename in this README.
 
 This fetches the wheel, not a Git checkout. GitLab additionally exposes its
-wheel through the project PyPI index as `qwen3-tts-client==0.1.0`.
+wheel through the project PyPI index using the version reported above.
 
-**Channel 2 — from the engine.** Every release image embeds the already
-published wheel and serves it at `GET /sdk/` on the health port:
+**Channel 2 — from the deployed service.** Every release image embeds the
+already published wheel and serves it at the public `GET /sdk/` endpoint:
 
 ```bash
-curl http://<engine-host>:<health-port>/sdk/      # list the .whl
-pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-none-any.whl
+curl https://<public-service-base>/sdk/      # list the .whl
+pip install "https://<public-service-base>/sdk/<wheel-filename>"
 ```
 
 Each forge's tag pipeline builds its wheel once, publishes it, and downloads

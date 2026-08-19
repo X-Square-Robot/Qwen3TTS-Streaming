@@ -2,6 +2,11 @@
 
 # 路线图
 
+下文前端表述保留 v0.1 的历史阶段语境。原独立 WebUI 已收敛为由 capabilities 门控的
+内置 Demo；当前实现与验收以
+[`demo_browser_sdk_docs_plan.zh-CN.md`](dev/design/demo_browser_sdk_docs_plan.zh-CN.md)
+为准。
+
 目标：把当前高性能工程原型演进为可信、可复现、可协作的高质量开源项目。
 
 ## v0.1: 工程预览版
@@ -9,11 +14,11 @@
 范围：
 
 - `custom-1.7b` / `custom_voice` 作为唯一推荐稳定路径。
-- README、WebUI、demo API 明确工程预览版定位。
+- README、内置 Demo、demo API 明确工程预览版定位。
 - benchmark 只发布带完整条件的数字。
 - autorun/build/deploy 打通 max batch、max input len、max seq len、dtype、engine mode。
 - manifest 记录 engine profile，runtime 启动前校验 profile 上限。
-- WebUI 支持 fixture/live 来源区分和风险提示。
+- 内置 Demo 支持真实能力门控和风险提示。
 - 中文文档齐全。
 
 退出标准：
@@ -21,7 +26,7 @@
 - `custom-1.7b` 完成最小端到端验收。
 - 关键脚本 `bash -n` 通过。
 - Python 单测通过或已记录阻塞原因。
-- WebUI 能构建。
+- 内置 Demo 能构建。
 - README 不再宣传未测通路径为稳定可用。
 
 ## v0.2: 稳定性专项
@@ -48,7 +53,7 @@
 - 打通 speaker embedding、ref codes、ref codec sum vec 到 prefill/build plan。
 - 区分 x-vector clone 和 ICL clone 的请求协议。
 - 增加 base/ICL 端到端测试。
-- WebUI 增加参考音频上传和 ref text 输入，但默认仍标注实验状态。
+- 内置 Demo 增加参考音频上传和 ref text 输入，但默认仍标注实验状态。
 
 退出标准：
 
@@ -77,13 +82,13 @@
 - 优化 engine Docker 的环境层/代码层体验。
 - 补 K8s/Helm 或 production compose 示例。
 - 增加健康检查、限流、日志、metrics、trace id。
-- 完善 CI：Python 单测、manifest schema 校验、bash 语法、WebUI build。
+- 完善 CI：Python 单测、manifest schema 校验、bash 语法、内置 Demo build。
 - 发布版本化 artifact 和 release note。
 
 退出标准：
 
 - 开发期不需要因普通代码改动重建依赖镜像。
-- CI 能阻止 README 口径、manifest schema、WebUI 类型错误和核心单测回归。
+- CI 能阻止 README 口径、manifest schema、Demo 类型错误和核心单测回归。
 
 ## 英文文档
 

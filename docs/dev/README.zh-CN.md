@@ -25,6 +25,7 @@
 | [可观测性目标](design/observability_goals.zh-CN.md) | 可观测性和指标设计目标 |
 | [实时音频流](design/realtime_audio.zh-CN.md) | 实时音频流设计目标 |
 | [流式文本消歧与 Soft Drain](design/incremental_text_normalization_and_soft_drain.zh-CN.md) | 增量 TN、单调提交、WAIT/HOLD、Soft Drain 和状态继承设计 |
+| [内置 Demo、浏览器 SDK 与统一文档建设计划](design/demo_browser_sdk_docs_plan.zh-CN.md) | 实例门户、SDK 相对分发、Browser SDK、单源文档与发布验收计划 |
 
 ## 调查报告
 

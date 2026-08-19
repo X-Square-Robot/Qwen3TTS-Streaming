@@ -21,6 +21,49 @@ permissions:
   contents: read
 
 jobs:
+  build-web-release:
+    runs-on: ubuntu-latest
+    outputs:
+      browser_sdk_version: ${{ steps.web.outputs.browser_sdk_version }}
+      browser_tarball: ${{ steps.web.outputs.browser_tarball }}
+      demo_archive: ${{ steps.web.outputs.demo_archive }}
+      browser_sha256: ${{ steps.web.outputs.browser_sha256 }}
+      demo_sha256: ${{ steps.web.outputs.demo_sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: false
+      - uses: actions/setup-node@1e60f620b9541d8bd359a7c72e207f614cf4c05f # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build and test web release once
+        run: bash scripts/bash/release_web.sh "$GITHUB_REF_NAME"
+      - name: Run cross-browser Demo E2E
+        working-directory: web
+        run: |
+          npx playwright install --with-deps chromium firefox webkit
+          npm run test:e2e
+      - name: Record web artifact metadata
+        id: web
+        shell: bash
+        run: |
+          source web/dist/web-release.env
+          echo "browser_sdk_version=$BROWSER_SDK_SEMVER" >> "$GITHUB_OUTPUT"
+          echo "browser_tarball=$(basename "$(find web/dist -name 'xmultimodalinteraction-qwen3tts-browser-*.tgz' -print)")" >> "$GITHUB_OUTPUT"
+          echo "demo_archive=$(basename "$(find web/dist -name 'qwen3tts-demo-*.tar.gz' -print)")" >> "$GITHUB_OUTPUT"
+          echo "browser_sha256=$(sha256sum "$(find web/dist -name 'xmultimodalinteraction-qwen3tts-browser-*.tgz' -print)" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "demo_sha256=$(sha256sum "$(find web/dist -name 'qwen3tts-demo-*.tar.gz' -print)" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-release-${{ github.ref_name }}
+          path: |
+            web/packages/demo/dist/
+            web/dist/
+          if-no-files-found: error
+          retention-days: 7
+
   build-client-wheel:
     runs-on: ubuntu-latest
     outputs:
@@ -97,7 +140,7 @@ jobs:
           retention-days: 7
 
   publish-client-wheel:
-    needs: build-client-wheel
+    needs: [build-client-wheel, build-web-release]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -106,11 +149,19 @@ jobs:
       GH_REPO: ${{ github.repository }}
       WHEEL_FILENAME: ${{ needs.build-client-wheel.outputs.wheel_filename }}
       WHEEL_SHA256: ${{ needs.build-client-wheel.outputs.wheel_sha256 }}
+      BROWSER_TARBALL: ${{ needs.build-web-release.outputs.browser_tarball }}
+      DEMO_ARCHIVE: ${{ needs.build-web-release.outputs.demo_archive }}
+      BROWSER_SHA256: ${{ needs.build-web-release.outputs.browser_sha256 }}
+      DEMO_SHA256: ${{ needs.build-web-release.outputs.demo_sha256 }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: client-wheel-${{ github.ref_name }}
           path: build/github-client-dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: web-release-${{ github.ref_name }}
+          path: web-release
 
       - name: Publish the wheel to a draft GitHub Release
         shell: bash
@@ -159,11 +210,32 @@ jobs:
             echo "Published GitHub Release wheel checksum does not match the build artifact" >&2
             exit 1
           fi
+          mkdir -p /tmp/verified-web-assets
+          for spec in "$BROWSER_TARBALL|$BROWSER_SHA256" "$DEMO_ARCHIVE|$DEMO_SHA256"; do
+            name="${spec%%|*}"
+            expected="${spec#*|}"
+            asset="web-release/dist/$name"
+            test "$(sha256sum "$asset" | cut -d' ' -f1)" = "$expected"
+            current_assets="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name')"
+            if grep -Fqx "$name" <<<"$current_assets"; then
+              gh release download "$GITHUB_REF_NAME" --pattern "$name" --dir /tmp/verified-web-assets
+              if [[ "$(sha256sum "/tmp/verified-web-assets/$name" | cut -d' ' -f1)" != "$expected" ]]; then
+                echo "GitHub Release already contains different bytes for $name" >&2
+                exit 1
+              fi
+            else
+              gh release upload "$GITHUB_REF_NAME" "$asset"
+            fi
+            rm -f "/tmp/verified-web-assets/$name"
+            gh release download "$GITHUB_REF_NAME" --pattern "$name" --dir /tmp/verified-web-assets
+            test "$(sha256sum "/tmp/verified-web-assets/$name" | cut -d' ' -f1)" = "$expected"
+          done
 
   build-engine-image:
     needs:
       - build-client-wheel
       - publish-client-wheel
+      - build-web-release
     # The NVIDIA PyTorch runtime image exceeds the practical disk budget of a
     # standard 14 GB hosted runner. Point RELEASE_IMAGE_RUNNER at a
     # larger runner label; otherwise use a repository self-hosted runner.
@@ -173,6 +245,7 @@ jobs:
       packages: write
     outputs:
       engine_image: ${{ steps.image.outputs.engine_image }}
+      triton_image: ${{ steps.image.outputs.triton_image }}
     env:
       DOCKER_BUILDKIT: "1"
       GH_TOKEN: ${{ github.token }}
@@ -180,6 +253,11 @@ jobs:
       NGC_API_KEY: ${{ secrets.NGC_API_KEY }}
       WHEEL_FILENAME: ${{ needs.build-client-wheel.outputs.wheel_filename }}
       WHEEL_SHA256: ${{ needs.build-client-wheel.outputs.wheel_sha256 }}
+      BROWSER_SDK_VERSION: ${{ needs.build-web-release.outputs.browser_sdk_version }}
+      BROWSER_TARBALL: ${{ needs.build-web-release.outputs.browser_tarball }}
+      TRITON_BASE_IMAGE: ${{ vars.TRITON_BASE_IMAGE || 'nvcr.io/nvidia/tritonserver:26.02-py3' }}
+      TRITON_TENSORRT_PYTHON_VERSION: ${{ vars.TRITON_TENSORRT_PYTHON_VERSION || '10.15.1.29' }}
+      TRITON_PYTORCH_CUDA_TAG: ${{ vars.TRITON_PYTORCH_CUDA_TAG || 'cu130' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -208,6 +286,18 @@ jobs:
             exit 1
           fi
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: web-release-${{ github.ref_name }}
+          path: web-release
+
+      - name: Stage the prebuilt Demo site
+        shell: bash
+        run: |
+          rm -rf web/packages/demo/dist
+          mkdir -p web/packages/demo/dist
+          cp -a web-release/packages/demo/dist/. web/packages/demo/dist/
+
       - name: Log in to container registries
         shell: bash
         run: |
@@ -216,14 +306,17 @@ jobs:
             echo "$NGC_API_KEY" | docker login nvcr.io --username '$oauthtoken' --password-stdin
           fi
 
-      - name: Build and verify the engine image
+      - name: Build and verify both runtime images
         id: image
         shell: bash
         run: |
           image_repository="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
           engine_image="ghcr.io/${image_repository}:${GITHUB_REF_NAME}"
           engine_cache_image="ghcr.io/${image_repository}:buildcache"
+          triton_image="ghcr.io/${image_repository}-triton:${GITHUB_REF_NAME}"
+          triton_cache_image="ghcr.io/${image_repository}-triton:buildcache"
           echo "engine_image=$engine_image" >> "$GITHUB_OUTPUT"
+          echo "triton_image=$triton_image" >> "$GITHUB_OUTPUT"
 
           docker pull "$engine_cache_image" || true
           docker build --pull \
@@ -235,10 +328,31 @@ jobs:
             --build-arg "ENGINE_VERSION=$GITHUB_REF_NAME" \
             --build-arg "CLIENT_WHEEL_FILENAME=$WHEEL_FILENAME" \
             --build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256" \
+            --build-arg "BROWSER_SDK_VERSION=$BROWSER_SDK_VERSION" \
+            --build-arg "BROWSER_SDK_TARBALL_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$BROWSER_TARBALL" \
             --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --tag "$engine_image" \
             --tag "$engine_cache_image" \
+            .
+
+          docker pull "$triton_cache_image" || true
+          docker build --pull \
+            --file infra/docker/Dockerfile.triton \
+            --cache-from "$triton_cache_image" \
+            --build-arg "BUILDKIT_INLINE_CACHE=1" \
+            --build-arg "BASE_IMAGE=$TRITON_BASE_IMAGE" \
+            --build-arg "TENSORRT_PYTHON_VERSION=$TRITON_TENSORRT_PYTHON_VERSION" \
+            --build-arg "PYTORCH_CUDA_TAG=$TRITON_PYTORCH_CUDA_TAG" \
+            --build-arg "ENGINE_VERSION=$GITHUB_REF_NAME" \
+            --build-arg "CLIENT_WHEEL_FILENAME=$WHEEL_FILENAME" \
+            --build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256" \
+            --build-arg "BROWSER_SDK_VERSION=$BROWSER_SDK_VERSION" \
+            --build-arg "BROWSER_SDK_TARBALL_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$BROWSER_TARBALL" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --tag "$triton_image" \
+            --tag "$triton_cache_image" \
             .
 
           container_id="$(docker create "$engine_image")"
@@ -260,10 +374,36 @@ jobs:
             echo "Engine image wheel labels do not match the verified Release asset" >&2
             exit 1
           fi
+          image_browser_version="$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.browser-sdk.version" }}' "$engine_image")"
+          if [[ "$image_browser_version" != "$BROWSER_SDK_VERSION" ]]; then
+            echo "Engine image browser SDK version does not match the web artifact" >&2
+            exit 1
+          fi
+          docker cp "$container_id:/app/demo/index.html" /tmp/image-demo-index.html
+          test -s /tmp/image-demo-index.html
           docker rm "$container_id" >/dev/null
           trap - EXIT
+          docker run --rm "$engine_image" \
+            python3 -m engine.distribution.container_smoke --runtime standalone
           docker push "$engine_image"
           docker push "$engine_cache_image" || echo "Warning: could not update optional engine build cache" >&2
+
+          container_id="$(docker create "$triton_image")"
+          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+          docker cp "$container_id:/app/sdk/$WHEEL_FILENAME" /tmp/triton-image-client.whl
+          test "$(sha256sum /tmp/triton-image-client.whl | cut -d' ' -f1)" = "$WHEEL_SHA256"
+          test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$triton_image")" = "$GITHUB_REF_NAME"
+          test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.filename" }}' "$triton_image")" = "$WHEEL_FILENAME"
+          test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.sha256" }}' "$triton_image")" = "$WHEEL_SHA256"
+          test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.browser-sdk.version" }}' "$triton_image")" = "$BROWSER_SDK_VERSION"
+          docker cp "$container_id:/app/demo/index.html" /tmp/triton-image-demo-index.html
+          test -s /tmp/triton-image-demo-index.html
+          docker rm "$container_id" >/dev/null
+          trap - EXIT
+          docker run --rm --env PYTHONPATH=/opt/qwen3-tts "$triton_image" \
+            python3 -m engine.distribution.container_smoke --runtime triton
+          docker push "$triton_image"
+          docker push "$triton_cache_image" || echo "Warning: could not update optional Triton build cache" >&2
 
   finalize-release:
     needs:
@@ -278,6 +418,7 @@ jobs:
       WHEEL_FILENAME: ${{ needs.build-client-wheel.outputs.wheel_filename }}
       WHEEL_SHA256: ${{ needs.build-client-wheel.outputs.wheel_sha256 }}
       ENGINE_IMAGE: ${{ needs.build-engine-image.outputs.engine_image }}
+      TRITON_IMAGE: ${{ needs.build-engine-image.outputs.triton_image }}
     steps:
       - name: Publish the verified GitHub Release
         shell: bash
@@ -287,8 +428,8 @@ jobs:
             echo "Expected a draft GitHub Release before finalization: $GITHUB_REF_NAME" >&2
             exit 1
           fi
-          notes="$(printf 'SDK wheel: `%s`\n\nSDK SHA256: `%s`\n\nEngine image: `%s`\n' \
-            "$WHEEL_FILENAME" "$WHEEL_SHA256" "$ENGINE_IMAGE")"
+          notes="$(printf 'SDK wheel: `%s`\n\nSDK SHA256: `%s`\n\nStandalone image: `%s`\n\nTriton image: `%s`\n' \
+            "$WHEEL_FILENAME" "$WHEEL_SHA256" "$ENGINE_IMAGE" "$TRITON_IMAGE")"
           gh release edit "$GITHUB_REF_NAME" \
             --title "Qwen3TTS-Streaming $GITHUB_REF_NAME" \
             --notes "$notes" \

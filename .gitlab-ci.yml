@@ -4,6 +4,7 @@ workflow:
     - when: never
 
 stages:
+  - web-build
   - sdk-build
   - sdk-publish
   - image
@@ -24,10 +25,14 @@ variables:
   # Keep the GitLab production image on the established Driver 580 channel.
   # The NVIDIA PyTorch image already includes matched CUDA and TensorRT.
   ENGINE_BASE_IMAGE: "m.daocloud.io/nvcr.io/nvidia/pytorch:25.10-py3"
+  TRITON_BASE_IMAGE: "m.daocloud.io/nvcr.io/nvidia/tritonserver:26.02-py3"
+  TRITON_TENSORRT_PYTHON_VERSION: "10.15.1.29"
+  TRITON_PYTORCH_CUDA_TAG: "cu130"
   RUNNER_PYTHON_IMAGE: "m.daocloud.io/docker.io/library/python:3.11-slim"
   RUNNER_DOCKER_CLI_IMAGE: "m.daocloud.io/docker.io/library/docker:27.4.1-cli"
   RUNNER_DOCKER_DIND_IMAGE: "m.daocloud.io/docker.io/library/docker:27.4.1-dind"
   RUNNER_GLAB_IMAGE: "m.daocloud.io/registry.gitlab.com/gitlab-org/cli:v1.112.0"
+  RUNNER_NODE_IMAGE: "m.daocloud.io/docker.io/library/node:22-bookworm-slim"
   DEBIAN_MIRROR: "https://mirrors.bfsu.edu.cn/debian"
   DEBIAN_SECURITY_MIRROR: "https://mirrors.bfsu.edu.cn/debian-security"
   ALPINE_MIRROR: "https://mirrors.bfsu.edu.cn/alpine"
@@ -43,6 +48,54 @@ variables:
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$/'
   interruptible: false
+
+build-web-release:
+  extends: .tag-release-job
+  stage: web-build
+  image: "$RUNNER_NODE_IMAGE"
+  script:
+    - bash scripts/bash/release_web.sh "$CI_COMMIT_TAG"
+    - npm --prefix web exec -- playwright install --with-deps chromium firefox webkit
+    - npm --prefix web run test:e2e
+    - |
+      browser_tgz="$(find web/dist -maxdepth 1 -type f -name 'xmultimodalinteraction-qwen3tts-browser-*.tgz' -print)"
+      demo_archive="$(find web/dist -maxdepth 1 -type f -name 'qwen3tts-demo-*.tar.gz' -print)"
+      test -n "$browser_tgz" && test -n "$demo_archive"
+      browser_sha256="$(sha256sum "$browser_tgz" | cut -d' ' -f1)"
+      demo_sha256="$(sha256sum "$demo_archive" | cut -d' ' -f1)"
+      printf 'BROWSER_SDK_TARBALL=%s\nBROWSER_SDK_SHA256=%s\nDEMO_ARCHIVE=%s\nDEMO_ARCHIVE_SHA256=%s\n' \
+        "$(basename "$browser_tgz")" "$browser_sha256" "$(basename "$demo_archive")" "$demo_sha256" \
+        >> web/dist/web-release.env
+  artifacts:
+    expire_in: 7 days
+    paths:
+      - web/packages/demo/dist/
+      - web/packages/browser-sdk/dist/
+      - web/dist/
+    reports:
+      dotenv: web/dist/web-release.env
+
+publish-browser-sdk:
+  extends: .tag-release-job
+  stage: sdk-publish
+  image: "$RUNNER_NODE_IMAGE"
+  needs:
+    - job: build-web-release
+      artifacts: true
+  variables:
+    GIT_STRATEGY: clone
+  script:
+    - |
+      npm config set "@xmultimodalinteraction:registry" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/npm/"
+      npm config set -- "//${CI_SERVER_HOST}/api/v4/projects/${CI_PROJECT_ID}/packages/npm/:_authToken" "$CI_JOB_TOKEN"
+      npm publish "web/dist/$BROWSER_SDK_TARBALL" --access public --tag "$BROWSER_SDK_DIST_TAG"
+      node web/scripts/publish-gitlab-assets.mjs
+  artifacts:
+    expire_in: 7 days
+    paths:
+      - web/dist/published-web.env
+    reports:
+      dotenv: web/dist/published-web.env
 
 build-client-wheel:
   extends: .tag-release-job
@@ -200,6 +253,10 @@ build-engine-image:
   needs:
     - job: publish-client-wheel
       artifacts: true
+    - job: build-web-release
+      artifacts: true
+    - job: publish-browser-sdk
+      artifacts: true
   variables:
     GIT_STRATEGY: clone
     GIT_DEPTH: "1"
@@ -217,7 +274,10 @@ build-engine-image:
       }
       ENGINE_RELEASE_IMAGE="${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}${CI_COMMIT_TAG}"
       ENGINE_BUILD_CACHE_IMAGE="${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}buildcache"
-      export ENGINE_RELEASE_IMAGE ENGINE_BUILD_CACHE_IMAGE
+      TRITON_IMAGE_REPOSITORY="${X2ROBOT_TRITON_IMAGE:-${X2ROBOT_IMAGE}-triton}"
+      TRITON_RELEASE_IMAGE="${TRITON_IMAGE_REPOSITORY}:${X2ROBOT_IMAGE_TAG_PREFIX}${CI_COMMIT_TAG}"
+      TRITON_BUILD_CACHE_IMAGE="${TRITON_IMAGE_REPOSITORY}:${X2ROBOT_IMAGE_TAG_PREFIX}buildcache"
+      export ENGINE_RELEASE_IMAGE ENGINE_BUILD_CACHE_IMAGE TRITON_RELEASE_IMAGE TRITON_BUILD_CACHE_IMAGE
       printf '%s\n' "$X2ROBOT_REGISTRY_PASSWORD" | docker login \
         --username "$X2ROBOT_REGISTRY_USER" \
         --password-stdin "$X2ROBOT_REGISTRY"
@@ -256,10 +316,33 @@ build-engine-image:
         --build-arg "ENGINE_VERSION=$CI_COMMIT_TAG" \
         --build-arg "CLIENT_WHEEL_FILENAME=$WHEEL_FILENAME" \
         --build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256" \
+        --build-arg "BROWSER_SDK_VERSION=$BROWSER_SDK_SEMVER" \
+        --build-arg "BROWSER_SDK_REGISTRY_URL=${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/npm/" \
+        --build-arg "BROWSER_SDK_TARBALL_URL=$BROWSER_SDK_GENERIC_URL" \
         --label "org.opencontainers.image.source=$CI_PROJECT_URL" \
         --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
         --tag "$ENGINE_RELEASE_IMAGE" \
         --tag "$ENGINE_BUILD_CACHE_IMAGE" \
+        .
+    - |
+      docker pull "$TRITON_BUILD_CACHE_IMAGE" || true
+      docker build --pull \
+        --file infra/docker/Dockerfile.triton \
+        --cache-from "$TRITON_BUILD_CACHE_IMAGE" \
+        --build-arg "BUILDKIT_INLINE_CACHE=1" \
+        --build-arg "BASE_IMAGE=$TRITON_BASE_IMAGE" \
+        --build-arg "TENSORRT_PYTHON_VERSION=$TRITON_TENSORRT_PYTHON_VERSION" \
+        --build-arg "PYTORCH_CUDA_TAG=$TRITON_PYTORCH_CUDA_TAG" \
+        --build-arg "ENGINE_VERSION=$CI_COMMIT_TAG" \
+        --build-arg "CLIENT_WHEEL_FILENAME=$WHEEL_FILENAME" \
+        --build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256" \
+        --build-arg "BROWSER_SDK_VERSION=$BROWSER_SDK_SEMVER" \
+        --build-arg "BROWSER_SDK_REGISTRY_URL=${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/npm/" \
+        --build-arg "BROWSER_SDK_TARBALL_URL=$BROWSER_SDK_GENERIC_URL" \
+        --label "org.opencontainers.image.source=$CI_PROJECT_URL" \
+        --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
+        --tag "$TRITON_RELEASE_IMAGE" \
+        --tag "$TRITON_BUILD_CACHE_IMAGE" \
         .
     - |
       container_id="$(docker create "$ENGINE_RELEASE_IMAGE")"
@@ -281,11 +364,37 @@ build-engine-image:
         echo "Engine image wheel labels do not match the verified Registry artifact" >&2
         exit 1
       fi
+      image_browser_version="$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.browser-sdk.version" }}' "$ENGINE_RELEASE_IMAGE")"
+      if [ "$image_browser_version" != "$BROWSER_SDK_SEMVER" ]; then
+        echo "Engine image browser SDK version does not match the web artifact" >&2
+        exit 1
+      fi
+      docker cp "$container_id:/app/demo/index.html" /tmp/engine-image-demo-index.html
+      test -s /tmp/engine-image-demo-index.html
       docker rm "$container_id" >/dev/null
       trap - EXIT
+      docker run --rm "$ENGINE_RELEASE_IMAGE" \
+        python3 -m engine.distribution.container_smoke --runtime standalone
+    - |
+      container_id="$(docker create "$TRITON_RELEASE_IMAGE")"
+      trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+      docker cp "$container_id:/app/sdk/$WHEEL_FILENAME" /tmp/triton-image-client.whl
+      test "$(sha256sum /tmp/triton-image-client.whl | cut -d' ' -f1)" = "$WHEEL_SHA256"
+      test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$TRITON_RELEASE_IMAGE")" = "$CI_COMMIT_TAG"
+      test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.filename" }}' "$TRITON_RELEASE_IMAGE")" = "$WHEEL_FILENAME"
+      test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.sha256" }}' "$TRITON_RELEASE_IMAGE")" = "$WHEEL_SHA256"
+      test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.browser-sdk.version" }}' "$TRITON_RELEASE_IMAGE")" = "$BROWSER_SDK_SEMVER"
+      docker cp "$container_id:/app/demo/index.html" /tmp/triton-image-demo-index.html
+      test -s /tmp/triton-image-demo-index.html
+      docker rm "$container_id" >/dev/null
+      trap - EXIT
+      docker run --rm --env PYTHONPATH=/opt/qwen3-tts "$TRITON_RELEASE_IMAGE" \
+        python3 -m engine.distribution.container_smoke --runtime triton
     - docker push "$ENGINE_RELEASE_IMAGE"
+    - docker push "$TRITON_RELEASE_IMAGE"
     - |
       docker push "$ENGINE_BUILD_CACHE_IMAGE" || echo "Warning: could not update optional engine build cache" >&2
+      docker push "$TRITON_BUILD_CACHE_IMAGE" || echo "Warning: could not update optional Triton build cache" >&2
 
 create-release:
   extends: .tag-release-job
@@ -296,13 +405,17 @@ create-release:
       artifacts: true
     - job: build-engine-image
       artifacts: false
+    - job: publish-browser-sdk
+      artifacts: true
   variables:
     GIT_STRATEGY: none
     GLAB_ENABLE_CI_AUTOLOGIN: "true"
   before_script:
     - |
       ENGINE_RELEASE_IMAGE="${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}${CI_COMMIT_TAG}"
-      export ENGINE_RELEASE_IMAGE
+      TRITON_IMAGE_REPOSITORY="${X2ROBOT_TRITON_IMAGE:-${X2ROBOT_IMAGE}-triton}"
+      TRITON_RELEASE_IMAGE="${TRITON_IMAGE_REPOSITORY}:${X2ROBOT_IMAGE_TAG_PREFIX}${CI_COMMIT_TAG}"
+      export ENGINE_RELEASE_IMAGE TRITON_RELEASE_IMAGE
       case "$CI_SERVER_PROTOCOL" in
         http|https) ;;
         *)
@@ -314,8 +427,8 @@ create-release:
       glab api --hostname "$CI_SERVER_FQDN" job --silent
   script:
     - |
-      notes="$(printf 'SDK wheel: `%s`\n\nSDK SHA256: `%s`\n\nEngine image: `%s`\n' \
-        "$WHEEL_FILENAME" "$WHEEL_SHA256" "$ENGINE_RELEASE_IMAGE")"
+      notes="$(printf 'SDK wheel: `%s`\n\nSDK SHA256: `%s`\n\nStandalone image: `%s`\n\nTriton image: `%s`\n' \
+        "$WHEEL_FILENAME" "$WHEEL_SHA256" "$ENGINE_RELEASE_IMAGE" "$TRITON_RELEASE_IMAGE")"
       glab release create "$CI_COMMIT_TAG" \
         --repo "$CI_PROJECT_PATH" \
         --ref "$CI_COMMIT_SHA" \
@@ -359,3 +472,49 @@ create-release:
         echo "Existing GitLab Release asset does not match the published wheel" >&2
         exit 1
       fi
+      for spec in "$BROWSER_SDK_TARBALL|$BROWSER_SDK_GENERIC_URL|/browser-sdk/$BROWSER_SDK_TARBALL" \
+                  "$DEMO_ARCHIVE|$DEMO_ARCHIVE_URL|/demo/$DEMO_ARCHIVE"; do
+        name="${spec%%|*}"
+        rest="${spec#*|}"
+        url="${rest%%|*}"
+        direct_path="${rest#*|}"
+        links_json="$(glab api --hostname "$CI_SERVER_FQDN" "$links_endpoint")"
+        matches="$(printf '%s' "$links_json" | jq --arg name "$name" --arg url "$url" \
+          '[.[] | select(.name == $name or .url == $url)]')"
+        case "$(printf '%s' "$matches" | jq 'length')" in
+          0)
+            link="$(glab api --hostname "$CI_SERVER_FQDN" --method POST "$links_endpoint" \
+              --raw-field "name=$name" --raw-field "url=$url" \
+              --raw-field "direct_asset_path=$direct_path" --raw-field "link_type=package")"
+            ;;
+          1) link="$(printf '%s' "$matches" | jq '.[0]')" ;;
+          *) echo "Release has conflicting asset links for $name" >&2; exit 1 ;;
+        esac
+        expected_direct_url="${CI_PROJECT_URL}/-/releases/${CI_COMMIT_TAG}/downloads${direct_path}"
+        if [ "$(printf '%s' "$link" | jq -r '.name')" != "$name" ] || \
+           [ "$(printf '%s' "$link" | jq -r '.url')" != "$url" ] || \
+           [ "$(printf '%s' "$link" | jq -r '.direct_asset_url')" != "$expected_direct_url" ] || \
+           [ "$(printf '%s' "$link" | jq -r '.link_type')" != "package" ]; then
+          echo "Existing GitLab Release asset does not match $name" >&2
+          exit 1
+        fi
+      done
+
+pages:
+  extends: .tag-release-job
+  stage: release
+  image: "$RUNNER_NODE_IMAGE"
+  needs:
+    - job: build-web-release
+      artifacts: true
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - mkdir -p public/demo
+    - cp -a web/packages/demo/dist/. public/demo/
+    - printf '<!doctype html><meta http-equiv="refresh" content="0;url=./demo/#/docs/overview-zh">' > public/index.html
+  environment:
+    name: documentation
+    url: $CI_PAGES_URL/demo/#/docs/overview-zh
+  artifacts:
+    paths: [public]

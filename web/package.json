@@ -1,0 +1,30 @@
+{
+  "name": "qwen3tts-web-workspace",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run scripts && npm run test --workspaces --if-present",
+    "lint": "eslint .",
+    "test:e2e": "playwright test",
+    "pack:browser": "node scripts/pack-browser-sdk.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.1",
+    "eslint": "^9.39.1",
+    "markdown-it": "^14.1.0",
+    "markdown-it-anchor": "^9.2.0",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.46.3",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

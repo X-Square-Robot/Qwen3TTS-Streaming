@@ -1,0 +1,25 @@
+{
+  "name": "@xmultimodalinteraction/qwen3tts-demo",
+  "version": "0.0.0-dev.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "node ../../scripts/build-docs.mjs && rimraf dist && tsc -p tsconfig.json --noEmit && vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@xmultimodalinteraction/qwen3tts-browser": "0.0.0-dev.0",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^5.0.4",
+    "vite": "^7.3.6"
+  },
+  "engines": {"node": ">=22"}
+}

@@ -43,6 +43,7 @@ from .vad import (
     VADMode,
     create_vad_processor,
     vad_config_from_dict,
+    tenvad_available,
     EnergyVADProcessor,
     TenVADProcessor,
     DisabledVADProcessor,
@@ -88,4 +89,5 @@ __all__ = (
     "to_core_output_policy",
     "to_core_timing_context",
     "vad_config_from_dict",
+    "tenvad_available",
 )

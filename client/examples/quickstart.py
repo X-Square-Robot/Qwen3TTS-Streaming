@@ -6,8 +6,8 @@ See the repo README for how to start one.
     pip install "qwen3-tts-client @ <matching-github-or-gitlab-release-wheel-url>"
     python quickstart.py [endpoint]
 
-Use the tag in the engine's ``capabilities.engine_version``; the engine also
-serves the matching wheel at GET /sdk/ on the health port.
+Use the tag in the engine's ``capabilities.engine_version``; the deployed
+service also serves the matching wheel at its public GET /sdk/ endpoint.
 
 Default endpoint: ws://localhost:50052/v1/realtime  (OpenAI Realtime)
 Other examples: ws://localhost:50053/v1/realtime (Triton sidecar),
@@ -22,9 +22,7 @@ import wave
 
 from qwen3tts import TTSClient, SynthesisConfig
 
-ENDPOINT = (
-    sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:50052/v1/realtime"
-)
+ENDPOINT = sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:50052/v1/realtime"
 TEXT = "你好，欢迎使用 Qwen3-TTS。"
 OUT = "quickstart.wav"
 

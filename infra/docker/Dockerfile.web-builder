@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1.7
+
+# Reproducible local builder for the embedded Demo and Browser SDK. Release
+# pipelines use the same Node major and publish their already-built artifacts;
+# runtime images only COPY the output and never contain Node/npm.
+ARG NODE_IMAGE=node:22-bookworm-slim
+FROM ${NODE_IMAGE} AS web-builder
+
+WORKDIR /repo
+COPY web/package.json web/package-lock.json web/
+COPY web/packages/browser-sdk/package.json web/packages/browser-sdk/
+COPY web/packages/demo/package.json web/packages/demo/
+RUN --mount=type=cache,target=/root/.npm npm --prefix web ci
+
+# Documentation link validation intentionally walks beyond the selected source
+# files (for example LICENSE, pyproject.toml, images and linked architecture
+# pages), so copy the repository context. .dockerignore excludes models,
+# workspaces, VCS data and local node_modules.
+COPY . .
+
+RUN npm --prefix web run build \
+    && install -d /out/demo /out/browser-sdk /out/metadata \
+    && cp -a web/packages/demo/dist/. /out/demo/ \
+    && cp -a web/packages/browser-sdk/dist/. /out/browser-sdk/ \
+    && node -p "require('./web/packages/browser-sdk/package.json').version" \
+       > /out/metadata/browser-sdk-version.txt
+
+FROM scratch AS web-artifacts
+COPY --from=web-builder /out/ /

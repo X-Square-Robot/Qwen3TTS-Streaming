@@ -7,9 +7,8 @@ env:
   PIP_RETRIES: "10"
   PYTORCH_CPU_INDEX: ${{ vars.PYTORCH_CPU_INDEX || 'https://mirrors.nju.edu.cn/pytorch/whl/cpu' }}
 
-# Initial CI scaffold: lint + proto-sync check + CPU unit tests.
-# GPU / Docker / e2e tests are excluded (require hardware + model artifacts).
-# Maintainers: verify dependency install on first run and tune as needed.
+# CPU CI covers Python, Browser SDK, the built Demo, and mock Realtime E2E.
+# GPU/model-dependent live synthesis remains a release-environment smoke test.
 
 on:
   push:
@@ -18,6 +17,32 @@ on:
     branches: [main]
 
 jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run typecheck
+        working-directory: web
+      - run: npm run lint
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - run: npx playwright install --with-deps chromium firefox webkit
+        working-directory: web
+      - run: npm run test:e2e
+        working-directory: web
+      - run: npm run pack:browser
+        working-directory: web
+
   lint:
     runs-on: ubuntu-latest
     steps:

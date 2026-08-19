@@ -59,13 +59,14 @@ from .runtime.fingerprint import (
 from .core.mlfq import MLFQConfig
 from .core import observability as obs
 from .core.types import SessionConfig
-from .interface import normalize_capabilities
+from .interface import normalize_capabilities, tenvad_available
 from .frontend.interface import FrontendInterface
 from .frontend.spliter.tokenizer import LightQwen3TTSTokenizer
 from .backend.engine_loop import EngineLoop
 from .backend.executor import Executor
 from .backend.prefill import EmbeddingWeights, PrefillBuilder
 from .backend.ref_audio_processor import ReferenceAudioProcessor
+from .distribution.sdk import mount_sdk_routes
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,11 @@ class TTSEngine:
         self._relay_task: Optional[asyncio.Task] = None
         self._ref_audio_processor: Optional[ReferenceAudioProcessor] = None
         self._default_base_ref_audio: Optional[bytes] = None
+        # Populated from the actual embedding package during start().  Keeping
+        # these empty before weights load makes capability discovery fail
+        # closed instead of advertising names inferred from config or docs.
+        self._supported_speakers: tuple[str, ...] = ()
+        self._supported_languages: tuple[str, ...] = ()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -345,6 +351,15 @@ class TTSEngine:
                         f"for variant '{self._model_arch.variant}': the loaded weights and "
                         "triton_manifest.json describe different models — re-export/rebuild."
                     )
+                self._supported_speakers = tuple(sorted(emb_weights.spk_id_map))
+                self._supported_languages = (
+                    "auto",
+                    *sorted(
+                        language
+                        for language in emb_weights.codec_language_id
+                        if language != "auto"
+                    ),
+                )
                 self._executor.set_embedding_weights(emb_weights)
                 prefill_builder = PrefillBuilder(
                     emb_weights,
@@ -611,6 +626,13 @@ class TTSEngine:
                     "full_text",
                 ],
                 "supported_group_policies": ["none", "auto"],
+                "supported_speakers": list(self._supported_speakers),
+                "supported_languages": list(self._supported_languages),
+                "supported_vad_strategies": [
+                    "disabled",
+                    "energy",
+                    *(["tenvad"] if tenvad_available() else []),
+                ],
                 "supported_audio_formats": [
                     {"encoding": "pcm_f32", "sample_rate": 24000, "channels": 1},
                     {"encoding": "pcm_f32", "sample_rate": 16000, "channels": 1},
@@ -681,7 +703,14 @@ class TTSEngine:
         requested = (config.task_type or "").strip()
 
         if loaded_model_type != "unknown":
-            if requested and requested != loaded_model_type:
+            compatible_public_voice_clone = (
+                loaded_model_type == "icl" and requested == "voice_clone"
+            )
+            if (
+                requested
+                and requested != loaded_model_type
+                and not compatible_public_voice_clone
+            ):
                 raise ValueError(
                     f"standalone engine has loaded model_type '{loaded_model_type}', "
                     f"but client requested task_type '{requested}'. "
@@ -1602,20 +1631,11 @@ class HealthState:
 
 
 def add_sdk_route(app) -> None:
-    """Serve the bundled client SDK wheel(s) at GET /sdk/ (aiohttp only).
-
-    The engine image bakes the wheel built from the same checkout into
-    ENGINE_SDK_DIR (default /app/sdk, see Dockerfile.engine); handing it out
-    from the service itself guarantees a caller always gets the SDK version
-    matching this engine. No-op when the directory is absent (source-tree
-    runs) — and never fatal, a broken SDK mount must not take down probes.
-    """
-    sdk_dir = os.environ.get("ENGINE_SDK_DIR", "/app/sdk")
+    """Backward-compatible bootstrap wrapper for the shared SDK distributor."""
     try:
-        if os.path.isdir(sdk_dir):
-            app.router.add_static("/sdk", sdk_dir, show_index=True)
+        mount_sdk_routes(app)
     except Exception:
-        logger.exception("Failed to mount /sdk static route (dir=%s)", sdk_dir)
+        logger.exception("Failed to mount /sdk distribution routes")
 
 
 class HealthServerThread:

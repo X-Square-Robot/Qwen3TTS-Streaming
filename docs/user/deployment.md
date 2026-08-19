@@ -428,24 +428,48 @@ Only the log file for the selected gateway is present. Container-local logs are
 lost when the container is deleted; mount `QWEN_LOG_DIR` on persistent storage
 if logs must survive container replacement.
 
-## WebUI
+## Built-in Demo and documentation
 
-Run locally:
-
-```bash
-python -m demo_api --host 0.0.0.0 --port 7860
-
-cd webui
-npm install
-npm run dev
-```
-
-Run with Compose:
+The release image already contains the version-matched product Demo, Browser
+SDK, Python wheel index, and selected Markdown documentation. Enable it on the
+same public endpoint as Realtime; no separate Demo API or Node process is used:
 
 ```bash
-bash scripts/bash/autorun.sh deploy --gateway triton -m custom-1.7b
-docker compose --profile demo up --build demo-api webui
+DEMO_ENABLED=true bash scripts/bash/compose.sh up --build \
+  --gateway engine --variant custom-1.7b
+# Open http://localhost:50052/demo/
 ```
+
+For Triton, replace `--gateway engine` with `--gateway triton` and open
+`http://localhost:50053/demo/`. The portal uses relative URLs, so a deployment
+below `/infer/<instance>` keeps that prefix for Demo assets, `/sdk/`,
+`/v1/capabilities`, and `/v1/realtime`. Keep `DEMO_ENABLED` unset or false when
+the portal must not be public; `/demo/` then returns 404.
+
+`demo_api` remains an optional engineering backend for detailed traces; the
+repository no longer carries a second WebUI. LLM PK, concurrency, and traces
+are entered through the single `/demo/#/lab` portal. Enable Compose profile
+`demo` and publish its URL through `DEMO_LAB_URL` only when those tools are needed.
+
+### Public gateway security boundary
+
+The portal does not implement a second login system and never asks the browser
+to enter or persist a long-lived API key. A public deployment must protect
+`/demo`, `/sdk`, and `/v1/*` behind the same reverse proxy and must:
+
+- preserve the complete instance path prefix and WebSocket upgrade headers;
+- enforce an explicit same-origin/allowlist check on WebSocket `Origin`;
+- authenticate the user/tenant before upgrade and enforce tenant concurrency,
+  request-rate, and usage quotas;
+- bound text, reference-audio, and WebSocket message sizes, never exceeding the
+  reference limit advertised by `/v1/capabilities`;
+- configure handshake, idle, per-response, and connection-lifetime timeouts and
+  cap total connections; and
+- avoid caching `config.json` or tenant-bearing responses, and never log text,
+  reference audio, or credentials.
+
+For a cross-origin `DEMO_LAB_URL`, restrict `QWEN_DEMO_CORS_ORIGIN` to the exact
+portal Origin; do not retain the default `*` in production.
 
 ## FAQ
 
@@ -474,10 +498,10 @@ If Triton reports errors like `TYPE_FP32` / `TYPE_BF16`, make sure:
 
 The TensorRT plan is tightly bound to the runtime version. After switching the TensorRT/NGC image, you need to rebuild the engine.
 
-### WebUI shows fixture fallback
+### The built-in portal does not show the Lab entry
 
-This indicates that live Triton or live engine is currently unreachable. Check:
+The portal shows Lab only when `lab_available=true` and `demo_api /healthz` is reachable. Check:
 
 - Whether the Triton gRPC port is `localhost:8001`.
 - Whether the demo API's `QWEN_DEMO_TRITON_GRPC` is correct.
-- Whether the standalone engine WebSocket is `localhost:50052`.
+- Whether the runtime publishes a browser-reachable `DEMO_LAB_URL`.

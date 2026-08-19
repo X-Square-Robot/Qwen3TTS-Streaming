@@ -53,16 +53,41 @@ print(f'grpcio {grpc.__version__}, pyyaml {yaml.__version__}, numpy {numpy.__ver
 
 FROM triton-deps AS triton-runtime
 
-ENV QWEN_LOG_DIR=/var/log/qwen3tts \
+ARG ENGINE_VERSION=""
+ARG CLIENT_WHEEL_FILENAME=""
+ARG CLIENT_WHEEL_SHA256=""
+ARG BROWSER_SDK_VERSION=""
+ARG BROWSER_SDK_REGISTRY_URL=""
+ARG BROWSER_SDK_TARBALL_URL=""
+ENV ENGINE_VERSION=${ENGINE_VERSION} \
+    BROWSER_SDK_VERSION=${BROWSER_SDK_VERSION} \
+    BROWSER_SDK_REGISTRY_URL=${BROWSER_SDK_REGISTRY_URL} \
+    BROWSER_SDK_TARBALL_URL=${BROWSER_SDK_TARBALL_URL} \
+    DEMO_SITE_DIR=/app/demo \
+    QWEN_LOG_DIR=/var/log/qwen3tts \
     QWEN_LOG_MAX_BYTES=52428800 \
     QWEN_LOG_BACKUP_COUNT=10 \
     QWEN_LOG_STDOUT=1
+LABEL org.opencontainers.image.version=${ENGINE_VERSION} \
+      io.qwen3tts.client-wheel.filename=${CLIENT_WHEEL_FILENAME} \
+      io.qwen3tts.client-wheel.sha256=${CLIENT_WHEEL_SHA256} \
+      io.qwen3tts.browser-sdk.version=${BROWSER_SDK_VERSION}
 
 RUN install -d /opt/qwen3tts/bin /var/log/qwen3tts
 
 COPY engine/ /opt/qwen3-tts/engine/
 COPY client/src/qwen3tts_protocol/ /opt/qwen3-tts/qwen3tts_protocol/
 COPY scripts/compose/rotating_log_runner.py /opt/qwen3tts/bin/rotating_log_runner.py
+RUN install -d /app/sdk && rm -f /app/sdk/*.whl
+COPY client/dist/ /app/sdk/
+COPY web/packages/demo/dist/ /app/demo/
+RUN if [ -n "${CLIENT_WHEEL_FILENAME}" ] || [ -n "${CLIENT_WHEEL_SHA256}" ]; then \
+        test -n "${CLIENT_WHEEL_FILENAME}" && \
+        test -n "${CLIENT_WHEEL_SHA256}" && \
+        test "$(find /app/sdk -maxdepth 1 -type f -name 'qwen3_tts_client-*.whl' | wc -l)" -eq 1 && \
+        test -f "/app/sdk/${CLIENT_WHEEL_FILENAME}" && \
+        printf '%s  %s\n' "${CLIENT_WHEEL_SHA256}" "/app/sdk/${CLIENT_WHEEL_FILENAME}" | sha256sum -c -; \
+    fi
 
 # Preserve the NGC image's NVIDIA entrypoint and make a bare `docker run`
 # capture Triton plus Python-backend output into the in-container log ring.

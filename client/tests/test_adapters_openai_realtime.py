@@ -4,6 +4,7 @@ import base64
 import json
 import queue
 import socket
+from pathlib import Path
 
 import pytest
 import qwen3tts._adapters.openai_realtime as realtime_module
@@ -15,6 +16,7 @@ from qwen3tts_protocol import (
     AudioFormat,
     SessionStartRequest,
     SynthesisConfig,
+    TimingContext,
 )
 
 
@@ -176,6 +178,73 @@ def test_oneshot_uses_standard_realtime_events_and_returns_usage(monkeypatch):
     item = connection.sent[1]["item"]
     assert item["content"] == [{"type": "input_text", "text": "你好"}]
     assert connection.closed is True
+
+
+def test_python_sdk_matches_browser_golden_session_core():
+    golden = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "protocol/contracts/golden/realtime-session-core.json"
+        ).read_text()
+    )
+    request = SessionStartRequest(
+        session_id="golden",
+        config=SynthesisConfig(
+            task_type="custom_voice",
+            speaker="Serena",
+            input_mode="full_text",
+            audio=AudioFormat(encoding="pcm_s16le", sample_rate=24000, channels=1),
+            timing_context=TimingContext(
+                request_id="golden-request", client_request_ts_ms=123456
+            ),
+        ),
+    )
+    session = realtime_module._session_update(request, "custom-1.7b")["session"]
+    assert {
+        "model": session["model"],
+        "task_type": session["qwen"]["task_type"],
+        "speaker": session["audio"]["output"]["voice"],
+        "input_mode": session["qwen"]["input_mode"],
+        "sample_rate": session["audio"]["output"]["format"]["rate"],
+        "audio_format": session["audio"]["output"]["format"]["type"],
+        "vad_enabled": session["qwen"]["output_policy"]["vad_policy"]["enabled"],
+        "vad_strategy": session["qwen"]["output_policy"]["vad_policy"]["strategy"],
+        "delivery": session["qwen"]["output_policy"]["config"].get(
+            "delivery", "guarded"
+        ),
+        "request_id": session["qwen"]["timing"]["request_id"],
+        "client_request_ts_ms": session["qwen"]["timing"][
+            "client_request_ts_ms"
+        ],
+    } == golden
+
+
+def test_python_realtime_session_update_validates_against_shared_json_schema():
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "protocol/contracts/realtime-business.schema.json"
+        ).read_text()
+    )
+    request = SessionStartRequest(
+        session_id="schema",
+        config=SynthesisConfig(
+            task_type="custom_voice",
+            input_mode="full_text",
+            audio=AudioFormat(encoding="pcm_s16le", sample_rate=24000, channels=1),
+        ),
+    )
+    jsonschema.validate(realtime_module._session_update(request, "custom-1.7b"), schema)
+    jsonschema.validate(
+        {"type": "qwen.input_text_buffer.append", "sequence": 1, "text": "你好"},
+        schema,
+    )
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            {"type": "qwen.input_text_buffer.append", "sequence": 0, "text": ""},
+            schema,
+        )
 
 
 def test_streaming_requires_advertised_text_buffer_extension(monkeypatch):

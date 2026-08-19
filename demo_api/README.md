@@ -2,15 +2,15 @@
 
 # demo_api
 
-WebUI demo API service for Qwen3TTS-Streaming.
+Optional engineering-lab API for the built-in Qwen3TTS-Streaming portal.
 
 ## Overview
 
-demo_api provides the backend endpoints for the three core demo panels of the frontend WebUI:
+demo_api provides optional deep-engineering endpoints for `/demo/#/lab`; normal playback does not depend on it:
 
 | Panel | Description |
 |------|------|
-| **Text Player** | Real-time streaming TTS playback; WebSocket pushes audio and events token by token |
+| **TRT live trace** | WebSocket delivery of Triton audio and decode events |
 | **LLM PK** | Streaming vs. offline side-by-side comparison, quantifying the difference in first-packet latency and total time |
 | **Concurrency** | Concurrency stress test, supporting real Triton requests or simulated mode, with real-time progress reporting |
 
@@ -43,7 +43,7 @@ Optional arguments: `--host`, `--port`.
 bash scripts/demo/start_webui_demo.sh
 ```
 
-This script automatically brings up Triton, demo_api, and the Vite WebUI — ready to use out of the box.
+This compatibility launcher starts Triton and demo_api, then points to the runtime's single built-in product portal; it does not start a second Vite application.
 It supports options such as `--variant`, `--triton-slots`, `--no-triton`, and `--simulated-concurrency`.
 
 ## Environment Variables

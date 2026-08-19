@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://x2robot.com/qwen3tts/contracts/capabilities.v1.schema.json",
+  "title": "Qwen3-TTS capabilities v1",
+  "type": "object",
+  "required": ["schema_version", "runtime", "protocols", "tasks", "task_status", "audio_formats", "limits", "output_policy", "reference"],
+  "properties": {
+    "schema_version": {"const": "qwen.tts.capabilities.v1"},
+    "runtime": {
+      "type": "object",
+      "required": ["type", "backend"],
+      "properties": {
+        "type": {"enum": ["standalone", "triton"]},
+        "backend": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "protocols": {
+      "type": "object",
+      "required": ["native_websocket", "openai_realtime"],
+      "properties": {
+        "native_websocket": {
+          "type": "object",
+          "required": ["path", "current", "supported", "features", "audio_formats"],
+          "properties": {
+            "path": {"type": "string"},
+            "current": {"const": "tts-session-v2alpha1"},
+            "supported": {"type": "array", "items": {"const": "tts-session-v2alpha1"}, "uniqueItems": true},
+            "features": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+            "audio_formats": {"type": "array", "items": {"enum": ["pcm_f32", "pcm_s16le"]}, "uniqueItems": true}
+          }
+        },
+        "openai_realtime": {
+          "type": "object",
+          "required": ["path", "base", "extension_protocol", "supported_extensions", "features", "audio_formats"],
+          "properties": {
+            "path": {"type": "string"},
+            "base": {"const": "openai-realtime-v1"},
+            "extension_protocol": {"const": "qwen-realtime-v1"},
+            "supported_extensions": {"type": "array", "items": {"enum": ["qwen.input_text_buffer.v1", "qwen.text_progress.v1", "qwen.playback_ack.v1", "qwen.response_resume.v1"]}, "uniqueItems": true},
+            "features": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+            "audio_formats": {"type": "array", "items": {"enum": ["pcm_s16le"]}, "uniqueItems": true}
+          }
+        }
+      }
+    },
+    "tasks": {"type": "array", "items": {"enum": ["base", "voice_clone", "custom_voice", "voice_design"]}, "uniqueItems": true},
+    "task_status": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["task", "available", "stability"],
+        "properties": {
+          "task": {"enum": ["base", "voice_clone", "custom_voice", "voice_design"]},
+          "available": {"type": "boolean"},
+          "stability": {"enum": ["stable", "experimental"]}
+        }
+      }
+    },
+    "speakers": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "languages": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "input_modes": {"type": "array", "items": {"enum": ["token", "clause", "long_segment", "full_text"]}, "uniqueItems": true},
+    "audio_formats": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["encoding", "sample_rate", "channels"],
+        "properties": {
+          "encoding": {"enum": ["pcm_f32", "pcm_s16le"]},
+          "sample_rate": {"type": "integer", "minimum": 1},
+          "channels": {"const": 1}
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "required": ["max_input_tokens", "max_realtime_message_bytes"],
+      "properties": {
+        "max_input_tokens": {"type": "integer", "minimum": 0},
+        "max_realtime_message_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "output_policy": {
+      "type": "object",
+      "required": ["features", "vad_strategies"],
+      "properties": {
+        "features": {"type": "array", "items": {"enum": ["vad_policy", "chunk_ms", "packet_format", "emit_text_events", "guarded_delivery", "request_context", "timing_context"]}, "uniqueItems": true},
+        "vad_strategies": {"type": "array", "items": {"enum": ["disabled", "energy", "tenvad"]}, "uniqueItems": true}
+      }
+    },
+    "reference": {
+      "type": "object",
+      "required": ["available", "max_duration_sec", "max_bytes", "mime_types", "reason"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "max_duration_sec": {"type": "number", "minimum": 0},
+        "max_bytes": {"type": "integer", "minimum": 1},
+        "mime_types": {"type": "array", "items": {"enum": ["audio/wav", "audio/x-wav"]}, "minItems": 1, "uniqueItems": true},
+        "speaker_encoder_available": {"type": "boolean"},
+        "ref_codec_available": {"type": "boolean"},
+        "icl_available": {"type": "boolean"},
+        "reason": {"type": "string"}
+      }
+    }
+  },
+  "additionalProperties": true
+}

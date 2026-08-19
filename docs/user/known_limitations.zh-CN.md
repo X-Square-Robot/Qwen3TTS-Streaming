@@ -2,7 +2,7 @@
 
 # 已知限制与风险
 
-本文档是当前开源预览版的风险说明。发布前请保持它和 README、WebUI、demo API 的口径一致。
+本文档是当前开源预览版的风险说明。发布前请保持它和 README、产品 Demo、demo API 的口径一致。
 
 ## 版本定位
 
@@ -13,7 +13,7 @@
 - 模型：`custom-1.7b`
 - 任务：`custom_voice`
 - 部署：standalone engine / Triton TRT streaming
-- WebUI：性能展示、trace 回放、live TRT/engine 对照
+- 产品 Demo：公共 Realtime 无代码试听、诊断、SDK 与可选工程实验
 
 ## 模型路径状态
 
@@ -50,14 +50,11 @@
 
 `128-stream avg TTFT` 也必须带上完整测试条件，包括硬件、driver、NGC 镜像、engine profile、输入文本、cache 模式、采样参数、客户端测量方法和失败率。
 
-## WebUI 数据来源
+## Demo 数据来源
 
-WebUI 有两种数据来源：
-
-- fixture trace：离线 JSON 回放，适合展示 UI 和对齐指标字段，不代表实时服务。
-- live measurement：实时调用 standalone engine、Triton 或官方 PyTorch API。
-
-只有结果里的 `source` 是 `live_triton`、`live_engine` 或 `live_official_pytorch` 时，才代表实时测量。默认 fixture 值在发布前需要用真实硬件重新采集。
+产品 Demo 只通过当前实例公共 `/v1/realtime` 产生音频与指标；后端不可用时明确失败，
+不会用 fixture、嘟声或历史 benchmark 冒充实时结果。可选 `demo_api` 的 trace 属于工程
+实验数据，必须独立标记，不能进入产品体验或公开性能口径。
 
 ## 部署限制
 
@@ -68,7 +65,7 @@ WebUI 有两种数据来源：
 
 ## 发布前必须保留的用户提示
 
-README、WebUI 和 release note 中必须明确：
+README、产品 Demo 和 release note 中必须明确：
 
 - 本项目是工程预览版。
 - v0.1 推荐路径是 `custom-1.7b`。

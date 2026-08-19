@@ -366,6 +366,23 @@ def test_validate_session_config_maps_icl_model_to_internal_voice_clone():
     assert config.x_vector_only is False
 
 
+def test_validate_session_config_accepts_public_voice_clone_for_icl_model():
+    engine = TTSEngine(
+        model_arch=ModelArchConfig(
+            variant="icl-1.7b",
+            tts_model_type="icl",
+            supported_task_types=("icl",),
+        )
+    )
+    engine._ref_audio_processor = _StubSupportProbe(_available_ref_support())
+
+    config = SessionConfig(task_type="voice_clone", ref_audio=b"wav", ref_text="你好")
+    engine._validate_session_config(config)
+
+    assert config.task_type == "voice_clone"
+    assert config.x_vector_only is False
+
+
 def test_validate_session_config_requires_ref_text_for_icl():
     engine = TTSEngine(
         model_arch=ModelArchConfig(
@@ -682,6 +699,8 @@ def test_describe_capabilities_reports_loaded_model_contract():
             reason="variant 'custom-1.7b' is not a base model; voice_clone is unsupported",
         )
     )
+    engine._supported_speakers = ("serena", "vivian")
+    engine._supported_languages = ("auto", "chinese", "english")
 
     cap = engine.describe_capabilities()
     assert cap["variant"] == "custom-1.7b"
@@ -694,10 +713,13 @@ def test_describe_capabilities_reports_loaded_model_contract():
         "full_text",
     ]
     assert cap["supported_group_policies"] == ["none", "auto"]
+    assert cap["supported_speakers"] == ["serena", "vivian"]
+    assert cap["supported_languages"] == ["auto", "chinese", "english"]
     assert cap["ref_audio_available"] is False
     assert cap["protocol_version"] == "tts-session-v2alpha1"
     assert "vad_policy" in cap["supported_output_policy_features"]
-    assert cap["supported_vad_strategies"] == sorted(SUPPORTED_VAD_STRATEGIES)
+    assert set(cap["supported_vad_strategies"]) <= set(SUPPORTED_VAD_STRATEGIES)
+    assert {"disabled", "energy"} <= set(cap["supported_vad_strategies"])
     assert "server_ttft_ms" in cap["supported_timing_fields"]
 
 

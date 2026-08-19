@@ -1,1 +1,1 @@
-"""Demo API for the Qwen3TTS-Streaming WebUI."""
+"""Optional engineering-lab API for the built-in Qwen3TTS portal."""

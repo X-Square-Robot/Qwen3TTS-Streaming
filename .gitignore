@@ -14,9 +14,13 @@ client/dist/*
 !client/dist/.gitkeep
 client/build/
 client/src/qwen3tts/_version.py
-webui/node_modules/
-webui/dist/
-webui/tsconfig.tsbuildinfo
+web/node_modules/
+web/packages/*/dist/
+web/packages/demo/public/docs.json
+web/packages/demo/public/docs-assets/
+web/test-results/
+web/playwright-report/
+web/.cache/
 *.egg-info
 
 # Local / secrets / tooling dotfiles (NOT a blanket ".*", which would also

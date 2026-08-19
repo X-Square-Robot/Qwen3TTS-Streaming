@@ -18,7 +18,7 @@ class TraceStore:
 
     The earlier multi-backend race fixture has been retired; this class now
     only surfaces the default text/speaker/language/ms_per_token combo so the
-    WebUI has sensible initial form values.
+    optional engineering lab has sensible initial form values.
     """
 
     def __init__(

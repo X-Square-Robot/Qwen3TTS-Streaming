@@ -144,7 +144,7 @@ def _slice_spans(
 
 
 def _concat_spans(
-    blocks: list[tuple[np.ndarray, list[SampleProvenanceSpan]]]
+    blocks: list[tuple[np.ndarray, list[SampleProvenanceSpan]]],
 ) -> AttributedSamples:
     if not blocks:
         return AttributedSamples(np.empty((0,), dtype=np.int16), [])
@@ -308,7 +308,9 @@ class TTSVADProcessor(ABC):
             self._metrics.original_audio_samples += pcm_int16.size
             self._metrics.effective_audio_samples += pcm_int16.size
             self._processed_input_samples += pcm_int16.size
-            return AttributedSamples(pcm_int16, _slice_spans(provenance, 0, pcm_int16.size))
+            return AttributedSamples(
+                pcm_int16, _slice_spans(provenance, 0, pcm_int16.size)
+            )
 
         # Append to input buffer
         if self._input_buffer.size > 0:
@@ -715,6 +717,12 @@ try:
     _TenVadClass = TenVad
 except ImportError as e:
     _tenvad_import_error = e
+
+
+def tenvad_available() -> bool:
+    """Return whether the optional TenVAD runtime dependency is importable."""
+
+    return _TenVadClass is not None
 
 
 class TenVADProcessor(TTSVADProcessor):

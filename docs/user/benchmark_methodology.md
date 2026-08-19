@@ -2,7 +2,7 @@
 
 # Benchmark Methodology
 
-This document defines the benchmark conventions used by the WebUI, README, and release traces. All published performance numbers must carry these conditions.
+This document defines the benchmark conventions used by the product Demo, README, and release traces. All published performance numbers must carry these conditions.
 
 ## Metric Definitions
 
@@ -71,7 +71,7 @@ Concurrency benchmarks must report at least:
 - throughput audio sec/sec.
 - whether live concurrency is enabled.
 
-The WebUI's live concurrency is disabled by default:
+The optional `demo_api` live concurrency path is disabled by default:
 
 ```bash
 QWEN_DEMO_ENABLE_LIVE_CONCURRENCY=1 python -m demo_api --port 7860

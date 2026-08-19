@@ -38,22 +38,20 @@ curl http://<engine-host>:<ws-port>/v1/capabilities
 # → {"engine_version": "v0.1.0", ...}
 ```
 
-**通道一 —— GitHub/GitLab Release。** 安装对应 tag 所附的 wheel；私有
-GitLab 项目需要配置凭据：
-
-```bash
-pip install "qwen3-tts-client[all] @ https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases/download/v0.1.0/qwen3_tts_client-0.1.0-py3-none-any.whl"
-```
+**通道一 —— GitHub/GitLab Release。** 安装对应
+[GitHub Release](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases)
+或 GitLab Release 所附的 wheel；私有项目需要配置凭据。部署实例的
+`/demo/#/sdk` 页面会给出精确命令，不在 README 中固化容易过期的版本和文件名。
 
 这条命令下载 wheel，不会检出 Git 仓库。GitLab 还可通过项目 PyPI 索引按
-`qwen3-tts-client==0.1.0` 安装同一文件。
+capabilities 报告的版本安装同一文件。
 
-**通道二 —— 从引擎获取。** 每个正式镜像都嵌入已发布的 wheel，并通过 health
-端口的 `GET /sdk/` 提供：
+**通道二 —— 从部署服务获取。** 每个正式镜像都嵌入已发布的 wheel，并通过公共
+服务的 `GET /sdk/` 提供：
 
 ```bash
-curl http://<engine-host>:<health-port>/sdk/      # 查看 .whl 列表
-pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-none-any.whl
+curl https://<public-service-base>/sdk/      # 查看 .whl 列表
+pip install "https://<public-service-base>/sdk/<wheel-filename>"
 ```
 
 两个代码托管平台的 tag 流水线都只构建一次 wheel：先发布，再按 SHA256 把同一

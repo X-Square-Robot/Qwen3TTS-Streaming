@@ -14,13 +14,13 @@
 
 <img src="docs/images/文本播放器.gif" width="720" alt="Text Player demo: streaming TTS playback synced to engine decode steps">
 
-*Text tokens go in, audio chunks come out — in real time. See why that matters in [Token-Level Streaming](#token-level-streaming), and the full demo set in [WebUI Demo](#webui-demo).*
+*Text tokens go in, audio chunks come out — in real time. See why that matters in [Token-Level Streaming](#token-level-streaming), then try it in the [built-in Demo](#built-in-demo-and-documentation).*
 
 </div>
 
 ## Introduction
 
-Qwen3TTS-Streaming is an **engineering preview** project: it exports the official Qwen3-TTS PyTorch weights into an ONNX/TensorRT runtime and builds **token-level streaming TTS** around a Triton/standalone engine, together with model fusion, frontend segmentation, prefix cache, continuous batching, and a WebUI performance showcase. The project opens up a highly optimized, reproducible, and continuously verifiable engineering pipeline, inviting the community to polish it together into a reliable open-source inference system.
+Qwen3TTS-Streaming is an **engineering preview** project: it exports the official Qwen3-TTS PyTorch weights into an ONNX/TensorRT runtime and builds **token-level streaming TTS** around a Triton/standalone engine, together with model fusion, frontend segmentation, prefix cache, continuous batching, and a built-in product Demo. The project opens up a highly optimized, reproducible, and continuously verifiable engineering pipeline, inviting the community to polish it together into a reliable open-source inference system.
 
 > ⚠️ **Status: v0.1 engineering preview, not production-ready.** Streaming mode may still exhibit **hallucination, repetition, and dropped reading** (roughly 10–18% on the current checkpoint, rooted in the model and sampling; see [Known Limitations](docs/user/known_limitations.md)). **The currently recommended stable scope is the `custom-1.7b` / `custom_voice` path.** `design-1.7b`, `base-1.7b` / x-vector voice cloning, and `icl` voice cloning are experimental; the `0.6b` variants are not part of the v0.1 mainline. Do not use it directly for production content generation.
 
@@ -96,7 +96,7 @@ The whole path is in this repo, not the `third_party/` submodule — export code
 - 🧵 **One TensorRT engine per decode step, not four** — talker + Code Predictor + codec-embedding sum + code2wav fused into a single exported graph, export-to-test code all in this repo
 - 🧠 **Prefix KV cache** — a 16-entry LRU skips prefill on repeat system prompts, saving 10–50ms (see [Engine Design Panorama](docs/dev/architecture/engine_overview.md))
 - 🧮 **Code predictor unrolled into one static TRT graph** — no per-step KV, higher GPU utilization than step-by-step decode (see [Engine Design Panorama](docs/dev/architecture/engine_overview.md))
-- 🖥️ **WebUI showcase** — Text Player, LLM PK, and Concurrency panels to see streaming behavior live
+- 🖥️ **Built-in product Demo** — no-code playback, parameter tuning, SDK download, unified docs, and an optional Lab
 
 The first four points above are unpacked in [Features](#features); the last two are covered in the [Engine Design Panorama](docs/dev/architecture/engine_overview.md).
 
@@ -114,7 +114,7 @@ The first four points above are unpacked in [Features](#features); the last two 
 - [Deployment Options](#deployment-options)
 - [Client SDK](#client-sdk)
 - [Testing and Acceptance](#testing-and-acceptance)
-- [WebUI Demo](#webui-demo)
+- [Built-in Demo and documentation](#built-in-demo-and-documentation)
 - [Streaming Protocol](#streaming-protocol)
 - [Project Structure](#project-structure)
 - [Documentation Navigation](#documentation-navigation)
@@ -133,8 +133,8 @@ The low-latency numbers mentioned in this project are conditional results, not g
 > ⚠️ **128 streams is the tested ceiling, not a safe production target.** After three decode-optimization rounds (2026-07-06: CP in-graph KV + CUDA-graph decode replay + arena-ized KV gather; 2026-07-07: batched burst admission + per-slot state pooling + serving hot-path slimming; 2026-07-08: post-review audit fix batch + batched p3_launch), the benchmarked GPU (RTX 5090, all-bf16 engine, batch=128 profile) sustains 128 concurrent streams at a decode step of 42.1ms per 80ms audio frame — RTF (audio duration / wall-clock decode time) ≈ 1.90, i.e. ~47% headroom above real-time (pre-optimization this was 119.8ms/frame, RTF ≈ 0.67 — below real-time). That margin absorbs normal jitter, but a sustained load spike or heavier-than-usual requests can still eat it. Size production concurrency with margin below 128 rather than running at it; at 64 streams the decode step is 24.5ms (RTF ≈ 3.3) with ample margin. Full breakdown and raw data: [serving performance benchmark](docs/dev/investigation/serving_performance_benchmark.md).
 
 - Standalone `engine-grpc` TTFT is measured by default over a ready/reused gRPC channel and, like WebSocket, does not count the client connection setup cost toward first-packet latency; a cold/lazy channel adds roughly 13ms.
-- The TTFT shown by the WebUI **Concurrency panel** is measured in a different window and under a different load shape than the table above, and is **not directly comparable**: on the Triton path each lane reports the server-side adapter TTFT — the clock starts when the model begins processing that request, so client connection setup, dispatch spread, queueing before processing, and the first-frame return trip are all excluded — and the demo backend issues the lanes serially on a single event loop, so arrival is a ramp rather than a simultaneous burst. On the same hardware the panel typically reads ~100–170ms at 128 lanes; that is a real live measurement, but for any external claim use the client-side burst figures above.
-- The WebUI only represents replayable real-time synthesized audio when the result source is marked `live_triton` or `live_engine_websocket` and carries an `audio` field.
+- A one-off browser metric in the Demo Lab uses a different measurement window and load shape from the table above and is not directly comparable; public claims must use benchmark data with complete conditions.
+- The product Demo calls only the current instance's public `/v1/realtime`; when a live backend is unavailable it fails explicitly and never falls back to fixtures or simulated audio.
 
 For detailed benchmark methodology, see [Benchmark Methodology](docs/user/benchmark_methodology.md).
 
@@ -142,7 +142,7 @@ For detailed benchmark methodology, see [Benchmark Methodology](docs/user/benchm
 
 | Path | Current status | Open-source scope |
 | --- | --- | --- |
-| `custom-1.7b` / `custom_voice` | 🟢 Prioritized/stable | The v0.1 recommended path; the WebUI and demo showcase it by default |
+| `custom-1.7b` / `custom_voice` | 🟢 Prioritized/stable | The v0.1 recommended path; the product Demo showcases it by default |
 | `design-1.7b` / `voice_design` | 🟡 Experimental | Code and export entry points can be kept, but must be marked as not fully validated |
 | `base-1.7b` / x-vector voice clone | 🟡 Experimental | Standalone already wires up ref audio → speaker embedding; needs the base export artifacts and real end-to-end validation |
 | `icl` voice clone | 🟡 Experimental | Standalone already wires up ref audio + ref text → ref codec/code injection; needs the TRT ref-audio engine and real end-to-end validation |
@@ -270,15 +270,17 @@ only produces a warning; installing the engine's wheel is still the simplest
 way to reproduce an exactly matched environment:
 
 ```bash
-curl http://<engine-host>:<ws-port>/v1/capabilities
+curl https://<public-service-base>/v1/capabilities
 # → {"engine_version": "v0.1.0", ...}
 
-# Public GitHub Release (the GitLab Release exposes the same filename).
-pip install "qwen3-tts-client[all] @ https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases/download/v0.1.0/qwen3_tts_client-0.1.0-py3-none-any.whl"
+# For an exact, copyable command, open the current instance's /demo/#/sdk page.
+# Forge users can instead select the wheel attached to the matching release:
+# https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases
 
-# The engine serves the exact same published wheel.
-curl http://<engine-host>:<health-port>/sdk/    # list, then:
-pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-none-any.whl
+# The public service serves the exact same published wheel. The index and its
+# links stay relative, including behind an /infer/<instance> proxy prefix.
+curl https://<public-service-base>/sdk/    # list, then use the returned filename:
+pip install "https://<public-service-base>/sdk/<wheel-filename>"
 
 # Or from a local checkout
 pip install "./client[all]"
@@ -340,42 +342,50 @@ mamba run -n qwen3-tts python tools/validation/serving_endpoints.py \
   --ref-text "这是一段与 vivian 参考音频完全一致的文本。"
 ```
 
-## WebUI Demo
+## Built-in Demo and documentation
 
-The WebUI contains three panels: **Text Player** (plays text by engine decode step — text tokens in the first half, PAD steps shown after flush, and the slider seeks the actual WAV audio once synthesis completes; see the hero GIF at the top of this README), **LLM PK** (simulates an upstream LLM emitting tokens one by one, comparing streaming vs. non-streaming on the same timeline), and **Concurrency** (the TTFT distribution and throughput of multi-stream synthesis, requesting live Triton by default and saving the real audio).
+Every release runtime image contains one version-matched portal at `/demo/`. Set
+`DEMO_ENABLED=true` to expose it on the same public port as `/v1/realtime` and
+`/sdk/`. The portal discovers the current instance, synthesizes through the
+Browser SDK, plays PCM through the system speaker, exposes capability-gated VAD
+and delivery controls, downloads WAV, and renders this repository's Markdown.
+No separate Demo API is required for the normal experience.
 
-**LLM PK** — streaming vs. non-streaming, same timeline
+The built-in Lab also provides LLM PK, concurrency requests, Text Player event
+traces, and JSON trace downloads over public Realtime. Results describe only
+the current browser-to-instance run; the page never substitutes fixtures or
+hard-coded performance numbers for a live backend.
+
+**Historical LLM PK demo asset** — streaming vs. non-streaming, same timeline
 
 ![Streaming vs. non-streaming comparison demo](docs/images/流式非流式对比.gif)
 
-**Concurrency** — multi-stream TTFT distribution and throughput
+**Historical concurrency demo asset** — multi-stream distribution and throughput
 
 ![Multi-stream synthesis demo](docs/images/多路合成.gif)
 
-> The TTFT this panel reports is a server-side, ramped-arrival metric and reads systematically lower than the burst benchmark numbers — see the notes under [Performance Claims](#performance-claims).
-
 Full screen recording: [演示视频.mp4](docs/videos/演示视频.mp4)
 
-One-click startup (the WebUI dev server, Demo API, and Triton are all started/reused by the launcher):
+Standalone startup:
 
 ```bash
-bash scripts/demo/start_webui_demo.sh --variant custom-1.7b
+DEMO_ENABLED=true bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 ```
 
-You can also start it manually in separate steps:
+Open `http://localhost:50052/demo/`. For the Triton deployment, use
+`--gateway triton` and open `http://localhost:50053/demo/`. Reverse proxies may
+mount the service below `/infer/<instance>`; all portal, SDK, WebSocket and asset
+links remain relative to that prefix.
 
-```bash
-python -m demo_api --host 0.0.0.0 --port 7860   # Terminal 1
-cd webui && npm install && npm run dev             # Terminal 2
-```
-
-Open `http://localhost:5173` in your browser. If the live backend is unavailable, the WebUI shows a warning; the audio button is enabled only when real waveform bytes are captured, and no beep placeholder is used.
-
-Docker Compose demo profile:
+The built-in **Lab** tab runs LLM PK and concurrency experiments through the
+same public Realtime endpoint. Detailed decode-trace data remains available
+from the optional `demo_api` engineering backend and is entered from that same
+built-in page; it is never presented as the normal product experience:
 
 ```bash
 bash scripts/bash/compose.sh up --gateway triton --variant custom-1.7b
-docker compose --profile demo -f infra/docker/compose.yaml up --build demo-api webui
+DEMO_ENABLED=true DEMO_LAB_URL=http://localhost:7860 \
+  docker compose --profile demo -f infra/docker/compose.yaml up --build demo-api
 ```
 
 ## Streaming Protocol
@@ -412,8 +422,8 @@ Qwen3TTS-Streaming/
 ├── client/                     # Standalone Python SDK package (qwen3-tts-client, released as a wheel)
 │   ├── src/qwen3tts/           #   Client implementation and transport adapters
 │   └── src/qwen3tts_protocol/  #   Shared protocol layer (single source of truth)
-├── demo_api/                   # WebUI Demo API (depends on the client package)
-├── webui/                      # Vite/React WebUI
+├── demo_api/                   # Optional engineering-lab API (depends on the client package)
+├── web/                        # Browser SDK and the single React/Vite product portal
 ├── proto/                      # Single source of the protocol definition (tts.proto + generated code)
 ├── model_repository/           # Triton Python BLS model definitions
 ├── infra/
@@ -421,7 +431,7 @@ Qwen3TTS-Streaming/
 ├── scripts/
 │   ├── bash/                   # autorun/setup/build/deploy lifecycle
 │   ├── compose/                # Container entry-point scripts
-│   ├── demo/                   # Demo startup scripts (start_webui_demo.sh)
+│   ├── demo/                   # Demo / engineering-lab launchers
 │   ├── export/                 # PyTorch → ONNX/manifest export
 │   └── python/                 # Config/manifest/audit tools
 ├── tests/
@@ -459,7 +469,7 @@ This project is a **v0.1 engineering preview**, and streaming quality is still b
 
 ## License
 
-- **This project's own code** (`engine/`, `client/`, `demo_api/`, `webui/`, `scripts/`, etc.) is released under the [MIT](LICENSE) license, copyright XSquareRobot.
+- **This project's own code** (`engine/`, `client/`, `demo_api/`, `web/`, `scripts/`, etc.) is released under the [MIT](LICENSE) license, copyright XSquareRobot.
 - **Upstream [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)** (the `third_party/` submodule) is Apache 2.0, which is compatible with MIT.
 - **Model weights** are released by Qwen/Alibaba; their license is governed by the respective [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [Hugging Face](https://huggingface.co/Qwen) model cards; this repository does not distribute any weights.
 - **TensorRT / Triton Inference Server** (NVIDIA NGC images) are NVIDIA proprietary software, not bundled in this repository; using them constitutes acceptance of the NVIDIA EULA.

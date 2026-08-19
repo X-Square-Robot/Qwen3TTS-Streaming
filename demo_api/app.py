@@ -155,10 +155,6 @@ async def handle_capabilities(request: web.Request) -> web.Response:
             },
             "release": RELEASE_METADATA,
             "limitations": STREAMING_LIMITATIONS,
-            "headline": {
-                "single_stream_cache_hit_ttft_ms": 13,
-                "concurrent_128_avg_ttft_ms": 180,
-            },
         }
     )
 
@@ -354,7 +350,7 @@ def _tts_request_from_body(body: dict[str, Any]) -> TtsRequest:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Qwen3TTS-Streaming WebUI demo API")
+    parser = argparse.ArgumentParser(description="Qwen3TTS-Streaming engineering Lab API")
     parser.add_argument("--host", default=os.environ.get("QWEN_DEMO_HOST", "0.0.0.0"))
     parser.add_argument(
         "--port", type=int, default=int(os.environ.get("QWEN_DEMO_PORT", "7860"))

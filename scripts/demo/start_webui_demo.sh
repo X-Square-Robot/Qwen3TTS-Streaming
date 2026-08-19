@@ -7,7 +7,6 @@ REPO_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel)"
 VARIANT="${MODEL_VARIANT:-custom-1.7b}"
 HOST="${QWEN_DEMO_HOST:-127.0.0.1}"
 API_PORT="${QWEN_DEMO_PORT:-7860}"
-WEBUI_PORT="${WEBUI_PORT:-5173}"
 TRITON_GRPC_PORT="${TRITON_GRPC_PORT:-8001}"
 TRITON_MAX_BATCH_SLOTS="${TRITON_MAX_BATCH_SLOTS:-128}"
 TRITON_MAX_SESSIONS="${TRITON_MAX_SESSIONS:-128}"
@@ -20,10 +19,10 @@ usage() {
   cat <<EOF
 Usage: scripts/demo/start_webui_demo.sh [options]
 
-Starts the local demo stack for first-time evaluation:
+Compatibility launcher for the built-in Demo engineering lab:
   1. Triton server, unless --no-triton is set or port ${TRITON_GRPC_PORT} is already listening
   2. demo_api on ${HOST}:${API_PORT}
-  3. Vite WebUI on 0.0.0.0:${WEBUI_PORT}
+  3. The single built-in portal at /demo/#/lab (no second WebUI)
 
 Options:
   --variant <name>          Model variant for Triton compose startup (default: ${VARIANT})
@@ -35,9 +34,9 @@ Options:
   -h, --help                Show this help
 
 Notes:
-  All demo panels (LLM PK, Speak TRT, Concurrency) talk to the same Triton.
+  LLM PK, concurrency and trace tools use the built-in product portal.
   --with-engine is optional and only needed when you also want to compare
-  against a side-by-side standalone engine container; the WebUI doesn't
+  against a side-by-side standalone engine container; the portal doesn't
   need it.
 EOF
 }
@@ -132,9 +131,6 @@ cleanup() {
   if [[ -n "${API_PID:-}" ]]; then
     kill "${API_PID}" >/dev/null 2>&1 || true
   fi
-  if [[ -n "${WEBUI_PID:-}" ]]; then
-    kill "${WEBUI_PID}" >/dev/null 2>&1 || true
-  fi
 }
 trap cleanup EXIT INT TERM
 
@@ -147,6 +143,8 @@ require_demo_python_dependencies
 
 export TRITON_MAX_BATCH_SLOTS
 export TRITON_MAX_SESSIONS
+export DEMO_ENABLED=true
+export DEMO_LAB_URL="${DEMO_LAB_URL:-http://localhost:${API_PORT}}"
 DETECTED_TRITON_SLOTS=""
 
 detect_running_triton_slots() {
@@ -199,29 +197,21 @@ else
 fi
 wait_http "http://${HOST}:${API_PORT}/healthz" "demo_api"
 
-if [[ ! -d webui/node_modules ]]; then
-  echo "Installing WebUI dependencies..."
-  npm --prefix webui install
-fi
-
-if port_listening "${WEBUI_PORT}"; then
-  echo "WebUI port already listening on :${WEBUI_PORT}"
+if ${START_TRITON}; then
+  PORTAL_URL="${QWEN_DEMO_PUBLIC_URL:-http://localhost:${TRITON_REALTIME_HOST_PORT:-50053}/demo/#/lab}"
 else
-  echo "Starting WebUI on http://localhost:${WEBUI_PORT} ..."
-  npm --prefix webui run dev -- --host 0.0.0.0 --port "${WEBUI_PORT}" &
-  WEBUI_PID=$!
+  PORTAL_URL="${QWEN_DEMO_PUBLIC_URL:-http://localhost:${ENGINE_WS_PORT}/demo/#/lab}"
 fi
-wait_http "http://127.0.0.1:${WEBUI_PORT}" "webui"
 
 cat <<EOF
 
 Demo stack is running.
-  WebUI:    http://localhost:${WEBUI_PORT}
+  Portal:   ${PORTAL_URL}
   Demo API: http://${HOST}:${API_PORT}
   Triton:   ${QWEN_DEMO_TRITON_GRPC}
   Engine:   ${QWEN_DEMO_ENGINE_WS} (${ENGINE_STATUS})
 
-Press Ctrl-C to stop demo_api and WebUI. Triton is managed by docker compose and is left running.
+Press Ctrl-C to stop demo_api. Runtime containers are managed by docker compose and are left running.
 EOF
 
 wait

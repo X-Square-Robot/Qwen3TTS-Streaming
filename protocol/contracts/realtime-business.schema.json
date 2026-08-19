@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://x2robot.com/qwen3tts/contracts/realtime-business.v1.schema.json",
+  "title": "Qwen3-TTS Realtime business events v1",
+  "type": "object",
+  "required": ["type"],
+  "properties": {"type": {"type": "string", "minLength": 1}},
+  "allOf": [
+    {
+      "if": {"properties": {"type": {"const": "session.update"}}},
+      "then": {
+        "required": ["session"],
+        "properties": {
+          "session": {
+            "type": "object",
+            "required": ["type", "output_modalities", "audio", "qwen"],
+            "properties": {
+              "type": {"const": "realtime"},
+              "output_modalities": {"const": ["audio"]},
+              "qwen": {
+                "type": "object",
+                "required": ["task_type", "output_policy"],
+                "properties": {
+                  "task_type": {"enum": ["base", "voice_clone", "custom_voice", "voice_design"]},
+                  "input_mode": {"enum": ["token", "clause", "long_segment", "full_text", "auto"]},
+                  "ref_audio": {"type": "string", "contentEncoding": "base64"},
+                  "output_policy": {"$ref": "#/$defs/outputPolicy"},
+                  "timing": {"$ref": "#/$defs/timing"}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"type": {"const": "qwen.input_text_buffer.append"}}},
+      "then": {
+        "required": ["sequence", "text"],
+        "properties": {
+          "sequence": {"type": "integer", "minimum": 1},
+          "text": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"type": {"const": "qwen.playback.ack"}}},
+      "then": {
+        "required": ["response_id", "played_through_sample", "buffered_through_sample"],
+        "properties": {
+          "response_id": {"type": "string", "minLength": 1},
+          "played_through_sample": {"$ref": "#/$defs/cursor"},
+          "buffered_through_sample": {"$ref": "#/$defs/cursor"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"type": {"const": "response.output_audio.delta"}}},
+      "then": {
+        "required": ["delta", "qwen_output_sample_start", "qwen_output_sample_end"],
+        "properties": {
+          "delta": {"type": "string", "contentEncoding": "base64"},
+          "qwen_output_sample_start": {"$ref": "#/$defs/cursor"},
+          "qwen_output_sample_end": {"$ref": "#/$defs/cursor"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "cursor": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string", "pattern": "^[0-9]+$"}]},
+    "timing": {
+      "type": "object",
+      "properties": {
+        "request_id": {"type": "string"},
+        "turn_id": {"type": "string"},
+        "client_request_ts_ms": {"type": "integer", "minimum": 0},
+        "client_text_ts_ms": {"type": "integer", "minimum": 0},
+        "client_end_ts_ms": {"type": "integer", "minimum": 0},
+        "extra": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "outputPolicy": {
+      "type": "object",
+      "required": ["vad_policy"],
+      "properties": {
+        "vad_policy": {
+          "type": "object",
+          "required": ["enabled", "strategy"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "strategy": {"enum": ["disabled", "energy", "tenvad"]}
+          }
+        },
+        "chunk_ms": {"type": "integer", "minimum": 0},
+        "emit_text_events": {"type": "boolean"},
+        "config": {
+          "type": "object",
+          "properties": {
+            "delivery": {"enum": ["guarded", "firehose"]},
+            "delivery_window_ms": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    }
+  }
+}

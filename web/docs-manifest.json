@@ -1,0 +1,14 @@
+[
+  {"slug": "overview-zh", "title": "项目概览", "source": "README.zh-CN.md"},
+  {"slug": "overview-en", "title": "Project Overview", "source": "README.md"},
+  {"slug": "sdk-zh", "title": "Python SDK", "source": "client/README.zh-CN.md"},
+  {"slug": "sdk-en", "title": "Python SDK (English)", "source": "client/README.md"},
+  {"slug": "deployment-zh", "title": "部署", "source": "docs/user/deployment.zh-CN.md"},
+  {"slug": "deployment-en", "title": "Deployment", "source": "docs/user/deployment.md"},
+  {"slug": "limitations-zh", "title": "已知限制", "source": "docs/user/known_limitations.zh-CN.md"},
+  {"slug": "limitations-en", "title": "Known Limitations", "source": "docs/user/known_limitations.md"},
+  {"slug": "realtime-zh", "title": "OpenAI Realtime 协议", "source": "docs/dev/architecture/openai_realtime.zh-CN.md"},
+  {"slug": "realtime-en", "title": "OpenAI Realtime Protocol", "source": "docs/dev/architecture/openai_realtime.md"},
+  {"slug": "benchmark-zh", "title": "性能测试方法", "source": "docs/user/benchmark_methodology.zh-CN.md"},
+  {"slug": "benchmark-en", "title": "Benchmark Methodology", "source": "docs/user/benchmark_methodology.md"}
+]

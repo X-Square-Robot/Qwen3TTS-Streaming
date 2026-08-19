@@ -25,7 +25,7 @@ class ProtocolVersionMismatchError(TTSClientError):
     """Raised when the server speaks an incompatible protocol family or major.
 
     Revisions within one protocol major are compatible. Install the wheel the
-    engine serves at ``GET /sdk/`` on its health port, or the matching wheel
+    service exposes at its public ``GET /sdk/`` endpoint, or the matching wheel
     from the GitHub/GitLab Release or Package Registry. Set
     ``QWEN3TTS_SKIP_PROTOCOL_CHECK=1`` to downgrade this error to a warning.
     """

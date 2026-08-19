@@ -52,7 +52,6 @@ from ..interface import (
     build_done_event,
     build_forward_event,
     build_start_event,
-    normalize_capabilities,
     parse_output_policy,
     parse_timing_context,
     serialize_stream_event,
@@ -64,6 +63,12 @@ from ..interface.vad import (
 )
 from ..frontend.hold_window import PrefixGateGuardBypass
 from .grpc_server import _build_vad_config, _inject_vad_metrics
+from .capabilities import (
+    REALTIME_MAX_MESSAGE_BYTES,
+    REFERENCE_AUDIO_MAX_BYTES,
+    RuntimeType,
+    build_gateway_capabilities,
+)
 from .session_identity import GatewaySessionIdentity
 from .websocket_resume import (
     ResumeAttachment,
@@ -140,62 +145,14 @@ class WebSocketGateway:
         return self._session_service
 
     def _capabilities(self) -> dict[str, Any]:
-        capabilities = normalize_capabilities(self._engine.describe_capabilities())
-        capabilities["supported_websocket_features"] = list(
-            _SUPPORTED_WEBSOCKET_FEATURES
+        return build_gateway_capabilities(
+            self._engine.describe_capabilities(),
+            runtime_type=RuntimeType.STANDALONE,
+            backend="in-process",
+            native_path=_normalize_ws_path("/v1/ws"),
+            resume_grace_ms=int(round(self._resume_registry.grace_seconds * 1000.0)),
+            resume_max_buffer_bytes=self._resume_registry.max_buffer_bytes,
         )
-        capabilities["supported_progress_features"] = [
-            "text_progress_anchor_v1",
-            "playback_progress_v1",
-            "qwen.text_progress.v1",
-        ]
-        capabilities["stream_resume_grace_ms"] = int(
-            round(self._resume_registry.grace_seconds * 1000.0)
-        )
-        capabilities["stream_resume_max_buffer_bytes"] = (
-            self._resume_registry.max_buffer_bytes
-        )
-        capabilities["supported_api_protocols"] = [
-            "openai-realtime-v1",
-            "tts-session-v2alpha1",
-        ]
-        capabilities["openai_realtime_path"] = _OPENAI_REALTIME_PATH
-        capabilities["supported_realtime_extensions"] = [
-            "qwen.input_text_buffer.v1",
-            "qwen.text_progress.v1",
-            "qwen.response_resume.v1",
-        ]
-        # Keep the historical flat fields for one compatibility release while
-        # making endpoint-specific capabilities explicit.  Consumers must not
-        # infer Realtime resume or native binary formats from engine fields.
-        capabilities["protocols"] = {
-            "native_websocket": {
-                "path": _normalize_ws_path("/v1/ws"),
-                "current": "tts-session-v2alpha1",
-                "supported": ["tts-session-v2alpha1"],
-                "features": list(_SUPPORTED_WEBSOCKET_FEATURES)
-                + ["playback_progress_v1"],
-                "audio_formats": ["pcm_f32", "pcm_s16le"],
-            },
-            "openai_realtime": {
-                "path": _OPENAI_REALTIME_PATH,
-                "base": "openai-realtime-v1",
-                "extension_protocol": "qwen-realtime-v1",
-                "supported_extensions": [
-                    "qwen.input_text_buffer.v1",
-                    "qwen.text_progress.v1",
-                    "qwen.response_resume.v1",
-                ],
-                "features": [
-                    "base64_pcm16",
-                    "full_duplex",
-                    "serial_responses",
-                    "active_response_resume",
-                ],
-                "audio_formats": ["pcm_s16le"],
-            },
-        }
-        return capabilities
 
     async def handle_capabilities(self, request):
         return web.json_response(self._capabilities())
@@ -225,7 +182,10 @@ class WebSocketGateway:
         )
 
     async def handle_websocket(self, request):
-        ws = web.WebSocketResponse(heartbeat=_WEBSOCKET_HEARTBEAT_SEC)
+        ws = web.WebSocketResponse(
+            heartbeat=_WEBSOCKET_HEARTBEAT_SEC,
+            max_msg_size=REALTIME_MAX_MESSAGE_BYTES,
+        )
         await ws.prepare(request)
 
         client_session_id: str | None = None
@@ -1288,10 +1248,6 @@ def add_health_routes(app, health_state: HealthState) -> None:
     for route in health_state.ROUTES:
         app.router.add_get(route, handle_probe)
 
-    from ..server import add_sdk_route  # lazy: avoid import cycle at module load
-
-    add_sdk_route(app)
-
 
 async def serve(
     engine: TTSEngine,
@@ -1338,6 +1294,16 @@ async def serve(
     app.router.add_get(_CAPABILITIES_PATH, gateway.handle_capabilities)
     app.router.add_get(_OPENAI_REALTIME_PATH, realtime_gateway.handle_websocket)
     app.router.add_get(ws_path, native_gateway.handle_websocket)
+    from ..distribution.sdk import mount_sdk_routes
+    from ..distribution.site import mount_demo_config_route
+
+    sdk_distribution = mount_sdk_routes(app)
+    mount_demo_config_route(
+        app,
+        runtime_type=RuntimeType.STANDALONE.value,
+        capabilities_provider=gateway._capabilities,
+        sdk_distribution=sdk_distribution,
+    )
     if health_state is not None:
         add_health_routes(app, health_state)
 
@@ -1549,11 +1515,18 @@ def _decode_optional_base64(value: Any) -> bytes | None:
     if value in (None, ""):
         return None
     if isinstance(value, bytes):
-        return value
-    try:
-        return base64.b64decode(str(value), validate=True)
-    except (ValueError, binascii.Error) as exc:
-        raise ValueError("websocket 'ref_audio' must be valid base64") from exc
+        decoded = value
+    else:
+        try:
+            decoded = base64.b64decode(str(value), validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("websocket 'ref_audio' must be valid base64") from exc
+    if len(decoded) > REFERENCE_AUDIO_MAX_BYTES:
+        raise ValueError(
+            "websocket 'ref_audio' exceeds the advertised "
+            f"{REFERENCE_AUDIO_MAX_BYTES}-byte limit"
+        )
+    return decoded
 
 
 def _coerce_ws_bool(value: Any) -> bool:

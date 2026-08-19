@@ -34,7 +34,9 @@ from ..exceptions import (
 def advertised_protocols(payload: Mapping[str, Any]) -> list[str]:
     """Read both legacy flat and endpoint-scoped capability fields."""
 
-    values: list[str] = [str(value) for value in payload.get("supported_api_protocols", [])]
+    values: list[str] = [
+        str(value) for value in payload.get("supported_api_protocols", [])
+    ]
     protocols = payload.get("protocols")
     if isinstance(protocols, Mapping):
         native = protocols.get("native_websocket")
@@ -149,10 +151,7 @@ def decode_audio_chunk(payload: dict[str, Any], pcm_bytes: bytes) -> AudioChunk:
             channels=int(audio.get("channels", 1)),
         ),
         chunk_index=int(meta.get("chunk_index", 0) or 0),
-        first_chunk=str(
-            meta.get("first_audio_chunk", "")
-        ).lower()
-        == "true",
+        first_chunk=str(meta.get("first_audio_chunk", "")).lower() == "true",
         final_chunk=bool(payload.get("final_chunk", False)),
         meta={str(k): str(v) for k, v in meta.items()},
         output_sample_start=_parse_optional_int(meta.get("output_sample_start")),
@@ -227,7 +226,7 @@ def check_protocol_version(server_version: Any) -> None:
     message = (
         f"Server protocol version {server!r} is not compatible with this SDK's "
         f"{PROTOCOL_VERSION!r}. Protocol family and major version must match. Install "
-        "the wheel this engine serves at GET /sdk/ on its health port, or the "
+        "the wheel this service exposes at its public GET /sdk/ endpoint, or the "
         "matching GitHub/GitLab Release or Package Registry wheel (the engine reports "
         "its release as capabilities.engine_version). "
         "Set QWEN3TTS_SKIP_PROTOCOL_CHECK=1 to proceed anyway."

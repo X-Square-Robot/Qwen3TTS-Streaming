@@ -52,15 +52,17 @@ capabilities：协议族或协议大版本不兼容时抛出
 
 ### 通道一 —— GitHub/GitLab Release 与 GitLab Package Registry
 
-每个版本 tag 都会在两个代码托管平台生成 Release wheel。安装对应 Release，
-`pip` 不会再检出整个 monorepo：
+每个版本 tag 都会在两个代码托管平台生成 Release wheel。权威、可直接复制的安装命令
+由已部署实例的 `/demo/#/sdk` 动态生成；它使用精确的相对 `/sdk/` 资源地址，因此能
+保留反向代理前缀。也可以从对应的
+[GitHub Release](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases)
+或 GitLab Release 的 `client-sdk` 链接选择 wheel。不要把旧发布的文件名复制进长期
+维护的文档。
 
 ```bash
-# GitHub
-pip install "qwen3-tts-client[all] @ https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases/download/v0.1.0/qwen3_tts_client-0.1.0-py3-none-any.whl"
-
-# GitLab（Release 中的 client-sdk 链接）
-pip install "qwen3-tts-client[all] @ https://<gitlab-project>/-/releases/v0.1.0/downloads/client-sdk/qwen3_tts_client-0.1.0-py3-none-any.whl"
+# 打开 https://<public-service-base>/demo/#/sdk，或列出同一批产物：
+curl https://<public-service-base>/sdk/
+pip install "https://<public-service-base>/sdk/<wheel-filename>"
 ```
 
 项目的 GitLab PyPI Registry 也提供同一个文件：
@@ -89,12 +91,12 @@ PyPI package forwarding，还需配置可信的依赖索引或预装 wheel 的�
 
 ### 通道二 —— 从运行中引擎获取同一 wheel
 
-每个正式引擎镜像都嵌入 tag 流水线已经发布的 wheel，并在 health 端口的
+每个正式运行时镜像都嵌入 tag 流水线已经发布的 wheel，并在公共服务的
 `GET /sdk/` 提供：
 
 ```bash
-curl http://<engine-host>:<health-port>/sdk/      # 查看可用 wheel
-pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-none-any.whl
+curl https://<public-service-base>/sdk/      # 查看可用 wheel
+pip install "https://<public-service-base>/sdk/<wheel-filename>"
 ```
 
 ### 发版不变量

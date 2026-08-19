@@ -15,6 +15,7 @@ def _read(path: str) -> str:
 def test_triton_profile_starts_openai_realtime_sidecar_with_internal_grpc():
     compose = yaml.safe_load(_read("infra/docker/compose.yaml"))
     service = compose["services"]["realtime-gateway"]
+    triton_build_args = compose["services"]["triton"]["build"]["args"]
 
     assert service["profiles"] == ["triton"]
     assert service["depends_on"] == ["triton"]
@@ -23,6 +24,8 @@ def test_triton_profile_starts_openai_realtime_sidecar_with_internal_grpc():
     assert service["ports"] == ["${TRITON_REALTIME_HOST_PORT:-50053}:50052"]
     assert "gpus" not in service
     assert any("workspace/realtime_usage" in volume for volume in service["volumes"])
+    assert triton_build_args["CLIENT_WHEEL_FILENAME"] == "${CLIENT_WHEEL_FILENAME:-}"
+    assert triton_build_args["CLIENT_WHEEL_SHA256"] == "${CLIENT_WHEEL_SHA256:-}"
     assert service["command"][-3:] == [
         "python3",
         "-m",
@@ -39,6 +42,11 @@ def test_triton_image_contains_sidecar_runtime_dependencies_and_protocol():
         "COPY client/src/qwen3tts_protocol/ /opt/qwen3-tts/qwen3tts_protocol/"
         in dockerfile
     )
+    assert 'ARG CLIENT_WHEEL_FILENAME=""' in dockerfile
+    assert 'ARG CLIENT_WHEEL_SHA256=""' in dockerfile
+    assert "COPY client/dist/ /app/sdk/" in dockerfile
+    assert "find /app/sdk -maxdepth 1" in dockerfile
+    assert "sha256sum -c -" in dockerfile
 
 
 def test_compose_wrapper_manages_sidecar_with_triton_lifecycle():
@@ -54,3 +62,33 @@ def test_compose_wrapper_manages_sidecar_with_triton_lifecycle():
     assert '--realtime-port)  COMPOSE_EXTRA+=(--realtime-port "$2")' in deploy
     assert '--realtime-port)    REALTIME_PORT="$2"' in autorun
     assert "append_optarg DEPLOY_ARGS --realtime-port" in autorun
+
+
+def test_release_pipelines_build_both_version_matched_runtime_images():
+    github = _read(".github/workflows/release.yml")
+    gitlab = _read(".gitlab-ci.yml")
+
+    for pipeline in (github, gitlab):
+        assert "--file infra/docker/Dockerfile.engine" in pipeline
+        assert "--file infra/docker/Dockerfile.triton" in pipeline
+        assert "BROWSER_SDK_VERSION" in pipeline
+        assert "CLIENT_WHEEL_SHA256" in pipeline
+        assert "/app/demo/index.html" in pipeline
+        assert "engine.distribution.container_smoke --runtime standalone" in pipeline
+        assert "engine.distribution.container_smoke --runtime triton" in pipeline
+
+    assert "triton_image" in github
+    assert "TRITON_RELEASE_IMAGE" in gitlab
+
+
+def test_local_compose_uses_reproducible_node_builder_for_web_artifacts():
+    compose_script = _read("scripts/bash/compose.sh")
+    dockerfile = _read("infra/docker/Dockerfile.web-builder")
+
+    assert "Dockerfile.web-builder" in compose_script
+    assert "--target web-artifacts" in compose_script
+    assert '--output "type=local,dest=$staged_web"' in compose_script
+    assert "FROM ${NODE_IMAGE} AS web-builder" in dockerfile
+    assert "npm --prefix web ci" in dockerfile
+    assert "npm --prefix web run build" in dockerfile
+    assert "FROM scratch AS web-artifacts" in dockerfile

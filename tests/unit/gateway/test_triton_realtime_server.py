@@ -4,7 +4,12 @@ import json
 
 import pytest
 
-from engine.gateway.triton_realtime_server import JsonlUsageRecorder, create_app
+from engine.config import ModelPackagePaths
+from engine.gateway.triton_realtime_server import (
+    JsonlUsageRecorder,
+    _runtime_capabilities_from_package,
+    create_app,
+)
 
 
 class _Backend:
@@ -37,13 +42,68 @@ class _Backend:
         return len(text)
 
 
+def test_runtime_capabilities_use_actual_package_voice_metadata(tmp_path, monkeypatch):
+    weights_dir = tmp_path / "weights"
+    weights_dir.mkdir()
+    (weights_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "spk_id": {"Vivian": 1, "Serena": 2},
+                "codec_language_id": {"English": 10, "Chinese": 11},
+            }
+        ),
+        encoding="utf-8",
+    )
+    package_paths = ModelPackagePaths(
+        package_dir=str(tmp_path),
+        engine_dir=str(tmp_path / "runtime"),
+        weights_dir=str(weights_dir),
+        tokenizer_dir=str(tmp_path / "tokenizer"),
+        manifest_path=str(tmp_path / "triton_manifest.json"),
+        runtime_artifact_path=str(tmp_path / "runtime/model.plan"),
+    )
+    monkeypatch.setattr(
+        "engine.gateway.triton_realtime_server.load_model_manifest",
+        lambda *_args, **_kwargs: type(
+            "Arch",
+            (),
+            {
+                "tts_model_type": "custom_voice",
+                "supported_task_types": ("custom_voice",),
+                "variant": "custom-1.7b",
+                "engine_profile": type(
+                    "Profile",
+                    (),
+                    {
+                        "max_batch_size": 8,
+                        "max_input_len": 128,
+                        "max_seq_len": 512,
+                        "engine_dtype": "bf16",
+                        "triton_io_float_dtype": "fp32",
+                    },
+                )(),
+            },
+        )(),
+    )
+
+    capabilities = _runtime_capabilities_from_package(package_paths, "")
+
+    assert capabilities["supported_speakers"] == ["serena", "vivian"]
+    assert capabilities["supported_languages"] == ["auto", "chinese", "english"]
+
+
 @pytest.mark.asyncio
-async def test_sidecar_health_and_capabilities_routes():
+async def test_sidecar_health_capabilities_sdk_and_demo_config_routes(
+    tmp_path, monkeypatch
+):
     pytest.importorskip("aiohttp")
     from aiohttp.test_utils import TestClient, TestServer
 
     backend = _Backend()
-    server = TestServer(create_app(backend))
+    monkeypatch.setenv("DEMO_ENABLED", "true")
+    wheel_name = "qwen3_tts_client-0.2.0-py3-none-any.whl"
+    (tmp_path / wheel_name).write_bytes(b"wheel")
+    server = TestServer(create_app(backend, sdk_dir=tmp_path))
     async with server:
         client = TestClient(server)
         async with client:
@@ -57,7 +117,12 @@ async def test_sidecar_health_and_capabilities_routes():
             response = await client.get("/v1/capabilities")
             assert response.status == 200
             capabilities = await response.json()
-            assert capabilities["supported_api_protocols"] == ["openai-realtime-v1"]
+            assert capabilities["supported_api_protocols"] == [
+                "openai-realtime-v1",
+                "tts-session-v2alpha1",
+            ]
+            assert capabilities["schema_version"] == "qwen.tts.capabilities.v1"
+            assert capabilities["runtime"]["type"] == "triton"
             assert capabilities["openai_realtime_path"] == "/v1/realtime"
             assert capabilities["model_version"] == "7"
             assert capabilities["usage"]["output_audio_token_ms"] == 50
@@ -75,6 +140,18 @@ async def test_sidecar_health_and_capabilities_routes():
                 "active_response_resume"
                 in capabilities["protocols"]["openai_realtime"]["features"]
             )
+            sdk_redirect = await client.get("/sdk", allow_redirects=False)
+            assert sdk_redirect.status == 308
+            assert sdk_redirect.headers["Location"] == "./sdk/"
+            sdk_index = await client.get("/sdk/")
+            assert wheel_name in await sdk_index.text()
+            demo_config_response = await client.get("/demo/config.json")
+            assert demo_config_response.status == 200
+            assert demo_config_response.headers["Cache-Control"] == "no-store"
+            demo_config = await demo_config_response.json()
+            assert demo_config["runtime_type"] == "triton"
+            assert demo_config["endpoints"]["openai_realtime_url"] == ("../v1/realtime")
+            assert demo_config["python_sdk"]["download_url"] == (f"../sdk/{wheel_name}")
     assert backend.closed is True
 
 
@@ -90,6 +167,18 @@ async def test_sidecar_health_is_503_while_triton_is_unavailable():
             response = await client.get("/health")
             assert response.status == 503
             assert (await response.json())["running"] is False
+
+
+@pytest.mark.asyncio
+async def test_demo_config_is_404_until_explicitly_enabled(tmp_path, monkeypatch):
+    pytest.importorskip("aiohttp")
+    from aiohttp.test_utils import TestClient, TestServer
+
+    monkeypatch.delenv("DEMO_ENABLED", raising=False)
+    server = TestServer(create_app(_Backend(), sdk_dir=tmp_path))
+    async with server:
+        async with TestClient(server) as client:
+            assert (await client.get("/demo/config.json")).status == 404
 
 
 @pytest.mark.asyncio

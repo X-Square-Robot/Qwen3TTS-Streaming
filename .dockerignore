@@ -22,6 +22,9 @@ third_party/
 venv/
 env/
 .cache/
+web/node_modules/
+web/test-results/
+web/playwright-report/
 
 .idea/
 .vscode/

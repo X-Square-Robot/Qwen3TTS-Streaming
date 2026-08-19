@@ -13,6 +13,9 @@ services:
         ENGINE_VERSION: ${ENGINE_VERSION:-}
         CLIENT_WHEEL_FILENAME: ${CLIENT_WHEEL_FILENAME:-}
         CLIENT_WHEEL_SHA256: ${CLIENT_WHEEL_SHA256:-}
+        BROWSER_SDK_VERSION: ${BROWSER_SDK_VERSION:-}
+        BROWSER_SDK_REGISTRY_URL: ${BROWSER_SDK_REGISTRY_URL:-}
+        BROWSER_SDK_TARBALL_URL: ${BROWSER_SDK_TARBALL_URL:-}
     container_name: ${ENGINE_CONTAINER_NAME:-qwen3-engine}
     working_dir: /app
     command:
@@ -37,6 +40,8 @@ services:
       ENGINE_WEBSOCKET_PORT: ${ENGINE_WEBSOCKET_PORT:-50052}
       ENGINE_HEALTH_PORT: ${ENGINE_HEALTH_PORT:-8080}
       ENGINE_HEALTH_PROBE_MODE: ${ENGINE_HEALTH_PROBE_MODE:-}
+      DEMO_ENABLED: ${DEMO_ENABLED:-false}
+      DEMO_LAB_URL: ${DEMO_LAB_URL:-}
       ENGINE_MAX_BATCH_SIZE: ${ENGINE_MAX_BATCH_SIZE:-128}
       ENGINE_MAX_SESSIONS: ${ENGINE_MAX_SESSIONS:-128}
       ENGINE_MAX_SEQ_LEN: ${ENGINE_MAX_SEQ_LEN:-}
@@ -102,6 +107,12 @@ services:
         BASE_IMAGE: ${TRITON_BASE_IMAGE:-nvcr.io/nvidia/tritonserver:26.02-py3}
         TENSORRT_PYTHON_VERSION: ${TRITON_TENSORRT_PYTHON_VERSION:-10.15.1.29}
         PYTORCH_CUDA_TAG: ${TRITON_PYTORCH_CUDA_TAG:-cu130}
+        ENGINE_VERSION: ${ENGINE_VERSION:-}
+        CLIENT_WHEEL_FILENAME: ${CLIENT_WHEEL_FILENAME:-}
+        CLIENT_WHEEL_SHA256: ${CLIENT_WHEEL_SHA256:-}
+        BROWSER_SDK_VERSION: ${BROWSER_SDK_VERSION:-}
+        BROWSER_SDK_REGISTRY_URL: ${BROWSER_SDK_REGISTRY_URL:-}
+        BROWSER_SDK_TARBALL_URL: ${BROWSER_SDK_TARBALL_URL:-}
     container_name: ${TRITON_CONTAINER_NAME:-qwen3tts-streaming}
     environment:
       MAX_BATCH_SLOTS: ${TRITON_MAX_BATCH_SLOTS:-128}
@@ -181,6 +192,8 @@ services:
       TRITON_REALTIME_HOST: 0.0.0.0
       TRITON_REALTIME_PORT: 50052
       TRITON_REALTIME_USAGE_LOG: /var/lib/qwen3tts/realtime_usage.jsonl
+      DEMO_ENABLED: ${DEMO_ENABLED:-false}
+      DEMO_LAB_URL: ${DEMO_LAB_URL:-}
       TRITON_GRPC_AUTH_TOKEN: ${TRITON_GRPC_AUTH_TOKEN:-}
       QWEN_LOG_DIR: ${QWEN_LOG_DIR:-/var/log/qwen3tts}
       QWEN_LOG_MAX_BYTES: ${QWEN_LOG_MAX_BYTES:-52428800}
@@ -237,20 +250,4 @@ services:
       - "${DEMO_API_PORT:-7860}:7860"
     volumes:
       - ${DEMO_TRACES_DIR:-../../workspace/demo_traces}:/app/workspace/demo_traces
-    restart: unless-stopped
-
-  webui:
-    profiles: ["demo"]
-    image: node:20-bookworm-slim
-    container_name: ${WEBUI_CONTAINER_NAME:-qwen3-tts-webui}
-    working_dir: /app/webui
-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
-    environment:
-      VITE_DEMO_API_URL: ${VITE_DEMO_API_URL:-http://localhost:${DEMO_API_PORT:-7860}}
-    ports:
-      - "${WEBUI_PORT:-5173}:5173"
-    volumes:
-      - ../..:/app
-    depends_on:
-      - demo-api
     restart: unless-stopped

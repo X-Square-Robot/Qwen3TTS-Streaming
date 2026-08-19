@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import os
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
@@ -44,6 +45,7 @@ from ..session import (
     TerminalStatus,
 )
 from .session_identity import GatewaySessionIdentity
+from .capabilities import REALTIME_MAX_MESSAGE_BYTES
 from .websocket_server import parse_session_start_request
 
 if TYPE_CHECKING:
@@ -353,6 +355,10 @@ class _ResponseState:
     terminal_cancellation_reason: str = ""
     terminal_usage: dict[str, Any] = field(default_factory=dict)
     terminal_delivery_seq: int = 0
+    terminal_metrics: dict[str, Any] = field(default_factory=dict)
+    created_monotonic_ns: int = field(default_factory=time.monotonic_ns)
+    first_audio_monotonic_ns: int = 0
+    finished_monotonic_ns: int = 0
 
 
 class OpenAIRealtimeGateway:
@@ -408,7 +414,10 @@ class OpenAIRealtimeGateway:
             await self._legacy_owner.close()
 
     async def handle_websocket(self, request):
-        ws = web.WebSocketResponse(heartbeat=_HEARTBEAT_SECONDS)
+        ws = web.WebSocketResponse(
+            heartbeat=_HEARTBEAT_SECONDS,
+            max_msg_size=REALTIME_MAX_MESSAGE_BYTES,
+        )
         await ws.prepare(request)
         connection = _RealtimeConnection(
             backend=self._backend,
@@ -826,6 +835,8 @@ class _RealtimeConnection:
                     if pcm:
                         # The adapter always asks the shared output pipeline for
                         # signed 16-bit PCM; duration is the billing ground truth.
+                        if state.first_audio_monotonic_ns == 0:
+                            state.first_audio_monotonic_ns = time.monotonic_ns()
                         state.audio_samples += len(pcm) // (2 * channels)
                         self._voice_locked = True
                         await self._send(
@@ -842,6 +853,7 @@ class _RealtimeConnection:
                 event = frame.get("event") or {}
                 event_type = str(event.get("type") or "")
                 if event_type == "done":
+                    state.terminal_metrics = dict(event.get("meta") or {})
                     await self._finish_response(state, status="completed")
                     return
                 if event_type in {
@@ -1029,6 +1041,8 @@ class _RealtimeConnection:
         self, state: _ResponseState, output: Any
     ) -> None:
         if isinstance(output, AudioOutput):
+            if state.first_audio_monotonic_ns == 0:
+                state.first_audio_monotonic_ns = time.monotonic_ns()
             state.audio_samples = max(state.audio_samples, output.output_sample_end)
             return
         if not isinstance(output, TerminalOutput):
@@ -1039,6 +1053,7 @@ class _RealtimeConnection:
         elif state.terminal_status == "cancelled":
             state.terminal_cancellation_reason = output.message or "client_cancelled"
         state.terminal_usage = self._usage(state)
+        state.terminal_metrics = dict(output.metrics)
         await self._record_usage_once(
             state, status=state.terminal_status, usage=state.terminal_usage
         )
@@ -1370,6 +1385,7 @@ class _RealtimeConnection:
             if state.finished:
                 return
             state.finished = True
+            state.finished_monotonic_ns = time.monotonic_ns()
             usage = state.terminal_usage or self._usage(state)
             await self._record_usage_once(state, status=status, usage=usage)
             item_status = "completed" if status == "completed" else "incomplete"
@@ -1564,8 +1580,43 @@ class _RealtimeConnection:
             "metadata": {
                 "qwen_final_output_sample": str(state.audio_samples),
                 "qwen_output_sample_rate": str(state.sample_rate),
+                **self._response_diagnostics_metadata(state),
             },
         }
+
+    @staticmethod
+    def _response_diagnostics_metadata(state: _ResponseState) -> dict[str, str]:
+        metadata: dict[str, str] = {}
+        if state.first_audio_monotonic_ns:
+            metadata["qwen_server_ttft_ms"] = (
+                f"{(state.first_audio_monotonic_ns - state.created_monotonic_ns) / 1_000_000:.3f}"
+            )
+        finished = state.finished_monotonic_ns or time.monotonic_ns()
+        metadata["qwen_server_total_ms"] = (
+            f"{(finished - state.created_monotonic_ns) / 1_000_000:.3f}"
+        )
+        aliases = {
+            "server_prefix_trimmed_ms": (
+                "server_prefix_trimmed_ms",
+                "vad_prefix_trimmed_ms",
+            ),
+            "server_prefix_trim_applied": ("server_prefix_trim_applied",),
+            "vad_strategy": ("vad_strategy", "vad_policy"),
+        }
+        for public_name, candidates in aliases.items():
+            value = next(
+                (
+                    state.terminal_metrics[name]
+                    for name in candidates
+                    if name in state.terminal_metrics
+                ),
+                None,
+            )
+            if value is not None:
+                metadata[public_name] = (
+                    str(value).lower() if isinstance(value, bool) else str(value)
+                )
+        return metadata
 
     async def _send_error(
         self,

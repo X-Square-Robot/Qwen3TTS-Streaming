@@ -1,0 +1,129 @@
+import {expect, test} from "@playwright/test";
+
+test("synthesizes mock PCM through the browser playback contract and exports WAV", async ({page}) => {
+  await page.addInitScript(() => {
+    class FakePort {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      postMessage(payload: {type?: string; samples?: ArrayBuffer}) {
+        if (payload.type === "push" && payload.samples) {
+          const frames = new Float32Array(payload.samples).length;
+          queueMicrotask(() => this.onmessage?.({data: {type: "consumed", frames}} as MessageEvent));
+        }
+      }
+    }
+    class FakeNode {
+      port = new FakePort();
+      connect(target: unknown) { return target; }
+      disconnect() {}
+    }
+    class FakeContext {
+      sampleRate = 48_000;
+      currentTime = 0;
+      destination = {};
+      audioWorklet = {addModule: async () => undefined};
+      createGain() { return {gain: {setValueAtTime() {}}, connect: () => this.destination, disconnect() {}}; }
+      async resume() {}
+      async suspend() {}
+      async close() {}
+    }
+    Object.assign(globalThis, {AudioContext: FakeContext, AudioWorkletNode: FakeNode});
+  });
+  let route: Parameters<Parameters<typeof page.routeWebSocket>[1]>[0] | undefined;
+  const messages: Array<{type: string}> = [];
+  await page.routeWebSocket(/\/infer\/instance\/v1\/realtime$/, (socket) => {
+    route = socket;
+    socket.onMessage((message) => {
+      messages.push(JSON.parse(String(message)) as {type: string});
+    });
+  });
+  await page.goto("/infer/instance/demo/");
+  await expect(page.getByRole("button", {name: "合成并播放"})).toBeEnabled();
+  await page.getByRole("button", {name: "合成并播放"}).click();
+  await expect.poll(() => route !== undefined).toBe(true);
+  route?.send(JSON.stringify({type: "session.created", session: {id: "sess_e2e"}}));
+  await expect.poll(() => messages.some((event) => event.type === "session.update")).toBe(true);
+  route?.send(JSON.stringify({type: "session.updated", session: {id: "sess_e2e"}}));
+  await expect.poll(() => messages.some((event) => event.type === "response.create")).toBe(true);
+  route?.send(JSON.stringify({type: "response.created", response: {id: "resp_e2e"}}));
+  const pcm = Buffer.alloc(2400 * 2);
+  for (let index = 0; index < 2400; index += 1) pcm.writeInt16LE(Math.round(Math.sin(index / 10) * 3000), index * 2);
+  route?.send(JSON.stringify({
+    type: "response.output_audio.delta", response_id: "resp_e2e", delta: pcm.toString("base64"),
+    qwen_delivery_seq: 1, qwen_output_sample_start: 0, qwen_output_sample_end: 2400,
+  }));
+  route?.send(JSON.stringify({type: "response.done", qwen_delivery_seq: 2, response: {
+    id: "resp_e2e", status: "completed", usage: {audio_tokens: 10},
+    metadata: {qwen_server_ttft_ms: "8.5", qwen_server_total_ms: "40", server_prefix_trimmed_ms: "12", server_prefix_trim_applied: "true", vad_strategy: "energy"},
+  }}));
+  await expect(page.getByRole("link", {name: "下载 WAV"})).toBeVisible();
+  await expect(page.getByText("0.10 s")).toBeVisible();
+  await expect(page.getByText("9 ms", {exact: true})).toBeVisible();
+  await expect(page.getByText("12.0 ms · energy")).toBeVisible();
+});
+
+test("keeps an instance prefix and gates controls from capabilities", async ({page}) => {
+  await page.goto("/infer/instance/demo/");
+  await expect(page.getByRole("heading", {name: "让文字，即刻成为声音。"})).toBeVisible();
+  await expect(page.getByLabel("任务").locator("option")).toHaveCount(2);
+  await expect(page.getByLabel("输出 VAD").locator("option")).toHaveCount(2);
+  await page.getByLabel("输出 VAD").selectOption("energy");
+  await expect(page.getByLabel("Begin threshold")).toBeVisible();
+  await page.getByLabel("任务").selectOption("voice_design");
+  await page.getByLabel("输入方式").selectOption("incremental");
+  await expect(page.getByText(/工程预览能力/)).toBeVisible();
+  await page.getByRole("link", {name: "SDK"}).click();
+  await expect(page.getByRole("link", {name: /下载 qwen3_tts_client/})).toHaveAttribute(
+    "href", "http://127.0.0.1:4173/infer/instance/sdk/qwen3_tts_client-1.2.3-py3-none-any.whl",
+  );
+  await expect(page.getByText("Engine、Python SDK、Browser SDK 与文档来自同一 release。")).toBeVisible();
+  await expect(page.getByText(/SynthesisTask\.VoiceDesign/)).toBeVisible();
+  await expect(page.getByText(/strategy: VadStrategy\.Energy/)).toBeVisible();
+  await expect(page.getByText(/client\.startIncremental\(options\)/)).toBeVisible();
+  await expect(page.getByText(/client\.open_stream\(SessionStartRequest/)).toBeVisible();
+});
+
+test("runs the built-in LLM comparison through public Realtime", async ({page}) => {
+  let sequence = 0;
+  await page.routeWebSocket(/\/infer\/instance\/v1\/realtime$/, (socket) => {
+    const id = ++sequence;
+    socket.send(JSON.stringify({type: "session.created", session: {id: `lab_${id}`}}));
+    socket.onMessage((message) => {
+      const event = JSON.parse(String(message)) as {type: string};
+      if (event.type === "session.update") {
+        socket.send(JSON.stringify({type: "session.updated", session: {id: `lab_${id}`}}));
+      }
+      if (event.type === "response.create") {
+        socket.send(JSON.stringify({type: "response.created", response: {id: `resp_lab_${id}`}}));
+        setTimeout(() => {
+          socket.send(JSON.stringify({
+            type: "response.output_audio.delta", response_id: `resp_lab_${id}`,
+            delta: Buffer.alloc(480).toString("base64"), qwen_delivery_seq: 1,
+            qwen_output_sample_start: 0, qwen_output_sample_end: 240,
+          }));
+          socket.send(JSON.stringify({
+            type: "response.done", qwen_delivery_seq: 2,
+            response: {id: `resp_lab_${id}`, status: "completed", usage: {audio_tokens: 1}},
+          }));
+        }, 300);
+      }
+    });
+  });
+  await page.goto("/infer/instance/demo/#/lab");
+  await expect(page.getByRole("heading", {name: "同一入口，观察不同负载。"})).toBeVisible();
+  await page.getByRole("button", {name: "运行 LLM PK"}).click();
+  await expect(page.getByText("增量文本", {exact: true})).toBeVisible();
+  await expect(page.getByText("完整文本", {exact: true})).toBeVisible();
+  await expect(page.getByRole("button", {name: "下载 JSON trace"})).toBeVisible();
+  expect(sequence).toBe(2);
+});
+
+test("Pages stays useful in docs-only mode", async ({page}) => {
+  await page.goto("/pages/#/docs/overview-zh");
+  await expect(page.getByText("同一份源码，同一个版本。")).toBeVisible();
+  await expect(page.locator("article.markdown h1").first()).toBeVisible();
+  await page.getByRole("link", {name: "体验"}).click();
+  await expect(page.getByRole("button", {name: "合成并播放"})).toBeDisabled();
+  await page.getByRole("link", {name: "SDK"}).click();
+  await expect(page.getByText(/只读文档模式/)).toBeVisible();
+  await expect(page.getByRole("heading", {name: "当前参数代码"})).toHaveCount(0);
+});

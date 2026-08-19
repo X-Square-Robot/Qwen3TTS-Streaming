@@ -2,7 +2,7 @@
 
 # Benchmark 方法
 
-本文档定义 WebUI、README 和 release trace 使用的 benchmark 口径。所有公开性能数字都必须带上这些条件。
+本文档定义产品 Demo、README 和 release trace 使用的 benchmark 口径。所有公开性能数字都必须带上这些条件。
 
 ## 指标定义
 
@@ -71,7 +71,7 @@ TTFT 15ms。
 - throughput audio sec/sec。
 - 是否启用 live concurrency。
 
-WebUI 的 live concurrency 默认关闭：
+可选 `demo_api` 的 live concurrency 默认关闭：
 
 ```bash
 QWEN_DEMO_ENABLE_LIVE_CONCURRENCY=1 python -m demo_api --port 7860

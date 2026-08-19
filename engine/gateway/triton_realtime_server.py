@@ -12,20 +12,19 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from ..config import resolve_model_package_paths
+from ..config import load_model_manifest, resolve_model_package_paths
+from ..distribution.sdk import mount_sdk_routes
+from ..distribution.site import mount_demo_config_route
 from ..session import ResumableSessionRegistry, SessionService
+from .capabilities import RuntimeType, build_gateway_capabilities
 from .openai_realtime import (
     OPENAI_REALTIME_PATH,
-    OPENAI_REALTIME_PROTOCOL,
-    QWEN_REALTIME_EXTENSION_PROTOCOL,
-    QWEN_TEXT_BUFFER_EXTENSION,
     OpenAIRealtimeGateway,
 )
 from .triton_realtime_backend import TritonRealtimeBackend
 from .session_backend import TritonSessionBackend
 from .native_session_gateway import (
     NATIVE_WEBSOCKET_PATH,
-    NATIVE_WEBSOCKET_PROTOCOL,
     NativeSessionGateway,
 )
 
@@ -36,6 +35,79 @@ except ImportError:  # pragma: no cover - deployment dependency
 
 
 logger = logging.getLogger(__name__)
+
+
+def _runtime_capabilities_from_package(
+    package_paths, tokenizer_dir: str
+) -> dict[str, Any]:
+    """Describe only features proven by the mounted model package."""
+
+    arch = load_model_manifest(package_paths.engine_dir, tokenizer_dir=tokenizer_dir)
+    weights_config: dict[str, Any] = {}
+    weights_config_path = Path(package_paths.weights_dir) / "config.json"
+    try:
+        loaded_config = json.loads(weights_config_path.read_text(encoding="utf-8"))
+        if isinstance(loaded_config, dict):
+            weights_config = loaded_config
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Could not read capability metadata from %s: %s",
+            weights_config_path,
+            exc,
+        )
+    speaker_ids = weights_config.get("spk_id")
+    language_ids = weights_config.get("codec_language_id")
+    supported_speakers = (
+        sorted(str(name).strip().lower() for name in speaker_ids if str(name).strip())
+        if isinstance(speaker_ids, dict)
+        else []
+    )
+    supported_languages = (
+        [
+            "auto",
+            *sorted(
+                str(name).strip().lower()
+                for name in language_ids
+                if str(name).strip() and str(name).strip().lower() != "auto"
+            ),
+        ]
+        if isinstance(language_ids, dict)
+        else []
+    )
+    loaded_model_type = str(arch.tts_model_type or "").strip()
+    if not loaded_model_type or loaded_model_type == "unknown":
+        tasks = [task for task in arch.supported_task_types if task]
+        loaded_model_type = tasks[0] if len(tasks) == 1 else "unknown"
+    profile = arch.engine_profile
+    return {
+        "variant": arch.variant,
+        "loaded_model_type": loaded_model_type,
+        "engine_version": os.environ.get("ENGINE_VERSION", "").strip(),
+        "declared_supported_task_types": list(arch.supported_task_types),
+        "supported_input_modes": ["token", "clause", "long_segment", "full_text"],
+        "supported_group_policies": ["none", "auto"],
+        "supported_speakers": supported_speakers,
+        "supported_languages": supported_languages,
+        "supported_vad_strategies": ["disabled", "energy"],
+        "supported_audio_formats": [
+            {"encoding": "pcm_f32", "sample_rate": 24000, "channels": 1},
+            {"encoding": "pcm_f32", "sample_rate": 16000, "channels": 1},
+            {"encoding": "pcm_s16le", "sample_rate": 24000, "channels": 1},
+            {"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 1},
+        ],
+        # Reference support depends on model parameters and optional runtime
+        # components that the sidecar cannot inspect safely. Keep it disabled
+        # until Triton publishes an affirmative capability contract.
+        "ref_audio_available": False,
+        "ref_audio_reason": "Triton model did not advertise reference support",
+        "engine_profile": {
+            "max_batch_size": profile.max_batch_size,
+            "max_input_len": profile.max_input_len,
+            "max_seq_len": profile.max_seq_len,
+            "engine_dtype": profile.engine_dtype,
+            "triton_io_float_dtype": profile.triton_io_float_dtype,
+        },
+    }
 
 
 class JsonlUsageRecorder:
@@ -62,6 +134,8 @@ def create_app(
     backend: TritonRealtimeBackend,
     *,
     usage_recorder: Any = None,
+    sdk_dir: str | os.PathLike[str] | None = None,
+    runtime_capabilities: dict[str, Any] | None = None,
 ):
     """Create the testable sidecar application without binding a socket."""
 
@@ -79,64 +153,22 @@ def create_app(
     )
 
     def capabilities_payload() -> dict[str, Any]:
-        return {
-            # Keep the historical flat field stable for one compatibility
-            # release.  New clients use the endpoint-scoped ``protocols`` map
-            # below, which now advertises both first-class wire adapters.
-            "supported_api_protocols": [OPENAI_REALTIME_PROTOCOL],
-            "openai_realtime_path": OPENAI_REALTIME_PATH,
-            "native_websocket_path": NATIVE_WEBSOCKET_PATH,
-            "supported_realtime_extensions": [
-                QWEN_TEXT_BUFFER_EXTENSION,
-                "qwen.text_progress.v1",
-                "qwen.response_resume.v1",
-            ],
-            "supported_progress_features": [
-                "text_progress_anchor_v1",
-                "playback_progress_v1",
-                "qwen.text_progress.v1",
-            ],
-            "stream_resume_grace_ms": int(resume_registry.grace_seconds * 1000),
-            "stream_resume_max_buffer_bytes": resume_registry.max_buffer_bytes,
-            "backend": "triton-grpc",
-            "model": backend.model_name,
-            "model_version": backend.model_version,
-            "usage": {
-                "response_field": "response.done.response.usage",
-                "input": "model_tokenizer",
-                "output_audio_token_ms": 50,
-            },
-            "protocols": {
-                "native_websocket": {
-                    "path": NATIVE_WEBSOCKET_PATH,
-                    "current": NATIVE_WEBSOCKET_PROTOCOL,
-                    "supported": [NATIVE_WEBSOCKET_PROTOCOL],
-                    "features": [
-                        "persistent_sessions_v1",
-                        "stream_resume_v1",
-                        "playback_progress_v1",
-                    ],
-                    "audio_formats": ["pcm_f32", "pcm_s16le"],
-                },
-                "openai_realtime": {
-                    "path": OPENAI_REALTIME_PATH,
-                    "base": OPENAI_REALTIME_PROTOCOL,
-                    "supported_extensions": [
-                        QWEN_TEXT_BUFFER_EXTENSION,
-                        "qwen.text_progress.v1",
-                        "qwen.response_resume.v1",
-                    ],
-                    "extension_protocol": QWEN_REALTIME_EXTENSION_PROTOCOL,
-                    "features": [
-                        "base64_pcm16",
-                        "full_duplex",
-                        "serial_responses",
-                        "active_response_resume",
-                    ],
-                    "audio_formats": ["pcm_s16le"],
-                },
-            },
+        capabilities = build_gateway_capabilities(
+            runtime_capabilities,
+            runtime_type=RuntimeType.TRITON,
+            backend="triton-grpc",
+            native_path=NATIVE_WEBSOCKET_PATH,
+            resume_grace_ms=int(resume_registry.grace_seconds * 1000),
+            resume_max_buffer_bytes=resume_registry.max_buffer_bytes,
+            model_name=backend.model_name,
+            model_version=backend.model_version,
+        )
+        capabilities["usage"] = {
+            "response_field": "response.done.response.usage",
+            "input": "model_tokenizer",
+            "output_audio_token_ms": 50,
         }
+        return capabilities
 
     native_gateway = NativeSessionGateway(
         service,
@@ -168,6 +200,13 @@ def create_app(
     app.router.add_get(NATIVE_WEBSOCKET_PATH, native_gateway.handle_websocket)
     app.router.add_get("/v1/capabilities", capabilities)
     app.router.add_get("/health", health)
+    sdk_distribution = mount_sdk_routes(app, sdk_dir=sdk_dir)
+    mount_demo_config_route(
+        app,
+        runtime_type=RuntimeType.TRITON.value,
+        capabilities_provider=capabilities_payload,
+        sdk_distribution=sdk_distribution,
+    )
     app.on_cleanup.append(cleanup)
     return app
 
@@ -225,7 +264,14 @@ async def _serve(args: argparse.Namespace) -> None:
         headers=_triton_headers(),
     )
     usage_recorder = JsonlUsageRecorder(args.usage_log) if args.usage_log else None
-    app = create_app(backend, usage_recorder=usage_recorder)
+    runtime_capabilities = _runtime_capabilities_from_package(
+        package_paths, tokenizer_dir
+    )
+    app = create_app(
+        backend,
+        usage_recorder=usage_recorder,
+        runtime_capabilities=runtime_capabilities,
+    )
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, args.host, args.port)

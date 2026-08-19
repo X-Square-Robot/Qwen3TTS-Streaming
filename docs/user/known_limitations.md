@@ -2,7 +2,7 @@
 
 # Known Limitations and Risks
 
-This document is the risk statement for the current open-source preview release. Before release, keep it consistent with the README, WebUI, and demo API.
+This document is the risk statement for the current open-source preview release. Before release, keep it consistent with the README, product Demo, and demo API.
 
 ## Release Positioning
 
@@ -13,7 +13,7 @@ Recommended v0.1 stable scope:
 - Model: `custom-1.7b`
 - Task: `custom_voice`
 - Deployment: standalone engine / Triton TRT streaming
-- WebUI: performance showcase, trace replay, live TRT/engine comparison
+- Product Demo: public-Realtime no-code playback, diagnostics, SDK, and optional engineering Lab
 
 ## Model Path Status
 
@@ -50,14 +50,13 @@ The single-stream TTFT figure (measured server TTFT 14.9 ± 0.3ms; see [benchmar
 
 `128-stream avg TTFT` must also carry complete test conditions, including hardware, driver, NGC image, engine profile, input text, cache mode, sampling parameters, client measurement method, and failure rate.
 
-## WebUI Data Sources
+## Demo Data Sources
 
-The WebUI has two data sources:
-
-- fixture trace: offline JSON replay, suitable for showcasing the UI and aligning metric fields; it does not represent a live service.
-- live measurement: real-time calls to the standalone engine, Triton, or the official PyTorch API.
-
-Only when the result's `source` is `live_triton`, `live_engine`, or `live_official_pytorch` does it represent a live measurement. Default fixture values need to be re-collected on real hardware before release.
+The product Demo produces audio and metrics only through the current instance's
+public `/v1/realtime`; an unavailable backend fails explicitly. Fixtures, beeps,
+and historical benchmark numbers never stand in for a live result. Optional
+`demo_api` traces are separately labelled engineering data and must not enter
+the product experience or public performance claims.
 
 ## Deployment Limitations
 
@@ -68,7 +67,7 @@ Only when the result's `source` is `live_triton`, `live_engine`, or `live_offici
 
 ## User Notices That Must Be Kept Before Release
 
-The README, WebUI, and release notes must make clear:
+The README, product Demo, and release notes must make clear:
 
 - This project is an engineering preview.
 - The v0.1 recommended path is `custom-1.7b`.

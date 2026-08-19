@@ -14,13 +14,13 @@
 
 <img src="docs/images/文本播放器.gif" width="720" alt="文本播放器演示：按 engine decode step 同步播放的流式 TTS">
 
-*文本 token 进去，音频 chunk 实时出来。为什么这很关键见 [Token 级流式](#token-级流式)，完整演示见 [WebUI Demo](#webui-demo)。*
+*文本 token 进去，音频 chunk 实时出来。为什么这很关键见 [Token 级流式](#token-级流式)，然后到[内置 Demo](#内置-demo-与统一文档)直接试听。*
 
 </div>
 
 ## 引言
 
-Qwen3TTS-Streaming 是一个**工程预览版**项目：把官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运行时，围绕 Triton/standalone engine 做**token 级流式 TTS**、模型 fuse、前端分词、prefix cache、连续批处理和 WebUI 性能展示。项目开放一条已高度优化、可复现、可继续验证的工程链路，让社区一起打磨成可靠的开源推理系统。
+Qwen3TTS-Streaming 是一个**工程预览版**项目：把官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运行时，围绕 Triton/standalone engine 做**token 级流式 TTS**、模型 fuse、前端分词、prefix cache、连续批处理和内置产品 Demo。项目开放一条已高度优化、可复现、可继续验证的工程链路，让社区一起打磨成可靠的开源推理系统。
 
 > ⚠️ **状态：v0.1 工程预览，非生产就绪。** 流式模式仍可能出现**幻觉、重复、漏读**（当前 checkpoint 上约 10–18%，根因在模型+采样，见 [已知限制](docs/user/known_limitations.zh-CN.md)）。**当前建议稳定范围为 `custom-1.7b` / `custom_voice` 路径**；`design-1.7b`、`base-1.7b` / x-vector 语音克隆、`icl` 语音克隆处于实验状态；`0.6b` 变体未作为 v0.1 主线。请勿直接用于生产内容生成。
 
@@ -96,7 +96,7 @@ Qwen3TTS-Streaming —— 每个 decode step 1 个融合 engine
 - 🧵 **每个 decode step 一个 TensorRT engine，而非四个** —— talker + Code Predictor + codec-embedding 求和 + code2wav 融合进一张导出图，导图到测试全流程都在本仓库
 - 🧠 **Prefix KV cache** —— 16 条 LRU 缓存，命中即跳过 prefill，省 10–50ms（见[引擎设计全景总览](docs/dev/architecture/engine_overview.zh-CN.md)）
 - 🧮 **Code predictor 展开成单张静态 TRT 图** —— 无逐步 KV，比逐步解码有更高 GPU 利用率（见[引擎设计全景总览](docs/dev/architecture/engine_overview.zh-CN.md)）
-- 🖥️ **WebUI 展示** —— Text Player、LLM PK、Concurrency 三个面板，实时看流式效果
+- 🖥️ **内置产品 Demo** —— 无代码试听、参数调节、SDK 下载、统一文档与可选实验页
 
 前四点详见[特色](#特色)；后两点见[引擎设计全景总览](docs/dev/architecture/engine_overview.zh-CN.md)。
 
@@ -114,7 +114,7 @@ Qwen3TTS-Streaming —— 每个 decode step 1 个融合 engine
 - [部署方式](#部署方式)
 - [Client SDK](#client-sdk)
 - [测试与验收](#测试与验收)
-- [WebUI Demo](#webui-demo)
+- [内置 Demo 与统一文档](#内置-demo-与统一文档)
 - [流式协议](#流式协议)
 - [项目结构](#项目结构)
 - [文档导航](#文档导航)
@@ -133,8 +133,8 @@ Qwen3TTS-Streaming —— 每个 decode step 1 个融合 engine
 > ⚠️ **128 路并发是压测出来的天花板，不是生产安全值。** 经三轮 decode 优化（2026-07-06:CP 展开图内 KV + CUDA graph decode 回放 + KV gather arena 化;2026-07-07:突发批量准入 + 逐 slot 状态入池 + 服务热路径瘦身;2026-07-08:复盘审计修复批 + 批量化 p3_launch）后，压测 GPU（RTX 5090，全 bf16 引擎，batch=128 profile）在 128 路并发下每 80ms 音频帧的解码耗时 42.1ms——RTF（音频时长 / 实际解码耗时）≈ 1.90，即约 47% 的实时余量（优化前为 119.8ms/帧，RTF ≈ 0.67,低于实时）。这点余量能吸收正常抖动，但持续的负载尖峰或偏重的请求仍可能把它吃掉。生产环境的并发规划仍应在 128 之下留足 buffer，不要顶格跑；64 路时解码耗时 24.5ms（RTF ≈ 3.3），余量充足。完整拆解与原始数据见[服务性能压测报告](docs/dev/investigation/serving_performance_benchmark.zh-CN.md)。
 
 - standalone `engine-grpc` TTFT 默认按 ready/reused gRPC channel 统计，和 WebSocket 一样不把客户端建连成本计入首包延迟；cold/lazy channel 会额外增加约 13ms。
-- WebUI **Concurrency 面板**显示的 TTFT 与上表不是同一测量窗口、也不是同一负载形态，**不能直接对比**：Triton 路径下每 lane 上报的是服务端 adapter TTFT——从模型开始处理该请求时起表，客户端建连、发出散布、处理前排队、首帧回传均不计入——且 demo 后端在单事件循环上逐路发起各 lane，到达是斜坡而非同时突发。同一硬件上面板在 128 路时通常显示 ~100–170ms；这是真实的 live 测量，但对外口径请以上表的客户端突发数字为准。
-- WebUI 只在结果 source 标记为 `live_triton` 或 `live_engine_websocket` 且带 `audio` 字段时代表可回放的实时合成音频。
+- Demo 实验页的单次浏览器指标与上表不是同一测量窗口或负载形态，不能直接对比；公开性能口径必须使用带完整条件的 benchmark 数据。
+- 产品 Demo 只调用当前实例公共 `/v1/realtime`；live backend 不可用时明确失败，不回退到 fixture 或模拟音频。
 
 详细 benchmark 口径见 [Benchmark 方法](docs/user/benchmark_methodology.zh-CN.md)。
 
@@ -142,7 +142,7 @@ Qwen3TTS-Streaming —— 每个 decode step 1 个融合 engine
 
 | 路径 | 当前状态 | 开源口径 |
 | --- | --- | --- |
-| `custom-1.7b` / `custom_voice` | 🟢 优先稳定 | v0.1 推荐路径，WebUI 和 demo 默认围绕它展示 |
+| `custom-1.7b` / `custom_voice` | 🟢 优先稳定 | v0.1 推荐路径，产品 Demo 默认围绕它展示 |
 | `design-1.7b` / `voice_design` | 🟡 实验 | 可保留代码和导出入口，需标注未充分测通 |
 | `base-1.7b` / x-vector voice clone | 🟡 实验 | standalone 已接入 ref audio → speaker embedding；需 base 导出产物和真实端到端验证 |
 | `icl` voice clone | 🟡 实验 | standalone 已接入 ref audio + ref text → ref codec/code 注入；需 TRT ref-audio engine 和真实端到端验证 |
@@ -269,12 +269,13 @@ transport 继续可用并发出弃用告警，当前尚未删除。
 curl http://<engine-host>:<ws-port>/v1/capabilities
 # → {"engine_version": "v0.1.0", ...}
 
-# 公共 GitHub Release（GitLab Release 提供同名文件）。
-pip install "qwen3-tts-client[all] @ https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases/download/v0.1.0/qwen3_tts_client-0.1.0-py3-none-any.whl"
+# 精确且可直接复制的安装命令见当前实例的 /demo/#/sdk 页面。
+# 也可在对应版本的发布页选择 wheel：
+# https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases
 
 # 引擎分发的也是同一个已发布 wheel。
-curl http://<engine-host>:<health-port>/sdk/    # 先看列表，再：
-pip install http://<engine-host>:<health-port>/sdk/qwen3_tts_client-0.1.0-py3-none-any.whl
+curl https://<public-service-base>/sdk/    # 先看列表，再使用页面返回的相对链接：
+pip install "https://<public-service-base>/sdk/<wheel-filename>"
 
 # 或从本地检出安装
 pip install "./client[all]"
@@ -336,46 +337,46 @@ mamba run -n qwen3-tts python tools/validation/serving_endpoints.py \
   --ref-text "这是一段与 vivian 参考音频完全一致的文本。"
 ```
 
-## WebUI Demo
+## 内置 Demo 与统一文档
 
-WebUI 包含三个板块：**Text Player**（按 engine decode step 播放文本，前半段 text token，flush 后显示 PAD step，合成完成后 slider seek 实际 WAV 音频）、**LLM PK**（模拟上游 LLM 逐 token 吐字，流式 vs 非流式同时间轴对比）、**Concurrency**（多路合成 TTFT 分布与吞吐，默认请求 live Triton 并保存真实音频）。
+每个正式运行时镜像都在 `/demo/` 内置与该版本匹配的实例门户。设置
+`DEMO_ENABLED=true` 后，它与 `/v1/realtime`、`/sdk/` 使用同一个公共端口。
+门户会发现当前实例的能力，通过 Browser SDK 合成，通过系统扬声器播放，并提供由
+capabilities 门控的 VAD/交付参数、WAV 下载和本仓库 Markdown 文档；普通体验不依赖
+独立 Demo API。
 
-**Text Player**
+内置“实验”页还提供通过公共 Realtime 执行的 **LLM PK**、并发请求、Text Player
+事件轨迹和 JSON trace 下载。结果仅代表当前浏览器到当前实例的本次请求，不展示
+硬编码性能数字，也不会用 fixture 或模拟音频替代 live backend。
 
-![Text Player 演示](docs/images/文本播放器.gif)
-
-**LLM PK**
+**LLM PK 历史演示素材**
 
 ![流式非流式对比演示](docs/images/流式非流式对比.gif)
 
-**Concurrency**
+**Concurrency 历史演示素材**
 
 ![多路合成演示](docs/images/多路合成.gif)
 
-> 该面板显示的 TTFT 是服务端口径、斜坡到达的指标，会系统性低于突发压测数字——见[性能声明](#性能声明)中的注记。
-
 完整录屏：[演示视频.mp4](docs/videos/演示视频.mp4)
 
-一键启动（WebUI dev server、Demo API 和 Triton 都由 launcher 启动/复用）：
+Standalone 启动：
 
 ```bash
-bash scripts/demo/start_webui_demo.sh --variant custom-1.7b
+DEMO_ENABLED=true bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 ```
 
-也可手动分步启动：
+浏览器打开 `http://localhost:50052/demo/`。Triton 部署改用 `--gateway triton`，
+然后打开 `http://localhost:50053/demo/`。服务挂在 `/infer/<instance>` 等反向代理前缀下
+时，门户、SDK、WebSocket 和静态资源链接仍会保留该前缀。
 
-```bash
-python -m demo_api --host 0.0.0.0 --port 7860   # Terminal 1
-cd webui && npm install && npm run dev             # Terminal 2
-```
-
-浏览器打开 `http://localhost:5173`。如果 live backend 不可用，WebUI 展示 warning；音频按钮只在捕获到真实 waveform bytes 时启用，不使用嘟声占位。
-
-Docker Compose demo profile：
+内置“实验”页已通过同一个公共 Realtime 入口提供 **LLM PK** 和并发实验。详细
+decode trace 数据仍由可选的 `demo_api` 工程实验后端提供，并从同一个内置页面进入，
+不会伪装成普通产品体验：
 
 ```bash
 bash scripts/bash/compose.sh up --gateway triton --variant custom-1.7b
-docker compose --profile demo -f infra/docker/compose.yaml up --build demo-api webui
+DEMO_ENABLED=true DEMO_LAB_URL=http://localhost:7860 \
+  docker compose --profile demo -f infra/docker/compose.yaml up --build demo-api
 ```
 
 ## 流式协议
@@ -410,8 +411,8 @@ Qwen3TTS-Streaming/
 ├── client/                     # 独立 Python SDK 包（qwen3-tts-client，以 wheel 发布）
 │   ├── src/qwen3tts/           #   客户端实现与传输适配器
 │   └── src/qwen3tts_protocol/  #   共享协议层（单一真相源）
-├── demo_api/                   # WebUI Demo API（依赖 client 包）
-├── webui/                      # Vite/React WebUI
+├── demo_api/                   # 可选工程实验 API（依赖 client 包）
+├── web/                        # Browser SDK 与唯一 React/Vite 产品门户
 ├── proto/                      # 协议定义唯一源（tts.proto + 生成代码）
 ├── model_repository/           # Triton Python BLS 模型定义
 ├── infra/
@@ -419,7 +420,7 @@ Qwen3TTS-Streaming/
 ├── scripts/
 │   ├── bash/                   # autorun/setup/build/deploy 生命周期
 │   ├── compose/                # 容器入口点脚本
-│   ├── demo/                   # Demo 启动脚本（start_webui_demo.sh）
+│   ├── demo/                   # Demo / 工程实验启动脚本
 │   ├── export/                 # PyTorch → ONNX/manifest 导出
 │   └── python/                 # 配置/manifest/audit 工具
 ├── tests/
@@ -457,7 +458,7 @@ Qwen3TTS-Streaming/
 
 ## 许可证
 
-- **本项目自有代码**（`engine/`、`client/`、`demo_api/`、`webui/`、`scripts/` 等）按 [MIT](LICENSE) 许可证发布，版权归 XSquareRobot。
+- **本项目自有代码**（`engine/`、`client/`、`demo_api/`、`web/`、`scripts/` 等）按 [MIT](LICENSE) 许可证发布，版权归 XSquareRobot。
 - **上游 [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)**（`third_party/` 子模块）为 Apache 2.0，与 MIT 兼容。
 - **模型权重**由 Qwen/Alibaba 发布，许可证以其 [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [Hugging Face](https://huggingface.co/Qwen) 模型卡为准；本仓库不分发任何权重。
 - **TensorRT / Triton Inference Server**（NVIDIA NGC 镜像）为 NVIDIA 专有软件，本仓库不打包，使用即表示接受 NVIDIA EULA。

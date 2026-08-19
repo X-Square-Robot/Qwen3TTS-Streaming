@@ -1091,6 +1091,7 @@ def _session_update(
         "ref_audio": maybe_base64(config.ref_audio or None),
         "ref_text": config.ref_text,
         "x_vector_only": bool(config.x_vector_only),
+        "input_mode": config.input_mode or "auto",
         "group_policy": config.group_policy or "auto",
         "output_policy": _output_policy_mapping(start_request),
         "timing": _timing_mapping(start_request),

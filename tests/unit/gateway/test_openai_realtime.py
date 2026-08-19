@@ -208,6 +208,11 @@ async def test_standard_realtime_tts_lifecycle_and_usage():
             ]
 
             usage = done["response"]["usage"]
+            metadata = done["response"]["metadata"]
+            assert float(metadata["qwen_server_ttft_ms"]) >= 0
+            assert float(metadata["qwen_server_total_ms"]) >= float(
+                metadata["qwen_server_ttft_ms"]
+            )
             assert usage["input_tokens"] == len("hello") + len("calm")
             assert usage["output_tokens"] == 1
             assert usage["output_token_details"]["audio_tokens"] == 1

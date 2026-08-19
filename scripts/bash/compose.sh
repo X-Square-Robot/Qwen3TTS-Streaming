@@ -50,6 +50,7 @@ TRITON_REALTIME="${TRITON_REALTIME_HOST_PORT:-50053}"
 TRITON_GPU_DEVICE="${TRITON_GPU_DEVICE:-$ENGINE_DEVICE}"
 TRITON_MAX_BATCH="${TRITON_MAX_BATCH_SLOTS:-${RUNTIME_MAX_BATCH_SIZE:-}}"
 TRITON_MAX_SEQ_LEN="${TRITON_MAX_SEQ_LEN:-${RUNTIME_MAX_SEQ_LEN:-}}"
+WEB_BUILDER_IMAGE="${WEB_BUILDER_IMAGE:-node:22-bookworm-slim}"
 
 usage() {
     cat <<'EOF'
@@ -772,6 +773,38 @@ stage_client_wheel() {
     fi
 }
 
+# Build the static Demo/docs payload before a runtime image build. A fixed
+# Node 22 BuildKit stage owns npm; only generated files are copied into the
+# runtime image context, so runtime images contain neither Node nor npm.
+stage_demo_site() {
+    if $DRY_RUN; then
+        log_info "[DRY RUN] Would build Demo/Browser SDK artifacts with the Node 22 builder"
+        return 0
+    fi
+    local staged_web
+    staged_web=$(mktemp -d /tmp/qwen3tts-web-artifacts.XXXXXX)
+    if ! DOCKER_BUILDKIT=1 docker build \
+        --file "$REPO_ROOT/infra/docker/Dockerfile.web-builder" \
+        --target web-artifacts \
+        --build-arg "NODE_IMAGE=$WEB_BUILDER_IMAGE" \
+        --output "type=local,dest=$staged_web" \
+        "$REPO_ROOT"; then
+        rm -rf "$staged_web"
+        log_error "Failed to build embedded Demo/Browser SDK artifacts"
+        return 1
+    fi
+    test -s "$staged_web/demo/index.html"
+    test -s "$staged_web/metadata/browser-sdk-version.txt"
+    rm -rf "$REPO_ROOT/web/packages/demo/dist" "$REPO_ROOT/web/packages/browser-sdk/dist"
+    mkdir -p "$REPO_ROOT/web/packages/demo/dist" "$REPO_ROOT/web/packages/browser-sdk/dist"
+    cp -a "$staged_web/demo/." "$REPO_ROOT/web/packages/demo/dist/"
+    cp -a "$staged_web/browser-sdk/." "$REPO_ROOT/web/packages/browser-sdk/dist/"
+    export BROWSER_SDK_VERSION
+    BROWSER_SDK_VERSION=$(tr -d '\r\n' < "$staged_web/metadata/browser-sdk-version.txt")
+    rm -rf "$staged_web"
+    log_info "Demo site staged for /demo/ (Browser SDK $BROWSER_SDK_VERSION)"
+}
+
 cmd_build() {
     require_docker_compose_if_needed
     resolve_variant_if_needed
@@ -780,12 +813,18 @@ cmd_build() {
     case "$GATEWAY" in
         engine)
             stage_client_wheel
+            stage_demo_site
             compose_cmd build engine
             verify_compose_engine_image
             ;;
-        triton) compose_cmd build triton ;;
+        triton)
+            stage_client_wheel
+            stage_demo_site
+            compose_cmd build triton
+            ;;
         all)
             stage_client_wheel
+            stage_demo_site
             compose_cmd build engine triton
             verify_compose_engine_image
             ;;
@@ -812,8 +851,9 @@ cmd_prepare() {
 # Run `compose up` for the given services, honoring --build.
 _compose_up_exec() {
     if $BUILD_BEFORE_UP; then
-        if [[ " $* " == *" engine "* ]]; then
+        if [[ " $* " == *" engine "* || " $* " == *" triton "* ]]; then
             stage_client_wheel
+            stage_demo_site
         fi
         compose_cmd up --build -d "$@"
     else

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://x2robot.com/qwen3tts/contracts/demo-config.v1.schema.json",
+  "title": "Qwen3-TTS instance Demo config v1",
+  "type": "object",
+  "required": ["schema_version", "engine_version", "runtime_type", "endpoints", "python_sdk", "browser_sdk", "docs", "lab"],
+  "properties": {
+    "schema_version": {"const": "qwen.tts.demo-config.v1"},
+    "runtime_type": {"enum": ["standalone", "triton"]},
+    "endpoints": {
+      "type": "object",
+      "required": ["capabilities_url", "openai_realtime_url", "native_websocket_url"],
+      "patternProperties": {"_url$": {"type": "string", "pattern": "^\\.\\./"}}
+    },
+    "python_sdk": {
+      "type": "object",
+      "required": ["available", "project", "index_url"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "index_url": {"type": "string", "pattern": "^\\.\\./sdk/"},
+        "download_url": {"type": "string", "pattern": "^\\.\\./sdk/"}
+      }
+    },
+    "browser_sdk": {
+      "type": "object",
+      "required": ["available", "package", "version", "registry_url", "tarball_url"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "package": {"const": "@xmultimodalinteraction/qwen3tts-browser"},
+        "version": {"type": "string"},
+        "registry_url": {"type": "string"},
+        "tarball_url": {"type": "string"}
+      }
+    },
+    "lab": {
+      "type": "object",
+      "required": ["available", "url"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "url": {"type": "string"}
+      }
+    }
+  },
+  "additionalProperties": true
+}

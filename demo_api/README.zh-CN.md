@@ -2,15 +2,15 @@
 
 # demo_api
 
-Qwen3TTS-Streaming 的 WebUI 演示 API 服务。
+Qwen3TTS-Streaming 内置门户的可选工程实验 API。
 
 ## 功能概述
 
-demo_api 为前端 WebUI 提供三个核心演示面板的后端接口：
+demo_api 为内置 `/demo/#/lab` 提供可选的深度工程实验接口；普通试听不依赖它：
 
 | 面板 | 说明 |
 |------|------|
-| **Text Player** | 实时流式 TTS 播放，WebSocket 逐 token 推送音频与事件 |
+| **TRT live trace** | WebSocket 推送 Triton 音频与 decode 事件 |
 | **LLM PK** | 流式 vs 离线双路对比，量化首包延迟与总耗时差异 |
 | **Concurrency** | 并发压测，支持真实 Triton 请求或模拟模式，实时回传进度 |
 
@@ -43,7 +43,7 @@ python -m demo_api
 bash scripts/demo/start_webui_demo.sh
 ```
 
-该脚本会自动拉起 Triton、demo_api 和 Vite WebUI，开箱即用。
+该兼容脚本会自动拉起 Triton、demo_api，并指向 runtime 内置的唯一产品门户；不会启动第二套 Vite 应用。
 支持 `--variant`、`--triton-slots`、`--no-triton`、`--simulated-concurrency` 等选项。
 
 ## 环境变量

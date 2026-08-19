@@ -414,24 +414,42 @@ tar -C "${QWEN_LOG_DIR:-/var/log/qwen3tts}" \
 实际只会生成所选 gateway 对应的日志文件。容器删除后，容器内日志也会丢失；
 如果日志需要跨容器替换保留，请将 `QWEN_LOG_DIR` 挂载到持久化存储。
 
-## WebUI
+## 内置 Demo 与统一文档
 
-本地运行：
-
-```bash
-python -m demo_api --host 0.0.0.0 --port 7860
-
-cd webui
-npm install
-npm run dev
-```
-
-Compose 运行：
+正式镜像已经包含同版本的产品 Demo、Browser SDK、Python wheel 索引和精选 Markdown
+文档。将它启用在 Realtime 的同一个公共入口即可，不需要独立 Demo API 或 Node 进程：
 
 ```bash
-bash scripts/bash/autorun.sh deploy --gateway triton -m custom-1.7b
-docker compose --profile demo up --build demo-api webui
+DEMO_ENABLED=true bash scripts/bash/compose.sh up --build \
+  --gateway engine --variant custom-1.7b
+# 打开 http://localhost:50052/demo/
 ```
+
+Triton 部署把 `--gateway engine` 改成 `--gateway triton`，然后打开
+`http://localhost:50053/demo/`。门户全部使用相对 URL，因此服务部署在
+`/infer/<instance>` 下时，Demo 资源、`/sdk/`、`/v1/capabilities` 和
+`/v1/realtime` 都会保留该前缀。不应公开门户时，让 `DEMO_ENABLED` 保持未设置或
+false，此时 `/demo/` 返回 404。
+
+`demo_api` 仅作为详细 trace 的可选工程实验后端；仓库不再保留第二套 WebUI。LLM PK、
+并发和 trace 均从同一个 `/demo/#/lab` 门户进入，仅在确有需要时显式启用 Compose 的
+`demo` profile，并通过 `DEMO_LAB_URL` 公布后端地址。
+
+### 公网网关安全边界
+
+内置门户不实现第二套登录，也不在浏览器中输入或持久化长期 API Key。公网部署必须由
+同一个反向代理同时保护 `/demo`、`/sdk` 与 `/v1/*`，并满足以下条件：
+
+- 转发时保留完整实例路径前缀和 WebSocket upgrade；
+- 对 WebSocket `Origin` 使用明确同源/允许列表校验，拒绝任意站点跨源调用；
+- 在升级连接前完成用户/租户认证，并对租户实施并发、请求速率和用量配额；
+- 限制文本、reference audio 和 WebSocket 消息大小；reference 上限不得高于
+  `/v1/capabilities` 公布值；
+- 设置握手、空闲、单次 response 和整条连接超时，并限制最大连接数；
+- 不缓存 `config.json` 或包含租户信息的响应，不在访问日志记录文本、reference 或凭据。
+
+若 `DEMO_LAB_URL` 指向跨源 `demo_api`，应把 `QWEN_DEMO_CORS_ORIGIN` 收紧为门户的
+精确 Origin；生产环境不要使用默认 `*`。
 
 ## 常见问题
 
@@ -460,10 +478,10 @@ runtime max_seq_len=1024 exceeds engine profile max_seq_len=512
 
 TensorRT plan 与 runtime 版本强绑定。更换 TensorRT/NGC image 后需要重新构建 engine。
 
-### WebUI 显示 fixture fallback
+### 内置门户不显示“实验”入口
 
-说明 live Triton 或 live engine 当前不可达。检查：
+门户只在 `lab_available=true` 且 `demo_api /healthz` 可达时显示入口。检查：
 
 - Triton gRPC 端口是否是 `localhost:8001`。
 - demo API 的 `QWEN_DEMO_TRITON_GRPC` 是否正确。
-- standalone engine WebSocket 是否是 `localhost:50052`。
+- runtime 是否设置了浏览器可访问的 `DEMO_LAB_URL`。

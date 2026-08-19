@@ -8,8 +8,8 @@
 请先启动一个 Qwen3-TTS 端点（见仓库 README），然后：
 
 ```bash
-# 使用引擎对应 tag 的 GitHub 或 GitLab Release wheel。
-pip install "qwen3-tts-client[all] @ https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases/download/v0.1.0/qwen3_tts_client-0.1.0-py3-none-any.whl"
+# 从 https://<public-service-base>/demo/#/sdk 复制精确安装命令。
+# 或在源码检出目录安装：pip install "../[all]"
 python quickstart.py                  # one-shot synthesis -> quickstart.wav
 python streaming.py                   # incremental text -> streaming.wav
 python realtime.py                    # wall-clock aligned frames (WebRTC/playback)
