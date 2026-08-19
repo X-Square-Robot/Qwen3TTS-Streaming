@@ -15,7 +15,7 @@
     "pack:browser": "node scripts/pack-browser-sdk.mjs"
   },
   "devDependencies": {
-    "@playwright/test": "^1.55.1",
+    "@playwright/test": "1.55.0",
     "eslint": "^9.39.1",
     "highlight.js": "^11.12.0",
     "markdown-it": "^14.1.0",
