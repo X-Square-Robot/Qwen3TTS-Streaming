@@ -94,6 +94,10 @@ COPY client/src/qwen3tts_protocol/ /app/qwen3tts_protocol/
 RUN install -d /app/sdk && rm -f /app/sdk/*.whl
 COPY client/dist/ /app/sdk/
 COPY web/packages/demo/dist/ /app/demo/
+RUN test -s /app/demo/index.html || { \
+        echo "Demo artifact missing: build web/packages/demo/dist before the runtime image" >&2; \
+        exit 1; \
+    }
 RUN if [ -n "${CLIENT_WHEEL_FILENAME}" ] || [ -n "${CLIENT_WHEEL_SHA256}" ]; then \
         test -n "${CLIENT_WHEEL_FILENAME}" && \
         test -n "${CLIENT_WHEEL_SHA256}" && \

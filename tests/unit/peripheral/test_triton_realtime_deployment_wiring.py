@@ -92,3 +92,14 @@ def test_local_compose_uses_reproducible_node_builder_for_web_artifacts():
     assert "npm --prefix web ci" in dockerfile
     assert "npm --prefix web run build" in dockerfile
     assert "FROM scratch AS web-artifacts" in dockerfile
+
+
+def test_runtime_images_fail_closed_when_demo_artifact_is_missing():
+    for path in (
+        "infra/docker/Dockerfile.engine",
+        "infra/docker/Dockerfile.triton",
+    ):
+        dockerfile = _read(path)
+        assert "COPY web/packages/demo/dist/ /app/demo/" in dockerfile
+        assert "test -s /app/demo/index.html" in dockerfile
+        assert "Demo artifact missing" in dockerfile
