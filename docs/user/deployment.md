@@ -397,6 +397,11 @@ bash scripts/bash/autorun.sh deploy \
   -m custom-1.7b
 ```
 
+Compose publishes gRPC `50051` and the public HTTP/WebSocket gateway `50052`.
+The early-start `8080` health listener is container-internal and feeds the
+Docker healthcheck; it is not bound on the host. Public `/health`, `/demo/`,
+`/sdk/`, `/v1/realtime`, and `/v1/ws` are all served on `50052`.
+
 This mode uses the engine image as a fixed application layer: the image contains the TensorRT/Python
 runtime, the `/app/engine` engine code, a default `/app/engine.yaml`, and startup scripts;
 at runtime it read-only mounts the same model package as Triton,

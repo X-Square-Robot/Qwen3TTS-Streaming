@@ -76,7 +76,7 @@ Options:
   --container <name>     Override container name for selected gateway
   --port <N>             Engine gRPC port
   --ws-port <N>          Engine WebSocket port
-  --health-port <N>      Engine health port
+  --health-port <N>      Engine-internal early health port (not host-published)
   --grpc-port <N>        Triton gRPC port
   --http-port <N>        Triton HTTP port
   --metrics-port <N>     Triton metrics port
@@ -518,7 +518,7 @@ compose_preflight_service() {
     case "$service" in
         engine)
             compose_remove_stale_container_if_needed \
-                "$service" "$container" "$ENGINE_PORT" "$ENGINE_WEBSOCKET" "$ENGINE_HEALTH"
+                "$service" "$container" "$ENGINE_PORT" "$ENGINE_WEBSOCKET"
             ;;
         triton)
             compose_remove_stale_container_if_needed "$service" "$container" 8000 8001 8002
@@ -585,36 +585,33 @@ compose_diagnose_service() {
     docker logs --tail 80 "$container" 2>&1 || true
 }
 
-compose_wait_engine_http_health() {
-    local port="${1:-$ENGINE_HEALTH}"
-    local timeout="${2:-90}"
+compose_wait_engine_container_health() {
+    local timeout="${1:-90}"
     local elapsed=0
     local interval=2
-    local url="http://localhost:${port}/health"
-
-    if ! command -v curl &>/dev/null; then
-        engine_health_check "$ENGINE_PORT" "$timeout"
-        return $?
-    fi
+    local container
+    container=$(compose_service_container_name engine)
 
     while [ "$elapsed" -lt "$timeout" ]; do
-        local body
-        body=$(curl -fsS "$url" 2>/dev/null || true)
-        if printf '%s\n' "$body" | grep -q '"running"[[:space:]]*:[[:space:]]*true'; then
-            log_info "Engine HTTP health ready at localhost:${port}"
+        local health_status
+        health_status=$(docker inspect \
+            --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+            "$container" 2>/dev/null || true)
+        if [[ "$health_status" == "healthy" ]]; then
+            log_info "Engine container health ready; public /health is on localhost:${ENGINE_WEBSOCKET}"
             return 0
         fi
         sleep "$interval"
         elapsed=$((elapsed + interval))
     done
 
-    log_error "Engine HTTP health check timed out after ${timeout}s"
+    log_error "Engine container health check timed out after ${timeout}s"
     return 1
 }
 
 compose_wait_engine_ready() {
-    compose_assert_service_network engine "$ENGINE_PORT" "$ENGINE_WEBSOCKET" "$ENGINE_HEALTH" || return 1
-    if compose_wait_engine_http_health "$ENGINE_HEALTH" 90; then
+    compose_assert_service_network engine "$ENGINE_PORT" "$ENGINE_WEBSOCKET" || return 1
+    if compose_wait_engine_container_health 90; then
         return 0
     fi
     compose_diagnose_service engine

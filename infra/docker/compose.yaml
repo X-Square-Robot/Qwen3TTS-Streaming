@@ -57,7 +57,8 @@ services:
     ports:
       - "${ENGINE_GRPC_PORT:-50051}:${ENGINE_GRPC_PORT:-50051}"
       - "${ENGINE_WEBSOCKET_PORT:-50052}:${ENGINE_WEBSOCKET_PORT:-50052}"
-      - "${ENGINE_HEALTH_PORT:-8080}:${ENGINE_HEALTH_PORT:-8080}"
+      # The early health listener stays container-internal. Public health,
+      # Demo, SDK and WebSocket traffic share ENGINE_WEBSOCKET_PORT.
     volumes:
       - ${MODEL_REPO_DIR:-../../workspace/model_repository}:/models:ro
       - ${ENGINE_CONFIG_FILE:-../../engine.yaml}:/etc/qwen3-tts/engine.yaml:ro

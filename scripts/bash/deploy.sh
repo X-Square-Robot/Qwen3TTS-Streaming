@@ -118,7 +118,7 @@ Options:
 
   Compose overlay options (triton / engine gateways):
     --dev                Enable the compose dev overlay (bind mounts)
-    --health-port <N>    Engine health port (default: 8080)
+    --health-port <N>    Engine-internal early health port (default: 8080)
     --metrics-port <N>   Triton metrics port (default: 8002)
     --realtime-port <N>  Triton OpenAI Realtime port (default: 50053)
     --triton-device <N>  Triton GPU device

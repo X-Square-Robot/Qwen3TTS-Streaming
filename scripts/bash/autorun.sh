@@ -244,7 +244,7 @@ Phase C options (forwarded to deploy.sh):
   --max-sessions <N>      Max concurrent sessions (default: 128)
   --foreground            Run Phase C in foreground (don't daemonize)
   --dev                   Enable compose dev overlay (triton/engine gateways)
-  --health-port <N>       Engine health port (default: 8080)
+  --health-port <N>       Engine-internal early health port (default: 8080)
   --metrics-port <N>      Triton metrics port (default: 8002)
   --realtime-port <N>     Triton OpenAI Realtime port (default: 50053)
   --triton-device <N>     Triton GPU device

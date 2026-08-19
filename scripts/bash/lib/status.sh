@@ -202,8 +202,11 @@ detect_phase_c_status() {
     if command -v docker &>/dev/null; then
         local engine_container="${ENGINE_CONTAINER_NAME:-qwen3-engine}"
         if docker ps -q --filter "name=$engine_container" 2>/dev/null | grep -q .; then
-            local health_port="${ENGINE_HEALTH_PORT:-8080}"
-            if curl -sf "http://localhost:${health_port}/health" &>/dev/null; then
+            local health_status
+            health_status=$(docker inspect \
+                --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                "$engine_container" 2>/dev/null || true)
+            if [ "$health_status" = "healthy" ]; then
                 echo "healthy"
             else
                 echo "running"

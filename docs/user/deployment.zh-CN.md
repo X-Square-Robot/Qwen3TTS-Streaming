@@ -383,6 +383,11 @@ bash scripts/bash/autorun.sh deploy \
   -m custom-1.7b
 ```
 
+Compose 只发布 gRPC `50051` 与公共 HTTP/WebSocket 网关 `50052`。用于冷启动
+探测的 `8080` health listener 保留在容器内部，供 Docker healthcheck 使用，
+不会绑定宿主机端口。对外的 `/health`、`/demo/`、`/sdk/`、`/v1/realtime`
+和 `/v1/ws` 全部由 `50052` 提供。
+
 这个模式使用 engine 镜像作为固定应用层：镜像内包含 TensorRT/Python
 运行时、`/app/engine` 引擎代码、默认 `/app/engine.yaml` 和启动脚本；
 运行时只读挂载和 Triton 相同的模型包

@@ -208,6 +208,11 @@ bash scripts/bash/autorun.sh package -m custom-1.7b --gateway engine-docker --bu
 bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway engine-docker --engine-mode trt
 ```
 
+Engine Docker publishes gRPC `50051` and the public gateway `50052`. Its
+early-start health listener remains container-internal and is used by Docker's
+healthcheck; public `/health`, `/demo/`, `/sdk/`, and both WebSocket protocols
+all share `50052`. It therefore does not reserve a host `8080` port.
+
 During development you can use bind mount or watch mode to avoid frequently rebuilding the image:
 
 ```bash
