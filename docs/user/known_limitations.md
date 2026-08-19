@@ -1,76 +1,63 @@
 **English** | [中文](known_limitations.zh-CN.md)
 
-# Known Limitations and Risks
+# Limits and launch checks
 
-This document is the risk statement for the current open-source preview release. Before release, keep it consistent with the README, product Demo, and demo API.
+This page describes product boundaries an API caller must own. How the service is built, scheduled,
+or deployed does not change these conclusions.
 
-## Release Positioning
+## Trust the running service's capabilities
 
-The current project is an **engineering preview / research preview**, not a production-stable release. It primarily demonstrates Qwen3-TTS engineering optimizations in TensorRT, model fusion, token-level streaming scheduling, prefix cache, and frontend segmentation.
+Deployments may load different models and disable individual features. Read `/v1/capabilities`
+before making requests. Do not infer availability from SDK types or another deployment's Demo.
 
-Recommended v0.1 stable scope:
+`custom_voice` is the primary validated path today. Use voice design or voice clone in production
+only when capabilities advertise it and the operator confirms that deployment has been validated.
 
-- Model: `custom-1.7b`
-- Task: `custom_voice`
-- Deployment: standalone engine / Triton TRT streaming
-- Product Demo: public-Realtime no-code playback, diagnostics, SDK, and optional engineering Lab
+## Synthesized content is not strongly consistent
 
-## Model Path Status
+Streaming TTS may repeat, omit, or insert content, produce abnormal silence, or degrade on long text.
+Punctuation, numbers, English, and mixed-language input can change segmentation and prosody. Guarded
+delivery, VAD, and length guards can reduce the chance that some bad tails reach a client, but they
+cannot prove that speech matches the source text.
 
-| Path | Status | Risk |
-| --- | --- | --- |
-| `custom-1.7b` / `custom_voice` | v0.1 recommended path | Still needs continued stress testing of streaming stability, long text, concurrency, and different speakers |
-| `design-1.7b` / `voice_design` | Experimental | Some code paths exist, but there is no thorough end-to-end validation |
-| `base` x-vector voice clone | Planned | ref audio preprocessing, speaker embedding injection, and end-to-end validation are not complete |
-| `icl` voice clone | Planned | The ref audio / ref text / ref code pipeline is not fully wired up |
-| `0.6b` variants | Not the v0.1 main line | Requires independent validation of export, profile, quality, and speed |
+Customer service, medical, financial, legal, alerting, and other high-risk uses need application-level
+text constraints, output sampling, cancellation, and human fallback. A completed synthesis state is
+not a semantic correctness guarantee.
 
-## Streaming Stability
+## VAD can change the beginning and end
 
-The current streaming mode may still exhibit:
+Output VAD trims content classified as silence and adds speech-onset confirmation time. A high
+threshold can reject an entire response; too little start margin can clip an initial consonant.
+Threshold scales from different detectors are not interchangeable.
 
-- Hallucination: generating content the user did not input. **This risk is strongly checkpoint-dependent, and this project does not ship model weights** — one checkpoint we tested ran away (never emitting EOS) on ~10-18% of sampling seeds, while another measured 0/100 on the same deterministic seed set (see `docs/dev/investigation/streaming_hallucination.md` for the methodology). Whatever weights you bring, treat streaming hallucination as a live risk until you have validated your own checkpoint. The engine now enables its token-loop guard, transparent lookahead reseed/rerun, wholly-silent/invalid-PCM defenses, abnormal-length defense, and guarded delivery by default. Guarded delivery sends the first chunk immediately, then holds only audio synthesized beyond the estimated playhead plus a small client lead; a condemned tail can be dropped only while it remains server-side. Set `output_policy.config: {"delivery": "firehose"}` to restore legacy pass-through explicitly. VAD remains a separate opt-in output filter, and these conservative defenses still cannot determine whether spoken content semantically matches the input text.
-- Repetition: local words, phrases, or audio segments repeating.
-- Dropped reading: skipping part of the input text.
-- Insertion: inserting extra words at pauses or across segments.
-- Long-text degradation: stability decreases as context and KV grow.
-- Segmentation boundary anomalies: text with punctuation, numbers, English, or mixed Chinese-English may trigger suboptimal splitting.
+Test real voices with soft onset, plosives, long pauses, numbers, and mixed languages. If VAD removes
+all audio, return an explicit error instead of waiting indefinitely.
 
-These issues mean the current release is not suitable for direct use in production broadcasting, customer service, medical, financial, legal, or content-safety scenarios that require strong consistency.
+## Break latency into stages
 
-## Performance Number Limitations
+Raw server TTFT, post-VAD effective TTFT, first audio received by a browser, and first sample consumed
+by a speaker are different metrics. Public networking, proxies, Base64 transport, browser scheduling,
+and playback buffering can add substantial end-to-end latency.
 
-The single-stream TTFT figure (measured server TTFT 14.9 ± 0.3ms; see [benchmark methodology](benchmark_methodology.md)) is not a universal guarantee. It usually requires all of the following to hold simultaneously:
+Published benchmarks represent only their stated hardware, concurrency, cache, and network
+conditions. Measure P50/P95/P99 with your region, text distribution, and target concurrency, together
+with error rate and audio completeness.
 
-- The engine is already warmed up.
-- prefix/cache hit.
-- Single-stream request or low contention.
-- Fixed hardware, fixed TensorRT profile, fixed dtype.
-- Local or low-network-overhead link.
+## Browser constraints
 
-`128-stream avg TTFT` must also carry complete test conditions, including hardware, driver, NGC image, engine profile, input text, cache mode, sampling parameters, client measurement method, and failure rate.
+- Microphone access, AudioWorklet, and output-device selection require a secure HTTPS context.
+- Browsers usually require a user gesture before starting an `AudioContext`.
+- Device enumeration, switching, and labels differ between browsers.
+- Tab closure, system sleep, and mobile network changes can interrupt an active response; retry only
+  when the service advertises recovery.
+- Never bundle a long-lived API key into a public web application.
 
-## Demo Data Sources
+## Launch checklist
 
-The product Demo produces audio and metrics only through the current instance's
-public `/v1/realtime`; an unavailable backend fails explicitly. Fixtures, beeps,
-and historical benchmark numbers never stand in for a live result. Optional
-`demo_api` traces are separately labelled engineering data and must not enter
-the product experience or public performance claims.
-
-## Deployment Limitations
-
-- The TensorRT engine is tightly coupled to the TensorRT runtime version. After switching the NGC image, TensorRT version, or driver, it is recommended to rebuild the engine.
-- The runtime `max_batch`/`max_seq_len` cannot exceed the `engine_profile` recorded in the manifest, otherwise startup fails immediately.
-- The regular `engine-docker` image is suitable for fixed-code deployment; during development, use `compose.sh --dev` or `compose.sh watch` to avoid frequently rebuilding the image.
-- The current containers do not cover production operations capabilities such as K8s, canary releases, authentication, rate limiting, or multi-tenant isolation.
-
-## User Notices That Must Be Kept Before Release
-
-The README, product Demo, and release notes must make clear:
-
-- This project is an engineering preview.
-- The v0.1 recommended path is `custom-1.7b`.
-- base/ICL/voice design should not be advertised as stable and ready to use.
-- Streaming TTS carries risks of hallucination and long-text instability. Hallucination severity is checkpoint-dependent and this project ships no weights — users must validate their own checkpoint (see Streaming Stability above).
-- Benchmark numbers must be accompanied by complete conditions and must not be written as unconditional performance guarantees.
+- Pin the service URL, SDK release, and protocol major version; validate capabilities at startup.
+- Set a total timeout, cancellation path, concurrency limit, and retry budget.
+- Log terminal state, usage, server timing, and business trace by `response_id`.
+- Cover short, long, empty, mixed-language, unsupported-speaker, disconnection, and rate-limit cases.
+- Validate PCM format, continuous sample cursors, player underruns, and final audio duration.
+- Tune VAD within product tolerance and provide an explicit no-valid-audio fallback.
+- Add content validation or human confirmation for high-risk messages.

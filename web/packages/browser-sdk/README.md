@@ -1,3 +1,5 @@
+[中文](README.zh-CN.md) | **English**
+
 # Qwen3-TTS Browser SDK
 
 Framework-neutral TypeScript client for the Qwen3TTS-Streaming OpenAI Realtime

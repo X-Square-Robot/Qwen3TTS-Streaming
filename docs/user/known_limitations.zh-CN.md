@@ -1,74 +1,58 @@
 [English](known_limitations.md) | **中文**
 
-# 已知限制与风险
+# 限制与上线检查
 
-本文档是当前开源预览版的风险说明。发布前请保持它和 README、产品 Demo、demo API 的口径一致。
+本页只描述调用方需要承担的产品边界。服务如何构建、调度和部署不影响这些结论。
 
-## 版本定位
+## 能力以实例返回为准
 
-当前项目是 **工程预览版 / research preview**，不是生产稳定版本。它主要展示 Qwen3-TTS 在 TensorRT、模型 fuse、token 级流式调度、prefix cache 和前端分词上的工程优化。
+不同部署可能加载不同模型并关闭部分能力。调用前读取 `/v1/capabilities`，不要仅根据
+SDK 类型或其他实例的 Demo 判断当前服务可用范围。
 
-推荐 v0.1 稳定范围：
+当前优先验证的是 `custom_voice`。只有 capabilities 明确列出并且部署方确认经过验收时，
+才在正式业务中使用 voice design 或 voice clone。
 
-- 模型：`custom-1.7b`
-- 任务：`custom_voice`
-- 部署：standalone engine / Triton TRT streaming
-- 产品 Demo：公共 Realtime 无代码试听、诊断、SDK 与可选工程实验
+## 合成内容不是强一致输出
 
-## 模型路径状态
+流式 TTS 仍可能出现重复、漏读、额外插入、异常静音或长文本退化。标点、数字、英文和
+中英混排也可能改变分段和韵律。Guarded delivery、VAD 和长度保护可以降低部分异常尾部
+到达客户端的概率，但不能证明语音内容与输入文本完全一致。
 
-| 路径 | 状态 | 风险 |
-| --- | --- | --- |
-| `custom-1.7b` / `custom_voice` | v0.1 推荐路径 | 仍需继续压测流式稳定性、长文本、并发、不同说话人 |
-| `design-1.7b` / `voice_design` | 实验 | 部分代码路径存在，但没有充分端到端验证 |
-| `base` x-vector voice clone | 计划中 | ref audio preprocessing、speaker embedding 注入、端到端验证未完成 |
-| `icl` voice clone | 计划中 | ref audio/ref text/ref code 链路未完整打通 |
-| `0.6b` variants | 非 v0.1 主线 | 需要独立验证导出、profile、质量和速度 |
+因此，在客服、医疗、金融、法律、告警播报和其他高风险场景中，调用方必须增加自己的
+文本限制、结果抽检、超时取消和人工兜底，不能只依赖一次合成成功终态。
 
-## 流式稳定性
+## VAD 可能改变开头和结尾
 
-当前流式模式仍可能出现：
+输出 VAD 会裁剪检测为静音的内容，并增加确认说话开始所需的门控时间。阈值过高可能让
+整段输出为空，start margin 过小可能切掉起始辅音。不同 VAD 检测器的阈值尺度不可直接
+互换。
 
-- 幻觉：生成用户没有输入的内容。**该风险强依赖 checkpoint,而本项目不发布模型权重**——我们测过的一个 checkpoint 在 ~10-18% 的采样种子上跑飞（永不吐 EOS），另一个在同一组确定性种子上实测 0/100（方法论见 `docs/dev/investigation/streaming_hallucination.zh-CN.md`）。无论你使用什么权重,在完成自己 checkpoint 的验证之前,都应把流式幻觉当作现实风险对待。引擎默认启用 token 循环守卫、lookahead 段换种子重跑、全静音/非法 PCM 防御、异常长度防御和守护交付；守护交付会立即发送首包，之后只保留超出“估算播放头 + 少量客户端提前量”的合成音频，坏尾只有在仍留在服务端时才能撤销。可通过 `output_policy.config: {"delivery": "firehose"}` 显式恢复旧的直通行为。VAD 仍是独立的可选输出过滤器，默认关闭；这些保守防御也不能判断语音内容是否与文本语义一致。
-- 重复：局部词、短语或音频片段重复。
-- 漏读：跳过部分输入文本。
-- 插入：在停顿或跨 segment 时插入额外字词。
-- 长文本退化：随着上下文和 KV 增长，稳定性下降。
-- 分段边界异常：标点、数字、英文、中英混排等文本可能触发不理想切分。
+上线前至少用业务真实音色覆盖轻声、爆破音开头、长停顿、数字和中英混排。整段被过滤
+时要向用户返回明确错误，不要无限等待。
 
-这些问题意味着当前版本不适合直接用于有强一致性要求的生产播报、客服、医疗、金融、法律或内容安全场景。
+## 延迟数字需要分段观察
 
-## 性能数字限制
+服务端 Raw TTFT、VAD 后 Effective TTFT、浏览器收到首包和扬声器开始消费不是同一个
+指标。公网网络、反向代理、Base64 传输、浏览器调度和播放缓冲都可能显著增加端到端
+延迟。
 
-单路 TTFT 数字（实测 server TTFT 14.9 ± 0.3ms;见 [Benchmark 方法](benchmark_methodology.zh-CN.md)）不是通用承诺。它通常需要同时满足：
+公开 benchmark 只能代表它注明的硬件、并发、缓存和网络条件。调用方应在自己的部署
+区域、文本分布和目标并发下测量 P50/P95/P99，并同时记录错误率和音频完整率。
 
-- engine 已 warm up。
-- prefix/cache 命中。
-- 单路请求或低竞争。
-- 固定硬件、固定 TensorRT profile、固定 dtype。
-- 本地或低网络开销链路。
+## 浏览器限制
 
-`128-stream avg TTFT` 也必须带上完整测试条件，包括硬件、driver、NGC 镜像、engine profile、输入文本、cache 模式、采样参数、客户端测量方法和失败率。
+- 麦克风、AudioWorklet 和输出设备选择需要 HTTPS 安全上下文。
+- 浏览器通常要求由用户点击触发 `AudioContext`，否则自动播放会被拒绝。
+- 输出设备枚举、切换能力和设备名称在不同浏览器中并不一致。
+- 页面关闭、系统休眠或移动网络切换可能中断活动 response；只在服务声明恢复能力时重试。
+- 不要把长期 API Key 打包进公开网页。
 
-## Demo 数据来源
+## 上线检查清单
 
-产品 Demo 只通过当前实例公共 `/v1/realtime` 产生音频与指标；后端不可用时明确失败，
-不会用 fixture、嘟声或历史 benchmark 冒充实时结果。可选 `demo_api` 的 trace 属于工程
-实验数据，必须独立标记，不能进入产品体验或公开性能口径。
-
-## 部署限制
-
-- TensorRT engine 与 TensorRT runtime 版本强相关。更换 NGC 镜像、TensorRT 版本或 driver 后，建议重新构建 engine。
-- runtime 的 `max_batch`/`max_seq_len` 不能超过 manifest 中记录的 `engine_profile`，否则启动会直接失败。
-- `engine-docker` 普通镜像适合固定代码部署；开发期请用 `compose.sh --dev` 或 `compose.sh watch` 避免频繁重建镜像。
-- 当前容器没有覆盖 K8s、灰度发布、鉴权、限流、多租户隔离等生产运维能力。
-
-## 发布前必须保留的用户提示
-
-README、产品 Demo 和 release note 中必须明确：
-
-- 本项目是工程预览版。
-- v0.1 推荐路径是 `custom-1.7b`。
-- base/ICL/voice design 不应宣传为已稳定可用。
-- 流式 TTS 存在幻觉和长文本不稳定风险。幻觉严重程度依赖 checkpoint,而本项目不发布权重——用户必须自行验证所用 checkpoint（见上文"流式稳定性"）。
-- benchmark 数字需要附带完整条件，不能写成无条件性能承诺。
+- 固定服务地址、SDK 版本与协议大版本，并在启动时验证 capabilities。
+- 为请求设置总超时、取消路径、并发上限和重试预算。
+- 按 `response_id` 记录终态、usage、服务端 timing 与业务 trace。
+- 验证短文本、长文本、空文本、混合语言、异常 speaker、断网和限流。
+- 校验 PCM 格式、sample 游标连续性、播放器 underrun 和最终音频时长。
+- 在业务可接受范围内设置 VAD；准备“无有效音频”的明确降级。
+- 对高风险文案增加内容校验或人工确认。

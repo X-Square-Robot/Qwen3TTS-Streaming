@@ -58,10 +58,6 @@ curl https://<public-service-base>/sdk/      # list the .whl
 pip install "https://<public-service-base>/sdk/<wheel-filename>"
 ```
 
-Each forge's tag pipeline builds its wheel once, publishes it, and downloads
-that same SHA256-verified file into its engine image. `client/dist/` is a
-local/CI staging directory; wheel binaries are not tracked in Git.
-
 From a local checkout: `pip install ./client` (repo root). An incompatible
 protocol family or major fails fast at connect with
 `ProtocolVersionMismatchError`; revisions within one major are compatible and
@@ -301,14 +297,6 @@ needed for normal use:
 from qwen3tts.diagnostics import LatencyAnalyzer, ServerTimingReport
 ```
 
-Project manual: `docs/user/client_sdk.md`.
-
----
-
-### For contributors
-
-This SDK is built on top of `qwen3tts_protocol`, a dependency-free package that
-holds the wire-format types and is the single source of truth shared by the
-client, the engine, and the demo server. **Client users do not need it** — every
-type it defines is re-exported from `qwen3tts`. Only touch `qwen3tts_protocol`
-directly when working on the protocol itself or on server-side components.
+Start with the [5-minute setup](../docs/user/quickstart.md). Continue to
+[Advanced configuration](../docs/user/advanced_configuration.md) only when you need VAD, delivery,
+or incremental-input controls.

@@ -163,9 +163,16 @@ test("runs the built-in LLM comparison through public Realtime", async ({page}) 
 });
 
 test("Pages stays useful in docs-only mode", async ({page}) => {
-  await page.goto("/pages/#/docs/overview-zh");
-  await expect(page.getByText("同一份源码，同一个版本。")).toBeVisible();
-  await expect(page.locator("article.markdown h1").first()).toBeVisible();
+  await page.goto("/pages/#/docs/quickstart-zh");
+  await expect(page.getByRole("heading", {name: "先让声音出来，再按需深入。"})).toBeVisible();
+  await expect(page.getByRole("heading", {name: "5 分钟接入", exact: true})).toBeVisible();
+  const docsNav = page.getByLabel("文档层级");
+  await expect(docsNav.locator(".docs-nav-group > header strong")).toHaveText([
+    "快速接入", "高级配置", "更多细节",
+  ]);
+  await expect(page.locator("article.markdown .hljs-keyword").first()).toBeVisible();
+  await page.getByRole("button", {name: "EN"}).click();
+  await expect(page.getByRole("heading", {name: "5-minute setup", exact: true})).toBeVisible();
   await page.getByRole("link", {name: "体验"}).click();
   await expect(page.getByRole("button", {name: "合成并播放"})).toBeDisabled();
   await page.getByRole("link", {name: "SDK"}).click();

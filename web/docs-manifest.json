@@ -1,14 +1,110 @@
 [
-  {"slug": "overview-zh", "title": "项目概览", "source": "README.zh-CN.md"},
-  {"slug": "overview-en", "title": "Project Overview", "source": "README.md"},
-  {"slug": "sdk-zh", "title": "Python SDK", "source": "client/README.zh-CN.md"},
-  {"slug": "sdk-en", "title": "Python SDK (English)", "source": "client/README.md"},
-  {"slug": "deployment-zh", "title": "部署", "source": "docs/user/deployment.zh-CN.md"},
-  {"slug": "deployment-en", "title": "Deployment", "source": "docs/user/deployment.md"},
-  {"slug": "limitations-zh", "title": "已知限制", "source": "docs/user/known_limitations.zh-CN.md"},
-  {"slug": "limitations-en", "title": "Known Limitations", "source": "docs/user/known_limitations.md"},
-  {"slug": "realtime-zh", "title": "OpenAI Realtime 协议", "source": "docs/dev/architecture/openai_realtime.zh-CN.md"},
-  {"slug": "realtime-en", "title": "OpenAI Realtime Protocol", "source": "docs/dev/architecture/openai_realtime.md"},
-  {"slug": "benchmark-zh", "title": "性能测试方法", "source": "docs/user/benchmark_methodology.zh-CN.md"},
-  {"slug": "benchmark-en", "title": "Benchmark Methodology", "source": "docs/user/benchmark_methodology.md"}
+  {
+    "slug": "quickstart-zh",
+    "topic": "quickstart",
+    "locale": "zh-CN",
+    "layer": "start",
+    "title": "5 分钟接入",
+    "summary": "安装匹配的 SDK，完成第一次合成。",
+    "source": "docs/user/quickstart.zh-CN.md"
+  },
+  {
+    "slug": "advanced-zh",
+    "topic": "advanced",
+    "locale": "zh-CN",
+    "layer": "advanced",
+    "title": "高级配置",
+    "summary": "任务、流式输入、VAD 与交付策略。",
+    "source": "docs/user/advanced_configuration.zh-CN.md"
+  },
+  {
+    "slug": "sdk-zh",
+    "topic": "python-sdk",
+    "locale": "zh-CN",
+    "layer": "details",
+    "title": "Python SDK",
+    "summary": "同步、异步、流式与异常处理参考。",
+    "source": "client/README.zh-CN.md"
+  },
+  {
+    "slug": "browser-sdk-zh",
+    "topic": "browser-sdk",
+    "locale": "zh-CN",
+    "layer": "details",
+    "title": "Browser SDK",
+    "summary": "在网页中接收、播放和保存音频。",
+    "source": "web/packages/browser-sdk/README.zh-CN.md"
+  },
+  {
+    "slug": "realtime-zh",
+    "topic": "realtime-api",
+    "locale": "zh-CN",
+    "layer": "details",
+    "title": "接口与事件",
+    "summary": "Realtime 端点、事件顺序和终态。",
+    "source": "docs/user/realtime_api.zh-CN.md"
+  },
+  {
+    "slug": "limitations-zh",
+    "topic": "limitations",
+    "locale": "zh-CN",
+    "layer": "details",
+    "title": "限制与上线检查",
+    "summary": "接入生产业务前需要确认的边界。",
+    "source": "docs/user/known_limitations.zh-CN.md"
+  },
+  {
+    "slug": "quickstart-en",
+    "topic": "quickstart",
+    "locale": "en",
+    "layer": "start",
+    "title": "5-minute setup",
+    "summary": "Install the matching SDK and synthesize your first audio.",
+    "source": "docs/user/quickstart.md"
+  },
+  {
+    "slug": "advanced-en",
+    "topic": "advanced",
+    "locale": "en",
+    "layer": "advanced",
+    "title": "Advanced configuration",
+    "summary": "Tasks, streaming input, VAD, and delivery policies.",
+    "source": "docs/user/advanced_configuration.md"
+  },
+  {
+    "slug": "sdk-en",
+    "topic": "python-sdk",
+    "locale": "en",
+    "layer": "details",
+    "title": "Python SDK",
+    "summary": "Sync, async, streaming, and error handling reference.",
+    "source": "client/README.md"
+  },
+  {
+    "slug": "browser-sdk-en",
+    "topic": "browser-sdk",
+    "locale": "en",
+    "layer": "details",
+    "title": "Browser SDK",
+    "summary": "Receive, play, and save audio in a web app.",
+    "source": "web/packages/browser-sdk/README.md"
+  },
+  {
+    "slug": "realtime-en",
+    "topic": "realtime-api",
+    "locale": "en",
+    "layer": "details",
+    "title": "Endpoints and events",
+    "summary": "Realtime endpoints, event order, and terminal states.",
+    "source": "docs/user/realtime_api.md"
+  },
+  {
+    "slug": "limitations-en",
+    "topic": "limitations",
+    "locale": "en",
+    "layer": "details",
+    "title": "Limits and launch checks",
+    "summary": "Boundaries to verify before a production integration.",
+    "source": "docs/user/known_limitations.md"
+  }
 ]

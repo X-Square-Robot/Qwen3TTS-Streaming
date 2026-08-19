@@ -1,14 +1,23 @@
 [English](README.md) | **中文**
 
-# 用户文档
+# 调用方文档
 
-> 面向所有使用 Qwen3TTS-Streaming 的人
+这组文档与内置 Demo 使用同一份 Markdown 源码，按接入深度分为三层：
 
-| 文档 | 说明 |
-|------|------|
-| [部署指南](deployment.zh-CN.md) | standalone / engine-docker / Triton 三种部署方式的详细参数和配置 |
-| [Client SDK](client_sdk.zh-CN.md) | Python SDK 安装、快速使用、流式 session、传输选择 |
-| [Benchmark 方法](benchmark_methodology.zh-CN.md) | 性能数字的口径定义、硬件条件、测量方式 |
-| [已知限制](known_limitations.zh-CN.md) | 当前版本的已知问题和实验路径状态 |
+## 01 快速接入
 
-开发者和贡献者请看 [开发者文档](../dev/)。
+- [5 分钟接入](quickstart.zh-CN.md)——确认端点、安装匹配 SDK、完成第一次合成。
+
+## 02 高级配置
+
+- [高级配置](advanced_configuration.zh-CN.md)——任务、增量文本、音频、VAD、交付策略和鉴权。
+
+## 03 更多细节
+
+- [Python SDK](../../client/README.zh-CN.md)——同步、异步、流式和异常参考。
+- [Browser SDK](../../web/packages/browser-sdk/README.zh-CN.md)——网页播放、游标和文件保存。
+- [Realtime 接口与事件](realtime_api.zh-CN.md)——仅供自研客户端或协议排查使用。
+- [限制与上线检查](known_limitations.zh-CN.md)——正式业务需要承担的产品边界。
+
+自行部署服务的维护者请阅读[部署说明](deployment.zh-CN.md)；引擎贡献者请进入
+[开发者文档](../dev/README.zh-CN.md)。它们不进入调用方门户的默认导航。

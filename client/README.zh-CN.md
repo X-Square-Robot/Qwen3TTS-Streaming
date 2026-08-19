@@ -54,9 +54,6 @@ curl https://<public-service-base>/sdk/      # 查看 .whl 列表
 pip install "https://<public-service-base>/sdk/<wheel-filename>"
 ```
 
-两个代码托管平台的 tag 流水线都只构建一次 wheel：先发布，再按 SHA256 把同一
-文件下载进各自的引擎镜像。`client/dist/` 只是本地/CI 暂存目录，wheel 二进制不进 Git。
-
 从本地检出安装：`pip install ./client`（在仓库根目录执行）。协议族或协议大版本
 不兼容时会在连接时立即报 `ProtocolVersionMismatchError`；同一大版本内的协议修订
 兼容，engine/SDK 发布版本不同只产生 `RuntimeWarning`。设
@@ -255,14 +252,5 @@ help(qwen3tts)` 或阅读 `qwen3tts.__all__`。主要名称：
 from qwen3tts.diagnostics import LatencyAnalyzer, ServerTimingReport
 ```
 
-项目手册：`docs/user/client_sdk.zh-CN.md`。
-
----
-
-### 面向贡献者
-
-本 SDK 构建于 `qwen3tts_protocol` 之上，这是一个无依赖的包，
-它持有 wire-format 类型，是由客户端、引擎和 demo server 共享的单一真相源（single
-source of truth）。**客户端用户无需它**——它定义的每个
-类型都从 `qwen3tts` 重新导出。仅当处理协议本身或服务端组件时，
-才直接接触 `qwen3tts_protocol`。
+需要从第一次调用开始接入，请先阅读[5 分钟接入](../docs/user/quickstart.zh-CN.md)；需要
+调整 VAD、交付策略或流式输入时，再阅读[高级配置](../docs/user/advanced_configuration.zh-CN.md)。

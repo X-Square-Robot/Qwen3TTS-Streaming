@@ -7,6 +7,8 @@ import {fileURLToPath} from "node:url";
 import MarkdownIt from "markdown-it";
 import anchor from "markdown-it-anchor";
 
+import {configureCodeRendering} from "./markdown-code.mjs";
+
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(webRoot, "..");
 const publicRoot = path.join(webRoot, "packages/demo/public");
@@ -26,6 +28,7 @@ for (const entry of manifest) {
   const markdown = normalizePresentationalHtml(await readFile(sourcePath, "utf8"));
   const md = new MarkdownIt({html: false, linkify: true, typographer: false})
     .use(anchor, {slugify: slugifyHeading});
+  configureCodeRendering(md, entry.slug);
   const defaultLinkOpen = md.renderer.rules.link_open
     ?? ((tokens, index, options, _env, self) => self.renderToken(tokens, index, options));
   md.renderer.rules.link_open = (tokens, index, options, env, self) => {
