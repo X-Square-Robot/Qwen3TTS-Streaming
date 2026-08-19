@@ -49,6 +49,55 @@ describe("WavCollector", () => {
 });
 
 describe("BrowserAudioPlayer float input", () => {
+  it("falls back to scheduled buffers when AudioWorklet is unavailable", async () => {
+    const originalContext = globalThis.AudioContext;
+    const originalNode = globalThis.AudioWorkletNode;
+    const sources: FakeScheduledSource[] = [];
+    class FakeScheduledSource {
+      buffer: unknown = null;
+      onended: (() => void) | null = null;
+      connect() {}
+      disconnect() {}
+      start() {}
+      stop() {}
+      finish() { this.onended?.(); }
+    }
+    class FakeContext {
+      sampleRate = 48_000; currentTime = 0; destination = {};
+      createGain() { return {gain: {setValueAtTime() {}}, connect: () => this.destination, disconnect() {}}; }
+      createBuffer(_channels: number, length: number) {
+        return {getChannelData() { return new Float32Array(length); }};
+      }
+      createBufferSource() {
+        const source = new FakeScheduledSource();
+        sources.push(source);
+        return source;
+      }
+      async resume() {} async suspend() {} async close() {}
+    }
+    Object.assign(globalThis, {AudioContext: FakeContext, AudioWorkletNode: undefined});
+    try {
+      const progress: Array<[bigint, bigint]> = [];
+      let fallbacks = 0;
+      const player = new BrowserAudioPlayer({
+        onFallback: () => { fallbacks += 1; },
+        onPlaybackProgress: (played, buffered) => progress.push([played, buffered]),
+      });
+      await player.start();
+      expect(player.snapshot().backend).toBe("scheduled-buffer");
+      expect(fallbacks).toBe(1);
+      player.enqueue(Float32Array.of(-1, 0, 1), 48_000, 0n, 3n);
+      player.flush();
+      for (const source of sources) source.finish();
+      const finalProgress = progress.at(-1);
+      expect(finalProgress?.[0]).toBeGreaterThan(0n);
+      expect(finalProgress?.[0]).toBe(finalProgress?.[1]);
+      await player.close();
+    } finally {
+      Object.assign(globalThis, {AudioContext: originalContext, AudioWorkletNode: originalNode});
+    }
+  });
+
   it("accepts a self-hosted AudioWorklet module URL", async () => {
     const originalContext = globalThis.AudioContext;
     const originalNode = globalThis.AudioWorkletNode;

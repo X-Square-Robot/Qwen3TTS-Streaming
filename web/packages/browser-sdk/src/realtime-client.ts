@@ -7,6 +7,7 @@ import type {Capabilities, SynthesisOptions, TTSEvent} from "./types.js";
 import {AudioEncoding, DeliveryPolicy, InputMode, VadStrategy} from "./types.js";
 import {toWebSocketUrl} from "./urls.js";
 import {parseRealtimeServerEvent} from "./realtime-contract.js";
+import {createUuidV4} from "./random-id.js";
 
 export enum ClientState {
   Idle = "idle",
@@ -458,7 +459,7 @@ class ActiveResponse implements IncrementalSynthesisRun {
   readonly done: Promise<TTSEvent>;
   responseId = "";
   sampleCursor = 0n;
-  readonly resumeToken = crypto.randomUUID();
+  readonly resumeToken = createUuidV4();
   private nextSequence = 1;
   private acceptedSequence = 0;
   private inputClosed = false;

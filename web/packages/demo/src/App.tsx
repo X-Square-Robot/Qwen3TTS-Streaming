@@ -233,6 +233,10 @@ function Experience({loaded, onCapabilities, onSettings}: {
           ...current,
           {type: "warning", message: "浏览器播放缓冲发生 underrun"},
         ]),
+        onFallback: () => setEvents((current) => [
+          ...current,
+          {type: "warning", message: "当前 HTTP 页面不支持 AudioWorklet，已切换到兼容播放模式"},
+        ]),
         onError: (error) => setEvents((current) => [...current, {type: "error", code: "audio_player", message: error.message}]),
       });
       await player.start();

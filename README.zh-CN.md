@@ -369,6 +369,15 @@ DEMO_ENABLED=true bash scripts/bash/compose.sh up --build --gateway engine --var
 然后打开 `http://localhost:50053/demo/`。服务挂在 `/infer/<instance>` 等反向代理前缀下
 时，门户、SDK、WebSocket 和静态资源链接仍会保留该前缀。
 
+Kubernetes 只允许一个公开端口时，engine 容器设置
+`PORT=8000 HEALTH_PORT=0 DEMO_ENABLED=true`，Service 只映射 `8000`；此时
+`/demo/`、`/sdk/`、`/health` 和 `/v1/realtime` 全部共用该端口。完整探针和 Service
+示例见[部署说明](docs/user/deployment.zh-CN.md#kubernetes-单端口部署)。
+
+没有 Ingress 的开发机也可像 FunASR Nano 一样设置 `TLS_CERT_FILE` 和
+`TLS_KEY_FILE`，由同一个公共端口直接提供 HTTPS/WSS；具体证书挂载方式见
+[开发机直接启用 HTTPS/WSS](docs/user/deployment.zh-CN.md#开发机直接启用-httpswss)。
+
 内置“实验”页已通过同一个公共 Realtime 入口提供 **LLM PK** 和并发实验。详细
 decode trace 数据仍由可选的 `demo_api` 工程实验后端提供，并从同一个内置页面进入，
 不会伪装成普通产品体验：

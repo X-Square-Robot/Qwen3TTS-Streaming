@@ -2,31 +2,32 @@ import {expect, test} from "@playwright/test";
 
 test("synthesizes mock PCM through the browser playback contract and exports WAV", async ({page}) => {
   await page.addInitScript(() => {
-    class FakePort {
-      onmessage: ((event: MessageEvent) => void) | null = null;
-      postMessage(payload: {type?: string; samples?: ArrayBuffer}) {
-        if (payload.type === "push" && payload.samples) {
-          const frames = new Float32Array(payload.samples).length;
-          queueMicrotask(() => this.onmessage?.({data: {type: "consumed", frames}} as MessageEvent));
-        }
-      }
-    }
-    class FakeNode {
-      port = new FakePort();
-      connect(target: unknown) { return target; }
+    Object.defineProperty(globalThis.crypto, "randomUUID", {
+      configurable: true,
+      value: undefined,
+    });
+    class FakeSource {
+      buffer: AudioBuffer | null = null;
+      onended: (() => void) | null = null;
+      connect() {}
       disconnect() {}
+      start() { queueMicrotask(() => this.onended?.()); }
+      stop() {}
     }
     class FakeContext {
       sampleRate = 48_000;
       currentTime = 0;
       destination = {};
-      audioWorklet = {addModule: async () => undefined};
       createGain() { return {gain: {setValueAtTime() {}}, connect: () => this.destination, disconnect() {}}; }
+      createBuffer(_channels: number, frames: number) {
+        return {getChannelData: () => new Float32Array(frames)};
+      }
+      createBufferSource() { return new FakeSource(); }
       async resume() {}
       async suspend() {}
       async close() {}
     }
-    Object.assign(globalThis, {AudioContext: FakeContext, AudioWorkletNode: FakeNode});
+    Object.assign(globalThis, {AudioContext: FakeContext, AudioWorkletNode: undefined});
   });
   let route: Parameters<Parameters<typeof page.routeWebSocket>[1]>[0] | undefined;
   const messages: Array<{type: string}> = [];
@@ -56,6 +57,7 @@ test("synthesizes mock PCM through the browser playback contract and exports WAV
     metadata: {qwen_server_ttft_ms: "8.5", qwen_server_total_ms: "40", server_prefix_trimmed_ms: "12", server_prefix_trim_applied: "true", vad_strategy: "energy"},
   }}));
   await expect(page.getByRole("link", {name: "下载 WAV"})).toBeVisible();
+  await expect(page.getByText(/已切换到兼容播放模式/)).toBeVisible();
   await expect(page.getByText("0.10 s")).toBeVisible();
   await expect(page.getByText("9 ms", {exact: true})).toBeVisible();
   await expect(page.getByText("12.0 ms · energy")).toBeVisible();

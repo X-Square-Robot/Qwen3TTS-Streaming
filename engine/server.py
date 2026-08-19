@@ -67,6 +67,7 @@ from .backend.executor import Executor
 from .backend.prefill import EmbeddingWeights, PrefillBuilder
 from .backend.ref_audio_processor import ReferenceAudioProcessor
 from .distribution.sdk import mount_sdk_routes
+from .security import build_server_ssl_context
 
 logger = logging.getLogger(__name__)
 
@@ -1328,6 +1329,16 @@ def main():
         help="Override server.websocket_port (-1 keeps config)",
     )
     parser.add_argument("--ws-path", default="", help="Override server.websocket_path")
+    parser.add_argument(
+        "--tls-cert-file",
+        default="",
+        help="PEM certificate chain for optional direct HTTPS/WSS",
+    )
+    parser.add_argument(
+        "--tls-key-file",
+        default="",
+        help="PEM private key paired with --tls-cert-file",
+    )
     args = parser.parse_args()
 
     cli_overrides: dict = {}
@@ -1347,8 +1358,16 @@ def main():
         cli_overrides.setdefault("server", {})["websocket_port"] = args.ws_port
     if args.ws_path:
         cli_overrides.setdefault("server", {})["websocket_path"] = args.ws_path
+    if args.tls_cert_file:
+        cli_overrides.setdefault("server", {})["tls_cert_file"] = args.tls_cert_file
+    if args.tls_key_file:
+        cli_overrides.setdefault("server", {})["tls_key_file"] = args.tls_key_file
 
     cfg = load_config(args.config, cli_overrides=cli_overrides)
+    ssl_context = build_server_ssl_context(
+        cfg.server.tls_cert_file,
+        cfg.server.tls_key_file,
+    )
 
     # Report the ground-truth code source via __file__ (not the entrypoint's
     # intent): the model package bundles its own engine/ copy, selected by
@@ -1504,11 +1523,13 @@ def main():
                         path=websocket_path,
                         started=ws_started,
                         health_state=health_state,
+                        ssl_context=ssl_context,
                     ),
                 )
                 gateway_started.append(ws_started)
                 logger.info(
-                    "WebSocket server launched on port %d path %s",
+                    "%s WebSocket server launched on port %d path %s",
+                    "TLS" if ssl_context is not None else "Plain",
                     websocket_port,
                     websocket_path,
                 )

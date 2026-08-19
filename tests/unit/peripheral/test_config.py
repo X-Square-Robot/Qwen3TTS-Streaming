@@ -39,6 +39,32 @@ class TestCoercion:
 
 
 class TestEnvOverrides:
+    def test_applies_platform_single_port_aliases(self):
+        raw: dict = {
+            "server": {"websocket_port": 50052, "health_port": 8080}
+        }
+
+        _apply_env_overrides(raw, {"PORT": "8000", "HEALTH_PORT": "0"})
+
+        assert raw["server"]["websocket_port"] == 8000
+        assert raw["server"]["health_port"] == 0
+
+    def test_engine_server_ports_override_platform_aliases(self):
+        raw: dict = {}
+
+        _apply_env_overrides(
+            raw,
+            {
+                "PORT": "8000",
+                "HEALTH_PORT": "0",
+                "ENGINE_SERVER_WEBSOCKET_PORT": "9000",
+                "ENGINE_SERVER_HEALTH_PORT": "9001",
+            },
+        )
+
+        assert raw["server"]["websocket_port"] == 9000
+        assert raw["server"]["health_port"] == 9001
+
     def test_applies_engine_prefix(self):
         raw: dict = {"scheduler": {"max_batch_size": 48}}
         env = {"ENGINE_SCHEDULER_MAX_BATCH_SIZE": "32"}
@@ -51,11 +77,15 @@ class TestEnvOverrides:
         env = {
             "ENGINE_SERVER_WEBSOCKET_PORT": "50052",
             "ENGINE_SERVER_WEBSOCKET_PATH": "/stream/ws",
+            "ENGINE_SERVER_TLS_CERT_FILE": "/run/tls/fullchain.pem",
+            "ENGINE_SERVER_TLS_KEY_FILE": "/run/tls/privkey.pem",
         }
         with _patch_env(env):
             _apply_env_overrides(raw)
         assert raw["server"]["websocket_port"] == 50052
         assert raw["server"]["websocket_path"] == "/stream/ws"
+        assert raw["server"]["tls_cert_file"] == "/run/tls/fullchain.pem"
+        assert raw["server"]["tls_key_file"] == "/run/tls/privkey.pem"
 
     def test_applies_server_health_probe_mode(self):
         raw: dict = {}

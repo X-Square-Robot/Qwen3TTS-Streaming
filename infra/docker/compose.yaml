@@ -40,6 +40,9 @@ services:
       ENGINE_WEBSOCKET_PORT: ${ENGINE_WEBSOCKET_PORT:-50052}
       ENGINE_HEALTH_PORT: ${ENGINE_HEALTH_PORT:-8080}
       ENGINE_HEALTH_PROBE_MODE: ${ENGINE_HEALTH_PROBE_MODE:-}
+      TLS_CERT_FILE: ${TLS_CERT_FILE:-}
+      TLS_KEY_FILE: ${TLS_KEY_FILE:-}
+      TLS_DIR: /app/tls
       DEMO_ENABLED: ${DEMO_ENABLED:-false}
       DEMO_LAB_URL: ${DEMO_LAB_URL:-}
       ENGINE_MAX_BATCH_SIZE: ${ENGINE_MAX_BATCH_SIZE:-128}
@@ -58,6 +61,7 @@ services:
     volumes:
       - ${MODEL_REPO_DIR:-../../workspace/model_repository}:/models:ro
       - ${ENGINE_CONFIG_FILE:-../../engine.yaml}:/etc/qwen3-tts/engine.yaml:ro
+      - ${TLS_HOST_DIR:-../../workspace/tls}:/app/tls:ro
       - ../../scripts/compose/rotating_log_runner.py:/tmp/qwen3tts_rotating_log_runner.py:ro
     gpus: all
     init: true

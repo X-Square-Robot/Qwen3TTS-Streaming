@@ -88,8 +88,34 @@ if [[ ! -f "$config_path" ]]; then
 fi
 
 export ENGINE_SCHEDULER_MAX_BATCH_SIZE="${ENGINE_MAX_BATCH_SIZE:-48}"
-export ENGINE_SERVER_WEBSOCKET_PORT="${ENGINE_WEBSOCKET_PORT:-50052}"
-export ENGINE_SERVER_HEALTH_PORT="${ENGINE_HEALTH_PORT:-8080}"
+# Container platforms commonly inject PORT as the only public service port.
+# The gateway serves Demo, SDK, health, capabilities and both WebSocket
+# protocols on that one port. HEALTH_PORT=0 disables the optional early-binding
+# health listener; /health remains available on PORT after the gateway binds.
+export ENGINE_SERVER_WEBSOCKET_PORT="${ENGINE_SERVER_WEBSOCKET_PORT:-${PORT:-${ENGINE_WEBSOCKET_PORT:-50052}}}"
+export ENGINE_SERVER_HEALTH_PORT="${ENGINE_SERVER_HEALTH_PORT:-${HEALTH_PORT:-${ENGINE_HEALTH_PORT:-8080}}}"
+tls_dir="${TLS_DIR:-/app/tls}"
+tls_cert_file="${TLS_CERT_FILE:-}"
+tls_key_file="${TLS_KEY_FILE:-}"
+if [[ -z "$tls_cert_file" && -z "$tls_key_file" \
+      && -f "${tls_dir}/cert.local.pem" \
+      && -f "${tls_dir}/key.local.pem" ]]; then
+    tls_cert_file="${tls_dir}/cert.local.pem"
+    tls_key_file="${tls_dir}/key.local.pem"
+    echo "Using development TLS certificate from ${tls_dir}."
+fi
+if [[ -n "$tls_cert_file" || -n "$tls_key_file" ]]; then
+    if [[ -z "$tls_cert_file" || -z "$tls_key_file" ]]; then
+        echo "TLS_CERT_FILE and TLS_KEY_FILE must be set together." >&2
+        exit 2
+    fi
+    if [[ ! -r "$tls_cert_file" || ! -r "$tls_key_file" ]]; then
+        echo "TLS certificate or private key is not readable." >&2
+        exit 2
+    fi
+fi
+export ENGINE_SERVER_TLS_CERT_FILE="$tls_cert_file"
+export ENGINE_SERVER_TLS_KEY_FILE="$tls_key_file"
 if [[ -n "${ENGINE_MAX_SEQ_LEN:-}" ]]; then
     export ENGINE_SCHEDULER_MAX_SEQ_LEN="${ENGINE_MAX_SEQ_LEN}"
 fi

@@ -1,12 +1,16 @@
 import {PlaybackCursorQueue} from "./playback-cursor.js";
 import {PCM_PLAYER_WORKLET_SOURCE} from "./pcm-player-worklet.js";
 import {ContinuousResampler, pcm16ToFloat32} from "./resampler.js";
+import {ScheduledBufferPlayer} from "./scheduled-buffer-player.js";
+
+export type AudioPlaybackBackend = "audio-worklet" | "scheduled-buffer";
 
 export interface BrowserAudioPlayerOptions {
   maxBufferMs?: number;
   onPlaybackProgress?: (played: bigint, buffered: bigint) => void;
   onUnderrun?: () => void;
   onError?: (error: Error) => void;
+  onFallback?: (reason: Error) => void;
   startupTimeoutMs?: number;
   workletModuleUrl?: string | URL;
 }
@@ -18,6 +22,7 @@ export interface AudioPlayerSnapshot {
   bufferedThroughSample: bigint;
   underruns: number;
   paused: boolean;
+  backend: AudioPlaybackBackend | null;
 }
 
 export class AudioQueueOverflowError extends Error {
@@ -27,6 +32,7 @@ export class AudioQueueOverflowError extends Error {
 export class BrowserAudioPlayer {
   private context: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
+  private scheduledPlayer: ScheduledBufferPlayer | null = null;
   private gain: GainNode | null = null;
   private resampler: ContinuousResampler | null = null;
   private sourceRate = 0;
@@ -47,33 +53,25 @@ export class BrowserAudioPlayer {
       return;
     }
     const context = new AudioContext();
-    const configuredModule = this.options.workletModuleUrl;
-    const ownedModuleUrl = configuredModule ? "" : URL.createObjectURL(
-      new Blob([PCM_PLAYER_WORKLET_SOURCE], {type: "text/javascript"}),
-    );
-    const moduleUrl = configuredModule?.toString() || ownedModuleUrl;
-    try {
-      await withTimeout(
-        context.audioWorklet.addModule(moduleUrl),
-        this.options.startupTimeoutMs ?? 10_000,
-        "AudioWorklet startup timed out",
-      );
-    } catch (error) {
-      await context.close();
-      throw error;
-    } finally {
-      if (ownedModuleUrl) URL.revokeObjectURL(ownedModuleUrl);
-    }
-    const node = new AudioWorkletNode(context, "qwen3tts-pcm-player", {
-      outputChannelCount: [1],
-    });
     const gain = context.createGain();
-    node.connect(gain).connect(context.destination);
-    node.port.onmessage = (message) => this.handleWorkletMessage(message);
+    gain.connect(context.destination);
+    let node: AudioWorkletNode | null = null;
+    try {
+      node = await this.createWorkletNode(context, gain);
+    } catch (error) {
+      const reason = toError(error);
+      this.options.onFallback?.(reason);
+      this.scheduledPlayer = new ScheduledBufferPlayer(context, gain, {
+        onConsumed: (frames) => this.handleConsumedFrames(frames),
+        onUnderrun: () => this.handleUnderrun(),
+      });
+    }
     try {
       await withTimeout(context.resume(), this.options.startupTimeoutMs ?? 10_000, "AudioContext resume timed out");
     } catch (error) {
-      node.disconnect();
+      node?.disconnect();
+      this.scheduledPlayer?.clear();
+      this.scheduledPlayer = null;
       gain.disconnect();
       await context.close();
       throw error;
@@ -89,7 +87,9 @@ export class BrowserAudioPlayer {
     sourceStart: bigint,
     sourceEnd: bigint,
   ): void {
-    if (!this.context || !this.node) throw new Error("Audio player has not been started");
+    if (!this.context || (!this.node && !this.scheduledPlayer)) {
+      throw new Error("Audio player has not been started");
+    }
     if (sourceEnd - sourceStart !== BigInt(pcm.length)) {
       throw new RangeError("PCM length does not match source sample cursor");
     }
@@ -118,8 +118,7 @@ export class BrowserAudioPlayer {
     const cursor = this.cursors.snapshot().bufferedThroughSample;
     const safeEnd = this.sourceBase + BigInt(this.resampler.consumedSourceFrames());
     this.cursors.push(output.length, cursor, safeEnd);
-    const transferable = output.buffer as ArrayBuffer;
-    this.node.port.postMessage({type: "push", samples: transferable}, [transferable]);
+    this.pushOutput(output);
   }
 
   async pause(): Promise<void> {
@@ -142,8 +141,7 @@ export class BrowserAudioPlayer {
       throw new Error("Resampler flush did not consume the complete source stream");
     }
     this.cursors.push(output.length, cursor, safeEnd);
-    const transferable = output.buffer as ArrayBuffer;
-    this.node.port.postMessage({type: "push", samples: transferable}, [transferable]);
+    this.pushOutput(output);
   }
 
   async resume(): Promise<void> {
@@ -155,6 +153,7 @@ export class BrowserAudioPlayer {
 
   clear(): void {
     this.node?.port.postMessage({type: "clear"});
+    this.scheduledPlayer?.clear();
     this.resampler?.reset();
     this.cursors.clear();
     this.sourceRate = 0;
@@ -194,12 +193,18 @@ export class BrowserAudioPlayer {
       bufferedThroughSample: cursor.bufferedThroughSample,
       underruns: this.underruns,
       paused: this.paused,
+      backend: this.node
+        ? "audio-worklet"
+        : this.scheduledPlayer
+          ? "scheduled-buffer"
+          : null,
     };
   }
 
   async close(): Promise<void> {
     this.clear();
     this.node?.disconnect();
+    this.scheduledPlayer = null;
     this.gain?.disconnect();
     this.node = null;
     this.gain = null;
@@ -210,17 +215,69 @@ export class BrowserAudioPlayer {
   private handleWorkletMessage(message: MessageEvent): void {
     const payload = message.data as {type?: string; frames?: number};
     if (payload.type === "consumed") {
-      const cursor = this.cursors.consume(payload.frames ?? 0);
-      this.options.onPlaybackProgress?.(
-        cursor.playedThroughSample,
-        cursor.bufferedThroughSample,
-      );
+      this.handleConsumedFrames(payload.frames ?? 0);
     } else if (payload.type === "underrun") {
-      this.underruns += 1;
-      this.options.onUnderrun?.();
+      this.handleUnderrun();
     } else if (payload.type === "overflow") {
       this.options.onError?.(new AudioQueueOverflowError("AudioWorklet playback queue overflowed"));
     }
+  }
+
+  private async createWorkletNode(
+    context: AudioContext,
+    gain: GainNode,
+  ): Promise<AudioWorkletNode> {
+    const worklet = context.audioWorklet as AudioWorklet | undefined;
+    if (!worklet || typeof globalThis.AudioWorkletNode !== "function") {
+      throw new Error(
+        "AudioWorklet is unavailable in this browser context; using scheduled audio fallback",
+      );
+    }
+    const configuredModule = this.options.workletModuleUrl;
+    const ownedModuleUrl = configuredModule ? "" : URL.createObjectURL(
+      new Blob([PCM_PLAYER_WORKLET_SOURCE], {type: "text/javascript"}),
+    );
+    const moduleUrl = configuredModule?.toString() || ownedModuleUrl;
+    try {
+      await withTimeout(
+        worklet.addModule(moduleUrl),
+        this.options.startupTimeoutMs ?? 10_000,
+        "AudioWorklet startup timed out",
+      );
+    } finally {
+      if (ownedModuleUrl) URL.revokeObjectURL(ownedModuleUrl);
+    }
+    const node = new AudioWorkletNode(context, "qwen3tts-pcm-player", {
+      outputChannelCount: [1],
+    });
+    node.connect(gain);
+    node.port.onmessage = (message) => this.handleWorkletMessage(message);
+    return node;
+  }
+
+  private pushOutput(output: Float32Array): void {
+    if (this.node) {
+      const transferable = output.buffer as ArrayBuffer;
+      this.node.port.postMessage(
+        {type: "push", samples: transferable},
+        [transferable],
+      );
+      return;
+    }
+    this.scheduledPlayer?.push(output);
+  }
+
+  private handleConsumedFrames(frames: number): void {
+    const cursor = this.cursors.consume(frames);
+    this.options.onPlaybackProgress?.(
+      cursor.playedThroughSample,
+      cursor.bufferedThroughSample,
+    );
+  }
+
+  private handleUnderrun(): void {
+    this.underruns += 1;
+    this.options.onUnderrun?.();
   }
 
   private maximumQueuedFrames(): number {
@@ -229,6 +286,10 @@ export class BrowserAudioPlayer {
       this.context.sampleRate * (this.options.maxBufferMs ?? 5_000) / 1_000,
     );
   }
+}
+
+function toError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
 }
 
 function validateFloat32Pcm(samples: Float32Array): Float32Array {

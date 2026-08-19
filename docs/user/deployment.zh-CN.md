@@ -260,6 +260,95 @@ health 端口在进程启动时立即监听（先于模型加载），探针始�
 
 同样四条路由也挂在 WebSocket 端口（默认 `50052`）上、共享同一份就绪状态，供只能探服务端口的平台使用。与 health 端口相比有两点差异：WebSocket 端口在模型加载完成后才 bind（加载窗口内探针只见拒连，startup 宽限必须覆盖冷启动）；且它由 gateway 事件循环应答，顺带验证了真实服务路径的响应性。平台允许选择时，优先探独立的 health 端口。
 
+#### Kubernetes 单端口部署
+
+只允许暴露一个容器端口的平台使用 `PORT=8000`、`HEALTH_PORT=0`。这会关闭独立
+health listener，但不会关闭健康检查；`/health`、`/readyz`、`/livez` 与 Demo、SDK、
+capabilities、Realtime WebSocket 都由同一个 `8000` 端口提供。内部 gRPC 可以继续监听
+默认 `50051`，无需写进 Service 或 Ingress。
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen3-tts
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qwen3-tts
+  template:
+    metadata:
+      labels:
+        app: qwen3-tts
+    spec:
+      containers:
+        - name: engine
+          image: qwen3-engine:<tag>
+          env:
+            - name: PORT
+              value: "8000"
+            - name: HEALTH_PORT
+              value: "0"
+            - name: DEMO_ENABLED
+              value: "true"
+          ports:
+            - name: public
+              containerPort: 8000
+          startupProbe:
+            httpGet:
+              path: /health
+              port: public
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: public
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: public
+            periodSeconds: 10
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: <model-pvc>
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen3-tts
+spec:
+  selector:
+    app: qwen3-tts
+  ports:
+    - name: public
+      port: 8000
+      targetPort: public
+```
+
+因此同一个 Service 地址直接提供：
+
+- `http://<service>:8000/demo/`
+- `ws://<service>:8000/v1/realtime`
+- `http://<service>:8000/sdk/`
+- `http://<service>:8000/health`
+
+公网 Ingress 在边缘终止 TLS 后，上述地址分别变为 `https://.../demo/` 和
+`wss://.../v1/realtime`；后端仍转发到 HTTP `8000`，并必须保留 WebSocket upgrade。
+不要再为 Demo 建立第二个 Service 或端口。若同时设置
+`ENGINE_SERVER_WEBSOCKET_PORT` / `ENGINE_SERVER_HEALTH_PORT`，这些完整变量优先于
+`PORT` / `HEALTH_PORT`。
+
 平台探针检查清单：
 
 - startup 宽限必须覆盖冷启动（TRT 反序列化 + warmup 约 20–40 秒，取决于 GPU 和 batch
@@ -424,6 +513,29 @@ DEMO_ENABLED=true bash scripts/bash/compose.sh up --build \
   --gateway engine --variant custom-1.7b
 # 打开 http://localhost:50052/demo/
 ```
+
+#### 开发机直接启用 HTTPS/WSS
+
+与 FunASR Nano 一样，没有 Ingress 的独立开发机可以在公共 WebSocket 端口直接终止
+TLS。证书与私钥只读挂载到容器，必须同时配置：
+
+```bash
+TLS_HOST_DIR=/host/path/to/certificate \
+TLS_CERT_FILE=/app/tls/fullchain.pem \
+TLS_KEY_FILE=/app/tls/privkey.pem \
+DEMO_ENABLED=true \
+bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
+```
+
+此时同一个端口提供 `https://<host>:50052/demo/`、
+`wss://<host>:50052/v1/realtime`、`https://<host>:50052/sdk/` 和
+`https://<host>:50052/health`。入口脚本也会自动发现
+`/app/tls/cert.local.pem` 与 `/app/tls/key.local.pem`，便于使用已受测试浏览器信任的
+开发证书。证书必须覆盖实际访问域名；缺文件、只配置一项或证书与私钥不匹配时，服务
+会在加载 GPU 模型前拒绝启动。
+
+生产 Kubernetes 通常不设置 `TLS_CERT_FILE` / `TLS_KEY_FILE`，由 Ingress 或 Gateway
+终止可信 TLS，再转发到 Pod 的 HTTP 端口。两种模式都只使用一个公共服务端口。
 
 Triton 部署把 `--gateway engine` 改成 `--gateway triton`，然后打开
 `http://localhost:50053/demo/`。门户全部使用相对 URL，因此服务部署在

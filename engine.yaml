@@ -20,6 +20,8 @@ server:
   port: 50051
   websocket_port: 50052           # WebSocket streaming gateway (0 to disable)
   websocket_path: /v1/ws
+  tls_cert_file: ""               # Optional PEM chain for direct HTTPS/WSS
+  tls_key_file: ""                # Mounted PEM key; configure both or neither
   health_port: 8080              # HTTP health/metrics endpoint (0 to disable)
   health_probe_mode: ready       # /health: "ready" = 503 until engine ready then 200
                                  # (for unified liveness/readiness/startup probes);

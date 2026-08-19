@@ -269,6 +269,96 @@ grace must cover the cold start), and it answers from the gateway event loop, so
 it also verifies the actual serving path is responsive. Prefer the dedicated
 health port when your platform lets you choose.
 
+#### Single-port Kubernetes deployment
+
+On platforms that expose only one container port, set `PORT=8000` and
+`HEALTH_PORT=0`. This disables the dedicated health listener, not health checks:
+`/health`, `/readyz`, `/livez`, Demo, SDK, capabilities, and Realtime WebSocket
+are all served by port `8000`. Internal gRPC may continue listening on its default
+`50051` without appearing in the Service or Ingress.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen3-tts
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qwen3-tts
+  template:
+    metadata:
+      labels:
+        app: qwen3-tts
+    spec:
+      containers:
+        - name: engine
+          image: qwen3-engine:<tag>
+          env:
+            - name: PORT
+              value: "8000"
+            - name: HEALTH_PORT
+              value: "0"
+            - name: DEMO_ENABLED
+              value: "true"
+          ports:
+            - name: public
+              containerPort: 8000
+          startupProbe:
+            httpGet:
+              path: /health
+              port: public
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: public
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: public
+            periodSeconds: 10
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: <model-pvc>
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen3-tts
+spec:
+  selector:
+    app: qwen3-tts
+  ports:
+    - name: public
+      port: 8000
+      targetPort: public
+```
+
+The same Service address now provides:
+
+- `http://<service>:8000/demo/`
+- `ws://<service>:8000/v1/realtime`
+- `http://<service>:8000/sdk/`
+- `http://<service>:8000/health`
+
+After a public Ingress terminates TLS, these become `https://.../demo/` and
+`wss://.../v1/realtime`; the backend still proxies to HTTP port `8000` and must
+preserve WebSocket upgrades. Do not create a second Service or port for Demo.
+When set together, `ENGINE_SERVER_WEBSOCKET_PORT` /
+`ENGINE_SERVER_HEALTH_PORT` take precedence over `PORT` / `HEALTH_PORT`.
+
 Platform probe checklist:
 
 - Size the startup grace to cover the cold start (TRT deserialize + warmup is
@@ -439,6 +529,32 @@ DEMO_ENABLED=true bash scripts/bash/compose.sh up --build \
   --gateway engine --variant custom-1.7b
 # Open http://localhost:50052/demo/
 ```
+
+#### Direct HTTPS/WSS on a development host
+
+Like FunASR Nano, a standalone development host without an Ingress can
+terminate TLS directly on the public WebSocket port. Mount the certificate and
+private key read-only and configure both together:
+
+```bash
+TLS_HOST_DIR=/host/path/to/certificate \
+TLS_CERT_FILE=/app/tls/fullchain.pem \
+TLS_KEY_FILE=/app/tls/privkey.pem \
+DEMO_ENABLED=true \
+bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
+```
+
+The same port then serves `https://<host>:50052/demo/`,
+`wss://<host>:50052/v1/realtime`, `https://<host>:50052/sdk/`, and
+`https://<host>:50052/health`. The entrypoint also auto-discovers
+`/app/tls/cert.local.pem` and `/app/tls/key.local.pem` for a development
+certificate already trusted by the test browser. The certificate must cover
+the actual hostname. A missing file, partial pair, or certificate/key mismatch
+fails before the GPU model is loaded.
+
+Production Kubernetes normally leaves `TLS_CERT_FILE` / `TLS_KEY_FILE` unset
+and terminates trusted TLS at its Ingress or Gateway before proxying to the
+Pod's HTTP port. Both modes still expose only one public service port.
 
 For Triton, replace `--gateway engine` with `--gateway triton` and open
 `http://localhost:50053/demo/`. The portal uses relative URLs, so a deployment

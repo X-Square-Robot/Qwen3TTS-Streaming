@@ -4,7 +4,7 @@ Loading priority for model architecture:
     package manifest (resolved runtime_dir) > engine.yaml model overrides > defaults
 
 Loading priority for engine params:
-    CLI args > ENGINE_* env vars > engine.yaml > defaults
+    CLI args > ENGINE_* env vars > PORT aliases > engine.yaml > defaults
 
 Usage:
     cfg = load_config("engine.yaml", cli_overrides={...})
@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
@@ -117,11 +118,13 @@ class ModelPackagePaths:
 
 @dataclass
 class ServerConfig:
-    """gRPC server settings."""
+    """Internal gRPC and public HTTP/WebSocket server settings."""
 
     port: int = 50051
     websocket_port: int = 0
     websocket_path: str = "/v1/ws"
+    tls_cert_file: str = ""
+    tls_key_file: str = ""
     health_port: int = 8080
     # /health probe semantics. "ready": 503 until the engine is fully started
     # (model loaded + warmup + gateways bound), then 200 — correct when one
@@ -328,13 +331,30 @@ def _deep_update(base: dict, override: dict) -> dict:
     return base
 
 
-def _apply_env_overrides(raw: dict) -> dict:
-    """Apply ENGINE_* environment variable overrides.
+def _apply_env_overrides(
+    raw: dict,
+    environ: Mapping[str, str] | None = None,
+) -> dict:
+    """Apply platform port aliases and ENGINE_* environment overrides.
 
     E.g. ENGINE_SCHEDULER_MAX_BATCH_SIZE=32 → scheduler.max_batch_size = 32
+
+    ``PORT`` and ``HEALTH_PORT`` are conventional container-platform aliases
+    for the public WebSocket/HTTP port and the optional dedicated health port.
+    The canonical ``ENGINE_SERVER_*`` variables retain higher precedence.
     """
+    values = os.environ if environ is None else environ
+    server = raw.setdefault("server", {})
+    for alias, field_name, canonical in (
+        ("PORT", "websocket_port", "ENGINE_SERVER_WEBSOCKET_PORT"),
+        ("HEALTH_PORT", "health_port", "ENGINE_SERVER_HEALTH_PORT"),
+    ):
+        value = values.get(alias, "").strip()
+        if value and canonical not in values:
+            server[field_name] = _coerce_value(value)
+
     prefix = "ENGINE_"
-    for key, val in os.environ.items():
+    for key, val in values.items():
         if not key.startswith(prefix):
             continue
         body = key[len(prefix) :].lower()

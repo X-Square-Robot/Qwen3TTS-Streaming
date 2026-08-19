@@ -37,6 +37,9 @@ import os
 import uuid
 from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    import ssl
+
 from ..core.types import (
     AudioConfig,
     AudioEncoding,
@@ -1258,6 +1261,7 @@ async def serve(
     started: asyncio.Event | None = None,
     health_state: HealthState | None = None,
     realtime_usage_recorder: Any = None,
+    ssl_context: ssl.SSLContext | None = None,
 ) -> None:
     """Start the websocket gateway using aiohttp.
 
@@ -1309,13 +1313,19 @@ async def serve(
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    site = web.TCPSite(
+        runner,
+        "0.0.0.0",
+        port,
+        ssl_context=ssl_context,
+    )
     try:
         await site.start()
         if started is not None:
             started.set()
         logger.info(
-            "WebSocket server listening on port %d (legacy %s, realtime %s, capabilities %s)",
+            "%s gateway listening on port %d (legacy %s, realtime %s, capabilities %s)",
+            "HTTPS/WSS" if ssl_context is not None else "HTTP/WS",
             port,
             ws_path,
             _OPENAI_REALTIME_PATH,
