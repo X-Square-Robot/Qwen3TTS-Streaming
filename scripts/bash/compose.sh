@@ -792,14 +792,19 @@ stage_demo_site() {
     fi
     test -s "$staged_web/demo/index.html"
     test -s "$staged_web/metadata/browser-sdk-version.txt"
+    test -s "$staged_web/metadata/browser-sdk-tarball.txt"
     rm -rf "$REPO_ROOT/web/packages/demo/dist" "$REPO_ROOT/web/packages/browser-sdk/dist"
     mkdir -p "$REPO_ROOT/web/packages/demo/dist" "$REPO_ROOT/web/packages/browser-sdk/dist"
     cp -a "$staged_web/demo/." "$REPO_ROOT/web/packages/demo/dist/"
     cp -a "$staged_web/browser-sdk/." "$REPO_ROOT/web/packages/browser-sdk/dist/"
     export BROWSER_SDK_VERSION
     BROWSER_SDK_VERSION=$(tr -d '\r\n' < "$staged_web/metadata/browser-sdk-version.txt")
+    local browser_tarball
+    browser_tarball=$(tr -d '\r\n' < "$staged_web/metadata/browser-sdk-tarball.txt")
+    test -s "$REPO_ROOT/web/packages/demo/dist/downloads/$browser_tarball"
+    export BROWSER_SDK_TARBALL_URL="./downloads/$browser_tarball"
     rm -rf "$staged_web"
-    log_info "Demo site staged for /demo/ (Browser SDK $BROWSER_SDK_VERSION)"
+    log_info "Demo site staged for /demo/ (Browser SDK $BROWSER_SDK_VERSION, $browser_tarball)"
 }
 
 cmd_build() {

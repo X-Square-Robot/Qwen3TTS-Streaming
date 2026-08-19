@@ -88,7 +88,10 @@ publish-browser-sdk:
     - |
       npm config set "@xmultimodalinteraction:registry" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/npm/"
       npm config set -- "//${CI_SERVER_HOST}/api/v4/projects/${CI_PROJECT_ID}/packages/npm/:_authToken" "$CI_JOB_TOKEN"
-      npm publish "web/dist/$BROWSER_SDK_TARBALL" --access public --tag "$BROWSER_SDK_DIST_TAG"
+      npm publish "web/dist/$BROWSER_SDK_TARBALL" \
+        --registry "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/npm/" \
+        --access public \
+        --tag "$BROWSER_SDK_DIST_TAG"
       node web/scripts/publish-gitlab-assets.mjs
   artifacts:
     expire_in: 7 days
@@ -318,7 +321,7 @@ build-engine-image:
         --build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256" \
         --build-arg "BROWSER_SDK_VERSION=$BROWSER_SDK_SEMVER" \
         --build-arg "BROWSER_SDK_REGISTRY_URL=${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/npm/" \
-        --build-arg "BROWSER_SDK_TARBALL_URL=$BROWSER_SDK_GENERIC_URL" \
+        --build-arg "BROWSER_SDK_TARBALL_URL=./downloads/$BROWSER_SDK_TARBALL" \
         --label "org.opencontainers.image.source=$CI_PROJECT_URL" \
         --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
         --tag "$ENGINE_RELEASE_IMAGE" \
@@ -338,7 +341,7 @@ build-engine-image:
         --build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256" \
         --build-arg "BROWSER_SDK_VERSION=$BROWSER_SDK_SEMVER" \
         --build-arg "BROWSER_SDK_REGISTRY_URL=${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/npm/" \
-        --build-arg "BROWSER_SDK_TARBALL_URL=$BROWSER_SDK_GENERIC_URL" \
+        --build-arg "BROWSER_SDK_TARBALL_URL=./downloads/$BROWSER_SDK_TARBALL" \
         --label "org.opencontainers.image.source=$CI_PROJECT_URL" \
         --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
         --tag "$TRITON_RELEASE_IMAGE" \
@@ -369,6 +372,8 @@ build-engine-image:
         echo "Engine image browser SDK version does not match the web artifact" >&2
         exit 1
       fi
+      docker cp "$container_id:/app/demo/downloads/$BROWSER_SDK_TARBALL" /tmp/engine-image-browser-sdk.tgz
+      test "$(sha256sum /tmp/engine-image-browser-sdk.tgz | cut -d' ' -f1)" = "$BROWSER_SDK_SHA256"
       docker cp "$container_id:/app/demo/index.html" /tmp/engine-image-demo-index.html
       test -s /tmp/engine-image-demo-index.html
       docker rm "$container_id" >/dev/null
@@ -384,6 +389,8 @@ build-engine-image:
       test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.filename" }}' "$TRITON_RELEASE_IMAGE")" = "$WHEEL_FILENAME"
       test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.sha256" }}' "$TRITON_RELEASE_IMAGE")" = "$WHEEL_SHA256"
       test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.browser-sdk.version" }}' "$TRITON_RELEASE_IMAGE")" = "$BROWSER_SDK_SEMVER"
+      docker cp "$container_id:/app/demo/downloads/$BROWSER_SDK_TARBALL" /tmp/triton-image-browser-sdk.tgz
+      test "$(sha256sum /tmp/triton-image-browser-sdk.tgz | cut -d' ' -f1)" = "$BROWSER_SDK_SHA256"
       docker cp "$container_id:/app/demo/index.html" /tmp/triton-image-demo-index.html
       test -s /tmp/triton-image-demo-index.html
       docker rm "$container_id" >/dev/null

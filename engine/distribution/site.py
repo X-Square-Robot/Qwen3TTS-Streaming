@@ -70,6 +70,9 @@ def build_demo_config(
     """Build prefix-neutral instance metadata consumed by the browser Demo."""
 
     engine_version = str(capabilities.get("engine_version", "") or "")
+    browser_version = os.environ.get("BROWSER_SDK_VERSION", "").strip()
+    browser_registry = os.environ.get("BROWSER_SDK_REGISTRY_URL", "").strip()
+    browser_tarball = os.environ.get("BROWSER_SDK_TARBALL_URL", "").strip()
     return {
         "schema_version": DEMO_CONFIG_SCHEMA_VERSION,
         "engine_version": engine_version,
@@ -81,11 +84,11 @@ def build_demo_config(
         },
         "python_sdk": sdk_distribution.python_sdk_metadata(),
         "browser_sdk": {
-            "available": bool(os.environ.get("BROWSER_SDK_VERSION", "").strip()),
+            "available": bool(browser_version and (browser_tarball or browser_registry)),
             "package": "@xmultimodalinteraction/qwen3tts-browser",
-            "version": os.environ.get("BROWSER_SDK_VERSION", "").strip(),
-            "registry_url": os.environ.get("BROWSER_SDK_REGISTRY_URL", "").strip(),
-            "tarball_url": os.environ.get("BROWSER_SDK_TARBALL_URL", "").strip(),
+            "version": browser_version,
+            "registry_url": browser_registry,
+            "tarball_url": browser_tarball,
         },
         "docs": {
             "version": os.environ.get("DOCS_VERSION", engine_version).strip(),

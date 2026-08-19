@@ -4,6 +4,7 @@ import {extname, resolve, sep} from "node:path";
 
 const root = resolve(import.meta.dirname, "../packages/demo/dist");
 const prefix = "/infer/instance/demo/";
+const browserTarball = "xmultimodalinteraction-qwen3tts-browser-1.2.3.tgz";
 const capabilities = {
   schema_version: "qwen.tts.capabilities.v1", engine_version: "v1.2.3", model: "custom-1.7b",
   tasks: ["custom_voice", "voice_design"], speakers: ["Serena", "Ryan"], languages: ["auto", "Chinese", "English"],
@@ -30,10 +31,11 @@ const server = createServer(async (request, response) => {
       schema_version: "qwen.tts.demo-config.v1", engine_version: "v1.2.3", runtime_type: "standalone",
       endpoints: {capabilities_url: "../v1/capabilities", openai_realtime_url: "../v1/realtime", native_websocket_url: "../v1/ws"},
       python_sdk: {available: true, project: "qwen3-tts-client", version: "1.2.3", filename: "qwen3_tts_client-1.2.3-py3-none-any.whl", sha256: "abcd", index_url: "../sdk/", download_url: "../sdk/qwen3_tts_client-1.2.3-py3-none-any.whl"},
-      browser_sdk: {available: true, package: "@xmultimodalinteraction/qwen3tts-browser", version: "1.2.3", registry_url: "", tarball_url: ""},
+      browser_sdk: {available: true, package: "@xmultimodalinteraction/qwen3tts-browser", version: "1.2.3", registry_url: "", tarball_url: `./downloads/${browserTarball}`},
       docs: {version: "v1.2.3", route: "./#/docs/"}, lab: {available: true, url: "/legacy-lab"},
     });
     if (path === "/infer/instance/sdk/qwen3_tts_client-1.2.3-py3-none-any.whl") return send(response, 200, "application/octet-stream", "wheel");
+    if (path === `${prefix}downloads/${browserTarball}`) return send(response, 200, "application/gzip", "browser-sdk");
     const relative = path.startsWith(prefix) ? path.slice(prefix.length) : path.startsWith("/pages/") ? path.slice(7) : null;
     if (relative === null || relative === "config.json") return send(response, 404, "text/plain", "not found");
     const file = resolve(root, relative || "index.html");

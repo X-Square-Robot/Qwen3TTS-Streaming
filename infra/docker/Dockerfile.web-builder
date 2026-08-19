@@ -19,9 +19,13 @@ RUN --mount=type=cache,target=/root/.npm npm --prefix web ci
 COPY . .
 
 RUN npm --prefix web run build \
-    && install -d /out/demo /out/browser-sdk /out/metadata \
+    && npm --prefix web run pack:browser \
+    && install -d /out/demo/downloads /out/browser-sdk /out/metadata \
     && cp -a web/packages/demo/dist/. /out/demo/ \
     && cp -a web/packages/browser-sdk/dist/. /out/browser-sdk/ \
+    && cp web/dist/xmultimodalinteraction-qwen3tts-browser-*.tgz /out/demo/downloads/ \
+    && basename web/dist/xmultimodalinteraction-qwen3tts-browser-*.tgz \
+       > /out/metadata/browser-sdk-tarball.txt \
     && node -p "require('./web/packages/browser-sdk/package.json').version" \
        > /out/metadata/browser-sdk-version.txt
 

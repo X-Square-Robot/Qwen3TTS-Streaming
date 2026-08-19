@@ -120,6 +120,10 @@ test("keeps an instance prefix and gates controls from capabilities", async ({pa
   await expect(page.getByRole("link", {name: /下载 qwen3_tts_client/})).toHaveAttribute(
     "href", "http://127.0.0.1:4173/infer/instance/sdk/qwen3_tts_client-1.2.3-py3-none-any.whl",
   );
+  await expect(page.getByText('npm install "http://127.0.0.1:4173/infer/instance/demo/downloads/xmultimodalinteraction-qwen3tts-browser-1.2.3.tgz"')).toBeVisible();
+  await expect(page.getByRole("link", {name: "下载 npm tarball"})).toHaveAttribute(
+    "href", "http://127.0.0.1:4173/infer/instance/demo/downloads/xmultimodalinteraction-qwen3tts-browser-1.2.3.tgz",
+  );
   await expect(page.getByText("Engine、Python SDK、Browser SDK 与文档来自同一 release。")).toBeVisible();
   await expect(page.getByText(/SynthesisTask\.VoiceDesign/)).toBeVisible();
   await expect(page.getByText(/strategy: VadStrategy\.Energy/)).toBeVisible();

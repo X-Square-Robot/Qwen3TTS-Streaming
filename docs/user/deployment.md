@@ -528,7 +528,12 @@ if logs must survive container replacement.
 The release image already contains the version-matched product Demo, Browser
 SDK, Python wheel index, and selected Markdown documentation. It is enabled by
 default on the same public endpoint as Realtime; no separate Demo API or Node
-process is used. Set `DEMO_ENABLED=false` at startup to disable it:
+process is used. CI/CD builds the Browser SDK npm tarball once and embeds the
+same bytes under `/demo/downloads/`; the SDK page generates an `npm install
+"https://...tgz"` command for the current instance, without requiring a source
+checkout. GitLab tag pipelines also publish that tarball to the project npm
+Registry as a second installation channel. Set `DEMO_ENABLED=false` at startup
+to disable it:
 
 ```bash
 bash scripts/bash/compose.sh up --build \

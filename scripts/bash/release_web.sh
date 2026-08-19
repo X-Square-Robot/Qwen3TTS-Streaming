@@ -35,6 +35,25 @@ npm run build
 npm run pack:browser
 
 mkdir -p dist
+browser_tarball="$(find "$repo_root/web/dist" -maxdepth 1 -type f -name 'xmultimodalinteraction-qwen3tts-browser-*.tgz' -print)"
+if [[ -z "$browser_tarball" || "$(printf '%s\n' "$browser_tarball" | wc -l)" -ne 1 ]]; then
+    echo "Expected exactly one Browser SDK tarball in web/dist" >&2
+    exit 1
+fi
+mkdir -p packages/demo/dist/downloads
+cp "$browser_tarball" packages/demo/dist/downloads/
+
+# Validate the exact archive that will be published and embedded in runtime
+# images, rather than importing the Browser SDK workspace build directly.
+smoke_dir="$(mktemp -d /tmp/qwen3tts-browser-sdk-smoke.XXXXXX)"
+trap 'rm -rf "$smoke_dir"' EXIT
+tar -C "$smoke_dir" -xzf "$browser_tarball"
+ln -s "$repo_root/web/node_modules" "$smoke_dir/package/node_modules"
+node --input-type=module -e \
+    "const sdk = await import('${smoke_dir}/package/dist/index.js'); if (!sdk.RealtimeTTSClient) throw new Error('Browser SDK entry point is incomplete')"
+rm -rf "$smoke_dir"
+trap - EXIT
+
 tar -C packages/demo/dist -czf "dist/qwen3tts-demo-${semver}.tar.gz" .
 printf 'BROWSER_SDK_VERSION=%s\nBROWSER_SDK_SEMVER=%s\nBROWSER_SDK_DIST_TAG=%s\n' \
     "$release_version" "$semver" "$dist_tag" > dist/web-release.env

@@ -69,6 +69,33 @@ def test_demo_config_disables_ambiguous_sdk_download(tmp_path):
     assert "multiple" in payload["python_sdk"]["reason"]
 
 
+def test_demo_config_only_advertises_installable_browser_sdk(tmp_path, monkeypatch):
+    monkeypatch.setenv("BROWSER_SDK_VERSION", "1.2.3")
+    payload = build_demo_config(
+        runtime_type="standalone",
+        capabilities={},
+        sdk_distribution=SdkDistribution.discover(tmp_path),
+    )
+    assert payload["browser_sdk"]["available"] is False
+
+    monkeypatch.setenv(
+        "BROWSER_SDK_TARBALL_URL",
+        "./downloads/xmultimodalinteraction-qwen3tts-browser-1.2.3.tgz",
+    )
+    payload = build_demo_config(
+        runtime_type="standalone",
+        capabilities={},
+        sdk_distribution=SdkDistribution.discover(tmp_path),
+    )
+    assert payload["browser_sdk"] == {
+        "available": True,
+        "package": "@xmultimodalinteraction/qwen3tts-browser",
+        "version": "1.2.3",
+        "registry_url": "",
+        "tarball_url": "./downloads/xmultimodalinteraction-qwen3tts-browser-1.2.3.tgz",
+    }
+
+
 def test_demo_config_rejects_unsafe_lab_url(tmp_path, monkeypatch):
     monkeypatch.setenv("DEMO_LAB_URL", "javascript:alert(1)")
     payload = build_demo_config(

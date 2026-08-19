@@ -85,6 +85,10 @@ RUN test -s /app/demo/index.html || { \
         echo "Demo artifact missing: build web/packages/demo/dist before the runtime image" >&2; \
         exit 1; \
     }
+RUN test "$(find /app/demo/downloads -maxdepth 1 -type f -name 'xmultimodalinteraction-qwen3tts-browser-*.tgz' | wc -l)" -eq 1 || { \
+        echo "Browser SDK tarball missing or ambiguous: package it before the runtime image" >&2; \
+        exit 1; \
+    }
 RUN if [ -n "${CLIENT_WHEEL_FILENAME}" ] || [ -n "${CLIENT_WHEEL_SHA256}" ]; then \
         test -n "${CLIENT_WHEEL_FILENAME}" && \
         test -n "${CLIENT_WHEEL_SHA256}" && \

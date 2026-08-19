@@ -357,6 +357,12 @@ Browser SDK, plays PCM through the system speaker, exposes capability-gated VAD
 and delivery controls, downloads WAV, and renders this repository's Markdown.
 No separate Demo API is required for the normal experience.
 
+CI packages the Browser SDK once as an npm tarball and embeds those exact bytes
+under `/demo/downloads/`. The SDK page generates an `npm install
+"https://<instance>/demo/downloads/<package>.tgz"` command, so consumers do not
+need a repository checkout. GitLab releases additionally publish the same
+archive to the project npm Registry.
+
 The built-in Lab also provides LLM PK, concurrency requests, Text Player event
 traces, and JSON trace downloads over public Realtime. Results describe only
 the current browser-to-instance run; the page never substitutes fixtures or

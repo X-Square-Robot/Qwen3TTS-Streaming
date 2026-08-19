@@ -255,6 +255,7 @@ jobs:
       WHEEL_SHA256: ${{ needs.build-client-wheel.outputs.wheel_sha256 }}
       BROWSER_SDK_VERSION: ${{ needs.build-web-release.outputs.browser_sdk_version }}
       BROWSER_TARBALL: ${{ needs.build-web-release.outputs.browser_tarball }}
+      BROWSER_SHA256: ${{ needs.build-web-release.outputs.browser_sha256 }}
       TRITON_BASE_IMAGE: ${{ vars.TRITON_BASE_IMAGE || 'nvcr.io/nvidia/tritonserver:26.02-py3' }}
       TRITON_TENSORRT_PYTHON_VERSION: ${{ vars.TRITON_TENSORRT_PYTHON_VERSION || '10.15.1.29' }}
       TRITON_PYTORCH_CUDA_TAG: ${{ vars.TRITON_PYTORCH_CUDA_TAG || 'cu130' }}
@@ -329,7 +330,7 @@ jobs:
             --build-arg "CLIENT_WHEEL_FILENAME=$WHEEL_FILENAME" \
             --build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256" \
             --build-arg "BROWSER_SDK_VERSION=$BROWSER_SDK_VERSION" \
-            --build-arg "BROWSER_SDK_TARBALL_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$BROWSER_TARBALL" \
+            --build-arg "BROWSER_SDK_TARBALL_URL=./downloads/$BROWSER_TARBALL" \
             --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --tag "$engine_image" \
@@ -348,7 +349,7 @@ jobs:
             --build-arg "CLIENT_WHEEL_FILENAME=$WHEEL_FILENAME" \
             --build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256" \
             --build-arg "BROWSER_SDK_VERSION=$BROWSER_SDK_VERSION" \
-            --build-arg "BROWSER_SDK_TARBALL_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$BROWSER_TARBALL" \
+            --build-arg "BROWSER_SDK_TARBALL_URL=./downloads/$BROWSER_TARBALL" \
             --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --tag "$triton_image" \
@@ -379,6 +380,8 @@ jobs:
             echo "Engine image browser SDK version does not match the web artifact" >&2
             exit 1
           fi
+          docker cp "$container_id:/app/demo/downloads/$BROWSER_TARBALL" /tmp/image-browser-sdk.tgz
+          test "$(sha256sum /tmp/image-browser-sdk.tgz | cut -d' ' -f1)" = "$BROWSER_SHA256"
           docker cp "$container_id:/app/demo/index.html" /tmp/image-demo-index.html
           test -s /tmp/image-demo-index.html
           docker rm "$container_id" >/dev/null
@@ -396,6 +399,8 @@ jobs:
           test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.filename" }}' "$triton_image")" = "$WHEEL_FILENAME"
           test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.sha256" }}' "$triton_image")" = "$WHEEL_SHA256"
           test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.browser-sdk.version" }}' "$triton_image")" = "$BROWSER_SDK_VERSION"
+          docker cp "$container_id:/app/demo/downloads/$BROWSER_TARBALL" /tmp/triton-image-browser-sdk.tgz
+          test "$(sha256sum /tmp/triton-image-browser-sdk.tgz | cut -d' ' -f1)" = "$BROWSER_SHA256"
           docker cp "$container_id:/app/demo/index.html" /tmp/triton-image-demo-index.html
           test -s /tmp/triton-image-demo-index.html
           docker rm "$container_id" >/dev/null

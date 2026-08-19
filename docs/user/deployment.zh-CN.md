@@ -512,6 +512,10 @@ tar -C "${QWEN_LOG_DIR:-/var/log/qwen3tts}" \
 
 正式镜像已经包含同版本的产品 Demo、Browser SDK、Python wheel 索引和精选 Markdown
 文档，并默认启用在 Realtime 的同一个公共入口，不需要独立 Demo API 或 Node 进程。
+CI/CD 只构建一次 Browser SDK npm tarball，并将同一份产物内置到
+`/demo/downloads/`；SDK 页面会生成指向当前实例的 `npm install "https://...tgz"`
+命令，调用方不需要拉取源码仓库。GitLab tag 流水线还会把同一 tarball 发布到项目 npm
+Registry，作为第二种安装渠道。
 启动时设置 `DEMO_ENABLED=false` 可将其关闭：
 
 ```bash

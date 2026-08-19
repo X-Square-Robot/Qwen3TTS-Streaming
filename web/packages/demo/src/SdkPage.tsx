@@ -20,6 +20,14 @@ export function SdkPage({loaded, capabilities, settings, docsOnly}: SdkPageProps
   const browserTarball = !docsOnly && loaded?.config.browser_sdk.tarball_url
     ? resolveRelativeUrl(loaded.config.browser_sdk.tarball_url, loaded.responseUrl).toString()
     : "";
+  const browserPackage = loaded?.config.browser_sdk.package ?? "@xmultimodalinteraction/qwen3tts-browser";
+  const browserVersion = loaded?.config.browser_sdk.version ?? "";
+  const browserRegistry = loaded?.config.browser_sdk.registry_url ?? "";
+  const browserInstall = browserTarball
+    ? `npm install ${JSON.stringify(browserTarball)}`
+    : browserRegistry && browserVersion
+      ? `npm install ${browserPackage}@${browserVersion} --registry ${JSON.stringify(browserRegistry)}`
+      : "当前实例未内置 Browser SDK 安装包";
   const command = download
     ? `pip install "${sdk?.project ?? "qwen3-tts-client"}[all] @ ${download}"`
     : "请在部署实例的 /demo/#/sdk 获取匹配 wheel 的安装命令";
@@ -43,9 +51,11 @@ export function SdkPage({loaded, capabilities, settings, docsOnly}: SdkPageProps
       {sdk?.sha256 && !docsOnly && <p className="hash">SHA256 {sdk.sha256}</p>}
     </div>
     <div className="panel"><div className="panel-heading"><div><p className="panel-kicker">WEB CLIENT</p><h2>Browser SDK</h2></div><p>用于网页实时合成与播放。</p></div>
-      <pre>npm install {loaded?.config.browser_sdk.package ?? "@xmultimodalinteraction/qwen3tts-browser"}{loaded?.config.browser_sdk.version ? `@${loaded.config.browser_sdk.version}` : ""}</pre>
-      {browserTarball && <a className="button" href={browserTarball}><Download size={17}/>下载 npm tarball</a>}
-      {loaded?.config.browser_sdk.registry_url && <p className="hint">Registry {loaded.config.browser_sdk.registry_url}</p>}
+      <pre>{browserInstall}</pre>
+      {browserTarball && <a className="button" href={browserTarball} download><Download size={17}/>下载 npm tarball</a>}
+      {browserRegistry && browserVersion && browserTarball && <><p className="hint">也可以从已配置 Registry 安装：</p>
+        <pre>npm install {browserPackage}@{browserVersion} --registry {JSON.stringify(browserRegistry)}</pre></>}
+      {!docsOnly && !loaded?.config.browser_sdk.available && <p className="alert">Browser SDK 尚未由当前实例或 Registry 提供。</p>}
       <p className="hint">协议 {capabilities?.schema_version ?? "连接实例后显示"}</p>
     </div>
     {!docsOnly && loaded && <div className="panel"><div className="panel-heading"><div><p className="panel-kicker">RELEASE PAIRING</p><h2>Release 一致性</h2></div></div>

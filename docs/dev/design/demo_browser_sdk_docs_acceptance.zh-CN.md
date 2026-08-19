@@ -34,8 +34,8 @@
 
 - GitLab 和 GitHub 都使用 Node 22 只构建一次站点与 Browser SDK，后续 npm/Pages、
   Release 和两种运行时镜像复用同一 artifact 并检查 SHA256。
-- 两种镜像只复制预构建站点和经过发布端校验的唯一 Python wheel；镜像内不含
-  Node/npm，也不重新构建 SDK。
+- 两种镜像只复制预构建站点、其中内置且经过 SHA256 校验的 Browser SDK tarball，
+  以及经过发布端校验的唯一 Python wheel；镜像内不含 Node/npm，也不重新构建 SDK。
 - 本地 Compose 使用 `infra/docker/Dockerfile.web-builder` 的 Node 22 BuildKit stage，
   将开发版 Demo 与 Browser SDK 写入 gitignored staging 目录后再构建运行镜像。
 - GitLab Pages 的 `documentation` environment 指向

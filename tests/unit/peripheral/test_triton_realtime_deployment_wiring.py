@@ -91,6 +91,9 @@ def test_local_compose_uses_reproducible_node_builder_for_web_artifacts():
     assert "FROM ${NODE_IMAGE} AS web-builder" in dockerfile
     assert "npm --prefix web ci" in dockerfile
     assert "npm --prefix web run build" in dockerfile
+    assert "npm --prefix web run pack:browser" in dockerfile
+    assert "/out/demo/downloads" in dockerfile
+    assert "browser-sdk-tarball.txt" in dockerfile
     assert "FROM scratch AS web-artifacts" in dockerfile
 
 
@@ -102,4 +105,5 @@ def test_runtime_images_fail_closed_when_demo_artifact_is_missing():
         dockerfile = _read(path)
         assert "COPY web/packages/demo/dist/ /app/demo/" in dockerfile
         assert "test -s /app/demo/index.html" in dockerfile
+        assert "xmultimodalinteraction-qwen3tts-browser-*.tgz" in dockerfile
         assert "Demo artifact missing" in dockerfile
