@@ -147,7 +147,7 @@ GitHub 单元测试的 CPU-only PyTorch 使用南京大学镜像；GitLab 的 De
 | `X2ROBOT_REGISTRY`、`X2ROBOT_IMAGE`、`X2ROBOT_IMAGE_TAG_PREFIX` | GitLab 引擎镜像的目标仓库及兼容性 tag 通道 |
 | `X2ROBOT_REGISTRY_USER`、`X2ROBOT_REGISTRY_PASSWORD` | GitLab 推送引擎镜像所需的 masked CI/CD 凭据 |
 | `PYTORCH_CPU_INDEX` | GitHub 单元测试使用的 CPU-only PyTorch 索引 |
-| `RUNNER_*_IMAGE`、`DEBIAN_*_MIRROR`、`ALPINE_MIRROR` | GitLab job/service 镜像与系统包源 |
+| `RUNNER_*_IMAGE`、`DEBIAN_*_MIRROR`、`ALPINE_MIRROR` | GitLab job/service 镜像与系统包源；`RUNNER_PLAYWRIGHT_IMAGE` 必须与 `web/package-lock.json` 中的 Playwright 精确版本一致 |
 
 公共代理适合先恢复流水线；稳定发版更建议把 NGC 与 job 镜像预同步到内网 Registry，
 再覆盖 `ENGINE_BASE_IMAGE` 和各 `RUNNER_*_IMAGE`。这些镜像不会代理 GitHub

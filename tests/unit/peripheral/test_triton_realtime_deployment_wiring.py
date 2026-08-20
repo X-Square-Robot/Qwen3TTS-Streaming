@@ -126,6 +126,22 @@ def test_release_uses_an_immutable_prebuilt_triton_dependency_base():
         assert '--cache-from "$triton_cache_image"' not in triton_build
 
 
+def test_gitlab_web_release_uses_the_matching_preinstalled_playwright_image():
+    gitlab = _read(".gitlab-ci.yml")
+    package_lock = _read("web/package-lock.json")
+    web_job = gitlab.split("\nbuild-web-release:\n", 1)[1].split(
+        "\nbuild-client-wheel:\n", 1
+    )[0]
+
+    assert '"@playwright/test": "1.55.0"' in package_lock
+    assert (
+        'RUNNER_PLAYWRIGHT_IMAGE: "mcr.microsoft.com/playwright:v1.55.0-noble"'
+        in gitlab
+    )
+    assert 'image: "$RUNNER_PLAYWRIGHT_IMAGE"' in web_job
+    assert "playwright install" not in web_job
+
+
 def test_web_release_stamps_only_the_publishable_workspace_without_registry_resolution():
     script = _read("scripts/bash/release_web.sh")
 

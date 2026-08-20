@@ -165,7 +165,7 @@ GitLab:
 | `X2ROBOT_REGISTRY`, `X2ROBOT_IMAGE`, `X2ROBOT_IMAGE_TAG_PREFIX` | GitLab engine image destination and compatibility tag channel |
 | `X2ROBOT_REGISTRY_USER`, `X2ROBOT_REGISTRY_PASSWORD` | Masked GitLab CI/CD credentials for pushing the engine image |
 | `PYTORCH_CPU_INDEX` | CPU-only PyTorch index used by GitHub unit tests |
-| `RUNNER_*_IMAGE`, `DEBIAN_*_MIRROR`, `ALPINE_MIRROR` | GitLab job/service images and OS package mirrors |
+| `RUNNER_*_IMAGE`, `DEBIAN_*_MIRROR`, `ALPINE_MIRROR` | GitLab job/service images and OS package mirrors; `RUNNER_PLAYWRIGHT_IMAGE` must exactly match the Playwright version in `web/package-lock.json` |
 
 The public proxies are useful for getting a constrained runner working. For a
 stable release path, pre-sync the NGC and job images into an internal Registry

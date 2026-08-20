@@ -37,6 +37,8 @@ variables:
   RUNNER_DOCKER_DIND_IMAGE: "m.daocloud.io/docker.io/library/docker:27.4.1-dind"
   RUNNER_GLAB_IMAGE: "m.daocloud.io/registry.gitlab.com/gitlab-org/cli:v1.112.0"
   RUNNER_NODE_IMAGE: "m.daocloud.io/docker.io/library/node:22-bookworm-slim"
+  # Matches web/package-lock.json and carries all three browsers plus OS deps.
+  RUNNER_PLAYWRIGHT_IMAGE: "mcr.microsoft.com/playwright:v1.55.0-noble"
   DEBIAN_MIRROR: "https://mirrors.bfsu.edu.cn/debian"
   DEBIAN_SECURITY_MIRROR: "https://mirrors.bfsu.edu.cn/debian-security"
   ALPINE_MIRROR: "https://mirrors.bfsu.edu.cn/alpine"
@@ -98,10 +100,9 @@ build-triton-runtime-base:
 build-web-release:
   extends: .tag-release-job
   stage: web-build
-  image: "$RUNNER_NODE_IMAGE"
+  image: "$RUNNER_PLAYWRIGHT_IMAGE"
   script:
     - bash scripts/bash/release_web.sh "$CI_COMMIT_TAG"
-    - npm --prefix web exec -- playwright install --with-deps chromium firefox webkit
     - npm --prefix web run test:e2e
     - |
       browser_tgz="$(find web/dist -maxdepth 1 -type f -name 'xmultimodalinteraction-qwen3tts-browser-*.tgz' -print)"
