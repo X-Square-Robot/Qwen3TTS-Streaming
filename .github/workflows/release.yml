@@ -259,7 +259,7 @@ jobs:
       TRITON_BASE_IMAGE: ${{ vars.TRITON_BASE_IMAGE || 'nvcr.io/nvidia/tritonserver:26.02-py3' }}
       TRITON_TENSORRT_PYTHON_VERSION: ${{ vars.TRITON_TENSORRT_PYTHON_VERSION || '10.15.1.29' }}
       TRITON_PYTORCH_CUDA_TAG: ${{ vars.TRITON_PYTORCH_CUDA_TAG || 'cu130' }}
-      TRITON_RUNTIME_BASE_TAG: ${{ vars.TRITON_RUNTIME_BASE_TAG || 'runtime-base_26.02_trt10.15.1.29_cu130_r1' }}
+      TRITON_RUNTIME_BASE_TAG: ${{ vars.TRITON_RUNTIME_BASE_TAG || 'runtime-base_26.02_trt10.15.1.29_cu130_r2' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -326,6 +326,13 @@ jobs:
             echo "Run the Build Triton Runtime Base workflow before creating a release tag." >&2
             exit 1
           fi
+          docker run --rm --entrypoint python3 "$triton_runtime_base_image" -c \
+            "import aiohttp, attr; print(f'aiohttp={aiohttp.__version__} attrs={attr.__version__}')"
+          triton_runtime_base_digest="$(docker image inspect --format '{{ index .RepoDigests 0 }}' "$triton_runtime_base_image")"
+          if [[ "$triton_runtime_base_digest" != *@sha256:* ]]; then
+            echo "Could not resolve Triton runtime base to an immutable digest" >&2
+            exit 1
+          fi
 
           docker pull "$engine_cache_image" || true
           docker build --pull \
@@ -345,15 +352,16 @@ jobs:
             --tag "$engine_cache_image" \
             .
 
-          docker pull "$triton_cache_image" || true
-          docker build --pull \
+          # Build the small application tail from the immutable dependency
+          # base. A mutable full-image cache must not mask base changes.
+          docker build --pull --no-cache \
             --file infra/docker/Dockerfile.triton \
-            --cache-from "$triton_cache_image" \
             --build-arg "BUILDKIT_INLINE_CACHE=1" \
             --build-arg "BASE_IMAGE=$TRITON_BASE_IMAGE" \
             --build-arg "TENSORRT_PYTHON_VERSION=$TRITON_TENSORRT_PYTHON_VERSION" \
             --build-arg "PYTORCH_CUDA_TAG=$TRITON_PYTORCH_CUDA_TAG" \
-            --build-arg "TRITON_RUNTIME_BASE_IMAGE=$triton_runtime_base_image" \
+            --build-arg "TRITON_RUNTIME_BASE_IMAGE=$triton_runtime_base_digest" \
+            --build-arg "TRITON_RUNTIME_BASE_REFERENCE=$triton_runtime_base_digest" \
             --build-arg "ENGINE_VERSION=$GITHUB_REF_NAME" \
             --build-arg "CLIENT_WHEEL_FILENAME=$WHEEL_FILENAME" \
             --build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256" \
@@ -408,12 +416,15 @@ jobs:
           test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.filename" }}' "$triton_image")" = "$WHEEL_FILENAME"
           test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.sha256" }}' "$triton_image")" = "$WHEEL_SHA256"
           test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.browser-sdk.version" }}' "$triton_image")" = "$BROWSER_SDK_VERSION"
+          test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.triton-runtime-base.reference" }}' "$triton_image")" = "$triton_runtime_base_digest"
           docker cp "$container_id:/app/demo/downloads/$BROWSER_TARBALL" /tmp/triton-image-browser-sdk.tgz
           test "$(sha256sum /tmp/triton-image-browser-sdk.tgz | cut -d' ' -f1)" = "$BROWSER_SHA256"
           docker cp "$container_id:/app/demo/index.html" /tmp/triton-image-demo-index.html
           test -s /tmp/triton-image-demo-index.html
           docker rm "$container_id" >/dev/null
           trap - EXIT
+          docker run --rm --entrypoint python3 "$triton_image" -c \
+            "import aiohttp, attr; print(f'aiohttp={aiohttp.__version__} attrs={attr.__version__}')"
           docker run --rm --env PYTHONPATH=/opt/qwen3-tts "$triton_image" \
             python3 -m engine.distribution.container_smoke --runtime triton
           docker push "$triton_image"

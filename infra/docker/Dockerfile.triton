@@ -60,7 +60,7 @@ print(f'grpcio {grpc.__version__}, pyyaml {yaml.__version__}, numpy {numpy.__ver
 # dependency. Install and probe that small dependency separately so changing it
 # never invalidates the multi-gigabyte TensorRT layer above.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install \
+    pip install --force-reinstall --no-deps \
     -i https://mirrors.bfsu.edu.cn/pypi/web/simple \
     --trusted-host mirrors.bfsu.edu.cn \
     attrs \
@@ -71,6 +71,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # making tag builds independent of PyPI/NVIDIA network availability.
 FROM ${TRITON_RUNTIME_BASE_IMAGE} AS triton-runtime
 
+ARG TRITON_RUNTIME_BASE_REFERENCE=""
 ARG ENGINE_VERSION=""
 ARG CLIENT_WHEEL_FILENAME=""
 ARG CLIENT_WHEEL_SHA256=""
@@ -87,9 +88,14 @@ ENV ENGINE_VERSION=${ENGINE_VERSION} \
     QWEN_LOG_BACKUP_COUNT=10 \
     QWEN_LOG_STDOUT=1
 LABEL org.opencontainers.image.version=${ENGINE_VERSION} \
+      io.qwen3tts.triton-runtime-base.reference=${TRITON_RUNTIME_BASE_REFERENCE} \
       io.qwen3tts.client-wheel.filename=${CLIENT_WHEEL_FILENAME} \
       io.qwen3tts.client-wheel.sha256=${CLIENT_WHEEL_SHA256} \
       io.qwen3tts.browser-sdk.version=${BROWSER_SDK_VERSION}
+
+# Fail at image construction rather than much later in the container smoke if
+# a release build ever selects a stale or incomplete dependency base.
+RUN python3 -c "import aiohttp, attr; print(f'aiohttp {aiohttp.__version__}, attrs {attr.__version__}')"
 
 RUN install -d /opt/qwen3tts/bin /var/log/qwen3tts
 

@@ -43,11 +43,14 @@ def test_triton_image_contains_sidecar_runtime_dependencies_and_protocol():
     assert len(dependency_runs) == 3
     assert "    attrs \\\n" not in dependency_runs[1]
     assert "    attrs \\\n" in dependency_runs[2]
+    assert "pip install --force-reinstall --no-deps" in dependency_runs[2]
     assert "    attrs \\\n" in dockerfile
     assert "aiohttp" in dockerfile
     assert "import aiohttp, attr" in dockerfile
     assert "ARG TRITON_RUNTIME_BASE_IMAGE=triton-deps" in dockerfile
     assert "FROM ${TRITON_RUNTIME_BASE_IMAGE} AS triton-runtime" in dockerfile
+    assert 'ARG TRITON_RUNTIME_BASE_REFERENCE=""' in dockerfile
+    assert "io.qwen3tts.triton-runtime-base.reference" in dockerfile
     assert '"tritonclient[grpc]>=2.54.0"' in dockerfile
     assert (
         "COPY client/src/qwen3tts_protocol/ /opt/qwen3-tts/qwen3tts_protocol/"
@@ -114,6 +117,13 @@ def test_release_uses_an_immutable_prebuilt_triton_dependency_base():
     assert "--target triton-deps" in publisher
     assert 'docker push "$runtime_base_image"' in publisher
     assert "docker manifest inspect" in publisher
+    for release in (github_release, gitlab):
+        assert "TRITON_RUNTIME_BASE_DIGEST" in release.upper()
+        assert "--no-cache" in release
+        assert "io.qwen3tts.triton-runtime-base.reference" in release
+        triton_build = release.split("--file infra/docker/Dockerfile.triton", 1)[1]
+        assert '--cache-from "$TRITON_BUILD_CACHE_IMAGE"' not in triton_build
+        assert '--cache-from "$triton_cache_image"' not in triton_build
 
 
 def test_web_release_stamps_only_the_publishable_workspace_without_registry_resolution():

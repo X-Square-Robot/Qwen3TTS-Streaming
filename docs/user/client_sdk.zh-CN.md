@@ -155,7 +155,9 @@ Actions、Release API、GHCR 推送或 GitLab 发布流量，runner 仍需能访
 两套发布流水线都会把 Docker inline cache 发布到可变的 `buildcache` 镜像标签（GitLab
 按运行时前缀隔离）；不可变 release tag 仍是部署产物。首次构建仍需拉取较大的 NGC
 基础镜像。Triton 的约束更严格：release job 必须拉取
-`TRITON_RUNTIME_BASE_TAG` 指定的不可变基座，不能现场安装 Python/TensorRT 依赖。
+`TRITON_RUNTIME_BASE_TAG` 指定的不可变基座并解析成 Registry digest，不能现场安装
+Python/TensorRT 依赖，也不会导入可变的 Triton 全量镜像缓存；流水线只重建较小的
+应用层，并在最终镜像内再次执行依赖探针。
 创建 release tag 之前，先通过 GitLab 手动 `BUILD_TRITON_RUNTIME_BASE=1` 流水线或
 GitHub 的 **Build Triton Runtime Base** workflow 构建一次基座。这样不稳定的
 PyPI/NVIDIA 下载不在 tag 发布关键路径中；基座缺失会立即失败。

@@ -174,9 +174,11 @@ mirrors do not proxy GitHub Actions, the Release API, GHCR pushes, or GitLab
 publication traffic, so the runner must still reach its forge. Both release
 pipelines publish inline Docker cache metadata under a mutable `buildcache`
 image tag (runtime-prefixed on GitLab); the immutable release tag is still the
-deployment artifact. Triton is stricter: release jobs must pull the immutable
-base named by `TRITON_RUNTIME_BASE_TAG` and never install its Python/TensorRT
-dependencies. Build that base once with GitLab's manual
+deployment artifact. Triton is stricter: release jobs pull the immutable base
+named by `TRITON_RUNTIME_BASE_TAG`, resolve it to a Registry digest, and never
+install its Python/TensorRT dependencies. They intentionally do not import the
+mutable Triton full-image cache: only the small application tail is rebuilt,
+followed by a dependency probe in the final image. Build that base once with GitLab's manual
 `BUILD_TRITON_RUNTIME_BASE=1` pipeline or GitHub's **Build Triton Runtime Base**
 workflow before creating a release tag. This keeps a flaky PyPI/NVIDIA download
 outside the tag critical path; a missing base fails fast.
