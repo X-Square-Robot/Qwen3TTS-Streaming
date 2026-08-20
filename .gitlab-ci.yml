@@ -68,6 +68,8 @@ build-triton-runtime-base:
     GIT_STRATEGY: clone
     GIT_DEPTH: "1"
   before_script:
+    - sed -i -e "s|http://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" -e "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" /etc/apk/repositories
+    - apk add --no-cache bash
     - |
       test -n "${X2ROBOT_REGISTRY_USER:-}" || {
         echo "X2ROBOT_REGISTRY_USER is required" >&2

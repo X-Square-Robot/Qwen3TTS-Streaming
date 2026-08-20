@@ -102,6 +102,10 @@ def test_release_uses_an_immutable_prebuilt_triton_dependency_base():
 
     assert 'BUILD_TRITON_RUNTIME_BASE == "1"' in gitlab
     assert "build-triton-runtime-base:" in gitlab
+    base_job = gitlab.split("\nbuild-triton-runtime-base:\n", 1)[1].split(
+        "\nbuild-web-release:\n", 1
+    )[0]
+    assert "apk add --no-cache bash" in base_job
     assert "Required Triton runtime base is missing" in gitlab
     assert "Required Triton runtime base is missing" in github_release
     assert "workflow_dispatch:" in github_base
