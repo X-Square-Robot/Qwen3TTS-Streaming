@@ -93,9 +93,11 @@ The Triton image consumes a separately published, immutable dependency base so
 release tags never download the multi-gigabyte TensorRT wheel from PyPI. Before
 the first release for a runtime matrix, run GitLab's manual pipeline with
 `BUILD_TRITON_RUNTIME_BASE=1` and/or GitHub's **Build Triton Runtime Base**
-workflow. Bump `TRITON_RUNTIME_BASE_TAG` whenever the `triton-deps` stage or its
-CUDA/TensorRT/PyTorch matrix changes, publish that base, and only then create the
-release tag. A missing base fails the release immediately by design.
+workflow. Maintainers can equivalently pass
+`-o ci.variable=BUILD_TRITON_RUNTIME_BASE=1` while pushing the base commit to
+GitLab. Bump `TRITON_RUNTIME_BASE_TAG` whenever the `triton-deps` stage or its
+CUDA/TensorRT/PyTorch matrix changes, publish that base, and only then create
+the release tag. A missing base fails the release immediately by design.
 
 ## Submitting a PR
 
