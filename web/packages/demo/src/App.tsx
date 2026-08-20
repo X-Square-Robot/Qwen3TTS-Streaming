@@ -146,6 +146,7 @@ function Experience({loaded, onCapabilities, onSettings}: {
   const recorderRef = useRef<ReferenceRecorder | null>(null);
   const recordingTimerRef = useRef<number | null>(null);
   const wavLimitWarned = useRef(false);
+  const playbackFailed = useRef(false);
   const startedAt = useRef(0);
   const streamGeneration = useRef(0);
   const [usage, setUsage] = useState<Record<string, number>>({});
@@ -195,6 +196,7 @@ function Experience({loaded, onCapabilities, onSettings}: {
     setEvents([]);
     setUsage({});
     wavLimitWarned.current = false;
+    playbackFailed.current = false;
     setBusy(true);
     setTiming({ttfb: 0, firstAudio: 0, firstAudible: 0, total: 0});
     setServerTiming({ttft: 0, total: 0, prefixTrimmed: 0, prefixApplied: false, vad: ""});
@@ -228,7 +230,6 @@ function Experience({loaded, onCapabilities, onSettings}: {
       collectorRef.current = collector;
       await playerRef.current?.close();
       const player = new BrowserAudioPlayer({
-        maxBufferMs: 5_000,
         onPlaybackProgress: (played, buffered) => {
           runRef.current?.acknowledgePlayback(played, buffered);
           const snapshot = playerRef.current?.snapshot();
@@ -301,7 +302,18 @@ function Experience({loaded, onCapabilities, onSettings}: {
           message: "WAV 收集达到 32 MiB 上限；实时播放不受影响",
         }]);
       }
-      playerRef.current?.enqueue(event.pcm, sampleRate, event.startSample, event.endSample);
+      if (!playbackFailed.current) {
+        try {
+          playerRef.current?.enqueue(event.pcm, sampleRate, event.startSample, event.endSample);
+        } catch (cause) {
+          playbackFailed.current = true;
+          const message = `浏览器实时播放缓冲失败：${String(cause)}；完整音频仍会保留为 WAV。`;
+          setOutputIssue(message);
+          setEvents((current) => [...current.slice(-199), {
+            type: "error", code: "audio_playback_buffer", message,
+          }]);
+        }
+      }
     } else if (event.type === "response_started") {
       setTiming((current) => ({...current, ttfb: performance.now() - startedAt.current}));
     } else if (event.type === "completed" || event.type === "cancelled" || event.type === "error") {
@@ -328,7 +340,18 @@ function Experience({loaded, onCapabilities, onSettings}: {
       }
       streamGeneration.current += 1;
       setTiming((current) => ({...current, total: performance.now() - startedAt.current}));
-      playerRef.current?.flush();
+      if (!playbackFailed.current) {
+        try {
+          playerRef.current?.flush();
+        } catch (cause) {
+          playbackFailed.current = true;
+          const message = `浏览器播放尾帧提交失败：${String(cause)}；完整音频仍会保留为 WAV。`;
+          setOutputIssue(message);
+          setEvents((current) => [...current.slice(-199), {
+            type: "error", code: "audio_playback_flush", message,
+          }]);
+        }
+      }
       const collector = collectorRef.current;
       if (collector && collector.snapshot().samples > 0) {
         const url = URL.createObjectURL(collector.toBlob());

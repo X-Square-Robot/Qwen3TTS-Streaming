@@ -222,6 +222,96 @@ def test_build_openai_realtime_adapter_forwards_model_and_auth():
     assert adapter.headers == {"Authorization": "Bearer secret"}
 
 
+def test_build_websocket_adapter_forwards_tls_policy():
+    adapter = _build_adapter(
+        TRANSPORT_OPENAI_REALTIME,
+        endpoint="wss://localhost:50052/v1/realtime",
+        model_name="qwen3-tts-realtime",
+        model_version="1",
+        timeout=30.0,
+        connect_timeout=5.0,
+        headers=None,
+        metadata=None,
+        tls_verify=False,
+    )
+
+    assert adapter._tls.verify is False
+
+
+def test_connect_forwards_one_tls_policy_to_detection_and_adapter(monkeypatch):
+    seen = {}
+
+    def detect(*args, **kwargs):
+        seen["detect_tls"] = kwargs["tls_verify"]
+        return type(
+            "Detected",
+            (),
+            {
+                "transport": TRANSPORT_OPENAI_REALTIME,
+                "resolved_endpoint": "wss://localhost:50052/v1/realtime",
+                "model_name": "qwen3-tts-realtime",
+                "model_version": "1",
+                "probe_report": [],
+            },
+        )()
+
+    def build(*args, **kwargs):
+        seen["adapter_tls"] = kwargs["tls_verify"]
+        return _FakeAdapter()
+
+    monkeypatch.setattr(client_module, "detect_transport", detect)
+    monkeypatch.setattr(client_module, "_build_adapter", build)
+
+    TTSClient.connect(
+        "wss://localhost:50052/v1/realtime",
+        tls_verify=False,
+    )
+
+    assert seen["detect_tls"] is seen["adapter_tls"]
+    assert seen["detect_tls"].verify is False
+
+
+def test_verify_protocol_replaces_legacy_verify_keyword(monkeypatch):
+    class _NoCapabilityProbeAdapter(_FakeAdapter):
+        def get_capabilities(self):
+            raise AssertionError("verify_protocol=False should skip capabilities")
+
+    monkeypatch.setattr(
+        client_module,
+        "detect_transport",
+        lambda *args, **kwargs: type(
+            "Detected",
+            (),
+            {
+                "transport": TRANSPORT_OPENAI_REALTIME,
+                "resolved_endpoint": "ws://localhost:50052/v1/realtime",
+                "model_name": "qwen3-tts-realtime",
+                "model_version": "1",
+                "probe_report": [],
+            },
+        )(),
+    )
+    adapter = _NoCapabilityProbeAdapter()
+    monkeypatch.setattr(
+        client_module, "_build_adapter", lambda *args, **kwargs: adapter
+    )
+
+    TTSClient.connect(
+        "ws://localhost:50052/v1/realtime",
+        transport=TRANSPORT_OPENAI_REALTIME,
+        verify_protocol=False,
+    )
+
+
+def test_verify_and_verify_protocol_cannot_disagree():
+    with pytest.raises(ValueError, match="must not disagree"):
+        TTSClient.connect(
+            "ws://localhost:50052/v1/realtime",
+            verify=False,
+            verify_protocol=True,
+        )
+
+
 def test_legacy_transport_warning_is_emitted_once(monkeypatch):
     client_module._WARNED_LEGACY_TRANSPORTS.clear()
     monkeypatch.delenv("QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING", raising=False)

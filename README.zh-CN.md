@@ -370,13 +370,18 @@ bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 然后打开 `http://localhost:50053/demo/`。服务挂在 `/infer/<instance>` 等反向代理前缀下
 时，门户、SDK、WebSocket 和静态资源链接仍会保留该前缀。
 
+HTTP/WS 是默认本地协议；挂载证书不会自动启用 HTTPS。需要直接调试自签名 WSS 时，
+Python SDK 可用 `tls_verify="/path/to/cert.local.pem"` 严格信任指定证书，或仅在临时
+联调中使用 `tls_verify=False`。浏览器与 Python 的证书信任相互独立。
+
 Kubernetes 只允许一个公开端口时，engine 容器设置
 `PORT=8000 HEALTH_PORT=0`，Service 只映射 `8000`；此时
 `/demo/`、`/sdk/`、`/health` 和 `/v1/realtime` 全部共用该端口。完整探针和 Service
 示例见[部署说明](docs/user/deployment.zh-CN.md#kubernetes-单端口部署)。
 
 没有 Ingress 的开发机也可像 FunASR Nano 一样设置 `TLS_CERT_FILE` 和
-`TLS_KEY_FILE`，由同一个公共端口直接提供 HTTPS/WSS；具体证书挂载方式见
+`TLS_KEY_FILE`，或为内置本地证书设置 `TLS_AUTO_ENABLE=true`，由同一个公共端口直接
+提供 HTTPS/WSS；具体证书挂载方式见
 [开发机直接启用 HTTPS/WSS](docs/user/deployment.zh-CN.md#开发机直接启用-httpswss)。
 
 内置“实验”页已通过同一个公共 Realtime 入口提供 **LLM PK** 和并发实验。详细

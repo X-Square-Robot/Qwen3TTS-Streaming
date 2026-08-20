@@ -23,6 +23,18 @@ python quickstart.py localhost:50051                  # legacy engine gRPC
 python quickstart.py http://localhost:8000            # legacy Triton HTTP
 ```
 
+Local services use HTTP/WS by default and need no certificate. If direct
+self-signed WSS was explicitly enabled:
+
+```bash
+# Strictly verify the selected certificate (recommended)
+python quickstart.py wss://localhost:50052/v1/realtime \
+  --tls-ca-file /path/to/cert.local.pem
+
+# Temporary local debugging only
+python quickstart.py wss://localhost:50052/v1/realtime --insecure
+```
+
 | Example | Shows |
 |---------|-------|
 | `quickstart.py` | `TTSClient.connect` + `synthesize_bytes`, save WAV |

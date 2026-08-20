@@ -25,6 +25,11 @@ https://tts.example.com
 | 服务能力 | `https://tts.example.com/v1/capabilities` |
 | Realtime WebSocket | `wss://tts.example.com/v1/realtime` |
 
+上表是生产环境可信 TLS 的示例。容器在本机默认提供明文 HTTP/WS：Demo 为
+`http://localhost:50052/demo/`，SDK 入口为
+`ws://localhost:50052/v1/realtime`。除非部署方显式启用 TLS，不要把本地地址改写成
+`https://` / `wss://`。
+
 先检查服务是否返回能力信息：
 
 ```bash
@@ -67,6 +72,19 @@ with TTSClient.connect(
 print(len(result.audio_bytes), result.audio_format)
 print(result.details.get("usage", {}))
 ```
+
+若部署方给的是自签名 HTTPS/WSS，可把其 CA/证书文件显式交给 SDK；该策略会同时用于
+HTTPS capabilities 探测、WSS 首次连接和断线重连：
+
+```python
+client = TTSClient.connect(
+    "wss://localhost:50052/v1/realtime",
+    tls_verify="/path/to/cert.local.pem",
+)
+```
+
+只做本地 TLS 联调时也可以使用 `tls_verify=False`。它会关闭证书和主机名校验，不应进入
+生产配置或提交到业务代码。普通本地联调直接使用默认 `ws://` 更简单。
 
 `result.audio_bytes` 是单声道 PCM，格式以 `result.audio_format` 为准。需要直接写成 WAV
 时可运行仓库中的完整示例 `client/examples/quickstart.py`，或交给业务已有的音频库处理。

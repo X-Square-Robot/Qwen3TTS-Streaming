@@ -17,6 +17,7 @@ import hashlib
 import json
 import re
 import socket
+import ssl
 import struct
 import threading
 import time
@@ -46,6 +47,67 @@ def test_send_socket_error_is_normalized_to_transport_error():
 
     with pytest.raises(RawWebSocketError, match="send failed"):
         ws_send_json(conn, {"type": "text", "text": "hello"})
+
+
+@pytest.mark.parametrize(
+    ("tls_verify", "expected"),
+    [
+        (
+            False,
+            {"cert_reqs": ssl.CERT_NONE, "check_hostname": False},
+        ),
+    ],
+)
+def test_ws_connect_supports_local_tls_without_verification(
+    monkeypatch, tls_verify, expected
+):
+    captured = {}
+    fake_socket = object()
+
+    def create_connection(url, **kwargs):
+        captured.update({"url": url, **kwargs})
+        return fake_socket
+
+    monkeypatch.setattr(
+        "qwen3tts._internal.raw_websocket.websocket.create_connection",
+        create_connection,
+    )
+
+    conn = ws_connect(
+        "wss://localhost:50052/v1/realtime",
+        timeout=2.0,
+        tls_verify=tls_verify,
+    )
+
+    assert conn.ws is fake_socket
+    assert captured["sslopt"] == expected
+
+
+def test_ws_connect_uses_explicit_ca_bundle(monkeypatch, tmp_path):
+    ca_file = tmp_path / "cert.local.pem"
+    ca_file.write_text("test certificate", encoding="utf-8")
+    captured = {}
+
+    def create_connection(url, **kwargs):
+        captured.update({"url": url, **kwargs})
+        return object()
+
+    monkeypatch.setattr(
+        "qwen3tts._internal.raw_websocket.websocket.create_connection",
+        create_connection,
+    )
+
+    ws_connect(
+        "wss://localhost:50052/v1/realtime",
+        timeout=2.0,
+        tls_verify=ca_file,
+    )
+
+    assert captured["sslopt"] == {
+        "cert_reqs": ssl.CERT_REQUIRED,
+        "check_hostname": True,
+        "ca_certs": str(ca_file.resolve()),
+    }
 
 
 def _server_frame(opcode: int, payload: bytes) -> bytes:

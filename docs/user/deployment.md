@@ -353,11 +353,66 @@ The same Service address now provides:
 - `http://<service>:8000/sdk/`
 - `http://<service>:8000/health`
 
-After a public Ingress terminates TLS, these become `https://.../demo/` and
-`wss://.../v1/realtime`; the backend still proxies to HTTP port `8000` and must
-preserve WebSocket upgrades. Do not create a second Service or port for Demo.
-When set together, `ENGINE_SERVER_WEBSOCKET_PORT` /
+#### Recommended: one HTTPS domain for Demo, WebSocket, and SDK
+
+Point the custom domain at an Ingress/Gateway and terminate TLS there with a
+trusted CA certificate. The container and Service remain plain HTTP/WS on
+`8000`; certificates do not need to enter the model container. This example
+uses ingress-nginx and cert-manager; replace the `ClusterIssuer` name with the
+one installed in the cluster:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: qwen3-tts
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [tts.example.com]
+      secretName: qwen3-tts-tls
+  rules:
+    - host: tts.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: qwen3-tts
+                port:
+                  number: 8000
+```
+
+The Ingress must preserve WebSocket upgrades; mainstream Kubernetes Ingress
+controllers handle upgrades on the same HTTP route. The long read/write
+timeouts keep persistent connections from being closed prematurely. One public
+`443` listener now serves:
+
+- Demo: `https://tts.example.com/demo/`
+- Python SDK: `TTSClient.connect("https://tts.example.com")`
+- Realtime: `wss://tts.example.com/v1/realtime`
+- SDK downloads: `https://tts.example.com/sdk/`
+
+A public-CA certificate is trusted by browsers and Python by default, so no
+`tls_verify=False`, certificate path, or extra environment variable is needed.
+Do not create a second Service or port for Demo. When set together,
+`ENGINE_SERVER_WEBSOCKET_PORT` /
 `ENGINE_SERVER_HEALTH_PORT` take precedence over `PORT` / `HEALTH_PORT`.
+
+When a development LAN does not need microphone capture or output-device
+selection, it does not need to duplicate this TLS setup. Public traffic can
+continue through Ingress as `https://` / `wss://`, while the LAN simultaneously
+uses `http://<ddns-host>:8000/demo/` and
+`ws://<ddns-host>:8000/v1/realtime` against the same Service or container. The
+player falls back automatically on HTTP and still plays through the system
+default speaker. Python can use
+`TTSClient.connect("http://<ddns-host>:8000")`. A service without a certificate
+cannot be addressed as `https://`.
 
 Platform probe checklist:
 
@@ -528,7 +583,9 @@ if logs must survive container replacement.
 The release image already contains the version-matched product Demo, Browser
 SDK, Python wheel index, and selected Markdown documentation. It is enabled by
 default on the same public endpoint as Realtime; no separate Demo API or Node
-process is used. CI/CD builds the Browser SDK npm tarball once and embeds the
+process is used. The shared endpoint is HTTP/WS by default; the presence of
+mounted local certificate files does not switch protocols automatically.
+CI/CD builds the Browser SDK npm tarball once and embeds the
 same bytes under `/demo/downloads/`; the SDK page generates an `npm install
 "https://...tgz"` command for the current instance, without requiring a source
 checkout. GitLab tag pipelines also publish that tarball to the project npm
@@ -549,7 +606,8 @@ private key read-only and configure both together:
 
 ```bash
 SAN_EXTRA_DNS=demo.example.test ./tools/generate_demo_local_cert.sh
-bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
+TLS_AUTO_ENABLE=true \
+  bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 ```
 
 For a CA-issued certificate, mount it explicitly:
@@ -563,11 +621,29 @@ bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 
 The same port then serves `https://<host>:50052/demo/`,
 `wss://<host>:50052/v1/realtime`, `https://<host>:50052/sdk/`, and
-`https://<host>:50052/health`. The entrypoint also auto-discovers
-`/app/tls/cert.local.pem` and `/app/tls/key.local.pem` for a development
-certificate already trusted by the test browser. The certificate must cover
-the actual hostname. A missing file, partial pair, or certificate/key mismatch
+`https://<host>:50052/health`. With `TLS_AUTO_ENABLE=true`, the entrypoint
+discovers `/app/tls/cert.local.pem` and `/app/tls/key.local.pem` for a
+development certificate after it has been explicitly trusted by the test
+browser. Auto-discovery is off by default, so merely mounting a certificate directory never changes
+`http://` / `ws://` into `https://` / `wss://`. The certificate must cover the
+actual hostname. A missing file, partial pair, or certificate/key mismatch
 fails before the GPU model is loaded.
+
+For Python SDK testing against that self-signed endpoint, explicitly trust the
+generated certificate:
+
+```python
+client = TTSClient.connect(
+    "wss://localhost:50052/v1/realtime",
+    tls_verify="workspace/tls/cert.local.pem",
+)
+```
+
+`tls_verify=False` is available for a temporary TLS-path check but must never
+be used in production. Accepting a certificate in a browser does not change
+Python's trust store, and the Browser SDK cannot disable browser certificate
+verification from JavaScript. When TLS itself is not under test, use the
+default local `http://` / `ws://` endpoint instead.
 
 Production Kubernetes normally leaves `TLS_CERT_FILE` / `TLS_KEY_FILE` unset
 and terminates trusted TLS at its Ingress or Gateway before proxying to the

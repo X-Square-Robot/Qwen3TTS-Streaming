@@ -75,6 +75,29 @@ class TestTritonHttpAdapter:
         assert capabilities.loaded_model_type == "custom_voice"
         assert seen_timeouts == [1.25]
 
+    def test_get_capabilities_supports_local_tls_debugging(self, monkeypatch):
+        seen = []
+
+        class FakeResponse:
+            status_code = 200
+            text = 'CAPABILITIES:{"loaded_model_type":"custom_voice"}'
+
+        def fake_post(url, **kwargs):
+            seen.append((url, kwargs))
+            return FakeResponse()
+
+        monkeypatch.setattr("qwen3tts._adapters.triton_http.requests.post", fake_post)
+        adapter = TritonHttpAdapter(
+            "https://localhost:8000",
+            model_name="tts_orchestrator_http",
+            timeout=5.0,
+            tls_verify=False,
+        )
+
+        adapter.get_capabilities()
+
+        assert seen[0][1]["verify"] is False
+
     def test_synthesize_bytes(self, monkeypatch):
         caps_json = json.dumps({"loaded_model_type": "custom_voice"}).encode()
         audio_data = b"\x00\x01\x02\x03"

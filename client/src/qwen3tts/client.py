@@ -18,6 +18,7 @@ from ._adapters.openai_realtime import OpenAIRealtimeAdapter
 from ._adapters.triton_grpc import TritonGrpcAdapter
 from ._adapters.triton_http import TritonHttpAdapter
 from ._internal.auth import apply_bearer_key
+from ._internal.tls import TLSConfig, TLSVerify
 from .audio import decode_audio_bytes_to_array
 from .constants import (
     DEFAULT_MODEL_VERSION,
@@ -67,7 +68,9 @@ class TTSClient:
         key: str | None = None,
         headers: dict[str, str] | None = None,
         metadata=None,
-        verify: bool = True,
+        verify: bool | None = None,
+        verify_protocol: bool | None = None,
+        tls_verify: TLSVerify = True,
     ):
         """Connect to a TTS endpoint.
 
@@ -83,6 +86,11 @@ class TTSClient:
         default to avoid synchronized gateway probes.
         """
 
+        if verify_protocol is None:
+            verify_protocol = True if verify is None else bool(verify)
+        elif verify is not None and bool(verify) != bool(verify_protocol):
+            raise ValueError("verify and verify_protocol must not disagree")
+        tls = TLSConfig.from_value(tls_verify)
         headers, metadata = apply_bearer_key(headers, metadata, key)
         detected = detect_transport(
             endpoint,
@@ -93,6 +101,7 @@ class TTSClient:
             connect_timeout=connect_timeout,
             headers=headers,
             metadata=metadata,
+            **tls.forwarding_kwargs(),
         )
         _warn_legacy_transport(detected.transport)
         adapter = _build_adapter(
@@ -117,15 +126,17 @@ class TTSClient:
             keepalive_jitter=keepalive_jitter,
             headers=headers,
             metadata=metadata,
+            tls_verify=tls,
         )
         client = cls(endpoint=endpoint, adapter=adapter, detected=detected)
         # Connect-time compatibility guard via the versioned capabilities
         # surface: protocol major compatibility + engine/SDK release diagnostics. Auto-detect
         # already exchanged capabilities (and validated), so only the explicit-
         # transport path needs an extra in-band fetch here to close that gap.
-        # ``verify=False`` skips it for a lazy connect; a mismatch raises
+        # ``verify_protocol=False`` skips it for a lazy connect; the historical
+        # ``verify`` keyword remains a compatibility alias. A mismatch raises
         # ProtocolVersionMismatchError; release skew only emits a warning.
-        if verify and transport != "auto":
+        if verify_protocol and transport != "auto":
             client.get_capabilities()
         elif transport == "auto" and detected.transport == TRANSPORT_ENGINE_WEBSOCKET:
             # Auto-detection used a short-lived probe socket.  Warm the actual
@@ -250,7 +261,9 @@ def _build_adapter(
     max_lifetime: float | None = None,
     keepalive_interval: float = 15.0,
     keepalive_jitter: float = 0.2,
+    tls_verify: TLSVerify | TLSConfig = True,
 ):
+    tls = TLSConfig.from_value(tls_verify)
     if transport == TRANSPORT_ENGINE_WEBSOCKET:
         return EngineWebSocketAdapter(
             endpoint,
@@ -270,6 +283,7 @@ def _build_adapter(
             max_lifetime=max_lifetime,
             keepalive_interval=keepalive_interval,
             keepalive_jitter=keepalive_jitter,
+            tls_verify=tls,
         )
     if transport == TRANSPORT_OPENAI_REALTIME:
         return OpenAIRealtimeAdapter(
@@ -287,6 +301,7 @@ def _build_adapter(
             max_idle_connections=max_idle_connections,
             max_pending_acquires=max_pending_acquires,
             acquire_timeout=acquire_timeout,
+            tls_verify=tls,
         )
     if transport == TRANSPORT_ENGINE_GRPC:
         return EngineGrpcAdapter(
@@ -308,6 +323,7 @@ def _build_adapter(
             model_version=model_version,
             timeout=timeout,
             headers=headers,
+            tls_verify=tls,
         )
     raise ValueError(f"unsupported transport: {transport!r}")
 

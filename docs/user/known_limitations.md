@@ -45,7 +45,9 @@ with error rate and audio completeness.
 
 ## Browser constraints
 
-- Microphone access, AudioWorklet, and output-device selection require a secure HTTPS context.
+- Microphone access, AudioWorklet, and output-device selection require a secure
+  HTTPS context. Plain HTTP automatically uses `AudioBufferSourceNode`; text
+  synthesis and playback through the system default speaker remain available.
 - Browsers usually require a user gesture before starting an `AudioContext`.
 - Device enumeration, switching, and labels differ between browsers.
 - Tab closure, system sleep, and mobile network changes can interrupt an active response; retry only

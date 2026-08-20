@@ -26,6 +26,8 @@ from websocket import (
     WebSocketTimeoutException,
 )
 
+from .tls import TLSConfig, TLSVerify
+
 
 class RawWebSocketError(RuntimeError):
     """Expected websocket transport error."""
@@ -46,7 +48,10 @@ def ws_connect(
     *,
     timeout: float,
     headers: Mapping[str, str] | None = None,
+    tls_verify: TLSVerify | TLSConfig = True,
 ) -> RawWebSocketConnection:
+    tls = TLSConfig.from_value(tls_verify)
+    tls_options = {} if tls.is_default else {"sslopt": tls.websocket_sslopt()}
     try:
         ws = websocket.create_connection(
             url,
@@ -56,6 +61,7 @@ def ws_connect(
             # session reader thread receives on the same socket.
             enable_multithread=True,
             skip_utf8_validation=True,
+            **tls_options,
         )
     except WebSocketTimeoutException as exc:
         raise socket.timeout(str(exc)) from exc

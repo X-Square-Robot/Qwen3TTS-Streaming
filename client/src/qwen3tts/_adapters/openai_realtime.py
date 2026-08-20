@@ -31,6 +31,7 @@ from .._internal.raw_websocket import (
     ws_recv_frame,
     ws_send_json,
 )
+from .._internal.tls import TLSConfig, TLSVerify
 from .._internal.utils import (
     advertised_protocols,
     build_bytes_result,
@@ -72,6 +73,7 @@ class OpenAIRealtimeAdapter:
         max_idle_connections: int = 0,
         max_pending_acquires: int = 256,
         acquire_timeout: float | None = 30.0,
+        tls_verify: TLSVerify | TLSConfig = True,
     ) -> None:
         self.model_name = str(model_name or DEFAULT_OPENAI_REALTIME_MODEL)
         self.endpoint = _with_model_query(endpoint, self.model_name)
@@ -82,6 +84,7 @@ class OpenAIRealtimeAdapter:
             else max(0.1, float(connect_timeout))
         )
         self.headers = dict(headers or {})
+        self._tls = TLSConfig.from_value(tls_verify)
         self.reconnect_attempts = max(0, int(reconnect_attempts))
         self.active_stream_resume = bool(active_stream_resume)
         self.stream_resume_attempts = max(0, int(stream_resume_attempts))
@@ -122,6 +125,7 @@ class OpenAIRealtimeAdapter:
             _capabilities_url(self.endpoint),
             timeout=request_timeout,
             headers=self.headers,
+            **self._tls.requests_kwargs(),
         )
         if response.status_code != 200:
             raise ProtocolError(
@@ -137,6 +141,14 @@ class OpenAIRealtimeAdapter:
             )
         check_engine_version(payload.get("engine_version"))
         return capabilities_from_mapping(payload)
+
+    def _connect_websocket(self, *, timeout: float) -> RawWebSocketConnection:
+        return ws_connect(
+            self.endpoint,
+            timeout=timeout,
+            headers=self.headers,
+            **self._tls.forwarding_kwargs(),
+        )
 
     def synthesize_bytes(self, text: str, *, request) -> BytesResult:
         if not str(text or ""):
@@ -196,11 +208,7 @@ class OpenAIRealtimeAdapter:
                 self._physical_connections += 1
             conn = None
             try:
-                conn = ws_connect(
-                    self.endpoint,
-                    timeout=self.connect_timeout,
-                    headers=self.headers,
-                )
+                conn = self._connect_websocket(timeout=self.connect_timeout)
                 _receive_event(
                     conn,
                     expected_type="session.created",
@@ -249,11 +257,7 @@ class OpenAIRealtimeAdapter:
             for attempt in range(self.reconnect_attempts + 1):
                 try:
                     if conn is None:
-                        conn = ws_connect(
-                            self.endpoint,
-                            timeout=self.connect_timeout,
-                            headers=self.headers,
-                        )
+                        conn = self._connect_websocket(timeout=self.connect_timeout)
                     session = OpenAIRealtimeStreamSession(
                         adapter=self,
                         start_request=start_request,
@@ -943,10 +947,8 @@ class OpenAIRealtimeStreamSession(BaseStreamSession):
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise TimeoutError("Realtime resume deadline expired")
-                    replacement = ws_connect(
-                        self._adapter.endpoint,
+                    replacement = self._adapter._connect_websocket(
                         timeout=min(self._adapter.connect_timeout, remaining),
-                        headers=self._adapter.headers,
                     )
                     _receive_event(
                         replacement,

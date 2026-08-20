@@ -48,7 +48,8 @@ capabilities：协议族或协议大版本不兼容时抛出
 `engine_version` 与 SDK 发布版本不同时只产生 `RuntimeWarning`，不会阻止连接，
 具体可选功能以 capabilities 为准。需要刻意绕过协议检查时，设
 `QWEN3TTS_SKIP_PROTOCOL_CHECK=1` 可将错误降级为警告；或给 `connect()` 传
-`verify=False` 跳过连接时的 capabilities 校验。
+`verify_protocol=False` 跳过连接时的 capabilities 校验。旧参数 `verify=False` 仍作为
+兼容别名保留，但它从来不控制 TLS 证书校验。
 
 ### 通道一 —— GitHub/GitLab Release 与 GitLab Package Registry
 
@@ -188,6 +189,36 @@ websocket 传输层迁移到 `websocket-client` 后的两点说明：
   `no_proxy` 环境变量（与 `requests` 行为一致）。此前 websocket 路径总是直连。
   如果部署机配置了企业代理，请确认 `no_proxy` 覆盖引擎主机，否则连接会被
   代理隧道转发（且很可能被代理拒绝）。
+
+### TLS 与本地调试
+
+容器默认在同一个端口提供 HTTP/WS，普通本地调试直接连接
+`ws://localhost:50052/v1/realtime`，不需要证书。只有部署端显式启用 TLS 或前面存在
+TLS Ingress/Gateway 时才使用 HTTPS/WSS。
+
+`connect(tls_verify=...)` 采用与 Requests 一致的三种策略，并统一应用到 HTTPS
+capabilities 探测、WSS 首连、连接池预热和断线重连：
+
+```python
+# 默认：系统信任链，适用于公有 CA
+client = TTSClient.connect("wss://tts.example/v1/realtime")
+
+# 自签名或私有 CA：仍然严格校验证书与主机名
+client = TTSClient.connect(
+    "wss://localhost:50052/v1/realtime",
+    tls_verify="/path/to/cert.local.pem",
+)
+
+# 仅限本地 TLS 联调：关闭证书和主机名校验
+client = TTSClient.connect(
+    "wss://localhost:50052/v1/realtime",
+    tls_verify=False,
+)
+```
+
+`tls_verify=False` 不能进入生产配置。浏览器与 Python 使用不同的信任库；在浏览器里手动
+放行自签名证书不会让 Python 自动信任它。浏览器 SDK 也不能从 JavaScript 关闭 TLS
+校验，需要由浏览器/操作系统信任证书，或改用本地 HTTP/WS。
 
 ## 快速开始
 

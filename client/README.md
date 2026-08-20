@@ -224,6 +224,31 @@ caps = client.get_capabilities(timeout=5.0)
 idle_connections = client.prewarm(connections=4, timeout=5.0)
 ```
 
+Local containers use `http://` / `ws://` by default, so ordinary local
+development needs no TLS option. When direct self-signed HTTPS/WSS is enabled,
+pass the certificate path to retain strict verification, or disable checking
+only for temporary local debugging:
+
+```python
+# Recommended: trust this self-signed certificate or private CA
+client = TTSClient.connect(
+    "wss://localhost:50052/v1/realtime",
+    tls_verify="/path/to/cert.local.pem",
+)
+
+# Local debugging only; never use in production
+client = TTSClient.connect(
+    "wss://localhost:50052/v1/realtime",
+    tls_verify=False,
+)
+```
+
+The default `tls_verify=True` uses the system trust store. One policy covers
+HTTPS discovery, WSS dials, prewarming, and reconnects.
+`verify_protocol=False` only skips protocol compatibility checking; it is
+unrelated to TLS. The old `verify` keyword remains an alias for that protocol
+option.
+
 `engine-websocket` retains completed physical connections and reuses them for
 later logical sessions; concurrent sessions use separate pooled connections.
 The `SessionStartRequest.session_id` is correlation data only. The gateway
@@ -273,6 +298,8 @@ python examples/quickstart.py                  # one-shot     -> quickstart.wav
 python examples/streaming.py                   # incremental  -> streaming.wav
 python examples/realtime.py                    # wall-clock aligned frames
 python examples/quickstart.py localhost:50051  # point at engine gRPC
+python examples/quickstart.py wss://localhost:50052/v1/realtime \
+  --tls-ca-file /path/to/cert.local.pem
 ```
 
 ## API reference

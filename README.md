@@ -389,6 +389,12 @@ Open `http://localhost:50052/demo/`. For the Triton deployment, use
 mount the service below `/infer/<instance>`; all portal, SDK, WebSocket and asset
 links remain relative to that prefix.
 
+HTTP/WS is the default local protocol; mounting certificate files does not
+enable HTTPS automatically. For direct self-signed WSS testing, the Python SDK
+can strictly trust one certificate with
+`tls_verify="/path/to/cert.local.pem"`, or use `tls_verify=False` only during
+temporary local debugging. Browser and Python trust stores are independent.
+
 When Kubernetes permits only one public port, set
 `PORT=8000 HEALTH_PORT=0` on the engine container and expose
 only `8000` in the Service. `/demo/`, `/sdk/`, `/health`, and `/v1/realtime` then
@@ -396,8 +402,9 @@ share that port. See the [deployment guide](docs/user/deployment.md#single-port-
 for complete probe and Service examples.
 
 A development host without an Ingress can also set `TLS_CERT_FILE` and
-`TLS_KEY_FILE`, as in FunASR Nano, to serve HTTPS/WSS directly from that same
-public port. See [direct HTTPS/WSS](docs/user/deployment.md#direct-httpswss-on-a-development-host)
+`TLS_KEY_FILE`, or set `TLS_AUTO_ENABLE=true` for the bundled local certificate,
+as in FunASR Nano, to serve HTTPS/WSS directly from that same public port. See
+[direct HTTPS/WSS](docs/user/deployment.md#direct-httpswss-on-a-development-host)
 for the certificate mount contract.
 
 The built-in **Lab** tab runs LLM PK and concurrency experiments through the

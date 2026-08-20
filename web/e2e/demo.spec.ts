@@ -67,6 +67,42 @@ test("synthesizes mock PCM through the browser playback contract and exports WAV
   await expect(page.getByText("12.0 ms · energy")).toBeVisible();
 });
 
+test("keeps a guarded-delivery tail longer than five seconds in automatic playback", async ({page}) => {
+  await installFakeAudio(page);
+  await page.routeWebSocket(/\/infer\/instance\/v1\/realtime$/, (socket) => {
+    socket.send(JSON.stringify({type: "session.created", session: {id: "sess_long_tail"}}));
+    socket.onMessage((message) => {
+      const event = JSON.parse(String(message)) as {type: string};
+      if (event.type === "session.update") {
+        socket.send(JSON.stringify({type: "session.updated", session: {id: "sess_long_tail"}}));
+      }
+      if (event.type === "response.create") {
+        socket.send(JSON.stringify({type: "response.created", response: {id: "resp_long_tail"}}));
+        const samples = 24_000 * 6;
+        socket.send(JSON.stringify({
+          type: "response.output_audio.delta",
+          response_id: "resp_long_tail",
+          delta: Buffer.alloc(samples * 2).toString("base64"),
+          qwen_delivery_seq: 1,
+          qwen_output_sample_start: 0,
+          qwen_output_sample_end: samples,
+        }));
+        socket.send(JSON.stringify({
+          type: "response.done",
+          qwen_delivery_seq: 2,
+          response: {id: "resp_long_tail", status: "completed"},
+        }));
+      }
+    });
+  });
+  await page.goto("/infer/instance/demo/");
+  await page.getByLabel("合成文本").fill("不说话，只吃菜。一说话就紧张。一个好人，真不错。不错啊，真不错。");
+  await page.getByRole("button", {name: "合成并播放"}).click();
+  await expect(page.getByRole("link", {name: "下载 WAV"})).toBeVisible();
+  await expect(page.getByText("6.00 s")).toBeVisible();
+  await expect(page.getByText(/播放缓冲失败|播放尾帧提交失败/)).toHaveCount(0);
+});
+
 test("explains when output VAD filters the complete result", async ({page}) => {
   await installFakeAudio(page);
   await page.routeWebSocket(/\/infer\/instance\/v1\/realtime$/, (socket) => {

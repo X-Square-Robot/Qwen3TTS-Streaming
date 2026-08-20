@@ -234,6 +234,62 @@ def test_https_capabilities_resolves_secure_websocket(monkeypatch):
     assert detected.resolved_endpoint == "wss://example.test/tts/v1/ws"
 
 
+@pytest.mark.parametrize("tls_verify", [False, pytest.param("ca", id="ca-file")])
+def test_https_probe_uses_requested_tls_policy(monkeypatch, tmp_path, tls_verify):
+    if tls_verify == "ca":
+        ca_file = tmp_path / "cert.local.pem"
+        ca_file.write_text("test certificate", encoding="utf-8")
+        tls_verify = ca_file
+        expected_verify = str(ca_file.resolve())
+    else:
+        expected_verify = False
+    calls = []
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"loaded_model_type": "custom_voice", "variant": "custom-1.7b"}
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        return _Resp()
+
+    monkeypatch.setattr("qwen3tts.detect.requests.get", get)
+
+    detected = detect_transport(
+        "https://localhost:50052",
+        transport="auto",
+        model_name=None,
+        timeout=2.0,
+        tls_verify=tls_verify,
+    )
+
+    assert detected.resolved_endpoint == "wss://localhost:50052/v1/ws"
+    assert calls[0][1]["verify"] == expected_verify
+
+
+def test_wss_probe_uses_requested_tls_policy(monkeypatch):
+    seen = []
+
+    def fake_probe(url, *, timeout, connect_timeout, headers, tls_verify):
+        seen.append((url, tls_verify))
+
+    monkeypatch.setattr("qwen3tts.detect._probe_openai_realtime", fake_probe)
+
+    detected = detect_transport(
+        "wss://localhost:50052/v1/realtime",
+        transport="auto",
+        model_name=None,
+        timeout=2.0,
+        tls_verify=False,
+    )
+
+    assert detected.transport == TRANSPORT_OPENAI_REALTIME
+    assert seen[0][0] == "wss://localhost:50052/v1/realtime"
+    assert seen[0][1].verify is False
+
+
 def test_host_port_prefers_engine_grpc(monkeypatch):
     calls = []
 
@@ -362,6 +418,7 @@ def test_bare_http_probe_forwards_headers(monkeypatch):
         report,
         model_name,
         model_version,
+        tls,
     ):
         seen.append((base_url, headers))
         return type(

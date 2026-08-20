@@ -20,7 +20,7 @@ const client = new RealtimeTTSClient({
   capabilitiesUrl: new URL("../v1/capabilities", location.href),
   websocketUrl: new URL("../v1/realtime", location.href),
 });
-const player = new BrowserAudioPlayer();
+const player = new BrowserAudioPlayer(); // one-hour runaway guard by default
 await player.start();
 client.onEvent((event) => {
   if (event.type === "audio") {
@@ -35,14 +35,24 @@ const run = await client.synthesize("你好，欢迎使用 Qwen3-TTS。", {
   vad: {enabled: false, strategy: VadStrategy.Disabled},
 });
 await run.done;
+player.flush(); // submit the resampler's retained tail frame
 ```
 
-The player uses an AudioWorklet, continuous explicit resampling, a bounded
-queue, and playback sample cursors. Feed its progress callback to
+The player prefers AudioWorklet and falls back to standards-based scheduled
+`AudioBufferSourceNode` playback when AudioWorklet is unavailable, including
+on a plain HTTP page. Both backends use continuous explicit resampling, a
+bounded queue, and playback sample cursors. Feed its progress callback to
 `run.acknowledgePlayback()` when guarded delivery is enabled. `WavCollector`
 provides independent bounded WAV capture; reaching its limit does not stop live
-playback.
+playback. The default one-hour runaway guard accommodates validated segment
+tails that can be released together. It does not preallocate that capacity;
+consumed chunks are released continuously. Memory-constrained applications can
+set a smaller `maxBufferMs` explicitly.
 
-The SDK requires a modern browser with WebSocket, Web Audio, AudioWorklet,
-BigInt, and ES2022 module support. See the same-release `/demo/#/docs/` portal
-for the protocol, deployment, and limitations documentation.
+The SDK requires a modern browser with WebSocket, Web Audio, BigInt, and ES2022
+module support. Text synthesis, `ws://` streaming, and playback through the
+system default speaker work on plain HTTP without a certificate. Microphone
+capture and output-device selection remain secure-context features and require
+HTTPS. An HTTPS page must use same-origin `wss://`, because browsers reject
+mixed-content `ws://`. See the same-release `/demo/#/docs/` portal for the
+protocol, deployment, and limitations documentation.

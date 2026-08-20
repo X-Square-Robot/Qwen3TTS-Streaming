@@ -1,9 +1,13 @@
 import {PlaybackCursorQueue} from "./playback-cursor.js";
-import {PCM_PLAYER_WORKLET_SOURCE} from "./pcm-player-worklet.js";
+import {
+  DEFAULT_MAX_BUFFER_MS,
+  PCM_PLAYER_WORKLET_SOURCE,
+} from "./pcm-player-worklet.js";
 import {ContinuousResampler, pcm16ToFloat32} from "./resampler.js";
 import {ScheduledBufferPlayer} from "./scheduled-buffer-player.js";
 
 export type AudioPlaybackBackend = "audio-worklet" | "scheduled-buffer";
+export {DEFAULT_MAX_BUFFER_MS};
 
 export interface BrowserAudioPlayerOptions {
   maxBufferMs?: number;
@@ -41,9 +45,15 @@ export class BrowserAudioPlayer {
   private readonly cursors = new PlaybackCursorQueue();
   private underruns = 0;
   private paused = false;
+  private readonly maxBufferMs: number;
   private readonly options: BrowserAudioPlayerOptions;
 
   constructor(options: BrowserAudioPlayerOptions = {}) {
+    const maxBufferMs = options.maxBufferMs ?? DEFAULT_MAX_BUFFER_MS;
+    if (!Number.isFinite(maxBufferMs) || maxBufferMs <= 0) {
+      throw new RangeError("maxBufferMs must be a positive finite number");
+    }
+    this.maxBufferMs = maxBufferMs;
     this.options = options;
   }
 
@@ -129,7 +139,7 @@ export class BrowserAudioPlayer {
   }
 
   flush(): void {
-    if (!this.node || !this.resampler) return;
+    if ((!this.node && !this.scheduledPlayer) || !this.resampler) return;
     const output = this.resampler.flush();
     if (output.length === 0) return;
     if (this.cursors.queuedOutputFrames() + output.length > this.maximumQueuedFrames()) {
@@ -249,6 +259,7 @@ export class BrowserAudioPlayer {
     }
     const node = new AudioWorkletNode(context, "qwen3tts-pcm-player", {
       outputChannelCount: [1],
+      processorOptions: {maxQueuedFrames: this.maximumQueuedFrames(context.sampleRate)},
     });
     node.connect(gain);
     node.port.onmessage = (message) => this.handleWorkletMessage(message);
@@ -280,10 +291,10 @@ export class BrowserAudioPlayer {
     this.options.onUnderrun?.();
   }
 
-  private maximumQueuedFrames(): number {
-    if (!this.context) return 0;
+  private maximumQueuedFrames(sampleRate = this.context?.sampleRate ?? 0): number {
+    if (sampleRate <= 0) return 0;
     return Math.floor(
-      this.context.sampleRate * (this.options.maxBufferMs ?? 5_000) / 1_000,
+      sampleRate * this.maxBufferMs / 1_000,
     );
   }
 }

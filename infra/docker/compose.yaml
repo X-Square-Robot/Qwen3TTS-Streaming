@@ -42,6 +42,7 @@ services:
       ENGINE_HEALTH_PROBE_MODE: ${ENGINE_HEALTH_PROBE_MODE:-}
       TLS_CERT_FILE: ${TLS_CERT_FILE:-}
       TLS_KEY_FILE: ${TLS_KEY_FILE:-}
+      TLS_AUTO_ENABLE: ${TLS_AUTO_ENABLE:-false}
       TLS_DIR: /app/tls
       DEMO_ENABLED: ${DEMO_ENABLED:-true}
       DEMO_LAB_URL: ${DEMO_LAB_URL:-}

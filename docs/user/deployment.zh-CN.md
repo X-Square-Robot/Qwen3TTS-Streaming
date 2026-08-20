@@ -343,11 +343,58 @@ spec:
 - `http://<service>:8000/sdk/`
 - `http://<service>:8000/health`
 
-公网 Ingress 在边缘终止 TLS 后，上述地址分别变为 `https://.../demo/` 和
-`wss://.../v1/realtime`；后端仍转发到 HTTP `8000`，并必须保留 WebSocket upgrade。
-不要再为 Demo 建立第二个 Service 或端口。若同时设置
+#### 推荐：自定义域名、Demo、WebSocket 与 SDK 共用 HTTPS
+
+把自定义域名解析到 Ingress/Gateway，并由受信 CA 证书在边缘终止 TLS。容器和 Service
+继续只提供 HTTP/WS `8000`，无需把证书放进模型容器。下面以 ingress-nginx 和
+cert-manager 为例；`ClusterIssuer` 名称需替换为集群实际配置：
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: qwen3-tts
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [tts.example.com]
+      secretName: qwen3-tts-tls
+  rules:
+    - host: tts.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: qwen3-tts
+                port:
+                  number: 8000
+```
+
+Ingress 必须支持 WebSocket upgrade；主流 Kubernetes Ingress Controller 会为同一条 HTTP
+路由处理 upgrade，上面的长读写超时用于避免长连接被过早关闭。此时只需要一个公网
+`443` 入口：
+
+- Demo：`https://tts.example.com/demo/`
+- Python SDK：`TTSClient.connect("https://tts.example.com")`
+- Realtime：`wss://tts.example.com/v1/realtime`
+- SDK 下载：`https://tts.example.com/sdk/`
+
+公有 CA 证书会被浏览器和 Python 默认信任，因此不需要 `tls_verify=False`、证书路径或
+额外环境变量。不要再为 Demo 建立第二个 Service 或端口。若同时设置
 `ENGINE_SERVER_WEBSOCKET_PORT` / `ENGINE_SERVER_HEALTH_PORT`，这些完整变量优先于
 `PORT` / `HEALTH_PORT`。
+
+开发机内网不需要麦克风或输出设备选择时，无需复制这套 TLS：公网仍经 Ingress 使用
+`https://` / `wss://`，内网可同时直连同一个 Service 或容器的
+`http://<ddns-host>:8000/demo/` 与 `ws://<ddns-host>:8000/v1/realtime`。播放器会在
+HTTP 页面自动降级，不影响系统默认扬声器播放；Python SDK 可直接连接
+`TTSClient.connect("http://<ddns-host>:8000")`。无证书服务不能写成 `https://`。
 
 平台探针检查清单：
 
@@ -512,6 +559,7 @@ tar -C "${QWEN_LOG_DIR:-/var/log/qwen3tts}" \
 
 正式镜像已经包含同版本的产品 Demo、Browser SDK、Python wheel 索引和精选 Markdown
 文档，并默认启用在 Realtime 的同一个公共入口，不需要独立 Demo API 或 Node 进程。
+这个入口默认是 HTTP/WS；即使挂载目录中已有本地证书，也不会自动切换协议。
 CI/CD 只构建一次 Browser SDK npm tarball，并将同一份产物内置到
 `/demo/downloads/`；SDK 页面会生成指向当前实例的 `npm install "https://...tgz"`
 命令，调用方不需要拉取源码仓库。GitLab tag 流水线还会把同一 tarball 发布到项目 npm
@@ -531,7 +579,8 @@ TLS。证书与私钥只读挂载到容器，必须同时配置：
 
 ```bash
 SAN_EXTRA_DNS=demo.example.test ./tools/generate_demo_local_cert.sh
-bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
+TLS_AUTO_ENABLE=true \
+  bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 ```
 
 使用 CA 签发的证书时，显式挂载证书目录：
@@ -545,10 +594,24 @@ bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 
 此时同一个端口提供 `https://<host>:50052/demo/`、
 `wss://<host>:50052/v1/realtime`、`https://<host>:50052/sdk/` 和
-`https://<host>:50052/health`。入口脚本也会自动发现
-`/app/tls/cert.local.pem` 与 `/app/tls/key.local.pem`，便于使用已受测试浏览器信任的
-开发证书。证书必须覆盖实际访问域名；缺文件、只配置一项或证书与私钥不匹配时，服务
-会在加载 GPU 模型前拒绝启动。
+`https://<host>:50052/health`。设置 `TLS_AUTO_ENABLE=true` 后，入口脚本才会发现
+`/app/tls/cert.local.pem` 与 `/app/tls/key.local.pem`，便于使用已经由测试浏览器显式
+信任的开发证书。自动发现默认关闭，因此仅仅挂载证书目录不会把 `http://` / `ws://` 暗中
+切换成 `https://` / `wss://`。证书必须覆盖实际访问域名；缺文件、只配置一项或证书
+与私钥不匹配时，服务会在加载 GPU 模型前拒绝启动。
+
+Python SDK 调试同一个自签名入口时，优先显式信任生成的证书：
+
+```python
+client = TTSClient.connect(
+    "wss://localhost:50052/v1/realtime",
+    tls_verify="workspace/tls/cert.local.pem",
+)
+```
+
+临时验证 TLS 链路时可设 `tls_verify=False`，但不能用于生产。浏览器手动放行证书不会改变
+Python 的信任库；Browser SDK 也不能从 JavaScript 关闭浏览器的证书校验。若测试目标
+并非 TLS，本地应直接使用默认的 `http://` / `ws://`。
 
 生产 Kubernetes 通常不设置 `TLS_CERT_FILE` / `TLS_KEY_FILE`，由 Ingress 或 Gateway
 终止可信 TLS，再转发到 Pod 的 HTTP 端口。两种模式都只使用一个公共服务端口。

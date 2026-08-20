@@ -122,6 +122,9 @@ client = TTSClient.connect(
 ```
 
 - `key` 作为 Bearer Token 交给部署网关；不要写进前端静态文件。
+- 本地默认使用 `ws://`。自签名 WSS 可设置
+  `tls_verify="/path/to/cert.local.pem"`；临时联调可用 `tls_verify=False`，禁止用于生产。
+- `verify_protocol=False` 仅关闭协议兼容检查，不会改变 TLS 校验。
 - 为进程复用一个 client，不要为每句话重新建立连接。
 - 为连接、获取连接和活动请求分别设置符合业务 SLA 的超时。
 - 失败时记录 `response_id`、终态错误码和服务端 timing，便于定位。

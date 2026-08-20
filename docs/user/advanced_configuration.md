@@ -124,6 +124,10 @@ client = TTSClient.connect(
 ```
 
 - `key` is passed to the deployment gateway as a Bearer token; never embed it in static frontend code.
+- Local endpoints use `ws://` by default. For self-signed WSS, set
+  `tls_verify="/path/to/cert.local.pem"`; `tls_verify=False` is for temporary
+  local debugging only and must not be shipped.
+- `verify_protocol=False` disables only protocol compatibility checking, not TLS verification.
 - Reuse one client per process instead of reconnecting for every utterance.
 - Set connection, acquisition, and active-request budgets to match your SLA.
 - Log the response ID, terminal error code, and server timing on failures.

@@ -5,6 +5,8 @@ See the repo README for how to start one.
 
     pip install "qwen3-tts-client @ <matching-github-or-gitlab-release-wheel-url>"
     python quickstart.py [endpoint]
+    python quickstart.py wss://localhost:50052/v1/realtime --tls-ca-file cert.local.pem
+    python quickstart.py wss://localhost:50052/v1/realtime --insecure  # local only
 
 Use the tag in the engine's ``capabilities.engine_version``; the deployed
 service also serves the matching wheel at its public GET /sdk/ endpoint.
@@ -16,21 +18,23 @@ localhost:50051 (legacy engine gRPC), http://localhost:8000 (legacy Triton HTTP)
 
 from __future__ import annotations
 
+import argparse
 import struct
-import sys
 import wave
 
 from qwen3tts import TTSClient, SynthesisConfig
 
-ENDPOINT = sys.argv[1] if len(sys.argv) > 1 else "ws://localhost:50052/v1/realtime"
+DEFAULT_ENDPOINT = "ws://localhost:50052/v1/realtime"
 TEXT = "你好，欢迎使用 Qwen3-TTS。"
 OUT = "quickstart.wav"
 
 
 def main() -> None:
+    args = _parse_args()
+    tls_verify = False if args.insecure else (args.tls_ca_file or True)
     # transport defaults to "auto": the SDK probes the endpoint and picks the
     # Realtime adapter first, with legacy transports retained as fallbacks.
-    client = TTSClient.connect(ENDPOINT)
+    client = TTSClient.connect(args.endpoint, tls_verify=tls_verify)
     result = client.synthesize_bytes(
         TEXT,
         request=SynthesisConfig(task_type="custom_voice", speaker="serena"),
@@ -45,6 +49,22 @@ def main() -> None:
 
     _save_wav(OUT, result.audio_bytes, fmt.encoding, fmt.sample_rate)
     print(f"saved {OUT}")
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("endpoint", nargs="?", default=DEFAULT_ENDPOINT)
+    tls = parser.add_mutually_exclusive_group()
+    tls.add_argument(
+        "--tls-ca-file",
+        help="CA certificate bundle for HTTPS/WSS verification",
+    )
+    tls.add_argument(
+        "--insecure",
+        action="store_true",
+        help="disable HTTPS/WSS certificate verification (local debugging only)",
+    )
+    return parser.parse_args()
 
 
 def _save_wav(path: str, pcm: bytes, encoding: str, sample_rate: int) -> None:

@@ -50,8 +50,10 @@ incompatible. Protocol revisions within one major are compatible. A differing
 `engine_version` only emits `RuntimeWarning` and does not reject the connection;
 optional behavior is selected from capabilities. Set
 `QWEN3TTS_SKIP_PROTOCOL_CHECK=1` to downgrade protocol incompatibility to a
-warning for deliberate experiments, or pass `verify=False` to `connect()` to
-skip the connect-time capabilities check entirely.
+warning for deliberate experiments, or pass `verify_protocol=False` to
+`connect()` to skip the connect-time capabilities check entirely. The old
+`verify=False` spelling remains a compatibility alias; it has never controlled
+TLS certificate verification.
 
 ### Channel 1 — GitHub/GitLab Release and GitLab Package Registry
 
@@ -212,6 +214,39 @@ Notes on the websocket transport (since the migration to `websocket-client`):
   Previously the websocket path always connected directly. If your deployment
   sets a corporate proxy, make sure `no_proxy` covers the engine host, or the
   connection will be tunneled through (and possibly rejected by) the proxy.
+
+### TLS and local debugging
+
+The container serves HTTP/WS on the shared port by default. For ordinary local
+development, connect directly to `ws://localhost:50052/v1/realtime`; no
+certificate is involved. Use HTTPS/WSS only when TLS has explicitly been
+enabled on the service or terminated by an Ingress/Gateway.
+
+`connect(tls_verify=...)` follows the Requests convention and applies one
+policy to HTTPS capability discovery, initial WSS dials, pool prewarming, and
+reconnects:
+
+```python
+# Default: system trust store, suitable for a public CA
+client = TTSClient.connect("wss://tts.example/v1/realtime")
+
+# Self-signed certificate or private CA: retain certificate and hostname checks
+client = TTSClient.connect(
+    "wss://localhost:50052/v1/realtime",
+    tls_verify="/path/to/cert.local.pem",
+)
+
+# Local TLS debugging only: disable certificate and hostname verification
+client = TTSClient.connect(
+    "wss://localhost:50052/v1/realtime",
+    tls_verify=False,
+)
+```
+
+Never ship `tls_verify=False`. Browsers and Python use separate trust stores;
+accepting a self-signed certificate in a browser does not make Python trust it.
+Browser JavaScript also cannot disable TLS verification, so trust the
+certificate in the browser/OS or use local HTTP/WS.
 
 ## Quick Start
 

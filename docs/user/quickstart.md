@@ -25,6 +25,11 @@ The portal and APIs share that origin:
 | Capabilities | `https://tts.example.com/v1/capabilities` |
 | Realtime WebSocket | `wss://tts.example.com/v1/realtime` |
 
+The table shows a production deployment with trusted TLS. A local container
+serves plain HTTP/WS by default: `http://localhost:50052/demo/` for the Demo and
+`ws://localhost:50052/v1/realtime` for the SDK. Do not change a local URL to
+`https://` / `wss://` unless the operator explicitly enabled TLS.
+
 Verify that the service returns its capabilities:
 
 ```bash
@@ -67,6 +72,21 @@ with TTSClient.connect(
 print(len(result.audio_bytes), result.audio_format)
 print(result.details.get("usage", {}))
 ```
+
+For a self-signed HTTPS/WSS deployment, give the SDK its CA/certificate file.
+The same policy is used for HTTPS capability discovery, the initial WSS dial,
+and reconnects:
+
+```python
+client = TTSClient.connect(
+    "wss://localhost:50052/v1/realtime",
+    tls_verify="/path/to/cert.local.pem",
+)
+```
+
+For local TLS debugging only, `tls_verify=False` disables certificate and
+hostname verification. Never ship that setting. Plain `ws://` remains the
+simplest local path.
 
 `result.audio_bytes` is mono PCM described by `result.audio_format`. Run
 `client/examples/quickstart.py` for a complete WAV-writing example, or pass the bytes to your

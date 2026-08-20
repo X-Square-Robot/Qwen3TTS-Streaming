@@ -30,6 +30,7 @@ from .._internal.raw_websocket import (
     ws_recv_frame,
     ws_send_json,
 )
+from .._internal.tls import TLSConfig, TLSVerify
 from .._internal.utils import (
     build_bytes_result,
     capabilities_from_payload,
@@ -122,6 +123,7 @@ class EngineWebSocketAdapter:
         max_lifetime: float | None = None,
         keepalive_interval: float = 15.0,
         keepalive_jitter: float = 0.2,
+        tls_verify: TLSVerify | TLSConfig = True,
     ) -> None:
         self.endpoint = endpoint
         self.timeout = timeout
@@ -131,6 +133,7 @@ class EngineWebSocketAdapter:
         # also occupy a worker thread for up to 120 seconds during connect.
         self.connect_timeout = timeout if connect_timeout is None else connect_timeout
         self.headers = dict(headers or {})
+        self._tls = TLSConfig.from_value(tls_verify)
         # A websocket carries one logical TTS session at a time because audio
         # frames are raw binary data without a session id.  Finished sockets
         # are therefore pooled and reused serially; concurrent sessions simply
@@ -423,6 +426,7 @@ class EngineWebSocketAdapter:
                         self.endpoint,
                         timeout=attempt_timeout,
                         headers=self.headers,
+                        **self._tls.forwarding_kwargs(),
                     )
                 except (OSError, RawWebSocketError) as exc:
                     last_error = exc

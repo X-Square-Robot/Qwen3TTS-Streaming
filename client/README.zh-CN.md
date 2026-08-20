@@ -203,6 +203,27 @@ client = TTSClient.connect(
 )
 ```
 
+本地容器默认使用 `http://` / `ws://`，因此本地调试通常不需要 TLS 配置。若显式启用了
+自签名 HTTPS/WSS，可传证书路径并保留严格校验，或只在临时联调时关闭校验：
+
+```python
+# 推荐：信任指定的自签名证书或私有 CA
+client = TTSClient.connect(
+    "wss://localhost:50052/v1/realtime",
+    tls_verify="/path/to/cert.local.pem",
+)
+
+# 仅限本地联调，禁止用于生产
+client = TTSClient.connect(
+    "wss://localhost:50052/v1/realtime",
+    tls_verify=False,
+)
+```
+
+默认 `tls_verify=True` 使用系统信任链。该策略覆盖 HTTPS 能力探测、WSS 首连、预热与
+断线重连。`verify_protocol=False` 只跳过协议兼容检查，与 TLS 无关；旧的 `verify`
+参数仅作为该选项的兼容别名。
+
 `engine-websocket` 会保留并复用已经完成会话的物理连接；并发会话使用连接池中的
 不同连接。session 以 `done`/`error` 事件为边界，而不是以 socket 关闭为边界；若旧
 gateway 没有长连接协议标识，SDK 会安全丢弃而不复用该 socket。engine error 的连接
@@ -229,6 +250,8 @@ python examples/quickstart.py                  # one-shot     -> quickstart.wav
 python examples/streaming.py                   # incremental  -> streaming.wav
 python examples/realtime.py                    # wall-clock aligned frames
 python examples/quickstart.py localhost:50051  # point at engine gRPC
+python examples/quickstart.py wss://localhost:50052/v1/realtime \
+  --tls-ca-file /path/to/cert.local.pem
 ```
 
 ## API 参考

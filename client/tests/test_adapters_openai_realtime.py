@@ -213,9 +213,7 @@ def test_python_sdk_matches_browser_golden_session_core():
             "delivery", "guarded"
         ),
         "request_id": session["qwen"]["timing"]["request_id"],
-        "client_request_ts_ms": session["qwen"]["timing"][
-            "client_request_ts_ms"
-        ],
+        "client_request_ts_ms": session["qwen"]["timing"]["client_request_ts_ms"],
     } == golden
 
 
@@ -368,3 +366,39 @@ def test_capabilities_use_http_sibling_of_realtime_path(monkeypatch):
             {"timeout": 2.0, "headers": {"Authorization": "Bearer secret"}},
         )
     ]
+
+
+def test_capabilities_and_websocket_share_tls_policy(monkeypatch, tmp_path):
+    ca_file = tmp_path / "cert.local.pem"
+    ca_file.write_text("test certificate", encoding="utf-8")
+    http_calls = []
+    websocket_calls = []
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {"supported_api_protocols": ["openai-realtime-v1"]}
+
+    monkeypatch.setattr(
+        realtime_module.requests,
+        "get",
+        lambda url, **kwargs: http_calls.append((url, kwargs)) or Response(),
+    )
+    monkeypatch.setattr(
+        realtime_module,
+        "ws_connect",
+        lambda url, **kwargs: websocket_calls.append((url, kwargs)) or object(),
+    )
+    adapter = OpenAIRealtimeAdapter(
+        "wss://localhost:50052/v1/realtime",
+        timeout=5.0,
+        tls_verify=ca_file,
+    )
+
+    adapter.get_capabilities()
+    adapter._connect_websocket(timeout=1.0)
+
+    expected_path = str(ca_file.resolve())
+    assert http_calls[0][1]["verify"] == expected_path
+    assert websocket_calls[0][1]["tls_verify"].ca_file == expected_path

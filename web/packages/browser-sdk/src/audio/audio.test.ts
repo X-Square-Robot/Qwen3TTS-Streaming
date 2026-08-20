@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 
-import {BrowserAudioPlayer} from "./browser-audio-player.js";
+import {BrowserAudioPlayer, DEFAULT_MAX_BUFFER_MS} from "./browser-audio-player.js";
 import {ContinuousResampler} from "./resampler.js";
 import {WavCollector} from "./wav-collector.js";
 
@@ -122,6 +122,46 @@ describe("BrowserAudioPlayer float input", () => {
     } finally {
       Object.assign(globalThis, {AudioContext: originalContext, AudioWorkletNode: originalNode});
     }
+  });
+
+  it("uses a large safety bound and passes explicit bounds to the AudioWorklet", async () => {
+    const originalContext = globalThis.AudioContext;
+    const originalNode = globalThis.AudioWorkletNode;
+    let nodeOptions: AudioWorkletNodeOptions | undefined;
+    class FakeNode {
+      port = {onmessage: null, postMessage() {}};
+      constructor(_context: AudioContext, _name: string, options?: AudioWorkletNodeOptions) {
+        nodeOptions = options;
+      }
+      connect() { return {connect() {}}; }
+      disconnect() {}
+    }
+    class FakeContext {
+      sampleRate = 48_000; currentTime = 0; destination = {};
+      audioWorklet = {addModule: async () => undefined};
+      createGain() { return {gain: {setValueAtTime() {}}, connect: () => this.destination, disconnect() {}}; }
+      async resume() {} async suspend() {} async close() {}
+    }
+    Object.assign(globalThis, {AudioContext: FakeContext, AudioWorkletNode: FakeNode});
+    try {
+      const defaultPlayer = new BrowserAudioPlayer();
+      await defaultPlayer.start();
+      expect(DEFAULT_MAX_BUFFER_MS).toBe(3_600_000);
+      expect(nodeOptions?.processorOptions).toEqual({maxQueuedFrames: 172_800_000});
+      await defaultPlayer.close();
+
+      const player = new BrowserAudioPlayer({maxBufferMs: 7_500});
+      await player.start();
+      expect(nodeOptions?.processorOptions).toEqual({maxQueuedFrames: 360_000});
+      await player.close();
+    } finally {
+      Object.assign(globalThis, {AudioContext: originalContext, AudioWorkletNode: originalNode});
+    }
+  });
+
+  it("rejects invalid queue bounds", () => {
+    expect(() => new BrowserAudioPlayer({maxBufferMs: 0})).toThrow("positive finite");
+    expect(() => new BrowserAudioPlayer({maxBufferMs: Number.NaN})).toThrow("positive finite");
   });
 
   it("accepts bounded PCM float and rejects invalid samples before queueing", async () => {

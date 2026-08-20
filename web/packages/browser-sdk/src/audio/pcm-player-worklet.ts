@@ -1,9 +1,16 @@
+/** Runaway protection only; queued audio is allocated incrementally. */
+export const DEFAULT_MAX_BUFFER_MS = 60 * 60 * 1_000;
+
 export const PCM_PLAYER_WORKLET_SOURCE = String.raw`
-const MAX_QUEUED_FRAMES = 48_000 * 10;
+const DEFAULT_MAX_QUEUED_FRAMES = 48_000 * ${DEFAULT_MAX_BUFFER_MS / 1_000};
 
 class QwenPcmPlayerProcessor extends AudioWorkletProcessor {
-  constructor() {
+  constructor(options) {
     super();
+    const configuredMax = Number(options?.processorOptions?.maxQueuedFrames);
+    this.maxQueuedFrames = Number.isSafeInteger(configuredMax) && configuredMax > 0
+      ? configuredMax
+      : DEFAULT_MAX_QUEUED_FRAMES;
     this.chunks = [];
     this.chunkOffset = 0;
     this.queuedFrames = 0;
@@ -14,7 +21,7 @@ class QwenPcmPlayerProcessor extends AudioWorkletProcessor {
       const payload = message.data;
       if (payload.type === "push" && payload.samples instanceof ArrayBuffer) {
         const samples = new Float32Array(payload.samples);
-        if (this.queuedFrames + samples.length > MAX_QUEUED_FRAMES) {
+        if (this.queuedFrames + samples.length > this.maxQueuedFrames) {
           this.port.postMessage({type: "overflow", queuedFrames: this.queuedFrames});
           return;
         }

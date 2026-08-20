@@ -18,18 +18,22 @@ def test_engine_container_mounts_runtime_tls_secret_and_maps_environment():
 
     assert engine["environment"]["TLS_CERT_FILE"] == "${TLS_CERT_FILE:-}"
     assert engine["environment"]["TLS_KEY_FILE"] == "${TLS_KEY_FILE:-}"
+    assert engine["environment"]["TLS_AUTO_ENABLE"] == "${TLS_AUTO_ENABLE:-false}"
     assert engine["environment"]["TLS_DIR"] == "/app/tls"
     assert any(volume.endswith(":/app/tls:ro") for volume in engine["volumes"])
 
 
-def test_engine_entrypoint_auto_discovers_local_pair_and_exports_canonical_config():
+def test_engine_entrypoint_requires_opt_in_for_local_pair_and_exports_canonical_config():
     entrypoint = _read("scripts/compose/engine-entrypoint.sh")
 
+    assert 'tls_auto_enable="${TLS_AUTO_ENABLE:-false}"' in entrypoint
+    assert '[[ "$tls_auto_enable" = "true"' in entrypoint
     assert '${tls_dir}/cert.local.pem' in entrypoint
     assert '${tls_dir}/key.local.pem' in entrypoint
     assert 'export ENGINE_SERVER_TLS_CERT_FILE="$tls_cert_file"' in entrypoint
     assert 'export ENGINE_SERVER_TLS_KEY_FILE="$tls_key_file"' in entrypoint
     assert "TLS_CERT_FILE and TLS_KEY_FILE must be set together" in entrypoint
+    assert "TLS_AUTO_ENABLE must be a boolean" in entrypoint
 
 
 def test_local_demo_certificate_generator_includes_requested_dns_san(tmp_path):

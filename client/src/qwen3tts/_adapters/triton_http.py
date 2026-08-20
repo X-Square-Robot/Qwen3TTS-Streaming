@@ -21,6 +21,7 @@ from .._internal.utils import (
     capabilities_from_payload,
     synthesis_config_to_mapping,
 )
+from .._internal.tls import TLSConfig, TLSVerify
 from .._session import BaseStreamSession
 from ..constants import DEFAULT_MODEL_VERSION, TRANSPORT_TRITON_HTTP
 
@@ -36,12 +37,14 @@ class TritonHttpAdapter:
         model_version: str = DEFAULT_MODEL_VERSION,
         timeout: float,
         headers: dict[str, str] | None = None,
+        tls_verify: TLSVerify | TLSConfig = True,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name
         self.model_version = model_version
         self.timeout = timeout
         self.headers = dict(headers or {})
+        self._tls = TLSConfig.from_value(tls_verify)
 
     def get_capabilities(self, *, timeout: float | None = None) -> Capabilities:
         effective_timeout = (
@@ -54,6 +57,7 @@ class TritonHttpAdapter:
             json=payload,
             timeout=effective_timeout,
             headers=self.headers,
+            **self._tls.requests_kwargs(),
         )
         caps = _parse_capabilities_from_http_response(response)
         if caps is None:
@@ -70,6 +74,7 @@ class TritonHttpAdapter:
             json=self._infer_payload(request_payload),
             timeout=self.timeout,
             headers=self.headers,
+            **self._tls.requests_kwargs(),
         )
         if response.status_code != 200:
             raise RuntimeError(

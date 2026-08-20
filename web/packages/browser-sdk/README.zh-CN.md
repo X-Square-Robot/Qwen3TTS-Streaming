@@ -14,8 +14,10 @@
 npm install @xmultimodalinteraction/qwen3tts-browser
 ```
 
-浏览器必须支持 WebSocket、Web Audio、AudioWorklet、BigInt 和 ES2022 module。麦克风录音
-或选择输出设备还要求 HTTPS 安全上下文。
+浏览器必须支持 WebSocket、Web Audio、BigInt 和 ES2022 module。HTTPS 安全上下文中
+优先使用 AudioWorklet；普通 HTTP 页面会自动降级到标准
+`AudioBufferSourceNode` 调度播放，因此文本合成、`ws://` 流式接收和系统默认扬声器
+播放不需要证书。只有麦克风录音或选择输出设备等安全上下文能力要求 HTTPS。
 
 ## 合成并播放
 
@@ -32,7 +34,7 @@ const client = new RealtimeTTSClient({
   capabilitiesUrl: new URL("../v1/capabilities", location.href),
   websocketUrl: new URL("../v1/realtime", location.href),
 });
-const player = new BrowserAudioPlayer();
+const player = new BrowserAudioPlayer(); // 默认一小时异常保护上界
 
 await player.start(); // 必须由用户点击等手势触发
 client.onEvent((event) => {
@@ -49,15 +51,23 @@ const run = await client.synthesize("你好，欢迎使用 Qwen3-TTS。", {
   vad: {enabled: false, strategy: VadStrategy.Disabled},
 });
 await run.done;
+player.flush(); // 提交重采样器保留的尾帧
 ```
 
 ## 播放和文件保存
 
 `BrowserAudioPlayer` 提供连续重采样、有界队列、暂停恢复和播放 sample 游标。使用 guarded
 delivery 时，把播放进度传给 `run.acknowledgePlayback()`；Demo 中已经有完整用法。
+默认队列使用一小时的异常保护上界，用于容纳服务在句尾校验完成后集中释放的有效尾段。
+它不会预分配一小时内存，音频会边播放边释放；内存受限的应用可以通过
+`new BrowserAudioPlayer({maxBufferMs: ...})` 显式调小。
 
 `WavCollector` 独立收集可下载 WAV，并设置内存上限。达到上限只停止文件收集，不会中断
 实时播放。
+
+内网无需麦克风和输出设备选择时，可以直接使用
+`http://<host>:<port>/demo/` 与 `ws://<host>:<port>/v1/realtime`。HTTPS 页面不能连接
+`ws://`，因此公网 HTTPS 门户应继续使用同源 `wss://`。
 
 ## 生命周期
 

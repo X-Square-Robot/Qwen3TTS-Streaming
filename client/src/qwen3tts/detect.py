@@ -11,6 +11,7 @@ from qwen3tts_protocol import DetectedTransport
 
 from ._internal.auth import grpc_metadata_as_headers, normalize_grpc_metadata
 from ._internal.raw_websocket import ws_close, ws_connect, ws_recv_frame, ws_send_json
+from ._internal.tls import TLSConfig, TLSVerify
 from ._internal.utils import (
     advertised_protocols,
     check_capabilities_pairing,
@@ -53,7 +54,9 @@ def detect_transport(
     connect_timeout: float | None = None,
     headers: dict[str, str] | None = None,
     metadata=None,
+    tls_verify: TLSVerify | TLSConfig = True,
 ) -> DetectedTransport:
+    tls = TLSConfig.from_value(tls_verify)
     if transport != "auto":
         if transport not in SUPPORTED_TRANSPORTS:
             raise TransportProbeError(f"unsupported transport: {transport!r}")
@@ -85,6 +88,7 @@ def detect_transport(
             report=report,
             model_name=model_name,
             model_version=model_version,
+            tls=tls,
         )
     if parsed.scheme in {"http", "https"}:
         return _detect_http_url(
@@ -94,6 +98,7 @@ def detect_transport(
             report=report,
             model_name=model_name,
             model_version=model_version,
+            tls=tls,
         )
     return _detect_bare_endpoint(
         endpoint,
@@ -104,6 +109,7 @@ def detect_transport(
         report=report,
         model_name=model_name,
         model_version=model_version,
+        tls=tls,
     )
 
 
@@ -116,6 +122,7 @@ def _detect_websocket_url(
     report: list[dict],
     model_name: str | None,
     model_version: str,
+    tls: TLSConfig,
 ) -> DetectedTransport:
     parsed = urlparse(url)
     if not parsed.path.endswith(DEFAULT_ENGINE_WS_PATH):
@@ -128,6 +135,7 @@ def _detect_websocket_url(
                 timeout=timeout,
                 connect_timeout=connect_timeout,
                 headers=headers,
+                **tls.forwarding_kwargs(),
             )
         except Exception as exc:
             report.append(
@@ -169,6 +177,7 @@ def _detect_websocket_url(
             timeout=timeout,
             connect_timeout=connect_timeout,
             headers=headers,
+            **tls.forwarding_kwargs(),
         )
     except ProtocolVersionMismatchError:
         # Definitive answer: we reached a live engine, wrong SDK pairing.
@@ -210,10 +219,16 @@ def _detect_http_url(
     report: list[dict],
     model_name: str | None,
     model_version: str,
+    tls: TLSConfig,
 ) -> DetectedTransport:
     capabilities_url = f"{base_url.rstrip('/')}{DEFAULT_ENGINE_CAPABILITIES_PATH}"
     try:
-        response = requests.get(capabilities_url, timeout=timeout, headers=headers)
+        response = requests.get(
+            capabilities_url,
+            timeout=timeout,
+            headers=headers,
+            **tls.requests_kwargs(),
+        )
         if response.status_code == 200:
             payload = response.json()
             if isinstance(payload, dict):
@@ -290,7 +305,10 @@ def _detect_http_url(
     ):
         try:
             response = requests.get(
-                f"{base_url.rstrip('/')}{path}", timeout=timeout, headers=headers
+                f"{base_url.rstrip('/')}{path}",
+                timeout=timeout,
+                headers=headers,
+                **tls.requests_kwargs(),
             )
             ok = response.status_code == 200
             report.append(
@@ -337,6 +355,7 @@ def _detect_bare_endpoint(
     report: list[dict],
     model_name: str | None,
     model_version: str,
+    tls: TLSConfig,
 ) -> DetectedTransport:
     candidates: list[tuple[str, str]]
     has_explicit_port = ":" in endpoint and not endpoint.endswith("]")
@@ -354,6 +373,7 @@ def _detect_bare_endpoint(
                 report=report,
                 model_name=model_name,
                 model_version=model_version,
+                tls=tls,
             )
             if detected is not None:
                 return detected
@@ -373,6 +393,7 @@ def _detect_bare_endpoint(
                     report=report,
                     model_name=model_name,
                     model_version=model_version,
+                    tls=tls,
                 )
             except TransportProbeError:
                 pass
@@ -392,6 +413,7 @@ def _detect_bare_endpoint(
                 report=report,
                 model_name=model_name,
                 model_version=model_version,
+                tls=tls,
             )
             if detected is not None:
                 return detected
@@ -471,6 +493,7 @@ def _detect_bare_endpoint(
                     timeout=timeout,
                     connect_timeout=connect_timeout,
                     headers=headers,
+                    **tls.forwarding_kwargs(),
                 )
                 report.append(
                     {
@@ -507,6 +530,7 @@ def _detect_bare_endpoint(
                 report=report,
                 model_name=model_name,
                 model_version=model_version,
+                tls=tls,
             )
         except TransportProbeError:
             pass
@@ -526,6 +550,7 @@ def _probe_bare_realtime_candidate(
     report: list[dict],
     model_name: str | None,
     model_version: str,
+    tls: TLSConfig,
 ) -> DetectedTransport | None:
     realtime_url = f"ws://{host}:{port}{DEFAULT_OPENAI_REALTIME_PATH}"
     try:
@@ -534,6 +559,7 @@ def _probe_bare_realtime_candidate(
             timeout=timeout,
             connect_timeout=connect_timeout,
             headers=headers,
+            **tls.forwarding_kwargs(),
         )
     except Exception as exc:
         report.append(
@@ -568,11 +594,14 @@ def _probe_engine_websocket(
     timeout: float,
     connect_timeout: float | None = None,
     headers,
+    tls_verify: TLSVerify | TLSConfig = True,
 ) -> None:
+    tls = TLSConfig.from_value(tls_verify)
     conn = ws_connect(
         url,
         timeout=timeout if connect_timeout is None else connect_timeout,
         headers=headers,
+        **tls.forwarding_kwargs(),
     )
     try:
         ws_send_json(conn, {"type": "get_capabilities"})
@@ -600,11 +629,14 @@ def _probe_openai_realtime(
     timeout: float,
     connect_timeout: float | None = None,
     headers,
+    tls_verify: TLSVerify | TLSConfig = True,
 ) -> None:
+    tls = TLSConfig.from_value(tls_verify)
     conn = ws_connect(
         url,
         timeout=timeout if connect_timeout is None else connect_timeout,
         headers=headers,
+        **tls.forwarding_kwargs(),
     )
     try:
         deadline = time.perf_counter() + timeout

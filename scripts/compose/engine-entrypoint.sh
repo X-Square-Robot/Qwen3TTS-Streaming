@@ -97,12 +97,23 @@ export ENGINE_SERVER_HEALTH_PORT="${ENGINE_SERVER_HEALTH_PORT:-${HEALTH_PORT:-${
 tls_dir="${TLS_DIR:-/app/tls}"
 tls_cert_file="${TLS_CERT_FILE:-}"
 tls_key_file="${TLS_KEY_FILE:-}"
-if [[ -z "$tls_cert_file" && -z "$tls_key_file" \
-      && -f "${tls_dir}/cert.local.pem" \
-      && -f "${tls_dir}/key.local.pem" ]]; then
+tls_auto_enable="${TLS_AUTO_ENABLE:-false}"
+case "${tls_auto_enable,,}" in
+    1|true|yes|on) tls_auto_enable="true" ;;
+    0|false|no|off|"") tls_auto_enable="false" ;;
+    *)
+        echo "TLS_AUTO_ENABLE must be a boolean (true/false)." >&2
+        exit 2
+        ;;
+esac
+if [[ "$tls_auto_enable" = "true" && -z "$tls_cert_file" && -z "$tls_key_file" ]]; then
+    if [[ ! -f "${tls_dir}/cert.local.pem" || ! -f "${tls_dir}/key.local.pem" ]]; then
+        echo "TLS_AUTO_ENABLE=true but cert.local.pem/key.local.pem were not found in ${tls_dir}." >&2
+        exit 2
+    fi
     tls_cert_file="${tls_dir}/cert.local.pem"
     tls_key_file="${tls_dir}/key.local.pem"
-    echo "Using development TLS certificate from ${tls_dir}."
+    echo "TLS_AUTO_ENABLE=true: using development TLS certificate from ${tls_dir}."
 fi
 if [[ -n "$tls_cert_file" || -n "$tls_key_file" ]]; then
     if [[ -z "$tls_cert_file" || -z "$tls_key_file" ]]; then
