@@ -43,6 +43,18 @@ bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway engine-docker
 
 配置优先级是：命令行参数 > 已导出的环境变量 > manifest/default。常用环境变量包括 `MODEL_VERSION`、`EXPORT_DEVICE`、`BUILD_GPU_DEVICE`、`RUNTIME_GPU_DEVICE`、`MAX_BATCH_SIZE`、`MAX_INPUT_LEN`、`MAX_SEQ_LEN`、`RUNTIME_MAX_BATCH_SIZE`、`RUNTIME_MAX_SEQ_LEN`；但推荐日常都从 autorun 参数进入，便于复现。
 
+不带 command 启动 `autorun.sh` 时，TUI 的“发布与打包信息”区可以直接输入模型发布版本、引擎编译版本、打包人和打包日期。相同字段也提供非交互参数：
+
+```bash
+bash scripts/bash/autorun.sh package -m custom-1.7b \
+  --model-release-version 'zehan@20260818' \
+  --engine-build-version 'rime@20260820_580_5090_v1' \
+  --packager rime \
+  --package-date 2026-08-20
+```
+
+`--model-version 2` 仍只表示 Triton 数字目录；`--model-release-version` 才是模型包中的 `MODEL_VERSION`。`all` 和 `all-1.7b` 不接受统一的 `--model-release-version`，避免把多个模型错误地重标成同一版本。
+
 ### Phase B 参数
 
 ```text
@@ -81,6 +93,26 @@ bash scripts/bash/autorun.sh deploy -m custom-1.7b \
 ```
 
 这个版本号是 Triton model repository 的版本目录，不是 Hugging Face / ModelScope 权重 revision。HTTP 客户端如果显式带版本，需要请求 `/v2/models/tts_orchestrator/versions/<N>/infer`；不显式带版本时则由 Triton 按仓库状态选择可用版本。
+
+模型自身的发布版本使用另一套、随模型走的标识。源模型目录可以携带只读文本文件 `MODEL_VERSION`；也可以在 autorun TUI 中直接输入，由导出阶段写入只读版本文件。内容为单行版本号，例如：
+
+```text
+zehan@20260601
+```
+
+Phase A 会把它复制到 `workspace/exported/<variant>/MODEL_VERSION`；TUI 输入的显式版本优先，并写入同一位置。Phase C 再复制到模型包根目录 `tts_orchestrator/<N>/MODEL_VERSION`，两处文件都设置为 `0444`。组装、仓库校验和引擎启动都会拒绝缺失或空的文件。引擎编译版本独立管理，可在 TUI 中输入或用 `--engine-build-version` 指定；autorun 会把它写入只读 `ENGINE_BUILD_VERSION`，Phase C 将其带入模型包，运行时直接从包内读取。
+
+模型包的打包溯源与模型发布版本分开保存。Phase C 会在同一模型包根目录生成只读的 `PACKAGE_INFO.json`：
+
+```json
+{
+  "package_info_schema_version": 1,
+  "packager": "rime",
+  "packaged_on": "2026-08-20"
+}
+```
+
+`packaged_on` 只精确到天，并严格使用 ISO `YYYY-MM-DD` 格式，不包含时分秒或时区。默认打包人取当前系统用户，默认打包日期取本机当天日期；CI 或可复现打包可分别用 `QWEN3_TTS_PACKAGER` 和 `QWEN3_TTS_PACKAGE_DATE` 显式传入。组装后文件权限为 `0444`，仓库校验会拒绝缺失、可写或格式不合法的文件。
 
 ## GPU 选择
 

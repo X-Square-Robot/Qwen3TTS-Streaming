@@ -14,6 +14,7 @@ import argparse
 import copy
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -25,7 +26,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPTS = _REPO_ROOT / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 from python.codec_embedding_sum import CodecEmbeddingSum
+from engine.runtime.model_version import (
+    MODEL_VERSION_FILENAME,
+    load_model_version,
+    validate_model_version,
+)
 
 from utils import (
     setup_logging,
@@ -60,6 +68,47 @@ def export_embeddings(
     model_path = resolve_model_path(variant, models_dir)
     out_dir = ensure_output_dir(output_dir, variant) / "weights"
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    exported_version_path = out_dir.parent / MODEL_VERSION_FILENAME
+    source_version_path = Path(model_path) / MODEL_VERSION_FILENAME
+    # MODEL_VERSION is model-owned metadata: validate and copy it before the
+    # expensive export so every successful artifact is unambiguously tagged.
+    # During migration, an already-tagged export remains rerunnable even when
+    # the external source-model mount is read-only and cannot yet be updated.
+    release_override = os.environ.get("QWEN3_TTS_MODEL_RELEASE_VERSION", "").strip()
+    if release_override:
+        model_version = validate_model_version(
+            release_override,
+            source="QWEN3_TTS_MODEL_RELEASE_VERSION",
+        )
+        logger.info(
+            "  %s: using explicit model release from autorun",
+            MODEL_VERSION_FILENAME,
+        )
+    elif source_version_path.is_file():
+        model_version = load_model_version(model_path)
+    elif exported_version_path.is_file():
+        model_version = validate_model_version(
+            exported_version_path.read_text(encoding="utf-8"),
+            source=str(exported_version_path),
+        )
+        logger.warning(
+            "  %s is missing; preserving version from existing export",
+            source_version_path,
+        )
+    else:
+        model_version = load_model_version(model_path)
+    if exported_version_path.exists():
+        # The assembled package is immutable, but this intermediate export is
+        # intentionally replaceable so Phase A can be rerun.
+        exported_version_path.chmod(0o644)
+    exported_version_path.write_text(f"{model_version}\n", encoding="utf-8")
+    exported_version_path.chmod(0o444)
+    logger.info(
+        "  %s: %s (validated for export)",
+        MODEL_VERSION_FILENAME,
+        model_version,
+    )
 
     logger.info(f"Loading model: {variant} from {model_path} (fp32 for precision)")
     logger.info(f"  Weights will be saved as {DTYPE_NAMES[dtype]} for inference")

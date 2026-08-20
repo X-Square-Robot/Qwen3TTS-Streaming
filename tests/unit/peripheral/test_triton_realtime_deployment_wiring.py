@@ -16,6 +16,8 @@ def test_triton_profile_starts_openai_realtime_sidecar_with_internal_grpc():
     compose = yaml.safe_load(_read("infra/docker/compose.yaml"))
     service = compose["services"]["realtime-gateway"]
     triton_build_args = compose["services"]["triton"]["build"]["args"]
+    engine_environment = compose["services"]["engine"]["environment"]
+    triton_environment = compose["services"]["triton"]["environment"]
 
     assert service["profiles"] == ["triton"]
     assert service["depends_on"] == ["triton"]
@@ -28,6 +30,13 @@ def test_triton_profile_starts_openai_realtime_sidecar_with_internal_grpc():
     assert triton_build_args["CLIENT_WHEEL_SHA256"] == "${CLIENT_WHEEL_SHA256:-}"
     assert triton_build_args["TRITON_RUNTIME_BASE_IMAGE"] == (
         "${TRITON_RUNTIME_BASE_IMAGE:-triton-deps}"
+    )
+    expected_build_identity = "${QWEN3_TTS_ENGINE_BUILD_VERSION:-}"
+    assert engine_environment["QWEN3_TTS_ENGINE_BUILD_VERSION"] == (
+        expected_build_identity
+    )
+    assert triton_environment["QWEN3_TTS_ENGINE_BUILD_VERSION"] == (
+        expected_build_identity
     )
     assert service["command"][-3:] == [
         "python3",
@@ -81,6 +90,9 @@ def test_compose_wrapper_manages_sidecar_with_triton_lifecycle():
     assert '--realtime-port)  COMPOSE_EXTRA+=(--realtime-port "$2")' in deploy
     assert '--realtime-port)    REALTIME_PORT="$2"' in autorun
     assert "append_optarg DEPLOY_ARGS --realtime-port" in autorun
+    assert "模型发布版本 MODEL_VERSION" in autorun
+    assert "引擎编译版本" in autorun
+    assert "打包日期 YYYY-MM-DD" in autorun
 
 
 def test_release_pipelines_build_both_version_matched_runtime_images():

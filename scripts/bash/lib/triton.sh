@@ -197,6 +197,8 @@ assemble_model_repo() {
     local orch_model_dir="$repo_dir/tts_orchestrator/$model_version"
     local orch_http_model_dir="$repo_dir/tts_orchestrator_http/$model_version"
     local runtime_dir="$orch_model_dir/runtime"
+    local repo_root
+    repo_root="$(cd "${_LIB_DIR}/../../.." && pwd)"
     # Read engine dtype from build_engines.sh output; default bf16
     local engine_dtype="bf16"
     if [ -f "$exported_dir/.engine_dtype" ]; then
@@ -216,6 +218,11 @@ assemble_model_repo() {
     fi
     if [ ! -f "$variant_dir/triton_manifest.json" ]; then
         log_error "Missing $variant_dir/triton_manifest.json — run export_09 (writes manifest + fused ONNX)"
+        return 1
+    fi
+    if [ ! -s "$variant_dir/MODEL_VERSION" ]; then
+        log_error "Missing or empty $variant_dir/MODEL_VERSION"
+        log_error "MODEL_VERSION must come from the source model and be copied by export_01"
         return 1
     fi
 
@@ -308,6 +315,57 @@ assemble_model_repo() {
     }
 
     mkdir -p "$runtime_dir"
+    cp -f "$variant_dir/MODEL_VERSION" "$orch_model_dir/MODEL_VERSION"
+    chmod 0444 "$orch_model_dir/MODEL_VERSION"
+    log_info "  MODEL_VERSION: $(tr -d '\r\n' < "$orch_model_dir/MODEL_VERSION")"
+
+    local engine_build_version="${QWEN3_TTS_ENGINE_BUILD_VERSION:-}"
+    if [ -z "$engine_build_version" ] && [ -f "$variant_dir/ENGINE_BUILD_VERSION" ]; then
+        engine_build_version=$(PYTHONPATH="$repo_root" python3 - "$variant_dir" <<'PY'
+import sys
+from engine.runtime.engine_build_version import load_engine_build_version
+
+print(load_engine_build_version(sys.argv[1]))
+PY
+) || {
+            log_error "  invalid $variant_dir/ENGINE_BUILD_VERSION"
+            return 1
+        }
+    fi
+    if [ -z "$engine_build_version" ]; then
+        engine_build_version=$(python3 - "$repo_root/engine/frontend/diagnostic_text.py" <<'PY'
+import runpy
+import sys
+
+print(runpy.run_path(sys.argv[1])["DEFAULT_ENGINE_VERSION"])
+PY
+)
+    fi
+    if ! PYTHONPATH="$repo_root" python3 "$repo_root/scripts/python/write_version_sidecar.py" \
+        --output "$orch_model_dir/ENGINE_BUILD_VERSION" \
+        --version "$engine_build_version"; then
+        log_error "  failed to write ENGINE_BUILD_VERSION"
+        return 1
+    fi
+    log_info "  ENGINE_BUILD_VERSION: $engine_build_version"
+
+    local package_info_path="$orch_model_dir/PACKAGE_INFO.json"
+    local packager="${QWEN3_TTS_PACKAGER:-}"
+    local packaged_on="${QWEN3_TTS_PACKAGE_DATE:-}"
+    if [ -z "$packager" ]; then
+        packager="$(id -un)"
+    fi
+    if [ -z "$packaged_on" ]; then
+        packaged_on="$(date +%F)"
+    fi
+    if ! PYTHONPATH="$repo_root" python3 "$repo_root/scripts/python/write_package_info.py" \
+        --output "$package_info_path" \
+        --packager "$packager" \
+        --packaged-on "$packaged_on"; then
+        log_error "  failed to write PACKAGE_INFO.json"
+        return 1
+    fi
+    log_info "  PACKAGE_INFO.json: $packager @ $packaged_on"
 
     # ── 1. Optional voice-clone runtime assets ──
     # Standalone TRT preprocessing loads these through TRTEngine, so TRT mode
@@ -397,8 +455,6 @@ assemble_model_repo() {
     fi
 
     # Copy orchestrator adapter + new engine package (paths relative to repo root)
-    local repo_root
-    repo_root="$(cd "${_LIB_DIR}/../../.." && pwd)"
     local orch_py_dir="$repo_root/model_repository/tts_orchestrator/1"
     if [ -d "$orch_py_dir" ]; then
         cp "$orch_py_dir/model.py" "$orch_model_dir/model.py"
@@ -547,6 +603,9 @@ PY
         ! -name "weights" \
         ! -name "runtime" \
         ! -name "resources" \
+        ! -name "ENGINE_BUILD_VERSION" \
+        ! -name "MODEL_VERSION" \
+        ! -name "PACKAGE_INFO.json" \
         ! -name "triton_manifest.json" \
         ! -name "artifact_manifest.json" \
         -exec rm -rf {} +
@@ -731,6 +790,42 @@ PY
         missing=$((missing + 1))
     else
         log_info "  tts_orchestrator/$model_version/model.py: OK"
+    fi
+    if [ ! -s "$orch_dir/MODEL_VERSION" ]; then
+        log_error "  tts_orchestrator/$model_version/MODEL_VERSION: missing or empty"
+        missing=$((missing + 1))
+    elif [ -w "$orch_dir/MODEL_VERSION" ]; then
+        log_error "  tts_orchestrator/$model_version/MODEL_VERSION: must be read-only"
+        missing=$((missing + 1))
+    else
+        log_info "  tts_orchestrator/$model_version/MODEL_VERSION: OK"
+    fi
+    local engine_build_identity
+    if ! engine_build_identity=$(PYTHONPATH="$repo_root" python3 - "$orch_dir" <<'PY'
+import sys
+from engine.runtime.engine_build_version import load_engine_build_version
+
+print(load_engine_build_version(sys.argv[1]))
+PY
+); then
+        log_error "  tts_orchestrator/$model_version/ENGINE_BUILD_VERSION: invalid"
+        missing=$((missing + 1))
+    else
+        log_info "  tts_orchestrator/$model_version/ENGINE_BUILD_VERSION: OK ($engine_build_identity)"
+    fi
+    local package_provenance
+    if ! package_provenance=$(PYTHONPATH="$repo_root" python3 - "$orch_dir" <<'PY'
+import sys
+from engine.runtime.package_info import load_package_info
+
+info = load_package_info(sys.argv[1])
+print(f"{info.packager} @ {info.packaged_on}")
+PY
+); then
+        log_error "  tts_orchestrator/$model_version/PACKAGE_INFO.json: invalid"
+        missing=$((missing + 1))
+    else
+        log_info "  tts_orchestrator/$model_version/PACKAGE_INFO.json: OK ($package_provenance)"
     fi
     if [ ! -d "$orch_dir/engine" ]; then
         log_error "  tts_orchestrator/$model_version/engine/: missing"

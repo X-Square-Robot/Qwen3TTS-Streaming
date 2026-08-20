@@ -15,6 +15,7 @@ from engine.backend.ref_audio_processor import ReferenceAudioSupport
 from engine.config import EngineConfig, EngineProfileConfig, ModelArchConfig
 from engine.core.types import SessionConfig
 from engine.server import TTSEngine
+from engine.runtime.model_version import ModelVersionError
 from qwen3tts_protocol.protocol import SUPPORTED_VAD_STRATEGIES
 
 
@@ -70,6 +71,33 @@ def test_validate_session_config_rejects_unsupported_task_type():
         engine._validate_session_config(
             SessionConfig(task_type="voice_clone", ref_audio=b"x")
         )
+
+
+def test_start_rejects_missing_model_version_before_loading_runtime(tmp_path):
+    cfg = EngineConfig()
+    cfg.paths.model_package_dir = str(tmp_path)
+    engine = TTSEngine(config=cfg)
+
+    with pytest.raises(ModelVersionError, match="MODEL_VERSION"):
+        asyncio.run(engine.start())
+
+    assert engine._tokenizer is None
+    assert engine._executor is None
+
+
+def test_start_rejects_missing_engine_build_version_before_loading_runtime(tmp_path):
+    model_version = tmp_path / "MODEL_VERSION"
+    model_version.write_text("zehan@20260818\n", encoding="utf-8")
+    model_version.chmod(0o444)
+    cfg = EngineConfig()
+    cfg.paths.model_package_dir = str(tmp_path)
+    engine = TTSEngine(config=cfg)
+
+    with pytest.raises(ModelVersionError, match="ENGINE_BUILD_VERSION"):
+        asyncio.run(engine.start())
+
+    assert engine._tokenizer is None
+    assert engine._executor is None
 
 
 def test_validate_session_config_uses_default_ref_audio_for_base(monkeypatch, tmp_path):

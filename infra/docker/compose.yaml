@@ -32,6 +32,7 @@ services:
       ENGINE_MODEL_NAME: ${ENGINE_MODEL_NAME:-tts_orchestrator}
       ENGINE_MODEL_VERSION: ${ENGINE_MODEL_VERSION:-1}
       ENGINE_MODEL_PACKAGE_DIR: ${ENGINE_MODEL_PACKAGE_DIR:-/models/tts_orchestrator/1}
+      QWEN3_TTS_ENGINE_BUILD_VERSION: ${QWEN3_TTS_ENGINE_BUILD_VERSION:-}
       # Emergency override: load engine/ code from the model package instead of
       # the image (hotfix without an image rebuild). Default off = image code.
       ENGINE_CODE_FROM_PACKAGE: ${ENGINE_CODE_FROM_PACKAGE:-0}
@@ -125,6 +126,7 @@ services:
       MAX_BATCH_SLOTS: ${TRITON_MAX_BATCH_SLOTS:-128}
       ENGINE_MAX_DECODE_LEN: ${TRITON_MAX_SEQ_LEN:-512}
       MAX_SESSIONS: ${TRITON_MAX_SESSIONS:-128}
+      QWEN3_TTS_ENGINE_BUILD_VERSION: ${QWEN3_TTS_ENGINE_BUILD_VERSION:-}
       # Comma-separated speakers to prewarm the prefix KV cache at startup so the
       # first real request per speaker is warm (~20ms TTFT instead of ~50ms cold).
       ENGINE_PREWARM_SPEAKERS: ${ENGINE_PREWARM_SPEAKERS:-}

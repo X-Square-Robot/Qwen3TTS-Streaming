@@ -43,6 +43,18 @@ bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway engine-docker
 
 Configuration precedence is: command-line arguments > exported environment variables > manifest/default. Common environment variables include `MODEL_VERSION`, `EXPORT_DEVICE`, `BUILD_GPU_DEVICE`, `RUNTIME_GPU_DEVICE`, `MAX_BATCH_SIZE`, `MAX_INPUT_LEN`, `MAX_SEQ_LEN`, `RUNTIME_MAX_BATCH_SIZE`, `RUNTIME_MAX_SEQ_LEN`; but for day-to-day use it is recommended to go through autorun parameters for reproducibility.
 
+When `autorun.sh` starts without a command, its **Release and package metadata** TUI section accepts the model release, engine build identity, packager, and package date directly. The same fields have non-interactive options:
+
+```bash
+bash scripts/bash/autorun.sh package -m custom-1.7b \
+  --model-release-version 'zehan@20260818' \
+  --engine-build-version 'rime@20260820_580_5090_v1' \
+  --packager rime \
+  --package-date 2026-08-20
+```
+
+`--model-version 2` remains the Triton numeric directory; `--model-release-version` is the value stored in the package's `MODEL_VERSION`. Combined variants `all` and `all-1.7b` reject one shared model release value so distinct models cannot be relabeled accidentally.
+
 ### Phase B Parameters
 
 ```text
@@ -81,6 +93,26 @@ bash scripts/bash/autorun.sh deploy -m custom-1.7b \
 ```
 
 This version number is the Triton model repository version directory, not a Hugging Face / ModelScope weights revision. HTTP clients that explicitly pass a version must request `/v2/models/tts_orchestrator/versions/<N>/infer`; when no version is passed explicitly, Triton selects an available version based on the repository state.
+
+The model's own release identity is separate and travels with the model. A source model can carry a read-only `MODEL_VERSION`, or the value can be entered directly in the autorun TUI and written as a read-only export sidecar. It contains one version line, for example:
+
+```text
+zehan@20260601
+```
+
+Phase A copies it to `workspace/exported/<variant>/MODEL_VERSION`; an explicit TUI value takes precedence and is written to the same location. Phase C copies it again to the model-package root at `tts_orchestrator/<N>/MODEL_VERSION`; both files use mode `0444`. Export, repository validation, and engine startup reject a missing or empty file. The engine build identity is managed independently and can be entered in the TUI or supplied with `--engine-build-version`; autorun writes it to read-only `ENGINE_BUILD_VERSION`, Phase C carries it into the model package, and runtime reads it directly from that package.
+
+Model-package provenance is stored separately from the model release identity. Phase C creates a read-only `PACKAGE_INFO.json` in the same model-package root:
+
+```json
+{
+  "package_info_schema_version": 1,
+  "packager": "rime",
+  "packaged_on": "2026-08-20"
+}
+```
+
+`packaged_on` has day precision only and must use strict ISO `YYYY-MM-DD` format, without a time or time zone. By default, the packager is the current system user and the package date is the local calendar date. CI and reproducible builds can set them explicitly with `QWEN3_TTS_PACKAGER` and `QWEN3_TTS_PACKAGE_DATE`. Phase C sets mode `0444`; repository validation rejects missing, writable, or malformed package metadata.
 
 ## GPU Selection
 

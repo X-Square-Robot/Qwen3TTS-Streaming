@@ -16,6 +16,14 @@ from engine.core.types import (
     SessionConfig,
 )
 from engine.frontend.interface import FrontendInterface, _normalize_tts_text
+from engine.frontend.diagnostic_text import (
+    DEFAULT_ENGINE_MODEL_VERSION,
+    DEFAULT_ENGINE_VERSION,
+    DEFAULT_MODEL_VERSION,
+    VERSION_QUERY_TEXT,
+    format_engine_model_version,
+    resolve_diagnostic_text,
+)
 from engine.core.text_journal import CanonicalTextJournal
 
 
@@ -64,6 +72,65 @@ def test_count_text_tokens_uses_synthesis_normalization_and_tokenizer():
 
     assert interface.count_text_tokens(" 你好😊\n世界 ") == len("你好世界")
     assert interface.count_text_tokens("😊🚀") == 0
+
+
+def test_diagnostic_text_alias_is_exact_and_uses_independent_versions():
+    version_text = format_engine_model_version(
+        DEFAULT_ENGINE_VERSION,
+        DEFAULT_MODEL_VERSION,
+    )
+    assert version_text == DEFAULT_ENGINE_MODEL_VERSION
+    assert resolve_diagnostic_text(VERSION_QUERY_TEXT, version_text) == version_text
+    assert resolve_diagnostic_text(
+        f"请合成{VERSION_QUERY_TEXT}", version_text
+    ) == f"请合成{VERSION_QUERY_TEXT}"
+
+
+@pytest.mark.parametrize("input_mode", [InputMode.FULL_TEXT, InputMode.AUTO])
+def test_version_query_synthesizes_engine_model_version(input_mode):
+    async def run():
+        inbox = asyncio.Queue(maxsize=64)
+        interface = FrontendInterface(
+            engine_inbox=inbox,
+            tokenizer=_CharTokenizer(),
+            max_sessions=2,
+            engine_max_decode_len=256,
+        )
+        session = await interface.create_session(
+            f"version-query-{input_mode.value}",
+            config=SessionConfig(
+                task_type="custom_voice",
+                speaker="Serena",
+                input_mode=input_mode,
+                group_policy=GroupPolicy.NONE,
+            ),
+        )
+
+        # Exercise packetized transport input: replacement happens only after
+        # the full-text session is complete.
+        await interface.push_text_input(session.session_id, VERSION_QUERY_TEXT[:5])
+        await interface.push_text_input(session.session_id, VERSION_QUERY_TEXT[5:])
+        await interface.mark_input_complete(session.session_id)
+
+        requests = await _drain_requests(inbox)
+        token_text = "".join(
+            chr(token_id)
+            for request in requests
+            for token_id in (request.token_ids or [])
+        )
+        assert token_text == DEFAULT_ENGINE_MODEL_VERSION
+        assert session.text_journal.raw_text == DEFAULT_ENGINE_MODEL_VERSION
+        assert session.text_journal.normalized_text == DEFAULT_ENGINE_MODEL_VERSION
+
+        await session.result_queue.put(
+            EngineResult(
+                type=ResultType.SESSION_DONE,
+                session_id=session.session_id,
+            )
+        )
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
 
 
 def test_token_spans_keep_session_raw_coordinates_after_normalization():

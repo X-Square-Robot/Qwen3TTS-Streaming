@@ -56,6 +56,13 @@ from .runtime.fingerprint import (
     FingerprintCheckError,
     enforce_engine_fingerprint,
 )
+from .runtime.engine_build_version import load_engine_build_version
+from .runtime.model_version import load_model_version
+from .frontend.diagnostic_text import (
+    DEFAULT_ENGINE_VERSION,
+    DEFAULT_MODEL_VERSION,
+    format_engine_model_version,
+)
 from .core.mlfq import MLFQConfig
 from .core import observability as obs
 from .core.types import SessionConfig
@@ -222,6 +229,26 @@ class TTSEngine:
         self._loop = asyncio.get_event_loop()
         self._async_inbox = asyncio.Queue(maxsize=4096)
 
+        # Release identity is cheap package metadata and must fail before any
+        # tokenizer, weights, or TensorRT plan is loaded.
+        model_version = (
+            load_model_version(self._cfg.paths.model_package_dir)
+            if self._cfg.paths.model_package_dir
+            else DEFAULT_MODEL_VERSION
+        )
+        engine_version = (
+            load_engine_build_version(self._cfg.paths.model_package_dir)
+            if self._cfg.paths.model_package_dir
+            else (
+                os.environ.get("QWEN3_TTS_ENGINE_BUILD_VERSION", "").strip()
+                or DEFAULT_ENGINE_VERSION
+            )
+        )
+        engine_model_version = format_engine_model_version(
+            engine_version,
+            model_version,
+        )
+
         self._tokenizer = LightQwen3TTSTokenizer(self._tokenizer_dir)
         self._ref_audio_processor = ReferenceAudioProcessor(
             self._engine_dir,
@@ -310,6 +337,7 @@ class TTSEngine:
             l3_split_cap_ratio=sc.l3_split_cap_ratio,
             guarded_delivery_default=self._cfg.server.guarded_delivery_default,
             guarded_delivery_window_ms=self._cfg.server.guarded_delivery_window_ms,
+            engine_model_version=engine_model_version,
         )
         prefill_builder = None
         if self._weights_dir:

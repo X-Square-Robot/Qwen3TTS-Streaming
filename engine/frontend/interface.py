@@ -35,6 +35,11 @@ from ..core import observability as obs
 from ..core.timing import ServerTimingAccumulator
 from ..text_normalization import strip_emoji, split_pending_emoji
 from ..interface.output import ENGINE_SAMPLE_RATE
+from .diagnostic_text import (
+    DEFAULT_ENGINE_MODEL_VERSION,
+    DiagnosticTextRouter,
+    resolve_diagnostic_text,
+)
 from .dispatcher import Dispatcher
 from .hold_window import DeliveryHoldWindow, PrefixGateGuardBypass
 from .spliter import Spliter
@@ -98,6 +103,7 @@ class FrontendInterface:
         l3_split_cap_ratio: float = 0.90,
         guarded_delivery_default: bool = True,
         guarded_delivery_window_ms: int = 100,
+        engine_model_version: str = DEFAULT_ENGINE_MODEL_VERSION,
     ):
         self._dispatcher = Dispatcher(engine_inbox)
         self._tokenizer = tokenizer
@@ -118,9 +124,13 @@ class FrontendInterface:
         self._guarded_delivery_window_ms = min(
             max(float(guarded_delivery_window_ms), 100.0), 10_000.0
         )
+        self._engine_model_version = str(engine_model_version).strip()
+        if not self._engine_model_version:
+            raise ValueError("engine_model_version must not be empty")
 
         self._sessions: Dict[str, Session] = {}
         self._consumer_tasks: Dict[str, asyncio.Task] = {}
+        self._diagnostic_text_routers: Dict[str, DiagnosticTextRouter] = {}
 
     @property
     def active_count(self) -> int:
@@ -187,6 +197,7 @@ class FrontendInterface:
         session.reorder = AudioReorder()
         session.event_callback = on_event
         self._sessions[session_id] = session
+        self._diagnostic_text_routers[session_id] = DiagnosticTextRouter()
 
         # Resolve per-session observability level (raise-only override of the
         # global floor, clamped to max_session_level — see observability_tiers §3).
@@ -278,7 +289,9 @@ class FrontendInterface:
         # split across packets (e.g. a keycap base) does not leak into speech.
         raw = session._emoji_carry + (text or "")
         body, session._emoji_carry = split_pending_emoji(raw)
-        await self._ingest_streaming_text(session, body)
+        router = self._diagnostic_text_routers[session_id]
+        for routed_text in router.push(body):
+            await self._ingest_streaming_text(session, routed_text)
 
     async def _ingest_streaming_text(self, session: "Session", body: str) -> None:
         """Normalize a streaming text body, tokenize, route to the spliter per
@@ -334,6 +347,19 @@ class FrontendInterface:
         else:
             text = session.text_journal.normalized_text
         text = session.text_journal.trim_normalized()
+        resolved_text = resolve_diagnostic_text(text, self._engine_model_version)
+        if resolved_text != text:
+            # The spoken diagnostic payload becomes the canonical text for
+            # tokenization and progress attribution.  Rebuilding the journal
+            # also keeps raw/normalized coordinate maps internally coherent.
+            journal = CanonicalTextJournal(
+                _normalize_tts_text,
+                strip_leading_whitespace=True,
+            )
+            journal.append(resolved_text)
+            journal.finish()
+            text = journal.trim_normalized()
+            session.text_journal = journal
         if not text:
             return
 
@@ -352,11 +378,26 @@ class FrontendInterface:
         session = self._sessions.get(session_id)
         if session is None:
             return
+        mode = session.config.input_mode
+        if mode != InputMode.FULL_TEXT:
+            router = self._diagnostic_text_routers[session_id]
+            resolution = router.finish(self._engine_model_version)
+            if resolution.query_matched:
+                # This is a server-owned final payload, so no later packet can
+                # turn its trailing digit into a keycap emoji. Finalize the
+                # journal before ingesting it to avoid withholding that digit.
+                session._emoji_carry = ""
+                session.text_journal.finish()
+                await self._ingest_streaming_text(session, resolution.chunks[0])
+            else:
+                for routed_text in resolution.chunks:
+                    raw = session._emoji_carry + routed_text
+                    body, session._emoji_carry = split_pending_emoji(raw)
+                    await self._ingest_streaming_text(session, body)
         session.mark_input_complete()
         if session.text_journal is not None:
             session.text_journal.finish()
 
-        mode = session.config.input_mode
         if mode == InputMode.FULL_TEXT:
             full_text = session.drain_text()
             # ``finish()`` can release a trailing keycap base that was held
@@ -1038,6 +1079,9 @@ class FrontendInterface:
             return
         session = self._sessions.pop(session_id, None)
         self._consumer_tasks.pop(session_id, None)
+        diagnostic_routers = getattr(self, "_diagnostic_text_routers", None)
+        if diagnostic_routers is not None:
+            diagnostic_routers.pop(session_id, None)
         if session:
             # Compute structured summary metrics
             summary: dict[str, Any] = {

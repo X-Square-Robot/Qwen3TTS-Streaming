@@ -24,6 +24,10 @@
 #  Options:
 #    --variant, -m <name>    Model variant (base-1.7b, custom-1.7b, ...)
 #    --model-version <N>     Triton model version directory (default: 1)
+#    --model-release-version <id>  Model-owned MODEL_VERSION value
+#    --engine-build-version <id>   Spoken engine build identity
+#    --packager <name>       Model-package creator
+#    --package-date <date>   Model-package date (YYYY-MM-DD)
 #    --ngc-tag <tag>         Select NGC tritonserver tag (e.g. 25.03)
 #    --target-driver <ver>   Target NVIDIA driver for NGC container selection
 #    --yes, -y               Skip confirmations (non-interactive)
@@ -77,6 +81,10 @@ _env_or_empty() { printenv "$1" 2>/dev/null || true; }
 COMMAND=""
 VARIANT="${MODEL_VARIANT:-}"
 MODEL_VERSION="${MODEL_VERSION:-${ENGINE_MODEL_VERSION:-1}}"
+MODEL_RELEASE_VERSION="${QWEN3_TTS_MODEL_RELEASE_VERSION:-}"
+ENGINE_BUILD_VERSION="${QWEN3_TTS_ENGINE_BUILD_VERSION:-}"
+PACKAGE_PACKAGER="${QWEN3_TTS_PACKAGER:-}"
+PACKAGE_BUILD_DATE="${QWEN3_TTS_PACKAGE_DATE:-}"
 DRY_RUN=false
 YES_MODE=false
 REBUILD_IMAGE=false
@@ -184,6 +192,12 @@ Options:
   --variant, -m <name>    Model variant (base-1.7b, custom-1.7b, design-1.7b,
                           base-0.6b, custom-0.6b, all-1.7b, all)
   --model-version <N>     Triton model version directory (default: 1)
+  --model-release-version <id>
+                          Model release stored in read-only MODEL_VERSION
+  --engine-build-version <id>
+                          Engine build identity spoken by the diagnostic query
+  --packager <name>       Package creator stored in PACKAGE_INFO.json
+  --package-date <date>   Package date in strict YYYY-MM-DD format
   --ngc-tag <tag>         Select NGC tritonserver:<tag>-py3 for Phase B/C
                           (default: newest compatible tag for current driver).
   --target-driver <ver>   Target NVIDIA driver version for NGC container
@@ -291,6 +305,10 @@ parse_args() {
         case "$1" in
             --variant|-m)       VARIANT="$2"; shift 2 ;;
             --model-version)    MODEL_VERSION="$2"; shift 2 ;;
+            --model-release-version) MODEL_RELEASE_VERSION="$2"; shift 2 ;;
+            --engine-build-version) ENGINE_BUILD_VERSION="$2"; shift 2 ;;
+            --packager)         PACKAGE_PACKAGER="$2"; shift 2 ;;
+            --package-date)     PACKAGE_BUILD_DATE="$2"; shift 2 ;;
             --ngc-tag|--container-tag) NGC_TAG="$2"; shift 2 ;;
             --yes|-y)           YES_MODE=true; shift ;;
             --build|--rebuild-image) REBUILD_IMAGE=true; shift ;;
@@ -376,9 +394,134 @@ parse_args() {
     done
 }
 
+# Validate release/package values through the same Python contracts used by
+# export, assembly, and runtime. Empty values retain their downstream defaults.
+_validate_deployment_metadata() {
+    PYTHONPATH="$REPO_ROOT" python3 - \
+        "$MODEL_RELEASE_VERSION" \
+        "$ENGINE_BUILD_VERSION" \
+        "$PACKAGE_PACKAGER" \
+        "$PACKAGE_BUILD_DATE" <<'PY'
+import sys
+
+from engine.runtime.model_version import ModelVersionError, validate_model_version
+from engine.runtime.package_info import (
+    PackageInfoError,
+    validate_packaged_on,
+    validate_packager,
+)
+
+model_release, engine_build, packager, package_date = sys.argv[1:]
+try:
+    if model_release:
+        validate_model_version(model_release, source="model release version")
+    if engine_build:
+        validate_model_version(engine_build, source="engine build version")
+    if packager:
+        validate_packager(packager, source="packager")
+    if package_date:
+        validate_packaged_on(package_date, source="package date")
+except (ModelVersionError, PackageInfoError) as exc:
+    print(f"Invalid release/package metadata: {exc}", file=sys.stderr)
+    raise SystemExit(1) from None
+PY
+}
+
+_current_exported_model_release_version() {
+    local variant="$1"
+    local version_path="$REPO_ROOT/workspace/exported/$variant/MODEL_VERSION"
+    if [ -s "$version_path" ]; then
+        tr -d '\r\n' < "$version_path"
+    fi
+}
+
+_current_exported_engine_build_version() {
+    local variant="$1"
+    local version_path="$REPO_ROOT/workspace/exported/$variant/ENGINE_BUILD_VERSION"
+    if [ -s "$version_path" ]; then
+        tr -d '\r\n' < "$version_path"
+    fi
+}
+
+# The exported model tree is the canonical mutable staging area. Phase C copies
+# this identity into the immutable model-package root and sets mode 0444 again.
+_stage_model_release_version() {
+    [ -n "$MODEL_RELEASE_VERSION" ] || return 0
+    if [ -z "$VARIANT" ]; then
+        log_error "--model-release-version requires a concrete --variant"
+        return 1
+    fi
+    if [[ "$VARIANT" == all* ]]; then
+        log_error "Cannot apply one model release version to combined variant '$VARIANT'"
+        log_error "Package each concrete model separately so every MODEL_VERSION stays model-owned"
+        return 1
+    fi
+
+    local output="$REPO_ROOT/workspace/exported/$VARIANT/MODEL_VERSION"
+    if $DRY_RUN; then
+        log_info "[DRY RUN] Would write MODEL_VERSION=$MODEL_RELEASE_VERSION to $output (0444)"
+        return 0
+    fi
+    PYTHONPATH="$REPO_ROOT" python3 "$REPO_ROOT/scripts/python/write_version_sidecar.py" \
+        --output "$output" \
+        --version "$MODEL_RELEASE_VERSION"
+}
+
+_stage_engine_build_version() {
+    [ -n "$ENGINE_BUILD_VERSION" ] || return 0
+    if [ -z "$VARIANT" ]; then
+        log_error "--engine-build-version requires --variant"
+        return 1
+    fi
+
+    local -a target_variants=()
+    local candidate
+    case "$VARIANT" in
+        all)
+            for candidate in "${!_QWEN3_TTS_MODELS[@]}"; do
+                target_variants+=("$candidate")
+            done
+            ;;
+        all-1.7b)
+            for candidate in "${!_QWEN3_TTS_MODELS[@]}"; do
+                [[ "$candidate" == *-1.7b ]] && target_variants+=("$candidate")
+            done
+            ;;
+        *) target_variants=("$VARIANT") ;;
+    esac
+
+    local target output
+    for target in "${target_variants[@]}"; do
+        output="$REPO_ROOT/workspace/exported/$target/ENGINE_BUILD_VERSION"
+        if $DRY_RUN; then
+            log_info "[DRY RUN] Would write ENGINE_BUILD_VERSION=$ENGINE_BUILD_VERSION to $output (0444)"
+            continue
+        fi
+        PYTHONPATH="$REPO_ROOT" python3 "$REPO_ROOT/scripts/python/write_version_sidecar.py" \
+            --output "$output" \
+            --version "$ENGINE_BUILD_VERSION"
+    done
+}
+
 # ── Build forwarding arg arrays ──
 
 build_forward_args() {
+    _validate_deployment_metadata || exit 1
+    if [ -n "$MODEL_RELEASE_VERSION" ]; then
+        export QWEN3_TTS_MODEL_RELEASE_VERSION="$MODEL_RELEASE_VERSION"
+        _stage_model_release_version || exit 1
+    fi
+    if [ -n "$ENGINE_BUILD_VERSION" ]; then
+        export QWEN3_TTS_ENGINE_BUILD_VERSION="$ENGINE_BUILD_VERSION"
+        _stage_engine_build_version || exit 1
+    fi
+    if [ -n "$PACKAGE_PACKAGER" ]; then
+        export QWEN3_TTS_PACKAGER="$PACKAGE_PACKAGER"
+    fi
+    if [ -n "$PACKAGE_BUILD_DATE" ]; then
+        export QWEN3_TTS_PACKAGE_DATE="$PACKAGE_BUILD_DATE"
+    fi
+
     # Target driver override (propagated via env var to all phases)
     if [ -n "$TARGET_PROFILE" ]; then
         export TARGET_PROFILE
@@ -987,6 +1130,70 @@ _prompt_with_default() {
     echo "${value:-$default_value}"
 }
 
+_prompt_deployment_metadata() {
+    local prompt_model="$1"
+    local prompt_engine="$2"
+    local prompt_package="$3"
+
+    echo ""
+    echo "  发布与打包信息"
+    echo "    Triton 数字目录、模型发布版本、引擎编译版本相互独立。"
+
+    if $prompt_model; then
+        if [[ "$VARIANT" == all* ]]; then
+            echo "    组合变体 $VARIANT：保留每个模型各自的 MODEL_VERSION，不统一重标。"
+        else
+            local current_model_release
+            current_model_release="${MODEL_RELEASE_VERSION:-$(_current_exported_model_release_version "$VARIANT")}"
+            local entered_model_release=""
+            if [ -n "$current_model_release" ]; then
+                entered_model_release=$(_prompt_with_default \
+                    "  模型发布版本 MODEL_VERSION" \
+                    "$current_model_release")
+            else
+                read -rp "  模型发布版本 MODEL_VERSION（必填，例如 zehan@20260818）: " \
+                    -t 30 entered_model_release || true
+            fi
+            if [ -z "$entered_model_release" ]; then
+                log_error "模型发布版本不能为空；它将随模型包保存"
+                return 1
+            fi
+            MODEL_RELEASE_VERSION="$entered_model_release"
+        fi
+    fi
+
+    if $prompt_engine; then
+        local default_engine_build
+        default_engine_build="${ENGINE_BUILD_VERSION:-}"
+        if [ -z "$default_engine_build" ] && [[ "$VARIANT" != all* ]]; then
+            default_engine_build="$(_current_exported_engine_build_version "$VARIANT")"
+        fi
+        if [ -z "$default_engine_build" ]; then
+            default_engine_build="$(python3 - "$REPO_ROOT/engine/frontend/diagnostic_text.py" <<'PY'
+import runpy
+import sys
+
+print(runpy.run_path(sys.argv[1])["DEFAULT_ENGINE_VERSION"])
+PY
+            )"
+        fi
+        ENGINE_BUILD_VERSION=$(_prompt_with_default \
+            "  引擎编译版本" \
+            "$default_engine_build")
+    fi
+
+    if $prompt_package; then
+        PACKAGE_PACKAGER=$(_prompt_with_default \
+            "  打包人" \
+            "${PACKAGE_PACKAGER:-$(id -un)}")
+        PACKAGE_BUILD_DATE=$(_prompt_with_default \
+            "  打包日期 YYYY-MM-DD" \
+            "${PACKAGE_BUILD_DATE:-$(date +%F)}")
+    fi
+
+    _validate_deployment_metadata
+}
+
 _default_triton_io_dtype() {
     case "${1:-bf16}" in
         bf16|fp16|fp32|fp8) echo "$1" ;;
@@ -1295,7 +1502,11 @@ show_run_banner() {
     echo ""
     echo "  模式:      $description"
     [ -n "$VARIANT" ] && echo "  变体:      $VARIANT"
-    [ -n "$MODEL_VERSION" ] && echo "  版本:      $MODEL_VERSION"
+    [ -n "$MODEL_VERSION" ] && echo "  Triton目录: $MODEL_VERSION"
+    [ -n "$MODEL_RELEASE_VERSION" ] && echo "  模型版本:  $MODEL_RELEASE_VERSION"
+    [ -n "$ENGINE_BUILD_VERSION" ] && echo "  引擎编译:  $ENGINE_BUILD_VERSION"
+    [ -n "$PACKAGE_PACKAGER" ] && echo "  打包人:    $PACKAGE_PACKAGER"
+    [ -n "$PACKAGE_BUILD_DATE" ] && echo "  打包日期:  $PACKAGE_BUILD_DATE"
     [ -n "${ENGINE_VERSION:-}" ] && echo "  发布戳:    $ENGINE_VERSION (engine_version)"
     [ -n "${GATEWAY_MODE:-}" ] && echo "  阶段 C:    $GATEWAY_MODE"
     [ -n "$ENGINE_DTYPE" ] && echo "  基础精度:  $ENGINE_DTYPE"
@@ -1426,12 +1637,30 @@ interactive_mode() {
 
     if [ -t 0 ] && { $needs_setup || $needs_build || $will_package || $will_deploy; }; then
         echo ""
-        echo "  模型版本 (Triton model version)"
+        echo "  Triton model repository 数字目录"
         local _mv=""
-        read -rp "  版本号 [${MODEL_VERSION}] (30s 后自动): " -t 30 _mv || true
+        read -rp "  目录版本 [${MODEL_VERSION}] (30s 后自动): " -t 30 _mv || true
         if [ -n "$_mv" ]; then
             MODEL_VERSION="$_mv"
         fi
+
+        local prompt_model_metadata=false
+        local prompt_engine_metadata=false
+        local prompt_package_metadata=false
+        if $needs_setup || $needs_build || $will_package || $will_deploy; then
+            prompt_model_metadata=true
+        fi
+        if $needs_build || $will_package || $will_deploy; then
+            prompt_engine_metadata=true
+        fi
+        if $will_package || $will_deploy; then
+            prompt_package_metadata=true
+        fi
+        _prompt_deployment_metadata \
+            "$prompt_model_metadata" \
+            "$prompt_engine_metadata" \
+            "$prompt_package_metadata" \
+            || exit 1
     fi
 
     if [ -t 0 ] && { $needs_setup || $needs_build || $will_deploy; } && \

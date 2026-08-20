@@ -629,6 +629,11 @@ engine_start_docker() {
         -e "QWEN_LOG_BACKUP_COUNT=${QWEN_LOG_BACKUP_COUNT:-10}"
         -e "QWEN_LOG_STDOUT=${QWEN_LOG_STDOUT:-1}"
     )
+    if [[ -n "${QWEN3_TTS_ENGINE_BUILD_VERSION:-}" ]]; then
+        env_args+=(
+            -e "QWEN3_TTS_ENGINE_BUILD_VERSION=$QWEN3_TTS_ENGINE_BUILD_VERSION"
+        )
+    fi
     if [[ -n "$max_seq_len" ]]; then
         env_args+=( -e "ENGINE_SCHEDULER_MAX_SEQ_LEN=$max_seq_len" )
     fi

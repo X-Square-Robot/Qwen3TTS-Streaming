@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -76,6 +77,10 @@ def _write_custom_export(exported_dir: Path) -> None:
         json.dumps(manifest),
         encoding="utf-8",
     )
+    (variant_dir / "MODEL_VERSION").write_text(
+        "zehan@20260601\n",
+        encoding="utf-8",
+    )
     (variant_dir / "talker_code2wav_fused.engine").write_bytes(b"fake-plan")
     weights_dir = variant_dir / "weights"
     weights_dir.mkdir()
@@ -104,7 +109,12 @@ def _write_custom_export(exported_dir: Path) -> None:
 
 
 def _assemble(
-    exported_dir: Path, repo_dir: Path, variant: str, engine_mode: str
+    exported_dir: Path,
+    repo_dir: Path,
+    variant: str,
+    engine_mode: str,
+    *,
+    package_date: str = "2026-08-20",
 ) -> None:
     cmd = """
 set -euo pipefail
@@ -124,6 +134,12 @@ assemble_model_repo "$1" "$2" "$3" "$4" "1"
         ],
         cwd=REPO_ROOT,
         check=True,
+        env={
+            **os.environ,
+            "QWEN3_TTS_ENGINE_BUILD_VERSION": "engine-builder@20260820_v1",
+            "QWEN3_TTS_PACKAGER": "packager-test",
+            "QWEN3_TTS_PACKAGE_DATE": package_date,
+        },
     )
 
 
@@ -311,6 +327,22 @@ def test_custom_trt_package_excludes_verification_and_icl_assets(tmp_path):
     assert not (repo_dir / "triton_manifest.json").exists()
     assert not (repo_dir / "artifact_manifest.json").exists()
     assert (runtime_dir / "model.plan").is_file()
+    assert (package_dir / "MODEL_VERSION").read_text(encoding="utf-8") == (
+        "zehan@20260601\n"
+    )
+    assert (package_dir / "MODEL_VERSION").stat().st_mode & 0o222 == 0
+    engine_version_path = package_dir / "ENGINE_BUILD_VERSION"
+    assert engine_version_path.read_text(encoding="utf-8") == (
+        "engine-builder@20260820_v1\n"
+    )
+    assert engine_version_path.stat().st_mode & 0o222 == 0
+    package_info_path = package_dir / "PACKAGE_INFO.json"
+    assert json.loads(package_info_path.read_text(encoding="utf-8")) == {
+        "package_info_schema_version": 1,
+        "packager": "packager-test",
+        "packaged_on": "2026-08-20",
+    }
+    assert package_info_path.stat().st_mode & 0o222 == 0
     assert (package_dir / "artifact_manifest.json").is_file()
     assert (runtime_dir / "artifact_manifest.json").is_file()
     assert not (runtime_dir / "speech_tokenizer_encoder.onnx").exists()
@@ -322,3 +354,18 @@ def test_custom_trt_package_excludes_verification_and_icl_assets(tmp_path):
     )
     optional_assets = manifest["package"]["optional_assets"]
     assert optional_assets == {}
+
+
+def test_assembly_rejects_package_date_with_time_component(tmp_path):
+    exported_dir = tmp_path / "exported"
+    repo_dir = tmp_path / "model_repository"
+    _write_custom_export(exported_dir)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        _assemble(
+            exported_dir,
+            repo_dir,
+            "custom-1.7b",
+            "trt",
+            package_date="2026-08-20T16:20:02+08:00",
+        )
