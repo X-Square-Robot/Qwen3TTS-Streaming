@@ -26,6 +26,9 @@ def test_triton_profile_starts_openai_realtime_sidecar_with_internal_grpc():
     assert any("workspace/realtime_usage" in volume for volume in service["volumes"])
     assert triton_build_args["CLIENT_WHEEL_FILENAME"] == "${CLIENT_WHEEL_FILENAME:-}"
     assert triton_build_args["CLIENT_WHEEL_SHA256"] == "${CLIENT_WHEEL_SHA256:-}"
+    assert triton_build_args["TRITON_RUNTIME_BASE_IMAGE"] == (
+        "${TRITON_RUNTIME_BASE_IMAGE:-triton-deps}"
+    )
     assert service["command"][-3:] == [
         "python3",
         "-m",
@@ -36,9 +39,15 @@ def test_triton_profile_starts_openai_realtime_sidecar_with_internal_grpc():
 def test_triton_image_contains_sidecar_runtime_dependencies_and_protocol():
     dockerfile = _read("infra/docker/Dockerfile.triton")
 
+    dependency_runs = dockerfile.split("RUN --mount=type=cache,target=/root/.cache/pip")
+    assert len(dependency_runs) == 3
+    assert "    attrs \\\n" not in dependency_runs[1]
+    assert "    attrs \\\n" in dependency_runs[2]
     assert "    attrs \\\n" in dockerfile
     assert "aiohttp" in dockerfile
     assert "import aiohttp, attr" in dockerfile
+    assert "ARG TRITON_RUNTIME_BASE_IMAGE=triton-deps" in dockerfile
+    assert "FROM ${TRITON_RUNTIME_BASE_IMAGE} AS triton-runtime" in dockerfile
     assert '"tritonclient[grpc]>=2.54.0"' in dockerfile
     assert (
         "COPY client/src/qwen3tts_protocol/ /opt/qwen3-tts/qwen3tts_protocol/"
@@ -78,9 +87,29 @@ def test_release_pipelines_build_both_version_matched_runtime_images():
         assert "/app/demo/index.html" in pipeline
         assert "engine.distribution.container_smoke --runtime standalone" in pipeline
         assert "engine.distribution.container_smoke --runtime triton" in pipeline
+        assert 'TRITON_RUNTIME_BASE_IMAGE=' in pipeline
+        assert '--build-arg "TRITON_RUNTIME_BASE_IMAGE=' in pipeline
 
     assert "triton_image" in github
     assert "TRITON_RELEASE_IMAGE" in gitlab
+
+
+def test_release_uses_an_immutable_prebuilt_triton_dependency_base():
+    github_release = _read(".github/workflows/release.yml")
+    github_base = _read(".github/workflows/triton-runtime-base.yml")
+    gitlab = _read(".gitlab-ci.yml")
+    publisher = _read("scripts/bash/publish_triton_runtime_base.sh")
+
+    assert 'BUILD_TRITON_RUNTIME_BASE == "1"' in gitlab
+    assert "build-triton-runtime-base:" in gitlab
+    assert "Required Triton runtime base is missing" in gitlab
+    assert "Required Triton runtime base is missing" in github_release
+    assert "workflow_dispatch:" in github_base
+    assert "scripts/bash/publish_triton_runtime_base.sh" in gitlab
+    assert "scripts/bash/publish_triton_runtime_base.sh" in github_base
+    assert "--target triton-deps" in publisher
+    assert 'docker push "$runtime_base_image"' in publisher
+    assert "docker manifest inspect" in publisher
 
 
 def test_web_release_stamps_only_the_publishable_workspace_without_registry_resolution():

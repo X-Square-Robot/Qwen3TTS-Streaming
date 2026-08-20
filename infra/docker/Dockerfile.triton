@@ -6,6 +6,7 @@
 ARG BASE_IMAGE=nvcr.io/nvidia/tritonserver:26.02-py3
 ARG TENSORRT_PYTHON_VERSION=10.15.1.29
 ARG PYTORCH_CUDA_TAG=cu130
+ARG TRITON_RUNTIME_BASE_IMAGE=triton-deps
 FROM ${BASE_IMAGE} AS triton-deps
 ARG TENSORRT_PYTHON_VERSION
 ARG PYTORCH_CUDA_TAG
@@ -16,9 +17,10 @@ ARG PYTORCH_CUDA_TAG
 # at build time. Install it separately from public PyPI + pypi.nvidia.com, using
 # the same CUDA-13 runtime-first, --no-deps recipe as scripts/bash/lib/pip.sh
 # (10.13.3.x metadata otherwise pulls a deprecated cuda-runtime source package).
-# Triton 26.02 also ships an aiohttp installation without its ``attrs`` runtime
-# dependency. Keep attrs explicit and import-probe both modules before the image
-# can advance to the release smoke test.
+# Keep this expensive layer stable: its TensorRT wheel is about 3.7 GB. Small
+# runtime additions belong in later layers so they cannot force CI to download
+# TensorRT again. The release pipeline normally skips this stage altogether and
+# starts from a versioned, prebuilt runtime base.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install \
     -i https://mirrors.bfsu.edu.cn/pypi/web/simple \
@@ -30,7 +32,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     numpy \
     'soxr>=1,<2' \
     grpcio \
-    attrs \
     aiohttp \
     "tritonclient[grpc]>=2.54.0" \
     && pip install \
@@ -49,13 +50,26 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     "tensorrt_cu13_libs==${TENSORRT_PYTHON_VERSION}" \
     "tensorrt-cu13==${TENSORRT_PYTHON_VERSION}" \
     && python3 -c "\
-import aiohttp, attr, torch, tokenizers, tensorrt, yaml, grpc, numpy, soxr; \
+import torch, tokenizers, tensorrt, yaml, grpc, numpy, soxr; \
 print(f'torch {torch.__version__}, CUDA {torch.version.cuda}'); \
 print(f'tokenizers {tokenizers.__version__}'); \
 print(f'tensorrt {tensorrt.__version__}'); \
 print(f'grpcio {grpc.__version__}, pyyaml {yaml.__version__}, numpy {numpy.__version__}')"
 
-FROM triton-deps AS triton-runtime
+# Triton 26.02 ships an aiohttp installation without its ``attrs`` runtime
+# dependency. Install and probe that small dependency separately so changing it
+# never invalidates the multi-gigabyte TensorRT layer above.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install \
+    -i https://mirrors.bfsu.edu.cn/pypi/web/simple \
+    --trusted-host mirrors.bfsu.edu.cn \
+    attrs \
+    && python3 -c "import aiohttp, attr; print(f'aiohttp {aiohttp.__version__}, attrs {attr.__version__}')"
+
+# Local Compose builds use the triton-deps stage by default. Release CI passes
+# an immutable Registry image here; BuildKit then prunes triton-deps completely,
+# making tag builds independent of PyPI/NVIDIA network availability.
+FROM ${TRITON_RUNTIME_BASE_IMAGE} AS triton-runtime
 
 ARG ENGINE_VERSION=""
 ARG CLIENT_WHEEL_FILENAME=""

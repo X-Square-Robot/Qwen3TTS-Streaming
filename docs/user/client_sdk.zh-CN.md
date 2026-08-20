@@ -143,6 +143,7 @@ GitHub 单元测试的 CPU-only PyTorch 使用南京大学镜像；GitLab 的 De
 | --- | --- |
 | `PIP_INDEX_URL` | wheel 构建、烟测及镜像内普通 Python 依赖 |
 | `ENGINE_BASE_IMAGE` | 已包含匹配 CUDA/PyTorch/TensorRT 的 NVIDIA PyTorch 基础镜像；优先指向公司 Harbor/ACR 中按 digest 同步的副本 |
+| `TRITON_RUNTIME_BASE_TAG` | release 镜像 job 选用的、已预发布且不可变的 Triton Python 依赖基座 |
 | `X2ROBOT_REGISTRY`、`X2ROBOT_IMAGE`、`X2ROBOT_IMAGE_TAG_PREFIX` | GitLab 引擎镜像的目标仓库及兼容性 tag 通道 |
 | `X2ROBOT_REGISTRY_USER`、`X2ROBOT_REGISTRY_PASSWORD` | GitLab 推送引擎镜像所需的 masked CI/CD 凭据 |
 | `PYTORCH_CPU_INDEX` | GitHub 单元测试使用的 CPU-only PyTorch 索引 |
@@ -153,7 +154,11 @@ GitHub 单元测试的 CPU-only PyTorch 使用南京大学镜像；GitLab 的 De
 Actions、Release API、GHCR 推送或 GitLab 发布流量，runner 仍需能访问对应发布平台。
 两套发布流水线都会把 Docker inline cache 发布到可变的 `buildcache` 镜像标签（GitLab
 按运行时前缀隔离）；不可变 release tag 仍是部署产物。首次构建仍需拉取较大的 NGC
-基础镜像，后续 tag 可以从 Registry 复用已验证的依赖层。
+基础镜像。Triton 的约束更严格：release job 必须拉取
+`TRITON_RUNTIME_BASE_TAG` 指定的不可变基座，不能现场安装 Python/TensorRT 依赖。
+创建 release tag 之前，先通过 GitLab 手动 `BUILD_TRITON_RUNTIME_BASE=1` 流水线或
+GitHub 的 **Build Triton Runtime Base** workflow 构建一次基座。这样不稳定的
+PyPI/NVIDIA 下载不在 tag 发布关键路径中；基座缺失会立即失败。
 
 `client/dist/` 保持为被忽略的本地/CI 暂存目录；wheel 二进制不提交进 Git。
 两个 tag CI 都不会调用会重新构建 wheel 的本地 `compose.sh` 路径。

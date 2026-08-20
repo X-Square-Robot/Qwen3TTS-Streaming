@@ -85,6 +85,13 @@ PyPI Package Registry 并挂到 Release。随后各流水线按 SHA256 将自己
 放进引擎镜像，分别推送 GHCR/GitLab Container Registry。每条发布流水线内都
 禁止手工再构建或上传第二份 wheel。
 
+Triton 镜像使用单独发布、不可变的依赖基座，release tag 流水线不再从 PyPI
+下载数 GB 的 TensorRT wheel。某套运行时矩阵第一次发布前，先运行 GitLab 手动
+流水线并设置 `BUILD_TRITON_RUNTIME_BASE=1`，以及/或者运行 GitHub 的
+**Build Triton Runtime Base** workflow。`triton-deps` 阶段或
+CUDA/TensorRT/PyTorch 矩阵变化时，先提升 `TRITON_RUNTIME_BASE_TAG`、发布新基座，
+再创建 release tag。基座缺失时 release 会立即失败，这是有意的发布门禁。
+
 ## 提交 PR
 
 1. 从 `dev` 切分支，PR 目标也是 `dev`（见上文分支模型；`main` 只接受来自 `beta` 的合并）。提交信息用 [Conventional Commits](https://www.conventionalcommits.org/) 前缀（`feat`/`fix`/`refactor`/`docs`/`chore` 等）。

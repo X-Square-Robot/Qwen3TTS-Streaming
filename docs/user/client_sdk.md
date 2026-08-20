@@ -161,6 +161,7 @@ GitLab:
 | --- | --- |
 | `PIP_INDEX_URL` | Wheel builds, smoke tests, and general Python image dependencies |
 | `ENGINE_BASE_IMAGE` | NVIDIA PyTorch base containing matched CUDA/PyTorch/TensorRT; preferably a digest-pinned company Harbor/ACR copy |
+| `TRITON_RUNTIME_BASE_TAG` | Immutable, prepublished Triton Python dependency base selected by release image jobs |
 | `X2ROBOT_REGISTRY`, `X2ROBOT_IMAGE`, `X2ROBOT_IMAGE_TAG_PREFIX` | GitLab engine image destination and compatibility tag channel |
 | `X2ROBOT_REGISTRY_USER`, `X2ROBOT_REGISTRY_PASSWORD` | Masked GitLab CI/CD credentials for pushing the engine image |
 | `PYTORCH_CPU_INDEX` | CPU-only PyTorch index used by GitHub unit tests |
@@ -173,8 +174,12 @@ mirrors do not proxy GitHub Actions, the Release API, GHCR pushes, or GitLab
 publication traffic, so the runner must still reach its forge. Both release
 pipelines publish inline Docker cache metadata under a mutable `buildcache`
 image tag (runtime-prefixed on GitLab); the immutable release tag is still the
-deployment artifact. The first build must pull the large NGC base, while later
-tag builds can reuse its verified dependency layers through the Registry.
+deployment artifact. Triton is stricter: release jobs must pull the immutable
+base named by `TRITON_RUNTIME_BASE_TAG` and never install its Python/TensorRT
+dependencies. Build that base once with GitLab's manual
+`BUILD_TRITON_RUNTIME_BASE=1` pipeline or GitHub's **Build Triton Runtime Base**
+workflow before creating a release tag. This keeps a flaky PyPI/NVIDIA download
+outside the tag critical path; a missing base fails fast.
 
 `client/dist/` remains an ignored local/CI staging directory. Wheel binaries
 are deliberately not committed to Git, and neither tag pipeline invokes the

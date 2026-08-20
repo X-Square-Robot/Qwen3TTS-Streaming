@@ -259,6 +259,7 @@ jobs:
       TRITON_BASE_IMAGE: ${{ vars.TRITON_BASE_IMAGE || 'nvcr.io/nvidia/tritonserver:26.02-py3' }}
       TRITON_TENSORRT_PYTHON_VERSION: ${{ vars.TRITON_TENSORRT_PYTHON_VERSION || '10.15.1.29' }}
       TRITON_PYTORCH_CUDA_TAG: ${{ vars.TRITON_PYTORCH_CUDA_TAG || 'cu130' }}
+      TRITON_RUNTIME_BASE_TAG: ${{ vars.TRITON_RUNTIME_BASE_TAG || 'runtime-base_26.02_trt10.15.1.29_cu130_r1' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -316,8 +317,15 @@ jobs:
           engine_cache_image="ghcr.io/${image_repository}:buildcache"
           triton_image="ghcr.io/${image_repository}-triton:${GITHUB_REF_NAME}"
           triton_cache_image="ghcr.io/${image_repository}-triton:buildcache"
+          triton_runtime_base_image="ghcr.io/${image_repository}-triton:${TRITON_RUNTIME_BASE_TAG}"
           echo "engine_image=$engine_image" >> "$GITHUB_OUTPUT"
           echo "triton_image=$triton_image" >> "$GITHUB_OUTPUT"
+
+          if ! docker pull "$triton_runtime_base_image"; then
+            echo "Required Triton runtime base is missing: $triton_runtime_base_image" >&2
+            echo "Run the Build Triton Runtime Base workflow before creating a release tag." >&2
+            exit 1
+          fi
 
           docker pull "$engine_cache_image" || true
           docker build --pull \
@@ -345,6 +353,7 @@ jobs:
             --build-arg "BASE_IMAGE=$TRITON_BASE_IMAGE" \
             --build-arg "TENSORRT_PYTHON_VERSION=$TRITON_TENSORRT_PYTHON_VERSION" \
             --build-arg "PYTORCH_CUDA_TAG=$TRITON_PYTORCH_CUDA_TAG" \
+            --build-arg "TRITON_RUNTIME_BASE_IMAGE=$triton_runtime_base_image" \
             --build-arg "ENGINE_VERSION=$GITHUB_REF_NAME" \
             --build-arg "CLIENT_WHEEL_FILENAME=$WHEEL_FILENAME" \
             --build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256" \
