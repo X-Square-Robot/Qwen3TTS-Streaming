@@ -504,7 +504,7 @@ create-release:
       TRITON_RELEASE_IMAGE="${TRITON_IMAGE_REPOSITORY}:${X2ROBOT_IMAGE_TAG_PREFIX}${CI_COMMIT_TAG}"
       export ENGINE_RELEASE_IMAGE TRITON_RELEASE_IMAGE
   script:
-    - bash scripts/bash/create_gitlab_release.sh
+    - sh scripts/bash/create_gitlab_release.sh
 
 pages:
   extends: .tag-release-job

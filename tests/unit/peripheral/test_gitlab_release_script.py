@@ -51,8 +51,8 @@ def _release_environment(tmp_path: Path) -> dict[str, str]:
 def _write_fake_glab(tmp_path: Path) -> Path:
     fake = tmp_path / "glab"
     fake.write_text(
-        """#!/usr/bin/env bash
-set -euo pipefail
+        """#!/bin/sh
+set -eu
 
 {
   echo CALL
@@ -64,7 +64,7 @@ case "${1:-}" in
     exit 0
     ;;
   release)
-    [[ "${2:-}" == create ]]
+    [ "${2:-}" = create ]
     exit 0
     ;;
   api)
@@ -74,7 +74,7 @@ case "${1:-}" in
     url=
     direct_path=
     endpoint=
-    while (($#)); do
+    while [ "$#" -gt 0 ]; do
       case "$1" in
         --hostname)
           shift 2
@@ -100,9 +100,10 @@ case "${1:-}" in
           ;;
       esac
     done
-    [[ "$endpoint" != job ]] || exit 0
-    if [[ "$method" == POST ]]; then
-      [[ -n "$name" && -n "$url" && "$direct_path" == /* ]]
+    [ "$endpoint" != job ] || exit 0
+    if [ "$method" = POST ]; then
+      [ -n "$name" ] && [ -n "$url" ]
+      case "$direct_path" in /*) ;; *) exit 3 ;; esac
       direct_url="${CI_PROJECT_URL}/-/releases/${CI_COMMIT_TAG}/downloads${direct_path}"
       jq -cn \
         --arg name "$name" \
@@ -131,7 +132,7 @@ def test_missing_release_metadata_fails_before_any_gitlab_request(tmp_path: Path
     environment.pop("WHEEL_FILENAME")
 
     result = subprocess.run(
-        ["bash", str(SCRIPT)],
+        ["sh", str(SCRIPT)],
         cwd=REPO_ROOT,
         env=environment,
         capture_output=True,
@@ -149,7 +150,7 @@ def test_release_links_use_nonempty_multipart_form_contract(tmp_path: Path):
     environment = _release_environment(tmp_path)
 
     subprocess.run(
-        ["bash", str(SCRIPT)],
+        ["sh", str(SCRIPT)],
         cwd=REPO_ROOT,
         env=environment,
         capture_output=True,

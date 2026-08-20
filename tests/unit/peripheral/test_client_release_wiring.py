@@ -211,7 +211,7 @@ def test_release_links_are_durable_and_docs_never_use_vcs_installs():
     )
 
     assert "gitlab-org/cli:v1.112.0" in gitlab
-    assert "bash scripts/bash/create_gitlab_release.sh" in gitlab
+    assert "sh scripts/bash/create_gitlab_release.sh" in gitlab
     assert (
         'glab config set api_protocol "$CI_SERVER_PROTOCOL" '
         '--host "$CI_SERVER_FQDN"' in gitlab_release
@@ -219,9 +219,9 @@ def test_release_links_are_durable_and_docs_never_use_vcs_installs():
     assert 'glab api --hostname "$CI_SERVER_FQDN" job --silent' in gitlab_release
     assert '--repo "$CI_PROJECT_PATH"' in gitlab_release
     assert '--hostname "$CI_SERVER_FQDN"' in gitlab_release
-    assert '--form "name=$name"' in gitlab_release
-    assert '--form "url=$url"' in gitlab_release
-    assert '--form "direct_asset_path=$direct_path"' in gitlab_release
+    assert '--form "name=$release_link_name"' in gitlab_release
+    assert '--form "url=$release_link_url"' in gitlab_release
+    assert '--form "direct_asset_path=$release_link_path"' in gitlab_release
     assert "$WHEEL_REGISTRY_URL" in gitlab_release
     assert "$WHEEL_RELEASE_URL" in gitlab_release
     assert "require_release_environment" in gitlab_release
