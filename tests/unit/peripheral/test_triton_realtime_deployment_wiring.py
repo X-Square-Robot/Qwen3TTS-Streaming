@@ -36,7 +36,9 @@ def test_triton_profile_starts_openai_realtime_sidecar_with_internal_grpc():
 def test_triton_image_contains_sidecar_runtime_dependencies_and_protocol():
     dockerfile = _read("infra/docker/Dockerfile.triton")
 
+    assert "    attrs \\\n" in dockerfile
     assert "aiohttp" in dockerfile
+    assert "import aiohttp, attr" in dockerfile
     assert '"tritonclient[grpc]>=2.54.0"' in dockerfile
     assert (
         "COPY client/src/qwen3tts_protocol/ /opt/qwen3-tts/qwen3tts_protocol/"
