@@ -202,6 +202,7 @@ def test_release_wheels_remain_artifacts_not_git_sources():
 
 def test_release_links_are_durable_and_docs_never_use_vcs_installs():
     gitlab = _read(".gitlab-ci.yml")
+    gitlab_release = _read("scripts/bash/create_gitlab_release.sh")
     github = _read(".github/workflows/release.yml")
     markdown = "\n".join(
         path.read_text(encoding="utf-8")
@@ -210,17 +211,20 @@ def test_release_links_are_durable_and_docs_never_use_vcs_installs():
     )
 
     assert "gitlab-org/cli:v1.112.0" in gitlab
+    assert "bash scripts/bash/create_gitlab_release.sh" in gitlab
     assert (
         'glab config set api_protocol "$CI_SERVER_PROTOCOL" '
-        '--host "$CI_SERVER_FQDN"' in gitlab
+        '--host "$CI_SERVER_FQDN"' in gitlab_release
     )
-    assert 'glab api --hostname "$CI_SERVER_FQDN" job --silent' in gitlab
-    assert '--repo "$CI_PROJECT_PATH"' in gitlab
-    assert '--hostname "$CI_SERVER_FQDN"' in gitlab
-    assert '"url=$WHEEL_REGISTRY_URL"' in gitlab
-    assert '"direct_asset_path=/client-sdk/$WHEEL_FILENAME"' in gitlab
-    assert "$WHEEL_REGISTRY_URL" in gitlab
-    assert "$WHEEL_RELEASE_URL" in gitlab
+    assert 'glab api --hostname "$CI_SERVER_FQDN" job --silent' in gitlab_release
+    assert '--repo "$CI_PROJECT_PATH"' in gitlab_release
+    assert '--hostname "$CI_SERVER_FQDN"' in gitlab_release
+    assert '--form "name=$name"' in gitlab_release
+    assert '--form "url=$url"' in gitlab_release
+    assert '--form "direct_asset_path=$direct_path"' in gitlab_release
+    assert "$WHEEL_REGISTRY_URL" in gitlab_release
+    assert "$WHEEL_RELEASE_URL" in gitlab_release
+    assert "require_release_environment" in gitlab_release
     assert "artifacts/raw" not in gitlab
     assert "gh release upload" in github
     vcs_prefix = "git" + "+"

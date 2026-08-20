@@ -487,10 +487,15 @@ create-release:
       artifacts: true
     - job: build-engine-image
       artifacts: false
+    # Artifact names originate in this job's dotenv report; they are not
+    # transitively re-exported by publish-browser-sdk.
+    - job: build-web-release
+      artifacts: true
     - job: publish-browser-sdk
       artifacts: true
   variables:
-    GIT_STRATEGY: none
+    GIT_STRATEGY: clone
+    GIT_DEPTH: "1"
     GLAB_ENABLE_CI_AUTOLOGIN: "true"
   before_script:
     - |
@@ -498,89 +503,8 @@ create-release:
       TRITON_IMAGE_REPOSITORY="${X2ROBOT_TRITON_IMAGE:-${X2ROBOT_IMAGE}-triton}"
       TRITON_RELEASE_IMAGE="${TRITON_IMAGE_REPOSITORY}:${X2ROBOT_IMAGE_TAG_PREFIX}${CI_COMMIT_TAG}"
       export ENGINE_RELEASE_IMAGE TRITON_RELEASE_IMAGE
-      case "$CI_SERVER_PROTOCOL" in
-        http|https) ;;
-        *)
-          echo "Unsupported GitLab API protocol: $CI_SERVER_PROTOCOL" >&2
-          exit 1
-          ;;
-      esac
-      glab config set api_protocol "$CI_SERVER_PROTOCOL" --host "$CI_SERVER_FQDN"
-      glab api --hostname "$CI_SERVER_FQDN" job --silent
   script:
-    - |
-      notes="$(printf 'SDK wheel: `%s`\n\nSDK SHA256: `%s`\n\nStandalone image: `%s`\n\nTriton image: `%s`\n' \
-        "$WHEEL_FILENAME" "$WHEEL_SHA256" "$ENGINE_RELEASE_IMAGE" "$TRITON_RELEASE_IMAGE")"
-      glab release create "$CI_COMMIT_TAG" \
-        --repo "$CI_PROJECT_PATH" \
-        --ref "$CI_COMMIT_SHA" \
-        --name "Qwen3TTS-Streaming $CI_COMMIT_TAG" \
-        --notes "$notes"
-
-      links_endpoint="projects/${CI_PROJECT_ID}/releases/${CI_COMMIT_TAG}/assets/links"
-      links_json="$(glab api --hostname "$CI_SERVER_FQDN" "$links_endpoint")"
-      matching_links="$(printf '%s' "$links_json" | jq \
-        --arg name "$WHEEL_FILENAME" \
-        --arg url "$WHEEL_REGISTRY_URL" \
-        '[.[] | select(.name == $name or .url == $url)]')"
-      matching_count="$(printf '%s' "$matching_links" | jq 'length')"
-
-      case "$matching_count" in
-        0)
-          matching_link="$(glab api --hostname "$CI_SERVER_FQDN" \
-            --method POST "$links_endpoint" \
-            --raw-field "name=$WHEEL_FILENAME" \
-            --raw-field "url=$WHEEL_REGISTRY_URL" \
-            --raw-field "direct_asset_path=/client-sdk/$WHEEL_FILENAME" \
-            --raw-field "link_type=package")"
-          ;;
-        1)
-          matching_link="$(printf '%s' "$matching_links" | jq '.[0]')"
-          ;;
-        *)
-          echo "Release has conflicting wheel asset links for $WHEEL_FILENAME" >&2
-          exit 1
-          ;;
-      esac
-
-      actual_name="$(printf '%s' "$matching_link" | jq -r '.name')"
-      actual_url="$(printf '%s' "$matching_link" | jq -r '.url')"
-      actual_direct_url="$(printf '%s' "$matching_link" | jq -r '.direct_asset_url')"
-      actual_link_type="$(printf '%s' "$matching_link" | jq -r '.link_type')"
-      if [ "$actual_name" != "$WHEEL_FILENAME" ] || \
-         [ "$actual_url" != "$WHEEL_REGISTRY_URL" ] || \
-         [ "$actual_direct_url" != "$WHEEL_RELEASE_URL" ] || \
-         [ "$actual_link_type" != "package" ]; then
-        echo "Existing GitLab Release asset does not match the published wheel" >&2
-        exit 1
-      fi
-      for spec in "$BROWSER_SDK_TARBALL|$BROWSER_SDK_GENERIC_URL|/browser-sdk/$BROWSER_SDK_TARBALL" \
-                  "$DEMO_ARCHIVE|$DEMO_ARCHIVE_URL|/demo/$DEMO_ARCHIVE"; do
-        name="${spec%%|*}"
-        rest="${spec#*|}"
-        url="${rest%%|*}"
-        direct_path="${rest#*|}"
-        links_json="$(glab api --hostname "$CI_SERVER_FQDN" "$links_endpoint")"
-        matches="$(printf '%s' "$links_json" | jq --arg name "$name" --arg url "$url" \
-          '[.[] | select(.name == $name or .url == $url)]')"
-        case "$(printf '%s' "$matches" | jq 'length')" in
-          0)
-            link="$(glab api --hostname "$CI_SERVER_FQDN" --method POST "$links_endpoint" \
-              --raw-field "name=$name" --raw-field "url=$url" \
-              --raw-field "direct_asset_path=$direct_path" --raw-field "link_type=package")"
-            ;;
-          1) link="$(printf '%s' "$matches" | jq '.[0]')" ;;
-          *) echo "Release has conflicting asset links for $name" >&2; exit 1 ;;
-        esac
-        expected_direct_url="${CI_PROJECT_URL}/-/releases/${CI_COMMIT_TAG}/downloads${direct_path}"
-        if [ "$(printf '%s' "$link" | jq -r '.name')" != "$name" ] || \
-           [ "$(printf '%s' "$link" | jq -r '.url')" != "$url" ] || \
-           [ "$(printf '%s' "$link" | jq -r '.direct_asset_url')" != "$expected_direct_url" ] || \
-           [ "$(printf '%s' "$link" | jq -r '.link_type')" != "package" ]; then
-          echo "Existing GitLab Release asset does not match $name" >&2
-          exit 1
-        fi
-      done
+    - bash scripts/bash/create_gitlab_release.sh
 
 pages:
   extends: .tag-release-job
