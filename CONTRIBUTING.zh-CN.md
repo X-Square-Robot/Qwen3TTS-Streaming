@@ -89,10 +89,10 @@ Triton 镜像使用单独发布、不可变的依赖基座，release tag 流水�
 下载数 GB 的 TensorRT wheel。某套运行时矩阵第一次发布前，先运行 GitLab 手动
 流水线并设置 `BUILD_TRITON_RUNTIME_BASE=1`，以及/或者运行 GitHub 的
 **Build Triton Runtime Base** workflow。`triton-deps` 阶段或
-CUDA/TensorRT/PyTorch 矩阵变化时，维护者也可以在向 GitLab 推送基座提交时附加
-`-o ci.variable=BUILD_TRITON_RUNTIME_BASE=1`。先提升
-`TRITON_RUNTIME_BASE_TAG`、发布新基座，再创建 release tag。基座缺失时 release
-会立即失败，这是有意的发布门禁。
+CUDA/TensorRT/PyTorch 矩阵变化时，先提升 `TRITON_RUNTIME_BASE_TAG`。维护者也可以
+在向 GitLab 推送受保护的 release tag 时附加
+`-o ci.variable=BUILD_TRITON_RUNTIME_BASE=1`，使 `runtime-base` stage 先完成并
+门禁后续发布。基座缺失时 release 会立即失败，这是有意的发布门禁。
 
 ## 提交 PR
 

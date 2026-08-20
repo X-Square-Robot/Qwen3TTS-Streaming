@@ -94,10 +94,11 @@ release tags never download the multi-gigabyte TensorRT wheel from PyPI. Before
 the first release for a runtime matrix, run GitLab's manual pipeline with
 `BUILD_TRITON_RUNTIME_BASE=1` and/or GitHub's **Build Triton Runtime Base**
 workflow. Maintainers can equivalently pass
-`-o ci.variable=BUILD_TRITON_RUNTIME_BASE=1` while pushing the base commit to
-GitLab. Bump `TRITON_RUNTIME_BASE_TAG` whenever the `triton-deps` stage or its
-CUDA/TensorRT/PyTorch matrix changes, publish that base, and only then create
-the release tag. A missing base fails the release immediately by design.
+`-o ci.variable=BUILD_TRITON_RUNTIME_BASE=1` while pushing a protected release
+tag to GitLab. The `runtime-base` stage then gates the rest of that release
+pipeline. Bump `TRITON_RUNTIME_BASE_TAG` whenever the `triton-deps` stage or its
+CUDA/TensorRT/PyTorch matrix changes. A missing base fails the release
+immediately by design.
 
 ## Submitting a PR
 
