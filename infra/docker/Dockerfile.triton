@@ -6,8 +6,9 @@
 ARG BASE_IMAGE=nvcr.io/nvidia/tritonserver:26.02-py3
 ARG TENSORRT_PYTHON_VERSION=10.15.1.29
 ARG PYTORCH_CUDA_TAG=cu130
+ARG TRITON_RUNTIME_PARENT_IMAGE=triton-heavy-deps
 ARG TRITON_RUNTIME_BASE_IMAGE=triton-deps
-FROM ${BASE_IMAGE} AS triton-deps
+FROM ${BASE_IMAGE} AS triton-heavy-deps
 ARG TENSORRT_PYTHON_VERSION
 ARG PYTORCH_CUDA_TAG
 
@@ -56,15 +57,17 @@ print(f'tokenizers {tokenizers.__version__}'); \
 print(f'tensorrt {tensorrt.__version__}'); \
 print(f'grpcio {grpc.__version__}, pyyaml {yaml.__version__}, numpy {numpy.__version__}')"
 
-# Triton 26.02 ships an aiohttp installation without its ``attrs`` runtime
-# dependency. Install and probe that small dependency separately so changing it
-# never invalidates the multi-gigabyte TensorRT layer above.
+# Small Python runtime dependencies live in a child layer. A new immutable base
+# can inherit the preceding published base through TRITON_RUNTIME_PARENT_IMAGE,
+# so dependency fixes never rebuild or redownload the multi-gigabyte layer.
+FROM ${TRITON_RUNTIME_PARENT_IMAGE} AS triton-deps
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --force-reinstall --no-deps \
     -i https://mirrors.bfsu.edu.cn/pypi/web/simple \
     --trusted-host mirrors.bfsu.edu.cn \
     attrs \
-    && python3 -c "import aiohttp, attr; print(f'aiohttp {aiohttp.__version__}, attrs {attr.__version__}')"
+    packaging \
+    && python3 -c "import aiohttp, attr, packaging; print(f'aiohttp {aiohttp.__version__}, attrs {attr.__version__}, packaging {packaging.__version__}')"
 
 # Local Compose builds use the triton-deps stage by default. Release CI passes
 # an immutable Registry image here; BuildKit then prunes triton-deps completely,
@@ -86,7 +89,8 @@ ENV ENGINE_VERSION=${ENGINE_VERSION} \
     QWEN_LOG_DIR=/var/log/qwen3tts \
     QWEN_LOG_MAX_BYTES=52428800 \
     QWEN_LOG_BACKUP_COUNT=10 \
-    QWEN_LOG_STDOUT=1
+    QWEN_LOG_STDOUT=1 \
+    PYTHONPATH=/opt/qwen3-tts:${PYTHONPATH}
 LABEL org.opencontainers.image.version=${ENGINE_VERSION} \
       io.qwen3tts.triton-runtime-base.reference=${TRITON_RUNTIME_BASE_REFERENCE} \
       io.qwen3tts.client-wheel.filename=${CLIENT_WHEEL_FILENAME} \
@@ -95,7 +99,7 @@ LABEL org.opencontainers.image.version=${ENGINE_VERSION} \
 
 # Fail at image construction rather than much later in the container smoke if
 # a release build ever selects a stale or incomplete dependency base.
-RUN python3 -c "import aiohttp, attr; print(f'aiohttp {aiohttp.__version__}, attrs {attr.__version__}')"
+RUN python3 -c "import aiohttp, attr, packaging; print(f'aiohttp {aiohttp.__version__}, attrs {attr.__version__}, packaging {packaging.__version__}')"
 
 RUN install -d /opt/qwen3tts/bin /var/log/qwen3tts
 

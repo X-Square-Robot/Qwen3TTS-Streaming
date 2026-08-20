@@ -144,6 +144,7 @@ GitHub 单元测试的 CPU-only PyTorch 使用南京大学镜像；GitLab 的 De
 | `PIP_INDEX_URL` | wheel 构建、烟测及镜像内普通 Python 依赖 |
 | `ENGINE_BASE_IMAGE` | 已包含匹配 CUDA/PyTorch/TensorRT 的 NVIDIA PyTorch 基础镜像；优先指向公司 Harbor/ACR 中按 digest 同步的副本 |
 | `TRITON_RUNTIME_BASE_TAG` | release 镜像 job 选用的、已预发布且不可变的 Triton Python 依赖基座 |
+| `TRITON_RUNTIME_PARENT_TAG` | 仅供基座构建继承的上一版不可变 Triton 基座，用于在不重建 TensorRT 的前提下叠加小依赖修复 |
 | `X2ROBOT_REGISTRY`、`X2ROBOT_IMAGE`、`X2ROBOT_IMAGE_TAG_PREFIX` | GitLab 引擎镜像的目标仓库及兼容性 tag 通道 |
 | `X2ROBOT_REGISTRY_USER`、`X2ROBOT_REGISTRY_PASSWORD` | GitLab 推送引擎镜像所需的 masked CI/CD 凭据 |
 | `PYTORCH_CPU_INDEX` | GitHub 单元测试使用的 CPU-only PyTorch 索引 |

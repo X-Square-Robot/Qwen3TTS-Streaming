@@ -162,6 +162,7 @@ GitLab:
 | `PIP_INDEX_URL` | Wheel builds, smoke tests, and general Python image dependencies |
 | `ENGINE_BASE_IMAGE` | NVIDIA PyTorch base containing matched CUDA/PyTorch/TensorRT; preferably a digest-pinned company Harbor/ACR copy |
 | `TRITON_RUNTIME_BASE_TAG` | Immutable, prepublished Triton Python dependency base selected by release image jobs |
+| `TRITON_RUNTIME_PARENT_TAG` | Previous immutable Triton base used only to layer small dependency fixes without rebuilding TensorRT |
 | `X2ROBOT_REGISTRY`, `X2ROBOT_IMAGE`, `X2ROBOT_IMAGE_TAG_PREFIX` | GitLab engine image destination and compatibility tag channel |
 | `X2ROBOT_REGISTRY_USER`, `X2ROBOT_REGISTRY_PASSWORD` | Masked GitLab CI/CD credentials for pushing the engine image |
 | `PYTORCH_CPU_INDEX` | CPU-only PyTorch index used by GitHub unit tests |

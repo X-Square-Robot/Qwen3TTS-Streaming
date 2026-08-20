@@ -31,7 +31,8 @@ variables:
   TRITON_TENSORRT_PYTHON_VERSION: "10.15.1.29"
   TRITON_PYTORCH_CUDA_TAG: "cu130"
   # Bump this only when the triton-deps stage or its pinned runtime matrix changes.
-  TRITON_RUNTIME_BASE_TAG: "runtime-base_26.02_trt10.15.1.29_cu130_r2"
+  TRITON_RUNTIME_PARENT_TAG: "runtime-base_26.02_trt10.15.1.29_cu130_r2"
+  TRITON_RUNTIME_BASE_TAG: "runtime-base_26.02_trt10.15.1.29_cu130_r3"
   RUNNER_PYTHON_IMAGE: "m.daocloud.io/docker.io/library/python:3.11-slim"
   RUNNER_DOCKER_CLI_IMAGE: "m.daocloud.io/docker.io/library/docker:27.4.1-cli"
   RUNNER_DOCKER_DIND_IMAGE: "m.daocloud.io/docker.io/library/docker:27.4.1-dind"
@@ -92,8 +93,10 @@ build-triton-runtime-base:
     - |
       triton_repository="${X2ROBOT_TRITON_IMAGE:-${X2ROBOT_IMAGE}-triton}"
       runtime_base_image="${TRITON_RUNTIME_BASE_IMAGE:-${triton_repository}:${TRITON_RUNTIME_BASE_TAG}}"
+      runtime_parent_image="${triton_repository}:${TRITON_RUNTIME_PARENT_TAG}"
       previous_cache_image="${triton_repository}:${X2ROBOT_IMAGE_TAG_PREFIX}buildcache"
-      bash scripts/bash/publish_triton_runtime_base.sh \
+      TRITON_RUNTIME_PARENT_IMAGE="$runtime_parent_image" \
+        bash scripts/bash/publish_triton_runtime_base.sh \
         "$runtime_base_image" \
         "$previous_cache_image"
 
@@ -343,7 +346,7 @@ build-engine-image:
         exit 1
       fi
       docker run --rm --entrypoint python3 "$TRITON_RUNTIME_BASE_IMAGE" -c \
-        "import aiohttp, attr; print(f'aiohttp={aiohttp.__version__} attrs={attr.__version__}')"
+        "import aiohttp, attr, packaging; print(f'aiohttp={aiohttp.__version__} attrs={attr.__version__} packaging={packaging.__version__}')"
       TRITON_RUNTIME_BASE_DIGEST="$(docker image inspect --format '{{ index .RepoDigests 0 }}' "$TRITON_RUNTIME_BASE_IMAGE")"
       case "$TRITON_RUNTIME_BASE_DIGEST" in
         *@sha256:*) ;;
@@ -466,8 +469,8 @@ build-engine-image:
       docker rm "$container_id" >/dev/null
       trap - EXIT
       docker run --rm --entrypoint python3 "$TRITON_RELEASE_IMAGE" -c \
-        "import aiohttp, attr; print(f'aiohttp={aiohttp.__version__} attrs={attr.__version__}')"
-      docker run --rm --env PYTHONPATH=/opt/qwen3-tts "$TRITON_RELEASE_IMAGE" \
+        "import aiohttp, attr, packaging; print(f'aiohttp={aiohttp.__version__} attrs={attr.__version__} packaging={packaging.__version__}')"
+      docker run --rm "$TRITON_RELEASE_IMAGE" \
         python3 -m engine.distribution.container_smoke --runtime triton
     - docker push "$ENGINE_RELEASE_IMAGE"
     - docker push "$TRITON_RELEASE_IMAGE"
