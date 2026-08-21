@@ -4,12 +4,12 @@
 
 ## Decision
 
-New clients should use `/v1/realtime` as the primary endpoint. The standalone
-deployment uses `ws://<host>:50052/v1/realtime`; the Triton compose deployment
-uses `ws://<host>:50053/v1/realtime` by default.
-`/v1/ws`, legacy gRPC, and the Triton JSON action protocol remain available
-during migration, but they are no longer the design center for new public API
-features.
+Official SDKs should use native `/v1/ws` as the primary endpoint. The
+standalone deployment uses `ws://<host>:50052/v1/ws`; the Triton compose
+sidecar uses `ws://<host>:50053/v1/ws` by default. `/v1/realtime` is the OpenAI
+Realtime compatibility endpoint. Legacy gRPC and the Triton JSON action
+protocol remain available during migration but are no longer the design
+center for new public API features.
 
 OpenAI Realtime is a full-duplex transport. The gateway continues reading
 client events while audio is flowing downstream, allowing concurrent input and
@@ -168,16 +168,17 @@ token-consistent routing.
 
 ## Migration Order
 
-1. Implemented: add `/v1/realtime`; keep `/v1/ws` and the old SDK available.
+1. Implemented: add `/v1/realtime` as a compatibility endpoint; keep native
+   `/v1/ws` and the SDK as the primary path.
    Capabilities advertise both protocol families.
-2. Implemented: make Realtime the preferred SDK auto-detection result; retain
-   legacy transports as explicit fallback with deprecation warnings.
+2. Implemented: make native WebSocket the preferred SDK auto-detection result;
+   retain Realtime as an explicit compatibility or automatic fallback. Only
+   the older direct gRPC/Triton transports emit deprecation warnings.
 3. Implemented: add the bidirectional Triton backend adapter and make JSON
    actions internal.
-4. Announce a legacy removal release only after durable usage, auth, quotas,
-   and multi-replica reconnect behavior pass acceptance tests.
+4. Evaluate removal of the older direct transports only after durable usage,
+   auth, quotas, and multi-replica reconnect behavior pass acceptance tests.
 
-Steps 1–3 are implemented. Step 4 remains the acceptance gate: the compatibility
-transports stay available until durable usage, auth, quotas, and multi-replica
-Realtime reconnect behavior are production-ready and a removal release is
-announced.
+Steps 1–3 are implemented. Step 4 remains the acceptance gate: native and
+Realtime compatibility endpoints remain maintained in parallel while durable
+usage, auth, quotas, and multi-replica reconnect behavior mature.

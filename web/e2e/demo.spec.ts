@@ -165,6 +165,7 @@ test("keeps an instance prefix and gates controls from capabilities", async ({pa
   await expect(page.getByText(/strategy: VadStrategy\.Energy/)).toBeVisible();
   await expect(page.getByText(/client\.startIncremental\(options\)/)).toBeVisible();
   await expect(page.getByText(/client\.open_stream\(SessionStartRequest/)).toBeVisible();
+  await expect(page.getByText(/TTSClient\.connect\("ws:\/\/127\.0\.0\.1:4173\/infer\/instance\/v1\/ws"\)/)).toBeVisible();
 });
 
 test("runs the built-in LLM comparison through public Realtime", async ({page}) => {

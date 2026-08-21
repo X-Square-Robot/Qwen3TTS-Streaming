@@ -8,6 +8,10 @@ from urllib.parse import urlparse
 import requests
 
 from qwen3tts_protocol import DetectedTransport
+from qwen3tts_protocol.protocol import (
+    PROTOCOL_VERSION,
+    protocol_versions_compatible,
+)
 
 from ._internal.auth import grpc_metadata_as_headers, normalize_grpc_metadata
 from ._internal.raw_websocket import ws_close, ws_connect, ws_recv_frame, ws_send_json
@@ -125,87 +129,95 @@ def _detect_websocket_url(
     tls: TLSConfig,
 ) -> DetectedTransport:
     parsed = urlparse(url)
-    if not parsed.path.endswith(DEFAULT_ENGINE_WS_PATH):
-        realtime_url = url
-        if parsed.path in ("", "/"):
-            realtime_url = url.rstrip("/") + DEFAULT_OPENAI_REALTIME_PATH
+    explicit_native = parsed.path.endswith(DEFAULT_ENGINE_WS_PATH)
+    explicit_realtime = parsed.path.endswith(DEFAULT_OPENAI_REALTIME_PATH)
+    native_url = (
+        url.rstrip("/") + DEFAULT_ENGINE_WS_PATH
+        if parsed.path in ("", "/")
+        else url
+    )
+    realtime_url = (
+        url.rstrip("/") + DEFAULT_OPENAI_REALTIME_PATH
+        if parsed.path in ("", "/")
+        else url
+    )
+
+    if not explicit_realtime:
         try:
-            _probe_openai_realtime(
-                realtime_url,
+            _probe_engine_websocket(
+                native_url,
                 timeout=timeout,
                 connect_timeout=connect_timeout,
                 headers=headers,
                 **tls.forwarding_kwargs(),
             )
+        except ProtocolVersionMismatchError:
+            # A live native endpoint with an incompatible protocol is a
+            # definitive pairing error, not a reason to switch wire contracts.
+            raise
         except Exception as exc:
             report.append(
                 {
-                    "transport": TRANSPORT_OPENAI_REALTIME,
-                    "endpoint": realtime_url,
+                    "transport": TRANSPORT_ENGINE_WEBSOCKET,
+                    "endpoint": native_url,
                     "ok": False,
                     "reason": str(exc),
                 }
             )
-            if parsed.path.endswith(DEFAULT_OPENAI_REALTIME_PATH):
+            if explicit_native:
                 raise TransportProbeError(
-                    f"OpenAI Realtime endpoint probe failed: {exc}",
+                    f"native WebSocket endpoint probe failed: {exc}",
                     probe_report=report,
                 ) from exc
         else:
             report.append(
                 {
-                    "transport": TRANSPORT_OPENAI_REALTIME,
-                    "endpoint": realtime_url,
+                    "transport": TRANSPORT_ENGINE_WEBSOCKET,
+                    "endpoint": native_url,
                     "ok": True,
                 }
             )
             return DetectedTransport(
                 requested_endpoint=url,
-                resolved_endpoint=realtime_url,
-                transport=TRANSPORT_OPENAI_REALTIME,
-                model_name=model_name or DEFAULT_OPENAI_REALTIME_MODEL,
+                resolved_endpoint=native_url,
+                transport=TRANSPORT_ENGINE_WEBSOCKET,
+                model_name="",
                 model_version=model_version,
                 probe_report=report,
             )
 
-    legacy_url = url
-    if parsed.path in ("", "/"):
-        legacy_url = url.rstrip("/") + DEFAULT_ENGINE_WS_PATH
     try:
-        _probe_engine_websocket(
-            legacy_url,
+        _probe_openai_realtime(
+            realtime_url,
             timeout=timeout,
             connect_timeout=connect_timeout,
             headers=headers,
             **tls.forwarding_kwargs(),
         )
-    except ProtocolVersionMismatchError:
-        # Definitive answer: we reached a live engine, wrong SDK pairing.
-        raise
     except Exception as exc:
         report.append(
             {
-                "transport": TRANSPORT_ENGINE_WEBSOCKET,
-                "endpoint": legacy_url,
+                "transport": TRANSPORT_OPENAI_REALTIME,
+                "endpoint": realtime_url,
                 "ok": False,
                 "reason": str(exc),
             }
         )
         raise TransportProbeError(
-            f"websocket endpoint probe failed: {exc}", probe_report=report
+            f"OpenAI Realtime endpoint probe failed: {exc}", probe_report=report
         ) from exc
     report.append(
         {
-            "transport": TRANSPORT_ENGINE_WEBSOCKET,
-            "endpoint": legacy_url,
+            "transport": TRANSPORT_OPENAI_REALTIME,
+            "endpoint": realtime_url,
             "ok": True,
         }
     )
     return DetectedTransport(
         requested_endpoint=url,
-        resolved_endpoint=legacy_url,
-        transport=TRANSPORT_ENGINE_WEBSOCKET,
-        model_name="",
+        resolved_endpoint=realtime_url,
+        transport=TRANSPORT_OPENAI_REALTIME,
+        model_name=model_name or DEFAULT_OPENAI_REALTIME_MODEL,
         model_version=model_version,
         probe_report=report,
     )
@@ -233,6 +245,36 @@ def _detect_http_url(
             payload = response.json()
             if isinstance(payload, dict):
                 protocols = advertised_protocols(payload)
+                native_supported = any(
+                    protocol_versions_compatible(PROTOCOL_VERSION, protocol)
+                    for protocol in protocols
+                )
+                if native_supported or (
+                    not protocols and "loaded_model_type" in payload
+                ):
+                    check_capabilities_pairing(payload)
+                    report.append(
+                        {
+                            "transport": "engine-http-capabilities",
+                            "endpoint": capabilities_url,
+                            "ok": True,
+                        }
+                    )
+                    native_path = str(
+                        payload.get("native_websocket_path")
+                        or DEFAULT_ENGINE_WS_PATH
+                    )
+                    return DetectedTransport(
+                        requested_endpoint=base_url,
+                        resolved_endpoint=(
+                            f"{_http_base_to_websocket(base_url).rstrip('/')}"
+                            f"{native_path}"
+                        ),
+                        transport=TRANSPORT_ENGINE_WEBSOCKET,
+                        model_name="",
+                        model_version=model_version,
+                        probe_report=report,
+                    )
                 if "openai-realtime-v1" in protocols:
                     check_engine_version(payload.get("engine_version"))
                     report.append(
@@ -254,26 +296,6 @@ def _detect_http_url(
                         ),
                         transport=TRANSPORT_OPENAI_REALTIME,
                         model_name=model_name or DEFAULT_OPENAI_REALTIME_MODEL,
-                        model_version=model_version,
-                        probe_report=report,
-                    )
-                if "loaded_model_type" in payload:
-                    check_capabilities_pairing(payload)
-                    report.append(
-                        {
-                            "transport": "engine-http-capabilities",
-                            "endpoint": capabilities_url,
-                            "ok": True,
-                        }
-                    )
-                    return DetectedTransport(
-                        requested_endpoint=base_url,
-                        resolved_endpoint=(
-                            f"{_http_base_to_websocket(base_url).rstrip('/')}"
-                            f"{DEFAULT_ENGINE_WS_PATH}"
-                        ),
-                        transport=TRANSPORT_ENGINE_WEBSOCKET,
-                        model_name="",
                         model_version=model_version,
                         probe_report=report,
                     )
@@ -363,6 +385,21 @@ def _detect_bare_endpoint(
         candidates = [(endpoint, "single")]
     else:
         for port in (DEFAULT_ENGINE_WS_PORT, DEFAULT_TRITON_REALTIME_PORT):
+            detected = _probe_bare_native_candidate(
+                requested_endpoint=endpoint,
+                host=endpoint,
+                port=port,
+                timeout=timeout,
+                connect_timeout=connect_timeout,
+                headers=headers,
+                report=report,
+                model_name=model_name,
+                model_version=model_version,
+                tls=tls,
+            )
+            if detected is not None:
+                return detected
+        for port in (DEFAULT_ENGINE_WS_PORT, DEFAULT_TRITON_REALTIME_PORT):
             detected = _probe_bare_realtime_candidate(
                 requested_endpoint=endpoint,
                 host=endpoint,
@@ -378,7 +415,6 @@ def _detect_bare_endpoint(
             if detected is not None:
                 return detected
         candidates = [
-            (f"{endpoint}:{DEFAULT_ENGINE_WS_PORT}", "ws-port"),
             (f"{endpoint}:{DEFAULT_ENGINE_GRPC_PORT}", "grpc-port"),
             (f"{endpoint}:{DEFAULT_TRITON_GRPC_PORT}", "triton-grpc-port"),
             (f"http://{endpoint}:{DEFAULT_TRITON_HTTP_PORT}", "triton-http-port"),
@@ -403,6 +439,20 @@ def _detect_bare_endpoint(
             DEFAULT_ENGINE_WS_PORT,
             DEFAULT_TRITON_REALTIME_PORT,
         ):
+            detected = _probe_bare_native_candidate(
+                requested_endpoint=endpoint,
+                host=host,
+                port=port,
+                timeout=timeout,
+                connect_timeout=connect_timeout,
+                headers=headers,
+                report=report,
+                model_name=model_name,
+                model_version=model_version,
+                tls=tls,
+            )
+            if detected is not None:
+                return detected
             detected = _probe_bare_realtime_candidate(
                 requested_endpoint=endpoint,
                 host=host,
@@ -485,42 +535,6 @@ def _detect_bare_endpoint(
                         "reason": str(exc),
                     }
                 )
-        if port == DEFAULT_ENGINE_WS_PORT:
-            ws_url = f"ws://{host}:{port}{DEFAULT_ENGINE_WS_PATH}"
-            try:
-                _probe_engine_websocket(
-                    ws_url,
-                    timeout=timeout,
-                    connect_timeout=connect_timeout,
-                    headers=headers,
-                    **tls.forwarding_kwargs(),
-                )
-                report.append(
-                    {
-                        "transport": TRANSPORT_ENGINE_WEBSOCKET,
-                        "endpoint": ws_url,
-                        "ok": True,
-                    }
-                )
-                return DetectedTransport(
-                    requested_endpoint=endpoint,
-                    resolved_endpoint=ws_url,
-                    transport=TRANSPORT_ENGINE_WEBSOCKET,
-                    model_name="",
-                    model_version=model_version,
-                    probe_report=report,
-                )
-            except ProtocolVersionMismatchError:
-                raise
-            except Exception as exc:
-                report.append(
-                    {
-                        "transport": TRANSPORT_ENGINE_WEBSOCKET,
-                        "endpoint": ws_url,
-                        "ok": False,
-                        "reason": str(exc),
-                    }
-                )
         http_fallback = f"http://{host}:{port}"
         try:
             return _detect_http_url(
@@ -536,6 +550,58 @@ def _detect_bare_endpoint(
             pass
     raise TransportProbeError(
         "auto-detect could not resolve a supported transport", probe_report=report
+    )
+
+
+def _probe_bare_native_candidate(
+    *,
+    requested_endpoint: str,
+    host: str,
+    port: int,
+    timeout: float,
+    connect_timeout: float | None,
+    headers,
+    report: list[dict],
+    model_name: str | None,
+    model_version: str,
+    tls: TLSConfig,
+) -> DetectedTransport | None:
+    del model_name
+    native_url = f"ws://{host}:{port}{DEFAULT_ENGINE_WS_PATH}"
+    try:
+        _probe_engine_websocket(
+            native_url,
+            timeout=timeout,
+            connect_timeout=connect_timeout,
+            headers=headers,
+            **tls.forwarding_kwargs(),
+        )
+    except ProtocolVersionMismatchError:
+        raise
+    except Exception as exc:
+        report.append(
+            {
+                "transport": TRANSPORT_ENGINE_WEBSOCKET,
+                "endpoint": native_url,
+                "ok": False,
+                "reason": str(exc),
+            }
+        )
+        return None
+    report.append(
+        {
+            "transport": TRANSPORT_ENGINE_WEBSOCKET,
+            "endpoint": native_url,
+            "ok": True,
+        }
+    )
+    return DetectedTransport(
+        requested_endpoint=requested_endpoint,
+        resolved_endpoint=native_url,
+        transport=TRANSPORT_ENGINE_WEBSOCKET,
+        model_name="",
+        model_version=model_version,
+        probe_report=report,
     )
 
 

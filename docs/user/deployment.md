@@ -272,8 +272,8 @@ bash scripts/bash/autorun.sh deploy \
 Endpoints:
 
 - gRPC: `localhost:50051`
-- OpenAI Realtime: `ws://localhost:50052/v1/realtime`
-- compatibility WebSocket: `ws://localhost:50052/v1/ws`
+- native WebSocket: `ws://localhost:50052/v1/ws`
+- OpenAI Realtime compatibility endpoint: `ws://localhost:50052/v1/realtime`
 - capabilities: `http://localhost:50052/v1/capabilities`
 - health: `http://localhost:8080/health`
 
@@ -381,6 +381,7 @@ spec:
 The same Service address now provides:
 
 - `http://<service>:8000/demo/`
+- `ws://<service>:8000/v1/ws`
 - `ws://<service>:8000/v1/realtime`
 - `http://<service>:8000/sdk/`
 - `http://<service>:8000/health`
@@ -427,7 +428,8 @@ timeouts keep persistent connections from being closed prematurely. One public
 
 - Demo: `https://tts.example.com/demo/`
 - Python SDK: `TTSClient.connect("https://tts.example.com")`
-- Realtime: `wss://tts.example.com/v1/realtime`
+- native WebSocket: `wss://tts.example.com/v1/ws`
+- OpenAI Realtime compatibility endpoint: `wss://tts.example.com/v1/realtime`
 - SDK downloads: `https://tts.example.com/sdk/`
 
 A public-CA certificate is trusted by browsers and Python by default, so no
@@ -564,8 +566,9 @@ Triton default ports:
 - HTTP: `localhost:8000`
 - gRPC: `localhost:8001`
 - Metrics: `localhost:8002`
-- OpenAI Realtime sidecar: `ws://localhost:50053/v1/realtime`
-- Realtime capabilities / health: `http://localhost:50053/v1/capabilities` and
+- sidecar native WebSocket: `ws://localhost:50053/v1/ws`
+- sidecar OpenAI Realtime compatibility: `ws://localhost:50053/v1/realtime`
+- sidecar capabilities / health: `http://localhost:50053/v1/capabilities` and
   `http://localhost:50053/health`
 
 The compose wrapper starts Triton and the Realtime sidecar together. Use
@@ -652,7 +655,8 @@ bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 ```
 
 The same port then serves `https://<host>:50052/demo/`,
-`wss://<host>:50052/v1/realtime`, `https://<host>:50052/sdk/`, and
+`wss://<host>:50052/v1/ws`, `wss://<host>:50052/v1/realtime`,
+`https://<host>:50052/sdk/`, and
 `https://<host>:50052/health`. With `TLS_AUTO_ENABLE=true`, the entrypoint
 discovers `/app/tls/cert.local.pem` and `/app/tls/key.local.pem` for a
 development certificate after it has been explicitly trusted by the test
@@ -666,7 +670,7 @@ generated certificate:
 
 ```python
 client = TTSClient.connect(
-    "wss://localhost:50052/v1/realtime",
+    "wss://localhost:50052/v1/ws",
     tls_verify="workspace/tls/cert.local.pem",
 )
 ```
@@ -684,7 +688,7 @@ Pod's HTTP port. Both modes still expose only one public service port.
 For Triton, replace `--gateway engine` with `--gateway triton` and open
 `http://localhost:50053/demo/`. The portal uses relative URLs, so a deployment
 below `/infer/<instance>` keeps that prefix for Demo assets, `/sdk/`,
-`/v1/capabilities`, and `/v1/realtime`. Set `DEMO_ENABLED=false` when the portal
+`/v1/capabilities`, `/v1/ws`, and `/v1/realtime`. Set `DEMO_ENABLED=false` when the portal
 must not be public; `/demo/` then returns 404.
 
 `demo_api` remains an optional engineering backend for detailed traces; the

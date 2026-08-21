@@ -329,7 +329,6 @@ def _build_adapter(
 
 
 _LEGACY_TRANSPORTS = {
-    TRANSPORT_ENGINE_WEBSOCKET,
     TRANSPORT_ENGINE_GRPC,
     TRANSPORT_TRITON_GRPC,
     TRANSPORT_TRITON_HTTP,
@@ -349,8 +348,9 @@ def _warn_legacy_transport(transport: str) -> None:
         _WARNED_LEGACY_TRANSPORTS.add(transport)
     warnings.warn(
         f"The {transport!r} transport is a compatibility path and will be "
-        "removed in a future major release. Prefer transport='openai-realtime' "
-        "or transport='auto' against a server that advertises OpenAI Realtime.",
+        "removed in a future major release. Prefer transport='engine-websocket' "
+        "or transport='auto' against a server that advertises the native "
+        "WebSocket protocol.",
         FutureWarning,
         stacklevel=3,
     )

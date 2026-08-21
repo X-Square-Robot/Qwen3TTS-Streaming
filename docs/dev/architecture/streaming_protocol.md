@@ -2,9 +2,9 @@
 
 # Standalone Protocol Redesign
 
-> Migration status: the primary new public WebSocket protocol is OpenAI
-> Realtime at `/v1/realtime`. The `tts-session-v2alpha1` contract documented
-> here remains supported for compatibility. See
+> Protocol status: the `tts-session-v2alpha1` contract documented here is the
+> native primary protocol used by the official SDK at `/v1/ws`. OpenAI
+> Realtime at `/v1/realtime` is the compatibility endpoint. See
 > [OpenAI Realtime TTS Protocol and Triton Boundary](openai_realtime.md) for
 > Realtime events, usage billing, and the Triton sidecar boundary.
 

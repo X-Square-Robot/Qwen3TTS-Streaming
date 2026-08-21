@@ -403,8 +403,8 @@ async def test_websocket_reuses_connection_for_serial_sessions_and_stop_alias():
             ]
             assert capabilities["capabilities"]["stream_resume_grace_ms"] == 30000
             assert capabilities["capabilities"]["supported_api_protocols"] == [
-                "openai-realtime-v1",
                 "tts-session-v2alpha1",
+                "openai-realtime-v1",
             ]
             assert capabilities["capabilities"]["openai_realtime_path"] == (
                 "/v1/realtime"

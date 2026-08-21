@@ -8,14 +8,15 @@ This SDK targets external callers, providing a unified, lightweight Python clien
 
 Supported service entry points:
 
-- `openai-realtime` (primary)
-- `engine-websocket`
+- `engine-websocket` (native primary protocol)
+- `openai-realtime` (OpenAI Realtime compatibility protocol)
 - `engine-grpc`
 - `triton-grpc`
 - `triton-http`
 
-The default behavior is `transport="auto"`: the client probes Realtime first,
-then binds a legacy adaptor only when the primary protocol is unavailable.
+The default behavior is `transport="auto"`: the client probes native WebSocket
+first, then falls back to the Realtime compatibility endpoint or another
+adaptor only when the native protocol is unavailable.
 
 ## Layout and Publishing
 
@@ -218,7 +219,7 @@ Notes on the websocket transport (since the migration to `websocket-client`):
 ### TLS and local debugging
 
 The container serves HTTP/WS on the shared port by default. For ordinary local
-development, connect directly to `ws://localhost:50052/v1/realtime`; no
+development, connect directly to `ws://localhost:50052/v1/ws`; no
 certificate is involved. Use HTTPS/WSS only when TLS has explicitly been
 enabled on the service or terminated by an Ingress/Gateway.
 
@@ -228,17 +229,17 @@ reconnects:
 
 ```python
 # Default: system trust store, suitable for a public CA
-client = TTSClient.connect("wss://tts.example/v1/realtime")
+client = TTSClient.connect("wss://tts.example/v1/ws")
 
 # Self-signed certificate or private CA: retain certificate and hostname checks
 client = TTSClient.connect(
-    "wss://localhost:50052/v1/realtime",
+    "wss://localhost:50052/v1/ws",
     tls_verify="/path/to/cert.local.pem",
 )
 
 # Local TLS debugging only: disable certificate and hostname verification
 client = TTSClient.connect(
-    "wss://localhost:50052/v1/realtime",
+    "wss://localhost:50052/v1/ws",
     tls_verify=False,
 )
 ```
@@ -267,14 +268,14 @@ print(result.details["usage"])
 ```
 
 On the standalone deployment, `localhost` resolves to
-`ws://localhost:50052/v1/realtime`. The Triton compose deployment exposes the
-same public protocol through its sidecar at
-`ws://localhost:50053/v1/realtime`. `client.resolved_transport` reports the
-selected adaptor.
+`ws://localhost:50052/v1/ws`. The Triton compose sidecar exposes its native
+endpoint at `ws://localhost:50053/v1/ws`. `client.resolved_transport` reports
+the selected adaptor.
 
-## OpenAI Realtime and Legacy Migration
+## Native WebSocket and the OpenAI Realtime Compatibility Endpoint
 
-Pin the primary transport when endpoint selection must be deterministic:
+Select the Realtime transport explicitly only when OpenAI Realtime event-model
+compatibility is required:
 
 ```python
 client = TTSClient.connect(
@@ -296,8 +297,10 @@ Terminal `response.done.response.usage` is available at
 correlation and terminal state. A configured server ledger remains
 authoritative if a client disconnects before receiving the terminal event.
 
-The four older transports remain available during migration and emit one
-`FutureWarning` per process and transport. The temporary environment switch
+OpenAI Realtime remains supported as a compatibility endpoint without a
+deprecation warning. The three older direct transports—`engine-grpc`,
+`triton-grpc`, and `triton-http`—emit one `FutureWarning` per process and
+transport. The temporary environment switch
 `QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING=1` suppresses that warning. When the
 Realtime endpoint advertises `qwen.response_resume.v1`, the SDK resumes an
 interrupted response from its exact delivery/sample cursor and replays only
@@ -410,7 +413,7 @@ gateways that do not negotiate the feature retain fail-fast behavior. Call
 ```python
 from qwen3tts import SessionStartRequest, SynthesisConfig, TTSClient
 
-client = TTSClient.connect("ws://localhost:50052/v1/realtime")
+client = TTSClient.connect("ws://localhost:50052/v1/ws")
 session = client.open_stream(
     SessionStartRequest(
         session_id="demo-session",
@@ -443,14 +446,15 @@ When `transport=` is set explicitly, no probing is done and the specified adapto
 
 When `transport="auto"`:
 
-- `ws://` / `wss://`: `/v1/realtime` is probed as Realtime; a root URL tries
-  `/v1/realtime` before `/v1/ws`; an explicit `/v1/ws` remains legacy.
-- `http://` / `https://`: probe `GET /v1/capabilities`; prefer its advertised
-  `openai-realtime-v1`, otherwise use the legacy standalone or Triton HTTP checks.
-- Bare `host:port`: ports `50052` and `50053` probe Realtime first; compatible
-  legacy and Triton probes remain fallbacks.
-- Bare `host`: expand candidates in priority order `50052` (standalone
-  Realtime), `50053` (Triton Realtime sidecar), `50051`, `8001`, `8000`.
+- `ws://` / `wss://`: explicit `/v1/ws` selects the native protocol and
+  explicit `/v1/realtime` selects the compatibility protocol; a root URL tries
+  `/v1/ws` before `/v1/realtime`.
+- `http://` / `https://`: probe `GET /v1/capabilities`; prefer the advertised
+  `tts-session/v2` compatibility major and use `openai-realtime-v1` only when
+  the deployment does not advertise native WebSocket.
+- Bare `host:port`: ports `50052` and `50053` probe native `/v1/ws` before Realtime.
+- Bare `host`: probe native WebSocket on `50052` and `50053`, then Realtime on
+  those two ports, followed by `50051`, `8001`, and `8000` fallbacks.
 
 The probing results are exposed at:
 
@@ -481,13 +485,14 @@ The current release has completed these structural goals:
 - The SDK code is consolidated into the `client/` subproject
 - A unified sync / async façade is provided
 - The shared protocol layer `qwen3tts_protocol` is introduced
-- OpenAI Realtime is the preferred auto-detected adaptor
-- Four legacy adaptor entry points remain available with deprecation warnings
+- Native `engine-websocket` is the preferred auto-detected adaptor
+- OpenAI Realtime remains available as a compatibility adaptor
+- Three older direct adaptors remain available with deprecation warnings
 - Explicit streaming-degradation semantics are provided for `triton-http`
 
 It is still recommended to treat it as v1 alpha:
 
 - SDK-to-gateway Realtime integration is covered without requiring a model/GPU
 - Real Triton sidecar and GPU smoke tests should still be run in deployment CI
-- Durable usage, auth, quotas, and Realtime reconnect acceptance remain gates
-  before announcing the legacy removal release
+- Durable usage, auth, quotas, and reconnect acceptance remain gates before
+  evaluating removal of the older direct adaptors

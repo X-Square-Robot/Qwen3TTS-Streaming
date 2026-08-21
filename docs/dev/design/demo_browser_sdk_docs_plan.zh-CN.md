@@ -14,12 +14,12 @@
 /demo/config.json       当前实例、协议、构建产物和 SDK 元数据
 /sdk/                   pip-compatible Python wheel 索引
 /v1/capabilities        协议、模型、任务、输出策略与限制的能力发现
-/v1/realtime            OpenAI Realtime 主协议
-/v1/ws                  native WebSocket 兼容协议
+/v1/ws                  原生主协议（Python SDK 使用）
+/v1/realtime            OpenAI Realtime 兼容协议（Browser SDK 使用）
 ```
 
-首版以 `/v1/realtime` 为唯一主体验链路；`/v1/ws` 保留给兼容性验证和工程诊断，
-不在产品首页与 Realtime 并列宣传。Demo 默认开启，通过 `DEMO_ENABLED=false`
+Browser Demo 首版以 `/v1/realtime` 为体验链路；产品文档同时说明 Python SDK 使用
+原生 `/v1/ws`。Demo 默认开启，通过 `DEMO_ENABLED=false`
 显式关闭。页面只连接当前实例，不接受跨域 API Key，不把凭据写入浏览器存储。
 认证、WebSocket Origin、租户配额和公网限流由同源部署网关统一负责。
 
@@ -137,8 +137,8 @@ Package Registry。SDK 与 UI 解耦，任何 React/Vue/原生网页都能调用
 
 协议约束：
 
-- 首版只把 OpenAI Realtime 作为公开主协议；native WebSocket adaptor 可保留在内部
-  兼容测试中，待确有外部需求再公开。
+- 产品页明确区分原生 `/v1/ws` 主协议与 OpenAI Realtime `/v1/realtime` 兼容协议；
+  Browser SDK 当前使用兼容入口，Python SDK 默认使用原生入口。
 - `session.update`、`conversation.item.create`、`response.create` 和
   `qwen.input_text_buffer.append/commit` 使用现有服务合同，不另造动作协议。
 - 使用版本化 JSON Schema 和 Zod 校验 Realtime 业务字段；与 Python SDK 共用
@@ -331,7 +331,7 @@ Demo 沿用 React、Vite、TypeScript；使用 hash history 和相对 asset base
 - 不把当前 React WebUI 重写为 Vue；
 - 不让产品 Demo 继续通过 `demo_api -> Triton gRPC` 合成；
 - 不在网页中输入或持久化长期 API Key；
-- 不把 native WebSocket 与主 Realtime 协议包装成看似等价的用户选择；
+- 不把原生 WebSocket 主协议与 Realtime 兼容协议包装成看似等价的用户选择；
 - 不展示服务没有通过 capabilities 明确声明的 task、VAD 或 sampling 参数；
 - 不复制 README/用户文档正文到前端组件；
 - 不在运行时镜像安装 Node/npm，也不在多个发布 job 重复构建前端产物；

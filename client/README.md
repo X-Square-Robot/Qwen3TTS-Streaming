@@ -3,13 +3,14 @@
 # Qwen3-TTS Python Client
 
 `qwen3-tts-client` is a lightweight Python SDK for talking to a Qwen3-TTS
-deployment. OpenAI Realtime is the primary protocol; four older transports
-remain available as migration fallbacks behind the same API.
+deployment. Native WebSocket is the primary protocol; OpenAI Realtime is a
+compatibility endpoint, and three older direct transports remain available as
+migration fallbacks behind the same API.
 
 ```python
 from qwen3tts import TTSClient, SynthesisConfig
 
-client = TTSClient.connect("ws://localhost:50052/v1/realtime")
+client = TTSClient.connect("ws://localhost:50052/v1/ws")
 result = client.synthesize_bytes("你好，欢迎使用 Qwen3-TTS。",
                                  request=SynthesisConfig(task_type="custom_voice"))
 print(result.audio_format, len(result.audio_bytes))
@@ -20,11 +21,12 @@ print(result.audio_format, len(result.audio_bytes))
 
 ## Features
 
-- **OpenAI Realtime first** — `openai-realtime` is the primary transport;
-  `engine-websocket`, `engine-grpc`, `triton-grpc`, and `triton-http` remain
-  compatibility fallbacks behind the same `TTSClient`.
+- **Native WebSocket first** — `engine-websocket` is the primary transport;
+  `openai-realtime` is the OpenAI compatibility endpoint, while `engine-grpc`,
+  `triton-grpc`, and `triton-http` are older direct fallbacks behind the same
+  `TTSClient`.
 - **Auto-detection** — `transport="auto"` (the default) probes the endpoint and
-  prefers Realtime when the server advertises or accepts it.
+  prefers native WebSocket when the server advertises or accepts it.
 - **One-shot, streaming, and realtime** modes.
 - **Sync and async** clients (`TTSClient` / `AsyncTTSClient`).
 - **Slim dependencies** — the core install only needs `requests` and
@@ -85,7 +87,7 @@ Requires Python 3.10+.
 ```python
 from qwen3tts import TTSClient, SynthesisConfig
 
-client = TTSClient.connect("ws://localhost:50052/v1/realtime")
+client = TTSClient.connect("ws://localhost:50052/v1/ws")
 result = client.synthesize_bytes(
     "你好，欢迎使用 Qwen3-TTS。",
     request=SynthesisConfig(task_type="custom_voice", speaker="serena"),
@@ -110,7 +112,7 @@ it arrives:
 ```python
 from qwen3tts import TTSClient, SessionStartRequest, SynthesisConfig, AudioChunk, StreamEvent
 
-client = TTSClient.connect("ws://localhost:50052/v1/realtime")
+client = TTSClient.connect("ws://localhost:50052/v1/ws")
 session = client.open_stream(
     SessionStartRequest(session_id="demo", config=SynthesisConfig(task_type="custom_voice"))
 )
@@ -137,7 +139,7 @@ to cover gaps so a playback device / WebRTC track never underruns:
 ```python
 from qwen3tts import TTSClient, RealtimeAudioStream, SessionStartRequest, SynthesisConfig
 
-client = TTSClient.connect("ws://localhost:50052/v1/realtime")
+client = TTSClient.connect("ws://localhost:50052/v1/ws")
 session = client.open_stream(
     SessionStartRequest(session_id="webrtc", config=SynthesisConfig(task_type="custom_voice"))
 )
@@ -164,7 +166,7 @@ for frame in RealtimeAudioStream(session, chunk_s=0.02, fill_silence=True):
 ```python
 from qwen3tts import AsyncTTSClient, SynthesisConfig
 
-client = await AsyncTTSClient.connect("ws://localhost:50052/v1/realtime")
+client = await AsyncTTSClient.connect("ws://localhost:50052/v1/ws")
 result = await client.synthesize_bytes("你好。", request=SynthesisConfig(task_type="custom_voice"))
 # streaming: session = await client.aopen_stream(SessionStartRequest(...))
 ```
@@ -176,13 +178,13 @@ auto-detects the backend. To pin it explicitly, pass `transport=`:
 
 | Endpoint example | Detected transport |
 |------------------|--------------------|
+| `ws://localhost:50052/v1/ws` | `engine-websocket` (native primary) |
 | `ws://localhost:50052/v1/realtime` | `openai-realtime` (standalone) |
 | `ws://localhost:50053/v1/realtime` | `openai-realtime` (Triton sidecar) |
-| `ws://localhost:50052/v1/ws` | `engine-websocket` |
 | `localhost:50051` | `engine-grpc` |
 | `http://localhost:8000` | `triton-http` / `triton-grpc` |
 
-### Realtime migration and usage
+### Realtime compatibility and usage
 
 Complete-text `synthesize_bytes()` uses standard Realtime
 `conversation.item.create` and `response.create` events. Incremental
@@ -196,12 +198,13 @@ one-shot calls and as `session.usage` after the terminal event for streaming.
 A configured server-side billing ledger remains authoritative when a client
 disconnects before receiving that event.
 
-The four legacy transports emit one `FutureWarning` per process and transport.
-They are not removed yet. `QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING=1` can
-temporarily silence the warning during migration. Active-stream transparent
-resume currently remains specific to the compatibility `engine-websocket`
-transport; an interrupted Realtime stream fails explicitly rather than
-silently re-synthesizing audio.
+The OpenAI Realtime compatibility transport does not emit a deprecation
+warning. The three older direct transports—`engine-grpc`, `triton-grpc`, and
+`triton-http`—emit one `FutureWarning` per process and transport.
+`QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING=1` can temporarily silence those
+warnings. Native WebSocket advertises `stream_resume_v1`; Realtime advertises
+`qwen.response_resume.v1`. A gateway that declares neither fails explicitly
+rather than silently re-synthesizing audio.
 
 ### Authentication and persistent WebSockets
 
@@ -232,13 +235,13 @@ only for temporary local debugging:
 ```python
 # Recommended: trust this self-signed certificate or private CA
 client = TTSClient.connect(
-    "wss://localhost:50052/v1/realtime",
+    "wss://localhost:50052/v1/ws",
     tls_verify="/path/to/cert.local.pem",
 )
 
 # Local debugging only; never use in production
 client = TTSClient.connect(
-    "wss://localhost:50052/v1/realtime",
+    "wss://localhost:50052/v1/ws",
     tls_verify=False,
 )
 ```
@@ -298,7 +301,7 @@ python examples/quickstart.py                  # one-shot     -> quickstart.wav
 python examples/streaming.py                   # incremental  -> streaming.wav
 python examples/realtime.py                    # wall-clock aligned frames
 python examples/quickstart.py localhost:50051  # point at engine gRPC
-python examples/quickstart.py wss://localhost:50052/v1/realtime \
+python examples/quickstart.py wss://localhost:50052/v1/ws \
   --tls-ca-file /path/to/cert.local.pem
 ```
 

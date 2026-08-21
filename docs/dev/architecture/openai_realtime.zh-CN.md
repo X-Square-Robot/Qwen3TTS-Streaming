@@ -4,10 +4,10 @@
 
 ## 结论
 
-新客户端应以 `/v1/realtime` 作为主入口。standalone 默认使用
-`ws://<host>:50052/v1/realtime`，Triton compose 部署默认使用
-`ws://<host>:50053/v1/realtime`。`/v1/ws`、旧 gRPC 和 Triton JSON action 协议进入
-兼容期：当前不删除，但不再作为新功能的公共协议设计中心。
+官方 SDK 应以原生 `/v1/ws` 作为主入口。standalone 默认使用
+`ws://<host>:50052/v1/ws`，Triton compose sidecar 默认使用
+`ws://<host>:50053/v1/ws`。`/v1/realtime` 是 OpenAI Realtime 兼容入口；旧 gRPC 和
+Triton JSON action 协议进入迁移期，不再作为新功能的公共协议设计中心。
 
 OpenAI Realtime 的传输是全双工的。gateway 在音频持续下行时仍然读取客户端事件，
 所以客户端可以并行提交后续输入或发送 `response.cancel`。当前引擎在一条连接上只允许
@@ -155,13 +155,13 @@ Triton sidecar 使用同一核心合同，但 wire contract 仍按 endpoint 分�
 
 ## 下线顺序
 
-1. 已完成：新增 `/v1/realtime`，旧 `/v1/ws` 和 SDK 保持可用，capabilities 同时声明
+1. 已完成：新增 `/v1/realtime` 兼容入口，原生 `/v1/ws` 和 SDK 保持主路径，capabilities 同时声明
    `openai-realtime-v1` 与 `tts-session-v2alpha1`。
-2. 已完成：新 SDK 的自动探测优先选择 Realtime；旧 transport 作为显式或自动
-   fallback，并发出 deprecation warning。
+2. 已完成：SDK 自动探测优先选择原生 WebSocket；Realtime 作为显式兼容或自动
+   fallback。只有旧 gRPC/Triton 直连 transport 发出 deprecation warning。
 3. 已完成：sidecar 接入双向 gRPC backend，Triton JSON action 降为内部协议。
-4. 稳定期：usage ledger、鉴权、配额和多副本断线恢复通过验收后，再公布旧协议删除
-   版本。
+4. 稳定期：usage ledger、鉴权、配额和多副本断线恢复通过验收后，再评估旧直连
+   transport 的删除版本。
 
-当前第 1–3 步已经完成。第 4 步仍是验收门槛：durable usage、鉴权、配额与 Realtime
-多副本断线恢复达到生产要求并公布删除版本之前，兼容 transport 继续保留。
+当前第 1–3 步已经完成。第 4 步仍是验收门槛：原生与 Realtime 兼容入口继续并行维护，
+旧直连 transport 是否删除需等 durable usage、鉴权、配额与多副本断线恢复达到生产要求后评估。

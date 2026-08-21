@@ -2,8 +2,8 @@
 
 # 独立协议重新设计
 
-> 迁移状态：新的公共 WebSocket 主协议是 OpenAI Realtime
-> `/v1/realtime`。本页记录的 `tts-session-v2alpha1` 是仍受支持的兼容协议。
+> 协议状态：本页记录的 `tts-session-v2alpha1` 是官方 SDK 使用的原生主协议，入口为
+> `/v1/ws`。OpenAI Realtime `/v1/realtime` 是兼容入口。
 > Realtime 事件、usage 计费和 Triton sidecar 边界见
 > [OpenAI Realtime TTS 协议与 Triton 边界](openai_realtime.zh-CN.md)。
 

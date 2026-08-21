@@ -23,11 +23,12 @@ The portal and APIs share that origin:
 | Try it | `https://tts.example.com/demo/` |
 | Python / Browser SDK | `https://tts.example.com/demo/#/sdk` |
 | Capabilities | `https://tts.example.com/v1/capabilities` |
-| Realtime WebSocket | `wss://tts.example.com/v1/realtime` |
+| Python SDK native WebSocket | `wss://tts.example.com/v1/ws` |
+| OpenAI Realtime compatibility endpoint | `wss://tts.example.com/v1/realtime` |
 
 The table shows a production deployment with trusted TLS. A local container
 serves plain HTTP/WS by default: `http://localhost:50052/demo/` for the Demo and
-`ws://localhost:50052/v1/realtime` for the SDK. Do not change a local URL to
+`ws://localhost:50052/v1/ws` for the SDK. Do not change a local URL to
 `https://` / `wss://` unless the operator explicitly enabled TLS.
 
 Verify that the service returns its capabilities:
@@ -57,7 +58,7 @@ Replace the URL, API key, and speaker with values supplied by the operator:
 from qwen3tts import AudioFormat, SynthesisConfig, TTSClient
 
 with TTSClient.connect(
-    "wss://tts.example.com/v1/realtime",
+    "wss://tts.example.com/v1/ws",
     key="your-api-key",  # remove this line when authentication is disabled
 ) as client:
     result = client.synthesize_bytes(
@@ -79,7 +80,7 @@ and reconnects:
 
 ```python
 client = TTSClient.connect(
-    "wss://localhost:50052/v1/realtime",
+    "wss://localhost:50052/v1/ws",
     tls_verify="/path/to/cert.local.pem",
 )
 ```
@@ -95,7 +96,9 @@ application's audio library.
 ## 4. Before integrating
 
 - Do not guess tasks, speakers, languages, or sample rates; use `/v1/capabilities`.
-- New integrations should use `/v1/realtime`, not legacy gRPC or `/v1/ws` endpoints.
+- New Python SDK integrations should prefer native `/v1/ws`. Use the
+  `/v1/realtime` compatibility endpoint only for OpenAI Realtime event-model
+  integrations; do not start new integrations on the old gRPC or Triton-native APIs.
 - Always wait for a completed, cancelled, or failed terminal event; terminal usage is returned there.
 - Use the Browser SDK for web apps; it handles audio decoding, playback cursors, and recovery.
 

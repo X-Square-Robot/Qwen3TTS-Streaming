@@ -32,8 +32,9 @@ export function SdkPage({loaded, capabilities, settings, docsOnly}: SdkPageProps
     ? `pip install "${sdk?.project ?? "qwen3-tts-client"}[all] @ ${download}"`
     : "请在部署实例的 /demo/#/sdk 获取匹配 wheel 的安装命令";
   const capabilitiesUrl = loaded ? resolveRelativeUrl(loaded.config.endpoints.capabilities_url, loaded.responseUrl).toString() : "";
+  const nativeUrl = loaded ? websocketEndpoint(resolveRelativeUrl(loaded.config.endpoints.native_websocket_url, loaded.responseUrl)).toString() : "";
   const realtimeUrl = loaded ? websocketEndpoint(resolveRelativeUrl(loaded.config.endpoints.openai_realtime_url, loaded.responseUrl)).toString() : "";
-  const pythonExample = buildPythonExample(realtimeUrl, settings);
+  const pythonExample = buildPythonExample(nativeUrl, settings);
   const browserExample = buildBrowserExample(capabilitiesUrl, realtimeUrl, settings);
   const versions = {
     engine: loaded?.config.engine_version ?? "",
@@ -70,7 +71,7 @@ export function SdkPage({loaded, capabilities, settings, docsOnly}: SdkPageProps
   </section>;
 }
 
-function buildPythonExample(realtimeUrl: string, value: DemoSynthesisSettings): string {
+export function buildPythonExample(nativeUrl: string, value: DemoSynthesisSettings): string {
   const vadEnabled = value.vad !== "disabled";
   const imports = value.inputMode === "full"
     ? "AudioFormat, OutputPolicy, TTSClient, SynthesisConfig, VADPolicy"
@@ -78,10 +79,10 @@ function buildPythonExample(realtimeUrl: string, value: DemoSynthesisSettings): 
   const execute = value.inputMode === "full"
     ? `result = client.synthesize_bytes("你好，欢迎使用 Qwen3-TTS。", request=config)\nopen("qwen3tts.pcm", "wb").write(result.audio_bytes)`
     : `session = client.open_stream(SessionStartRequest(session_id="demo", config=config))\nsession.send_text("你好，")\nsession.send_text("欢迎使用 Qwen3-TTS。")\nsession.end()\nwith open("qwen3tts.pcm", "wb") as output:\n    for message in session.iter_messages():\n        if isinstance(message, AudioChunk):\n            output.write(message.pcm_bytes)`;
-  return `from qwen3tts import (\n    ${imports},\n)\n\nclient = TTSClient.connect(${JSON.stringify(realtimeUrl)})\nconfig = SynthesisConfig(\n    task_type=${JSON.stringify(value.task)},\n    speaker=${JSON.stringify(value.speaker)},\n    language=${JSON.stringify(value.language)},\n    input_mode=${JSON.stringify(value.inputMode === "full" ? "full_text" : "token")},\n    audio=AudioFormat(encoding="pcm_s16le", sample_rate=${value.sampleRate}, channels=1),\n    output_policy=OutputPolicy(\n        vad=VADPolicy(\n            enabled=${vadEnabled ? "True" : "False"}, strategy=${JSON.stringify(value.vad)},\n            chunk_ms=${value.vadChunkMs}, begin_threshold=${value.vadBeginThreshold},\n            begin_count=${value.vadBeginCount}, end_threshold=${value.vadEndThreshold},\n            end_count=${value.vadEndCount}, start_margin_ms=${value.vadStartMarginMs},\n        ),\n        chunk_ms=${value.outputChunkMs}, emit_text_events=${value.emitTextEvents ? "True" : "False"},\n        config={"delivery": ${JSON.stringify(value.delivery)}, "delivery_window_ms": ${value.deliveryWindowMs}},\n    ),\n)\n${execute}`;
+  return `from qwen3tts import (\n    ${imports},\n)\n\nclient = TTSClient.connect(${JSON.stringify(nativeUrl)})\nconfig = SynthesisConfig(\n    task_type=${JSON.stringify(value.task)},\n    speaker=${JSON.stringify(value.speaker)},\n    language=${JSON.stringify(value.language)},\n    input_mode=${JSON.stringify(value.inputMode === "full" ? "full_text" : "token")},\n    audio=AudioFormat(encoding="pcm_s16le", sample_rate=${value.sampleRate}, channels=1),\n    output_policy=OutputPolicy(\n        vad=VADPolicy(\n            enabled=${vadEnabled ? "True" : "False"}, strategy=${JSON.stringify(value.vad)},\n            chunk_ms=${value.vadChunkMs}, begin_threshold=${value.vadBeginThreshold},\n            begin_count=${value.vadBeginCount}, end_threshold=${value.vadEndThreshold},\n            end_count=${value.vadEndCount}, start_margin_ms=${value.vadStartMarginMs},\n        ),\n        chunk_ms=${value.outputChunkMs}, emit_text_events=${value.emitTextEvents ? "True" : "False"},\n        config={"delivery": ${JSON.stringify(value.delivery)}, "delivery_window_ms": ${value.deliveryWindowMs}},\n    ),\n)\n${execute}`;
 }
 
-function buildBrowserExample(capabilitiesUrl: string, realtimeUrl: string, value: DemoSynthesisSettings): string {
+export function buildBrowserExample(capabilitiesUrl: string, realtimeUrl: string, value: DemoSynthesisSettings): string {
   const task = enumMember({base: "Base", voice_clone: "VoiceClone", custom_voice: "CustomVoice", voice_design: "VoiceDesign"}, value.task);
   const vad = enumMember({disabled: "Disabled", energy: "Energy", tenvad: "TenVad"}, value.vad);
   const delivery = enumMember({guarded: "Guarded", firehose: "Firehose"}, value.delivery);

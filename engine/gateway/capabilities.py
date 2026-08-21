@@ -106,8 +106,8 @@ def build_gateway_capabilities(
             "model": model_name or str(capabilities.get("variant", "")),
             "model_version": model_version,
             "supported_api_protocols": [
-                OPENAI_REALTIME_PROTOCOL,
                 NATIVE_WEBSOCKET_PROTOCOL,
+                OPENAI_REALTIME_PROTOCOL,
             ],
             "openai_realtime_path": OPENAI_REALTIME_PATH,
             "native_websocket_path": native_path,

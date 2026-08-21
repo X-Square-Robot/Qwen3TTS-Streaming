@@ -26,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `authorization` metadata for gRPC. Authentication remains the deployment
   platform's responsibility; the engine does not validate this header.
 
+### Changed
+
+- Python SDK `transport="auto"` now prefers native `/v1/ws` and retains
+  `/v1/realtime` as the OpenAI Realtime compatibility endpoint. Explicit
+  endpoints still honor the caller's wire-contract choice, and automatic
+  Realtime fallback occurs only when native WebSocket is unavailable.
+- `engine-websocket` is no longer classified as an old compatibility
+  transport; deprecation warnings now apply only to the older direct
+  `engine-grpc`, `triton-grpc`, and `triton-http` paths.
+
 ### Fixed
 
 - Split the engine WebSocket handshake budget (`connect_timeout`) from the

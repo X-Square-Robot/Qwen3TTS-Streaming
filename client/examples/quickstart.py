@@ -5,14 +5,15 @@ See the repo README for how to start one.
 
     pip install "qwen3-tts-client @ <matching-github-or-gitlab-release-wheel-url>"
     python quickstart.py [endpoint]
-    python quickstart.py wss://localhost:50052/v1/realtime --tls-ca-file cert.local.pem
-    python quickstart.py wss://localhost:50052/v1/realtime --insecure  # local only
+    python quickstart.py wss://localhost:50052/v1/ws --tls-ca-file cert.local.pem
+    python quickstart.py wss://localhost:50052/v1/ws --insecure  # local only
 
 Use the tag in the engine's ``capabilities.engine_version``; the deployed
 service also serves the matching wheel at its public GET /sdk/ endpoint.
 
-Default endpoint: ws://localhost:50052/v1/realtime  (OpenAI Realtime)
-Other examples: ws://localhost:50053/v1/realtime (Triton sidecar),
+Default endpoint: ws://localhost:50052/v1/ws  (native WebSocket)
+Other examples: ws://localhost:50053/v1/ws (Triton sidecar native WebSocket),
+ws://localhost:50052/v1/realtime (OpenAI Realtime compatibility),
 localhost:50051 (legacy engine gRPC), http://localhost:8000 (legacy Triton HTTP).
 """
 
@@ -24,7 +25,7 @@ import wave
 
 from qwen3tts import TTSClient, SynthesisConfig
 
-DEFAULT_ENDPOINT = "ws://localhost:50052/v1/realtime"
+DEFAULT_ENDPOINT = "ws://localhost:50052/v1/ws"
 TEXT = "你好，欢迎使用 Qwen3-TTS。"
 OUT = "quickstart.wav"
 
@@ -33,7 +34,7 @@ def main() -> None:
     args = _parse_args()
     tls_verify = False if args.insecure else (args.tls_ca_file or True)
     # transport defaults to "auto": the SDK probes the endpoint and picks the
-    # Realtime adapter first, with legacy transports retained as fallbacks.
+    # Native WebSocket first, with Realtime and older transports as fallbacks.
     client = TTSClient.connect(args.endpoint, tls_verify=tls_verify)
     result = client.synthesize_bytes(
         TEXT,

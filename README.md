@@ -195,7 +195,7 @@ Run `engine.server` in local Python, suitable for debugging the engine, protocol
 bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway standalone --engine-mode trt
 ```
 
-Default ports: gRPC `50051`, OpenAI Realtime `ws://localhost:50052/v1/realtime`, compatibility WebSocket `ws://localhost:50052/v1/ws`, HTTP capabilities `http://localhost:50052/v1/capabilities`, health `http://localhost:8080/health` (binds at process start; returns `503` while the model loads, `200` once ready — see [deployment](docs/user/deployment.md) for probe details).
+Default ports: gRPC `50051`, native WebSocket `ws://localhost:50052/v1/ws`, OpenAI Realtime compatibility endpoint `ws://localhost:50052/v1/realtime`, HTTP capabilities `http://localhost:50052/v1/capabilities`, health `http://localhost:8080/health` (binds at process start; returns `503` while the model loads, `200` once ready — see [deployment](docs/user/deployment.md) for probe details).
 
 ### Engine Docker
 
@@ -237,9 +237,9 @@ bash scripts/bash/compose.sh prepare --gateway triton --variant custom-1.7b --en
 bash scripts/bash/compose.sh up --gateway triton --variant custom-1.7b
 ```
 
-The Triton deployment starts both Triton and an OpenAI Realtime sidecar. Its
-default public endpoints are Realtime
-`ws://localhost:50053/v1/realtime`, capabilities
+The Triton deployment starts both Triton and a public WebSocket sidecar. Its
+default public endpoints are native WebSocket `ws://localhost:50053/v1/ws`,
+OpenAI Realtime compatibility `ws://localhost:50053/v1/realtime`, capabilities
 `http://localhost:50053/v1/capabilities`, and health
 `http://localhost:50053/health`; Triton's native HTTP/gRPC/metrics ports remain
 `8000/8001/8002`. Set `--realtime-port` on `compose.sh` to change the host port.
@@ -264,10 +264,10 @@ You can also configure the reference library and reference cache in `engine.yaml
 
 ## Client SDK
 
-The Python SDK now prefers `openai-realtime` when `transport="auto"` can
-discover it. The four compatibility transports—engine-websocket, engine-grpc,
-triton-grpc, and triton-http—remain available and emit deprecation warnings;
-they are not removed yet.
+The Python SDK prefers native `engine-websocket` when `transport="auto"` can
+discover it. OpenAI Realtime remains available as a compatibility transport
+without a deprecation warning; engine-grpc, triton-grpc, and triton-http are
+older direct transports that remain available with deprecation warnings.
 
 SDK compatibility is determined by the wire-protocol family and major reported
 by `GET /v1/capabilities`. Release skew in `engine_version` is diagnostic and
@@ -296,7 +296,7 @@ Quick usage:
 ```python
 from qwen3tts import TTSClient, SynthesisConfig
 
-client = TTSClient.connect("ws://localhost:50052/v1/realtime")
+client = TTSClient.connect("ws://localhost:50052/v1/ws")
 result = client.synthesize_bytes(
     "你好，欢迎使用 Qwen3-TTS。",
     request=SynthesisConfig(task_type="custom_voice"),
@@ -350,7 +350,7 @@ mamba run -n qwen3-tts python tools/validation/serving_endpoints.py \
 ## Built-in Demo and documentation
 
 Every release runtime image contains one version-matched portal at `/demo/`.
-It is enabled by default on the same public port as `/v1/realtime` and `/sdk/`;
+It is enabled by default on the same public port as `/v1/ws`, `/v1/realtime`, and `/sdk/`;
 set `DEMO_ENABLED=false` at startup to disable it. The portal discovers the
 current instance and synthesizes through the
 Browser SDK, plays PCM through the system speaker, exposes capability-gated VAD
@@ -397,7 +397,7 @@ temporary local debugging. Browser and Python trust stores are independent.
 
 When Kubernetes permits only one public port, set
 `PORT=8000 HEALTH_PORT=0` on the engine container and expose
-only `8000` in the Service. `/demo/`, `/sdk/`, `/health`, and `/v1/realtime` then
+only `8000` in the Service. `/demo/`, `/sdk/`, `/health`, `/v1/ws`, and `/v1/realtime` then
 share that port. See the [deployment guide](docs/user/deployment.md#single-port-kubernetes-deployment)
 for complete probe and Service examples.
 
@@ -420,9 +420,9 @@ DEMO_ENABLED=true DEMO_LAB_URL=http://localhost:7860 \
 
 ## Streaming Protocol
 
-New clients should use OpenAI Realtime at `/v1/realtime`. It is a full-duplex WebSocket: input and cancellation remain available while audio flows downstream. Complete text uses `conversation.item.create` plus `response.create`; token-level input uses the `qwen.input_text_buffer.append/commit` extension. Billable tokens are returned in `response.done.response.usage`. See [OpenAI Realtime TTS Protocol and Triton Boundary](docs/dev/architecture/openai_realtime.md).
+The official Python SDK uses native `/v1/ws` as its primary protocol; `/v1/realtime` is the OpenAI Realtime compatibility endpoint. The compatibility endpoint is full duplex: complete text uses `conversation.item.create` plus `response.create`, and token-level input uses the `qwen.input_text_buffer.append/commit` extension. See [OpenAI Realtime TTS Protocol and Triton Boundary](docs/dev/architecture/openai_realtime.md).
 
-The following `/v1/ws` control frames remain for compatibility with the old SDK:
+Native `/v1/ws` uses these control frames:
 
 ```json
 {"type":"start","session_id":"demo","config":{"task_type":"custom_voice","speaker":"Serena"}}

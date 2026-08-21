@@ -114,7 +114,7 @@ config.output_policy = OutputPolicy(
 
 ```python
 client = TTSClient.connect(
-    "wss://tts.example.com/v1/realtime",
+    "wss://tts.example.com/v1/ws",
     key="your-api-key",
     timeout=120.0,
     connect_timeout=5.0,

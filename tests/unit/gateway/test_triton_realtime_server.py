@@ -118,8 +118,8 @@ async def test_sidecar_health_capabilities_sdk_and_demo_config_routes(
             assert response.status == 200
             capabilities = await response.json()
             assert capabilities["supported_api_protocols"] == [
-                "openai-realtime-v1",
                 "tts-session-v2alpha1",
+                "openai-realtime-v1",
             ]
             assert capabilities["schema_version"] == "qwen.tts.capabilities.v1"
             assert capabilities["runtime"]["type"] == "triton"

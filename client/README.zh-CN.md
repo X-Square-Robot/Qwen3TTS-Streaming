@@ -3,12 +3,13 @@
 # Qwen3-TTS Python 客户端
 
 `qwen3-tts-client` 是一个轻量级 Python SDK，用于与 Qwen3-TTS 部署进行通信。
-OpenAI Realtime 是主协议；旧的四种 transport 继续作为迁移期 fallback，并共用同一 API。
+原生 WebSocket 是主协议；OpenAI Realtime 作为兼容入口，三种旧直连 transport 作为
+迁移期 fallback，并共用同一 API。
 
 ```python
 from qwen3tts import TTSClient, SynthesisConfig
 
-client = TTSClient.connect("ws://localhost:50052/v1/realtime")
+client = TTSClient.connect("ws://localhost:50052/v1/ws")
 result = client.synthesize_bytes("你好，欢迎使用 Qwen3-TTS。",
                                  request=SynthesisConfig(task_type="custom_voice"))
 print(result.audio_format, len(result.audio_bytes))
@@ -18,11 +19,11 @@ print(result.audio_format, len(result.audio_bytes))
 
 ## 特性
 
-- **OpenAI Realtime 优先** —— `openai-realtime` 是主 transport；
-  `engine-websocket`、`engine-grpc`、`triton-grpc`、`triton-http` 作为兼容
-  fallback，全部由同一个 `TTSClient` 承载。
+- **原生 WebSocket 优先** —— `engine-websocket` 是主 transport；
+  `openai-realtime` 是 OpenAI 兼容入口，`engine-grpc`、`triton-grpc`、
+  `triton-http` 作为旧直连 fallback，全部由同一个 `TTSClient` 承载。
 - **自动检测** —— `transport="auto"`（默认）会探测端点并
-  在服务端声明或接受 Realtime 时优先绑定它。
+  在服务端声明或接受原生 WebSocket 时优先绑定它。
 - **一次性、流式（streaming）和实时（realtime）** 三种模式。
 - **同步与异步** 客户端（`TTSClient` / `AsyncTTSClient`）。
 - **精简依赖** —— 核心安装仅需 `requests` 和 `websocket-client`；
@@ -79,7 +80,7 @@ pip install "https://<public-service-base>/sdk/<wheel-filename>"
 ```python
 from qwen3tts import TTSClient, SynthesisConfig
 
-client = TTSClient.connect("ws://localhost:50052/v1/realtime")
+client = TTSClient.connect("ws://localhost:50052/v1/ws")
 result = client.synthesize_bytes(
     "你好，欢迎使用 Qwen3-TTS。",
     request=SynthesisConfig(task_type="custom_voice", speaker="serena"),
@@ -103,7 +104,7 @@ print(arr.audio_array.shape)
 ```python
 from qwen3tts import TTSClient, SessionStartRequest, SynthesisConfig, AudioChunk, StreamEvent
 
-client = TTSClient.connect("ws://localhost:50052/v1/realtime")
+client = TTSClient.connect("ws://localhost:50052/v1/ws")
 session = client.open_stream(
     SessionStartRequest(session_id="demo", config=SynthesisConfig(task_type="custom_voice"))
 )
@@ -130,7 +131,7 @@ print(session.usage, session.response_id, session.response_status)
 ```python
 from qwen3tts import TTSClient, RealtimeAudioStream, SessionStartRequest, SynthesisConfig
 
-client = TTSClient.connect("ws://localhost:50052/v1/realtime")
+client = TTSClient.connect("ws://localhost:50052/v1/ws")
 session = client.open_stream(
     SessionStartRequest(session_id="webrtc", config=SynthesisConfig(task_type="custom_voice"))
 )
@@ -157,7 +158,7 @@ for frame in RealtimeAudioStream(session, chunk_s=0.02, fill_silence=True):
 ```python
 from qwen3tts import AsyncTTSClient, SynthesisConfig
 
-client = await AsyncTTSClient.connect("ws://localhost:50052/v1/realtime")
+client = await AsyncTTSClient.connect("ws://localhost:50052/v1/ws")
 result = await client.synthesize_bytes("你好。", request=SynthesisConfig(task_type="custom_voice"))
 # streaming: session = await client.aopen_stream(SessionStartRequest(...))
 ```
@@ -169,13 +170,13 @@ result = await client.synthesize_bytes("你好。", request=SynthesisConfig(task
 
 | Endpoint example | Detected transport |
 |------------------|--------------------|
+| `ws://localhost:50052/v1/ws` | `engine-websocket`（原生主协议） |
 | `ws://localhost:50052/v1/realtime` | `openai-realtime`（standalone） |
 | `ws://localhost:50053/v1/realtime` | `openai-realtime`（Triton sidecar） |
-| `ws://localhost:50052/v1/ws` | `engine-websocket` |
 | `localhost:50051` | `engine-grpc` |
 | `http://localhost:8000` | `triton-http` / `triton-grpc` |
 
-### Realtime 迁移与 usage
+### Realtime 兼容入口与 usage
 
 完整文本的 `synthesize_bytes()` 使用标准 Realtime
 `conversation.item.create` 和 `response.create` 事件。增量 `open_stream()` 使用
@@ -187,8 +188,9 @@ result = await client.synthesize_bytes("你好。", request=SynthesisConfig(task
 `result.details["usage"]`，流式调用则在终态事件后映射为 `session.usage`。若客户端在
 终态前断联，已配置的服务端计费账本仍是权威数据源。
 
-四种旧 transport 当前不会删除，但每个进程、每种 transport 会发出一次
-`FutureWarning`。迁移期间可用 `QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING=1` 临时
+OpenAI Realtime 兼容 transport 不发出弃用告警。`engine-grpc`、`triton-grpc` 和
+`triton-http` 三种旧直连 transport 会按每个进程、每种 transport 发出一次
+`FutureWarning`；迁移期间可用 `QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING=1` 临时
 静默。native WebSocket 通过 `stream_resume_v1`、Realtime 通过
 `qwen.response_resume.v1` 声明活动流恢复；未声明对应能力时仍明确失败。
 
@@ -209,13 +211,13 @@ client = TTSClient.connect(
 ```python
 # 推荐：信任指定的自签名证书或私有 CA
 client = TTSClient.connect(
-    "wss://localhost:50052/v1/realtime",
+    "wss://localhost:50052/v1/ws",
     tls_verify="/path/to/cert.local.pem",
 )
 
 # 仅限本地联调，禁止用于生产
 client = TTSClient.connect(
-    "wss://localhost:50052/v1/realtime",
+    "wss://localhost:50052/v1/ws",
     tls_verify=False,
 )
 ```
@@ -250,7 +252,7 @@ python examples/quickstart.py                  # one-shot     -> quickstart.wav
 python examples/streaming.py                   # incremental  -> streaming.wav
 python examples/realtime.py                    # wall-clock aligned frames
 python examples/quickstart.py localhost:50051  # point at engine gRPC
-python examples/quickstart.py wss://localhost:50052/v1/realtime \
+python examples/quickstart.py wss://localhost:50052/v1/ws \
   --tls-ca-file /path/to/cert.local.pem
 ```
 

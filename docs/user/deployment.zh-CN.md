@@ -272,8 +272,8 @@ bash scripts/bash/autorun.sh deploy \
 端点：
 
 - gRPC: `localhost:50051`
-- OpenAI Realtime: `ws://localhost:50052/v1/realtime`
-- 兼容 WebSocket: `ws://localhost:50052/v1/ws`
+- 原生 WebSocket: `ws://localhost:50052/v1/ws`
+- OpenAI Realtime 兼容入口: `ws://localhost:50052/v1/realtime`
 - capabilities: `http://localhost:50052/v1/capabilities`
 - health: `http://localhost:8080/health`
 
@@ -371,6 +371,7 @@ spec:
 因此同一个 Service 地址直接提供：
 
 - `http://<service>:8000/demo/`
+- `ws://<service>:8000/v1/ws`
 - `ws://<service>:8000/v1/realtime`
 - `http://<service>:8000/sdk/`
 - `http://<service>:8000/health`
@@ -414,7 +415,8 @@ Ingress 必须支持 WebSocket upgrade；主流 Kubernetes Ingress Controller �
 
 - Demo：`https://tts.example.com/demo/`
 - Python SDK：`TTSClient.connect("https://tts.example.com")`
-- Realtime：`wss://tts.example.com/v1/realtime`
+- 原生 WebSocket：`wss://tts.example.com/v1/ws`
+- OpenAI Realtime 兼容入口：`wss://tts.example.com/v1/realtime`
 - SDK 下载：`https://tts.example.com/sdk/`
 
 公有 CA 证书会被浏览器和 Python 默认信任，因此不需要 `tls_verify=False`、证书路径或
@@ -543,8 +545,9 @@ Triton 默认端口：
 - HTTP: `localhost:8000`
 - gRPC: `localhost:8001`
 - Metrics: `localhost:8002`
-- OpenAI Realtime sidecar：`ws://localhost:50053/v1/realtime`
-- Realtime capabilities / health：`http://localhost:50053/v1/capabilities` 和
+- sidecar 原生 WebSocket：`ws://localhost:50053/v1/ws`
+- sidecar OpenAI Realtime 兼容入口：`ws://localhost:50053/v1/realtime`
+- sidecar capabilities / health：`http://localhost:50053/v1/capabilities` 和
   `http://localhost:50053/health`
 
 compose wrapper 会同时启动 Triton 和 Realtime sidecar；用 `--realtime-port <N>`
@@ -625,7 +628,8 @@ bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 ```
 
 此时同一个端口提供 `https://<host>:50052/demo/`、
-`wss://<host>:50052/v1/realtime`、`https://<host>:50052/sdk/` 和
+`wss://<host>:50052/v1/ws`、`wss://<host>:50052/v1/realtime`、
+`https://<host>:50052/sdk/` 和
 `https://<host>:50052/health`。设置 `TLS_AUTO_ENABLE=true` 后，入口脚本才会发现
 `/app/tls/cert.local.pem` 与 `/app/tls/key.local.pem`，便于使用已经由测试浏览器显式
 信任的开发证书。自动发现默认关闭，因此仅仅挂载证书目录不会把 `http://` / `ws://` 暗中
@@ -636,7 +640,7 @@ Python SDK 调试同一个自签名入口时，优先显式信任生成的证书
 
 ```python
 client = TTSClient.connect(
-    "wss://localhost:50052/v1/realtime",
+    "wss://localhost:50052/v1/ws",
     tls_verify="workspace/tls/cert.local.pem",
 )
 ```
@@ -650,7 +654,7 @@ Python 的信任库；Browser SDK 也不能从 JavaScript 关闭浏览器的证�
 
 Triton 部署把 `--gateway engine` 改成 `--gateway triton`，然后打开
 `http://localhost:50053/demo/`。门户全部使用相对 URL，因此服务部署在
-`/infer/<instance>` 下时，Demo 资源、`/sdk/`、`/v1/capabilities` 和
+`/infer/<instance>` 下时，Demo 资源、`/sdk/`、`/v1/capabilities`、`/v1/ws` 和
 `/v1/realtime` 都会保留该前缀。不应公开门户时设置 `DEMO_ENABLED=false`，
 此时 `/demo/` 返回 404。
 

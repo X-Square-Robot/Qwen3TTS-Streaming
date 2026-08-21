@@ -2,15 +2,15 @@
 
 # Realtime 接口与事件
 
-正常业务优先使用 Python SDK 或 Browser SDK。只有在其他语言中实现客户端、排查网关事件，
-或需要接入自有播放器时，才需要本页内容。
+本页描述 OpenAI Realtime **兼容入口**。Python 业务优先使用官方 SDK 的原生 `/v1/ws`；
+Browser SDK、已有 OpenAI Realtime 客户端、其他语言兼容接入或协议排障才需要本页内容。
 
 ## 公共端点
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | `GET` | `/v1/capabilities` | 查询当前实例支持的任务、音频格式和扩展 |
-| WebSocket | `/v1/realtime` | 新客户端统一使用的 Realtime 入口 |
+| WebSocket | `/v1/realtime` | OpenAI Realtime 兼容入口 |
 | `GET` | `/demo/` | 在线体验、SDK 下载和同版本文档 |
 
 HTTP 站点使用 HTTPS 时，WebSocket 必须使用 WSS。反向代理存在路径前缀时，不要手工拼接

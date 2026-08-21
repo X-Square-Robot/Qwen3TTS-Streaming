@@ -2,15 +2,17 @@
 
 # Realtime endpoints and events
 
-Use the Python or Browser SDK for normal application work. This page is for implementing a client in
-another language, inspecting gateway events, or integrating a custom player.
+This page describes the OpenAI Realtime **compatibility endpoint**. Python
+applications should prefer the official SDK with native `/v1/ws`. Use this
+page for the Browser SDK, an existing OpenAI Realtime client, another-language
+compatibility integration, or protocol debugging.
 
 ## Public endpoints
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/v1/capabilities` | Discover tasks, audio formats, and extensions on this deployment |
-| WebSocket | `/v1/realtime` | Realtime endpoint for all new clients |
+| WebSocket | `/v1/realtime` | OpenAI Realtime compatibility endpoint |
 | `GET` | `/demo/` | Playground, SDK downloads, and same-release documentation |
 
 Use WSS when the HTTP origin uses HTTPS. When a reverse proxy adds a path prefix, resolve relative

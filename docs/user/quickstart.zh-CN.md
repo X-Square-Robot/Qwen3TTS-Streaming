@@ -23,11 +23,12 @@ https://tts.example.com
 | 在线体验 | `https://tts.example.com/demo/` |
 | Python / Browser SDK | `https://tts.example.com/demo/#/sdk` |
 | 服务能力 | `https://tts.example.com/v1/capabilities` |
-| Realtime WebSocket | `wss://tts.example.com/v1/realtime` |
+| Python SDK 原生 WebSocket | `wss://tts.example.com/v1/ws` |
+| OpenAI Realtime 兼容入口 | `wss://tts.example.com/v1/realtime` |
 
 上表是生产环境可信 TLS 的示例。容器在本机默认提供明文 HTTP/WS：Demo 为
 `http://localhost:50052/demo/`，SDK 入口为
-`ws://localhost:50052/v1/realtime`。除非部署方显式启用 TLS，不要把本地地址改写成
+`ws://localhost:50052/v1/ws`。除非部署方显式启用 TLS，不要把本地地址改写成
 `https://` / `wss://`。
 
 先检查服务是否返回能力信息：
@@ -57,7 +58,7 @@ pip install "qwen3-tts-client[all] @ https://tts.example.com/sdk/<wheel-filename
 from qwen3tts import AudioFormat, SynthesisConfig, TTSClient
 
 with TTSClient.connect(
-    "wss://tts.example.com/v1/realtime",
+    "wss://tts.example.com/v1/ws",
     key="your-api-key",  # 无鉴权时删除这一行
 ) as client:
     result = client.synthesize_bytes(
@@ -78,7 +79,7 @@ HTTPS capabilities 探测、WSS 首次连接和断线重连：
 
 ```python
 client = TTSClient.connect(
-    "wss://localhost:50052/v1/realtime",
+    "wss://localhost:50052/v1/ws",
     tls_verify="/path/to/cert.local.pem",
 )
 ```
@@ -92,7 +93,8 @@ client = TTSClient.connect(
 ## 4. 接入前确认
 
 - 不要猜测任务、说话人、语言或采样率；以 `/v1/capabilities` 返回值为准。
-- 新接入统一使用 `/v1/realtime`，不要从旧的 gRPC 或 `/v1/ws` 开始。
+- Python SDK 新接入优先使用原生 `/v1/ws`；只有对接 OpenAI Realtime 事件模型时才使用
+  `/v1/realtime` 兼容入口。旧 gRPC 和 Triton 原生接口不作为新接入起点。
 - 一定等待成功、取消或失败终态；`usage` 也在终态返回。
 - 浏览器接入请使用 Browser SDK，它已经处理 Base64 音频、播放游标和断线恢复。
 

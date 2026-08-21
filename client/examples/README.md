@@ -3,7 +3,7 @@
 # Examples
 
 Runnable examples for the `qwen3-tts-client` SDK. Each takes an optional
-endpoint argument (default: `ws://localhost:50052/v1/realtime`).
+endpoint argument (default: `ws://localhost:50052/v1/ws`).
 
 First start a Qwen3-TTS endpoint (see the repo README), then:
 
@@ -18,7 +18,8 @@ python realtime.py                    # wall-clock aligned frames (WebRTC/playba
 Point at a different endpoint:
 
 ```bash
-python quickstart.py ws://localhost:50053/v1/realtime  # Triton sidecar
+python quickstart.py ws://localhost:50053/v1/ws        # Triton sidecar native endpoint
+python quickstart.py ws://localhost:50052/v1/realtime  # OpenAI Realtime compatibility
 python quickstart.py localhost:50051                  # legacy engine gRPC
 python quickstart.py http://localhost:8000            # legacy Triton HTTP
 ```
@@ -28,11 +29,11 @@ self-signed WSS was explicitly enabled:
 
 ```bash
 # Strictly verify the selected certificate (recommended)
-python quickstart.py wss://localhost:50052/v1/realtime \
+python quickstart.py wss://localhost:50052/v1/ws \
   --tls-ca-file /path/to/cert.local.pem
 
 # Temporary local debugging only
-python quickstart.py wss://localhost:50052/v1/realtime --insecure
+python quickstart.py wss://localhost:50052/v1/ws --insecure
 ```
 
 | Example | Shows |

@@ -318,10 +318,21 @@ def test_legacy_transport_warning_is_emitted_once(monkeypatch):
 
     with pytest.warns(FutureWarning, match="compatibility path"):
         TTSClient.connect(
-            "ws://localhost:50052/v1/ws",
-            transport=TRANSPORT_ENGINE_WEBSOCKET,
+            "http://localhost:8000",
+            transport=TRANSPORT_TRITON_HTTP,
             verify=False,
         )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        TTSClient.connect(
+            "http://localhost:8000",
+            transport=TRANSPORT_TRITON_HTTP,
+            verify=False,
+        )
+    assert caught == []
+
+
+def test_native_websocket_transport_has_no_legacy_warning():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         TTSClient.connect(

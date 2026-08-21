@@ -195,7 +195,7 @@ bash scripts/bash/autorun.sh deploy  -m custom-1.7b --gateway standalone --engin
 bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway standalone --engine-mode trt
 ```
 
-默认端口：gRPC `50051`，OpenAI Realtime `ws://localhost:50052/v1/realtime`，兼容 WebSocket `ws://localhost:50052/v1/ws`，HTTP capabilities `http://localhost:50052/v1/capabilities`，health `http://localhost:8080/health`（进程启动即监听；模型加载期间返回 `503`，就绪后返回 `200`，探针细节见[部署文档](docs/user/deployment.zh-CN.md)）。
+默认端口：gRPC `50051`，原生 WebSocket `ws://localhost:50052/v1/ws`，OpenAI Realtime 兼容入口 `ws://localhost:50052/v1/realtime`，HTTP capabilities `http://localhost:50052/v1/capabilities`，health `http://localhost:8080/health`（进程启动即监听；模型加载期间返回 `503`，就绪后返回 `200`，探针细节见[部署文档](docs/user/deployment.zh-CN.md)）。
 
 ### Engine Docker
 
@@ -232,7 +232,8 @@ bash scripts/bash/compose.sh prepare --gateway triton --variant custom-1.7b --en
 bash scripts/bash/compose.sh up --gateway triton --variant custom-1.7b
 ```
 
-Triton 部署会同时启动 Triton 和 OpenAI Realtime sidecar。默认公共入口为 Realtime
+Triton 部署会同时启动 Triton 和公共 WebSocket sidecar。默认公共入口为原生 WebSocket
+`ws://localhost:50053/v1/ws`、OpenAI Realtime 兼容入口
 `ws://localhost:50053/v1/realtime`、capabilities
 `http://localhost:50053/v1/capabilities` 和 health
 `http://localhost:50053/health`；Triton 原生 HTTP/gRPC/metrics 端口仍为
@@ -258,9 +259,9 @@ bash scripts/bash/autorun.sh all -m base-1.7b --gateway standalone --engine-mode
 
 ## Client SDK
 
-Python SDK 在 `transport="auto"` 能探测到 Realtime 时，现已优先选择
-`openai-realtime`。engine-websocket、engine-grpc、triton-grpc、triton-http 四种兼容
-transport 继续可用并发出弃用告警，当前尚未删除。
+Python SDK 在 `transport="auto"` 时优先选择原生 `engine-websocket`。OpenAI Realtime
+作为兼容 transport 保留且不发出弃用告警；engine-grpc、triton-grpc、triton-http 三种
+旧直连 transport 继续可用并发出弃用告警。
 
 引擎与 SDK 从同一个 git tag 配对发布。先从 `GET /v1/capabilities` 读取
 `engine_version`，再安装对应 GitHub 或 GitLab Release 中的 wheel：
@@ -286,7 +287,7 @@ pip install "./client[all]"
 ```python
 from qwen3tts import TTSClient, SynthesisConfig
 
-client = TTSClient.connect("ws://localhost:50052/v1/realtime")
+client = TTSClient.connect("ws://localhost:50052/v1/ws")
 result = client.synthesize_bytes(
     "你好，欢迎使用 Qwen3-TTS。",
     request=SynthesisConfig(task_type="custom_voice"),
@@ -340,7 +341,7 @@ mamba run -n qwen3-tts python tools/validation/serving_endpoints.py \
 ## 内置 Demo 与统一文档
 
 每个正式运行时镜像都在 `/demo/` 内置与该版本匹配的实例门户。Demo 默认开启，
-与 `/v1/realtime`、`/sdk/` 使用同一个公共端口；启动时设置
+与 `/v1/ws`、`/v1/realtime`、`/sdk/` 使用同一个公共端口；启动时设置
 `DEMO_ENABLED=false` 可将其关闭。
 门户会发现当前实例的能力，通过 Browser SDK 合成，通过系统扬声器播放，并提供由
 capabilities 门控的 VAD/交付参数、WAV 下载和本仓库 Markdown 文档；普通体验不依赖
@@ -376,7 +377,7 @@ Python SDK 可用 `tls_verify="/path/to/cert.local.pem"` 严格信任指定证�
 
 Kubernetes 只允许一个公开端口时，engine 容器设置
 `PORT=8000 HEALTH_PORT=0`，Service 只映射 `8000`；此时
-`/demo/`、`/sdk/`、`/health` 和 `/v1/realtime` 全部共用该端口。完整探针和 Service
+`/demo/`、`/sdk/`、`/health`、`/v1/ws` 和 `/v1/realtime` 全部共用该端口。完整探针和 Service
 示例见[部署说明](docs/user/deployment.zh-CN.md#kubernetes-单端口部署)。
 
 没有 Ingress 的开发机也可像 FunASR Nano 一样设置 `TLS_CERT_FILE` 和
@@ -396,9 +397,9 @@ DEMO_ENABLED=true DEMO_LAB_URL=http://localhost:7860 \
 
 ## 流式协议
 
-新客户端以 OpenAI Realtime `/v1/realtime` 为主协议；它是全双工 WebSocket，音频下行时仍可追加输入或取消。完整文本使用 `conversation.item.create` + `response.create`，token 级追加使用 `qwen.input_text_buffer.append/commit` 扩展，最终 `response.done.response.usage` 返回计费 token。完整说明见 [OpenAI Realtime TTS 协议与 Triton 边界](docs/dev/architecture/openai_realtime.zh-CN.md)。
+官方 Python SDK 以原生 `/v1/ws` 为主协议，`/v1/realtime` 是 OpenAI Realtime 兼容入口。兼容入口是全双工 WebSocket，完整文本使用 `conversation.item.create` + `response.create`，token 级追加使用 `qwen.input_text_buffer.append/commit` 扩展。完整说明见 [OpenAI Realtime TTS 协议与 Triton 边界](docs/dev/architecture/openai_realtime.zh-CN.md)。
 
-以下 `/v1/ws` 控制帧保留用于旧 SDK 兼容：
+原生 `/v1/ws` 使用以下控制帧：
 
 ```json
 {"type":"start","session_id":"demo","config":{"task_type":"custom_voice","speaker":"Serena"}}

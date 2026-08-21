@@ -8,14 +8,14 @@
 
 支持的服务入口：
 
-- `openai-realtime`（主协议）
-- `engine-websocket`
+- `engine-websocket`（原生主协议）
+- `openai-realtime`（OpenAI Realtime 兼容协议）
 - `engine-grpc`
 - `triton-grpc`
 - `triton-http`
 
-默认行为是 `transport="auto"`：客户端优先探测 Realtime，仅在主协议不可用时绑定旧
-adaptor。
+默认行为是 `transport="auto"`：客户端优先探测原生 WebSocket，仅在原生协议不可用时
+回退 Realtime 兼容入口或其他 adaptor。
 
 ## 目录与发布
 
@@ -193,7 +193,7 @@ websocket 传输层迁移到 `websocket-client` 后的两点说明：
 ### TLS 与本地调试
 
 容器默认在同一个端口提供 HTTP/WS，普通本地调试直接连接
-`ws://localhost:50052/v1/realtime`，不需要证书。只有部署端显式启用 TLS 或前面存在
+`ws://localhost:50052/v1/ws`，不需要证书。只有部署端显式启用 TLS 或前面存在
 TLS Ingress/Gateway 时才使用 HTTPS/WSS。
 
 `connect(tls_verify=...)` 采用与 Requests 一致的三种策略，并统一应用到 HTTPS
@@ -201,17 +201,17 @@ capabilities 探测、WSS 首连、连接池预热和断线重连：
 
 ```python
 # 默认：系统信任链，适用于公有 CA
-client = TTSClient.connect("wss://tts.example/v1/realtime")
+client = TTSClient.connect("wss://tts.example/v1/ws")
 
 # 自签名或私有 CA：仍然严格校验证书与主机名
 client = TTSClient.connect(
-    "wss://localhost:50052/v1/realtime",
+    "wss://localhost:50052/v1/ws",
     tls_verify="/path/to/cert.local.pem",
 )
 
 # 仅限本地 TLS 联调：关闭证书和主机名校验
 client = TTSClient.connect(
-    "wss://localhost:50052/v1/realtime",
+    "wss://localhost:50052/v1/ws",
     tls_verify=False,
 )
 ```
@@ -239,13 +239,13 @@ print(result.details["usage"])
 ```
 
 standalone 部署中，`localhost` 会解析到
-`ws://localhost:50052/v1/realtime`；Triton compose 则通过 sidecar 暴露同一公共协议，
-默认地址为 `ws://localhost:50053/v1/realtime`。最终选择可从
+`ws://localhost:50052/v1/ws`；Triton compose sidecar 的原生入口默认为
+`ws://localhost:50053/v1/ws`。最终选择可从
 `client.resolved_transport` 读取。
 
-## OpenAI Realtime 与旧协议迁移
+## 原生 WebSocket 与 OpenAI Realtime 兼容入口
 
-需要确定性选择入口时可显式固定主 transport：
+只有需要兼容 OpenAI Realtime 事件模型时，才显式选择对应 transport：
 
 ```python
 client = TTSClient.connect(
@@ -265,7 +265,8 @@ append/commit 扩展。传输仍是全双工：音频 delta 下行时可以继�
 `session.response_id` 和 `session.response_status` 用于计费关联和终态判断。若客户端未
 收到终态即断联，已配置的服务端 ledger 仍是权威计费来源。
 
-迁移期继续保留四种旧 transport，并按每进程、每 transport 发出一次
+OpenAI Realtime 作为兼容入口继续受支持且不发出弃用告警。`engine-grpc`、
+`triton-grpc` 和 `triton-http` 三种旧直连 transport 会按每进程、每 transport 发出一次
 `FutureWarning`；可用 `QWEN3TTS_SUPPRESS_LEGACY_TRANSPORT_WARNING=1` 临时静默。
 当 Realtime 入口声明 `qwen.response_resume.v1` 时，SDK 会从精确的
 delivery/sample 游标恢复，并只重放尚未 ACK 的文本。恢复与 native WebSocket 一样受
@@ -362,7 +363,7 @@ engine execution。SDK 在连接池内替换坏连接，不会再次调用 `open
 ```python
 from qwen3tts import SessionStartRequest, SynthesisConfig, TTSClient
 
-client = TTSClient.connect("ws://localhost:50052/v1/realtime")
+client = TTSClient.connect("ws://localhost:50052/v1/ws")
 session = client.open_stream(
     SessionStartRequest(
         session_id="demo-session",
@@ -393,14 +394,13 @@ print(session.response_id, session.response_status, session.usage)
 
 `transport="auto"` 时：
 
-- `ws://` / `wss://`：`/v1/realtime` 按 Realtime 探测；根 URL 先尝试
-  `/v1/realtime` 再尝试 `/v1/ws`；显式 `/v1/ws` 保持旧协议。
+- `ws://` / `wss://`：显式 `/v1/ws` 使用原生协议，显式 `/v1/realtime` 使用兼容协议；
+  根 URL 先尝试 `/v1/ws`，不可用时再尝试 `/v1/realtime`。
 - `http://` / `https://`：先探测 `GET /v1/capabilities`，优先采用声明的
-  `openai-realtime-v1`，否则才走旧 standalone 或 Triton HTTP 探测。
-- 裸 `host:port`：`50052` 和 `50053` 优先探测 Realtime，旧协议和 Triton 探测作为
-  fallback。
-- 裸 `host`：按 `50052`（standalone Realtime）、`50053`（Triton Realtime
-  sidecar）、`50051`、`8001`、`8000` 的优先级扩展。
+  `tts-session-v2` 兼容大版本；只有实例未声明原生协议时才采用 `openai-realtime-v1`。
+- 裸 `host:port`：`50052` 和 `50053` 都先探测原生 `/v1/ws`，再探测 Realtime。
+- 裸 `host`：依次探测 `50052`、`50053` 上的原生 WebSocket，再探测两个端口上的
+  Realtime，最后回退 `50051`、`8001` 和 `8000`。
 
 探测结果会暴露在：
 
@@ -431,12 +431,13 @@ Triton HTTP 本身不支持真正的 decoupled streaming infer。
 - SDK 代码被收敛到 `client/` 子项目
 - 提供统一同步 / 异步 façade
 - 引入共享协议层 `qwen3tts_protocol`
-- OpenAI Realtime 成为 auto-detect 首选 adaptor
-- 四类旧 adaptor 继续可用并发出 deprecation warning
+- 原生 `engine-websocket` 是 auto-detect 首选 adaptor
+- OpenAI Realtime 作为兼容 adaptor 保留
+- 三类旧直连 adaptor 继续可用并发出 deprecation warning
 - 为 `triton-http` 提供显式的流式降级语义
 
 当前仍建议把它视为 v1 alpha：
 
 - SDK 到 gateway 的 Realtime 集成已经覆盖，无需模型/GPU
 - 真实 Triton sidecar 和 GPU smoke test 仍应在部署 CI 中执行
-- durable usage、鉴权、配额与 Realtime 断线恢复验收通过后，才公布旧协议删除版本
+- durable usage、鉴权、配额与断线恢复验收通过后，才评估旧直连 adaptor 的删除版本

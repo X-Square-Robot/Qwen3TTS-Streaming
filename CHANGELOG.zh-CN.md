@@ -23,6 +23,14 @@
   添加 `Authorization: Bearer <key>`，并为 gRPC 添加小写 `authorization`
   metadata。鉴权仍由部署平台负责，engine 不校验 Header。
 
+### Changed
+
+- Python SDK 的 `transport="auto"` 改为优先选择原生 `/v1/ws`；
+  `/v1/realtime` 保留为 OpenAI Realtime 兼容入口。显式 endpoint 继续严格遵循调用方
+  选择，只有原生入口不可用时才自动回退 Realtime。
+- `engine-websocket` 不再被标记为旧兼容 transport；弃用告警只适用于
+  `engine-grpc`、`triton-grpc` 和 `triton-http` 三种旧直连路径。
+
 ### Fixed
 
 - 将引擎 WebSocket 握手预算（`connect_timeout`）与连接建立后的请求接收空闲预算

@@ -1,6 +1,6 @@
 {
   "schema_version": "qwen.tts.capabilities.v1",
-  "supported_api_protocols": ["openai-realtime-v1", "tts-session-v2alpha1"],
+  "supported_api_protocols": ["tts-session-v2alpha1", "openai-realtime-v1"],
   "openai_realtime_path": "/v1/realtime",
   "native_websocket_path": "/v1/ws",
   "required_realtime_extensions": [
