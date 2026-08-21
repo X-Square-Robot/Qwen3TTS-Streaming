@@ -1289,15 +1289,24 @@ class FrontendInterface:
         else:
             # A zero-token EMA step is still a valid boundary, but it must be
             # anchored at this segment's first global token span rather than
-            # at session offset zero.
-            boundary = spans[min(token_start, len(spans) - 1)]
-            normalized_start = normalized_end = boundary["normalized_start"]
+            # at session offset zero.  Once every token has been consumed,
+            # anchor trailing audio at the final token's end; using that
+            # token's start would move the public text cursor backwards.
+            at_segment_end = token_start >= len(spans)
+            boundary = spans[-1] if at_segment_end else spans[token_start]
+            normalized_boundary = boundary[
+                "normalized_end" if at_segment_end else "normalized_start"
+            ]
+            normalized_start = normalized_end = normalized_boundary
             if session.text_journal is not None:
                 raw_start, raw_end = session.text_journal.raw_span(
                     normalized_start, normalized_start
                 )
             else:
-                raw_start = raw_end = boundary["raw_start"]
+                raw_boundary = boundary[
+                    "raw_end" if at_segment_end else "raw_start"
+                ]
+                raw_start = raw_end = raw_boundary
         return {
             "type": "text_progress",
             "segment_idx": segment_idx,

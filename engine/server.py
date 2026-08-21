@@ -236,13 +236,14 @@ class TTSEngine:
             if self._cfg.paths.model_package_dir
             else DEFAULT_MODEL_VERSION
         )
-        engine_version = (
+        # ENGINE_BUILD_VERSION remains package/fingerprint metadata, but the
+        # public engine version is the release tag advertised by capabilities.
+        # Validate the package sidecar early without conflating it with that
+        # release identity.
+        if self._cfg.paths.model_package_dir:
             load_engine_build_version(self._cfg.paths.model_package_dir)
-            if self._cfg.paths.model_package_dir
-            else (
-                os.environ.get("QWEN3_TTS_ENGINE_BUILD_VERSION", "").strip()
-                or DEFAULT_ENGINE_VERSION
-            )
+        engine_version = (
+            os.environ.get("ENGINE_VERSION", "").strip() or DEFAULT_ENGINE_VERSION
         )
         engine_model_version = format_engine_model_version(
             engine_version,

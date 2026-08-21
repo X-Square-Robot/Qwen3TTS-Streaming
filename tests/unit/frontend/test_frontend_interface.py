@@ -79,6 +79,10 @@ def test_diagnostic_text_alias_is_exact_and_uses_independent_versions():
         DEFAULT_ENGINE_VERSION,
         DEFAULT_MODEL_VERSION,
     )
+    assert version_text == (
+        "引擎版本号：v0.2.0a14，"
+        "模型版本号：rime@20260820_580_5090_v1-zehan@20260818"
+    )
     assert version_text == DEFAULT_ENGINE_MODEL_VERSION
     assert resolve_diagnostic_text(VERSION_QUERY_TEXT, version_text) == version_text
     assert resolve_diagnostic_text(
@@ -89,7 +93,10 @@ def test_diagnostic_text_alias_is_exact_and_uses_independent_versions():
 @pytest.mark.parametrize("input_mode", [InputMode.FULL_TEXT, InputMode.AUTO])
 def test_version_query_synthesizes_engine_model_version(input_mode):
     async def run():
-        inbox = asyncio.Queue(maxsize=64)
+        # The labeled engine + model identity is intentionally longer than the
+        # old bare version pair; keep this isolated unit inbox large enough to
+        # hold the complete dispatch without a concurrent engine consumer.
+        inbox = asyncio.Queue(maxsize=256)
         interface = FrontendInterface(
             engine_inbox=inbox,
             tokenizer=_CharTokenizer(),
@@ -184,6 +191,55 @@ def test_text_progress_keeps_later_segment_global_coordinates():
     assert event["meta"]["normalized_codepoint_end"] == "11"
     assert event["meta"]["raw_codepoint_start"] == "12"
     assert event["meta"]["raw_codepoint_end"] == "13"
+
+
+def test_text_progress_keeps_trailing_audio_at_segment_end():
+    session = SimpleNamespace(
+        spliter=SimpleNamespace(ema_ratio_for_segment=lambda _segment_idx: 4.5),
+        segment_progress_frames={},
+        text_progress_estimators={},
+        segment_token_spans={
+            0: [
+                {
+                    "normalized_start": start,
+                    "normalized_end": end,
+                    "raw_start": start,
+                    "raw_end": end,
+                }
+                for start, end in ((0, 3), (3, 5), (5, 7), (7, 9))
+            ]
+        },
+        text_journal=None,
+        input_complete=True,
+    )
+
+    before_end = FrontendInterface._make_text_progress_event(
+        None,
+        session,
+        0,
+        {"source_frame_end": "13", "text_tokens": "4"},
+    )
+    reaches_end = FrontendInterface._make_text_progress_event(
+        None,
+        session,
+        0,
+        {"source_frame_end": "18", "text_tokens": "4"},
+    )
+    trailing_audio = FrontendInterface._make_text_progress_event(
+        None,
+        session,
+        0,
+        {"source_frame_end": "19", "text_tokens": "4"},
+    )
+
+    assert before_end is not None
+    assert reaches_end is not None
+    assert trailing_audio is not None
+    assert reaches_end["meta"]["raw_codepoint_end"] == "9"
+    assert trailing_audio["meta"]["raw_codepoint_start"] == "9"
+    assert trailing_audio["meta"]["raw_codepoint_end"] == "9"
+    assert trailing_audio["meta"]["normalized_codepoint_start"] == "9"
+    assert trailing_audio["meta"]["normalized_codepoint_end"] == "9"
 
 
 async def _drain_requests(inbox: asyncio.Queue) -> list:

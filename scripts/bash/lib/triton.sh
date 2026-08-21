@@ -337,7 +337,7 @@ PY
 import runpy
 import sys
 
-print(runpy.run_path(sys.argv[1])["DEFAULT_ENGINE_VERSION"])
+print(runpy.run_path(sys.argv[1])["DEFAULT_ENGINE_BUILD_VERSION"])
 PY
 )
     fi
