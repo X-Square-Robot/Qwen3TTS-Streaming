@@ -118,7 +118,7 @@ L2 layers decision-reason records on top of L1: structured, derived, human-reada
 
 | ⭐ | obs | Trigger | Fields | Source | State |
 |---|---|---|---|---|---|
-| ⭐ | `split_decision` | Each split point | path(offline/streaming), trigger(l1_punct/force_fallback_l1/force_hard_cut/driver_l1-3), remaining_kv, prefill_len, ema_ratio, thresholds{min_tokens_l1, force_split_at, l1/l2/l3_cap}, token_count_at_split, last_l1_pos, chosen_level, reason, text_preview | spliter.py:pre_split / driver.py | 🆕 |
+| ⭐ | `split_decision` | Each split point | path(offline/streaming), trigger(l1_punct/force_fallback_l1/force_hard_cut/driver_l1-3), remaining_kv, prefill_len, ema_ratio(compat capacity alias), duration_ema_ratio, safety_ratio, thresholds{min_tokens_l1, force_split_at, l1/l2/l3_cap}, token_count_at_split, last_l1_pos, chosen_level, reason, text_preview | spliter.py:pre_split / driver.py | 🆕 |
 | | `presplit_group` | Offline pre-split done | groups_created, tokens_per_group[], last_l1_pos, hard_cut_engaged, forced_split_count | spliter.py:_enqueue_presplit_groups | 🆕 |
 | | `driver_transition` | Streaming FSM transition | driver_state, token_count, threshold_met{l1,l2,l3,force}, fsm_rule_name, action_type, is_final | driver.py / spliter/core.py | 🆕 |
 | | `punct_classify` | Punctuation token (sampleable) | token_text, punct_level, saw_level3_break, trailing_closer_handled | spliter.py:classify_punct_level | 🆕 |

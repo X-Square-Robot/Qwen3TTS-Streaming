@@ -1189,6 +1189,8 @@ class TestSegmentRetry:
         assert retry.segment_idx == 1
         assert retry.metrics["retry_idx"] == 1
         assert retry.metrics["retry_reason"] == "loop"
+        assert retry.metrics["audio_steps"] >= 0
+        assert retry.metrics["text_tokens"] == 0
         # Steps 1-3 streamed; the triggering 4th frame is not sent on retry.
         assert types.count(ResultType.AUDIO_CHUNK) == 3
         loop.close()
@@ -1319,4 +1321,6 @@ class TestSegmentRetry:
         results = self._drain(loop, result_queue)
         retry = next(r for r in results if r.type == ResultType.SEGMENT_RETRY)
         assert retry.metrics["retry_reason"] == "length"
+        assert retry.metrics["audio_steps"] == model_config.max_seq_len
+        assert retry.metrics["text_tokens"] == 1
         loop.close()

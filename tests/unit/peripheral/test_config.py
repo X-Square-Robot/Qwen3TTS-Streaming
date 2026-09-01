@@ -120,6 +120,19 @@ class TestEnvOverrides:
         assert raw["reference_cache"]["enabled"] is False
         assert raw["reference_cache"]["max_entries"] == 4
 
+    def test_applies_split_safety_overrides(self):
+        raw: dict = {}
+        env = {
+            "ENGINE_SPLITER_SAFETY_RATIO_INITIAL": "6.0",
+            "ENGINE_SPLITER_EMA_MIN_OBSERVATION_TOKENS": "12",
+            "ENGINE_SPLITER_SAFETY_FAILURE_MULTIPLIER": "1.2",
+        }
+        with _patch_env(env):
+            _apply_env_overrides(raw)
+        assert raw["spliter"]["safety_ratio_initial"] == 6.0
+        assert raw["spliter"]["ema_min_observation_tokens"] == 12
+        assert raw["spliter"]["safety_failure_multiplier"] == 1.2
+
     def test_ignores_non_engine(self):
         raw: dict = {}
         env = {"OTHER_VAR": "123"}
@@ -140,6 +153,9 @@ class TestLoadConfig:
         assert cfg.prefix_cache.enabled is True
         assert cfg.reference_cache.enabled is True
         assert cfg.reference_cache.max_entries == 16
+        assert cfg.spliter.ema_ratio_initial == pytest.approx(4.5)
+        assert cfg.spliter.safety_ratio_initial == pytest.approx(5.5)
+        assert cfg.spliter.ema_min_observation_tokens == 8
 
     def test_yaml_file(self):
         pytest.importorskip("yaml")

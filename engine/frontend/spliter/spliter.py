@@ -36,6 +36,11 @@ from .driver import (
 )
 from .event import SpliterEvent, SpliterEventType as ET
 from .defines import LEVEL1_PUNCTIONS, LEVEL2_PUNCTIONS, LEVEL3_PUNCTIONS
+from .ratio import (
+    RatioObservation,
+    RatioOutcome,
+    SplitRatioController,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,15 +108,32 @@ class SegmentAction:
 class _PendingToken:
     """One queued token awaiting a driver slot in the unified pipeline.
 
-    ``group_idx`` is the offline pre-split group id, or ``None`` for a streaming
-    token (each streaming segment is its own top-level group — see Option ①).
+    ``group_key`` is an internal offline pre-split key, or ``None`` for a
+    streaming token.  It is deliberately not the public reorder ``group_idx``:
+    public ids are allocated only when a segment opens, in FIFO text order.
     ``boundary`` marks the last token of an offline group: the driver is
     force-flushed right after it.
     """
 
     token: SegmentToken
-    group_idx: Optional[int]
+    group_key: Optional[int]
     boundary: bool = False
+    plan: Optional["_PresplitPlan"] = None
+
+
+@dataclass(frozen=True)
+class _PresplitPlan:
+    """Immutable Stage-1 capacity contract shared by one planning epoch.
+
+    A packet may yield several groups.  Every visible group must be opened with
+    the same thresholds used to choose its boundary; otherwise a later ratio
+    update can silently turn a planned ``N``-token group into ``cap + tiny
+    remainder`` during Stage 2.  A monotonic safety tightening may replace the
+    plan only by re-running Stage 1 over an entirely unopened packet suffix.
+    """
+
+    safety_ratio: float
+    thresholds: SplitThresholds
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +151,14 @@ class Spliter:
     prefill_len : int
         Estimated prefill length (prompt tokens) for threshold computation.
     ema_ratio : float
-        Initial audio:text step ratio (updated via update_ratio).
+        Initial audio:text duration ratio (updated from natural completions).
+        This ratio is used for progress/duration estimation, not as an
+        unconstrained hard-capacity estimate.
+    safety_ratio_initial : float, optional
+        Conservative audio:text ratio used for text-capacity planning.  It is
+        initialized independently and never decreases within a session.  When
+        omitted, it inherits ``ema_ratio`` for compatibility with direct
+        callers; the production server passes its explicit calibrated value.
     max_concurrent : int
         Maximum segments driven in parallel (Level 2).  Set to 1 for
         Level 1 (serial) behavior.
@@ -141,25 +170,40 @@ class Spliter:
         engine_max_decode_len: int = 512,
         prefill_len: int = 12,
         ema_ratio: float = 4.5,
+        safety_ratio_initial: Optional[float] = None,
         safety_margin: int = 8,
         max_concurrent: int = 2,
         ema_alpha: float = 0.1,
         ema_overflow_alpha: float = 0.5,
         ema_min_ratio: float = 2.0,
         ema_max_ratio: float = 10.0,
+        ema_min_observation_tokens: int = 8,
+        safety_failure_multiplier: float = 1.25,
         l1_split_cap_ratio: float = 0.70,
         l2_split_cap_ratio: float = 0.80,
         l3_split_cap_ratio: float = 0.90,
     ) -> None:
         self._engine_max = engine_max_decode_len
         self._prefill_len = prefill_len
-        self._ema_ratio = ema_ratio
         self._safety_margin = safety_margin
         self._max_concurrent = max_concurrent
-        self._ema_alpha = ema_alpha
-        self._ema_overflow_alpha = ema_overflow_alpha
-        self._ema_min_ratio = ema_min_ratio
-        self._ema_max_ratio = ema_max_ratio
+        self._ratios = SplitRatioController(
+            duration_initial=ema_ratio,
+            safety_initial=(
+                ema_ratio
+                if safety_ratio_initial is None
+                else safety_ratio_initial
+            ),
+            duration_alpha=ema_alpha,
+            # Keep the existing overflow-alpha knob backward compatible, but
+            # apply it to the independent failure-safety controller instead
+            # of mixing censored failures into the duration EMA.
+            failure_alpha=ema_overflow_alpha,
+            min_ratio=ema_min_ratio,
+            max_ratio=ema_max_ratio,
+            min_duration_tokens=ema_min_observation_tokens,
+            failure_multiplier=safety_failure_multiplier,
+        )
         self._l1_split_cap_ratio = l1_split_cap_ratio
         self._l2_split_cap_ratio = l2_split_cap_ratio
         self._l3_split_cap_ratio = l3_split_cap_ratio
@@ -168,8 +212,12 @@ class Spliter:
         # and offline pre-split group deque: streaming and offline now feed one
         # queue of `_PendingToken` and one driving core (`_drive_events`).
         self._pending: Deque[_PendingToken] = deque()
-        self._presplit_thresholds: Optional[SplitThresholds] = None
-        self._next_group_idx: int = 0
+        # Offline planning keys identify queued Stage-1 groups. Public reorder
+        # ids live in a separate namespace and are allocated only at open time;
+        # preallocating public ids for offline work behind pending streaming
+        # text can otherwise invert AudioReorder order under backpressure.
+        self._next_group_key: int = 0
+        self._next_output_group_idx: int = 0
         self._input_complete: bool = False
 
         # Per-segment drivers; key = segment_idx
@@ -184,9 +232,15 @@ class Spliter:
             int, Optional[int]
         ] = {}  # segment_idx -> offline group id (None = streaming)
         self._seg_ema_ratio: dict[int, float] = {}  # EMA snapshot at segment open
+        self._seg_safety_ratio: dict[
+            int, float
+        ] = {}  # capacity ratio snapshot at segment open
         self._group_next_local: dict[
             int, int
-        ] = {}  # offline group id -> next local_idx
+        ] = {}  # internal offline group key -> next local_idx
+        self._group_output_idx: dict[
+            int, int
+        ] = {}  # internal offline group key -> public reorder group_idx
 
         # Segments that have entered flush (engine still decoding pad)
         self._flushing: set[int] = set()
@@ -207,7 +261,13 @@ class Spliter:
 
     @property
     def ema_ratio(self) -> float:
-        return self._ema_ratio
+        """Current duration EMA (never the unconstrained split budget)."""
+        return self._ratios.duration_ratio
+
+    @property
+    def safety_ratio(self) -> float:
+        """Current monotonic ratio used for future capacity planning."""
+        return self._ratios.safety_ratio
 
     def ema_ratio_for_segment(self, segment_idx: int) -> float:
         """Return the EMA snapshot frozen when *segment_idx* opened.
@@ -218,7 +278,11 @@ class Spliter:
         backwards when a later segment teaches the splitter a new ratio.
         """
 
-        return self._seg_ema_ratio.get(int(segment_idx), self._ema_ratio)
+        return self._seg_ema_ratio.get(int(segment_idx), self.ema_ratio)
+
+    def safety_ratio_for_segment(self, segment_idx: int) -> float:
+        """Return the capacity ratio frozen when *segment_idx* opened."""
+        return self._seg_safety_ratio.get(int(segment_idx), self.safety_ratio)
 
     @property
     def current_segment_idx(self) -> int:
@@ -265,7 +329,11 @@ class Spliter:
                 "trigger": trigger,
                 "remaining_kv": self._engine_max - self._prefill_len,
                 "prefill_len": self._prefill_len,
-                "ema_ratio": round(self._ema_ratio, 2),
+                # Compatibility alias: this field historically meant the
+                # ratio that planned the split capacity.
+                "ema_ratio": round(self.safety_ratio, 3),
+                "duration_ema_ratio": round(self.ema_ratio, 3),
+                "safety_ratio": round(self.safety_ratio, 3),
                 "thresholds": {
                     "min_tokens_l1": th.min_tokens_l1,
                     "force_split_at": th.force_split_at,
@@ -286,11 +354,17 @@ class Spliter:
         remaining_kv = self._engine_max - self._prefill_len
         return compute_thresholds(
             remaining_kv,
-            self._ema_ratio,
+            self.safety_ratio,
             self._safety_margin,
             l1_cap_ratio=self._l1_split_cap_ratio,
             l2_cap_ratio=self._l2_split_cap_ratio,
             l3_cap_ratio=self._l3_split_cap_ratio,
+        )
+
+    def _make_presplit_plan(self) -> _PresplitPlan:
+        return _PresplitPlan(
+            safety_ratio=self.safety_ratio,
+            thresholds=self._make_thresholds(),
         )
 
     def _create_driver(
@@ -358,8 +432,18 @@ class Spliter:
                             "path": "streaming_driver",
                             "segment_idx": idx,
                             "flush_type": r.type.name,
+                            # Compatibility alias for existing telemetry
+                            # consumers; capacity now uses safety_ratio.
                             "ema_ratio": round(
-                                self._seg_ema_ratio.get(idx, self._ema_ratio), 2
+                                self._seg_safety_ratio.get(idx, self.safety_ratio),
+                                3,
+                            ),
+                            "duration_ema_ratio": round(
+                                self._seg_ema_ratio.get(idx, self.ema_ratio), 3
+                            ),
+                            "safety_ratio": round(
+                                self._seg_safety_ratio.get(idx, self.safety_ratio),
+                                3,
                             ),
                             "thresholds": {
                                 "min_tokens_l1": th.min_tokens_l1,
@@ -435,6 +519,8 @@ class Spliter:
     def pre_split(
         self,
         tokens: List[SegmentToken],
+        *,
+        thresholds: Optional[SplitThresholds] = None,
     ) -> List[List[SegmentToken]]:
         """Pack a fully-known token sequence into capacity-sized segments,
         cutting at the LATEST safe boundary (hierarchical bin-packing).
@@ -447,15 +533,16 @@ class Spliter:
         yields fewer, fuller, prosody-continuous segments than cutting at the
         first L1, and avoids orphaning a trailing punctuation token.
 
-        Capacity is the live ``force_split_at`` (EMA-derived single-segment
-        budget). Each resulting group is driven in obey mode (raised driver
-        thresholds, see ``_open_segment``) so the Driver does not re-fragment
-        the packed group at its own internal L1/L2/L3 thresholds.
+        Capacity comes from one immutable Stage-1 planning snapshot.  Every
+        resulting group carries that snapshot into obey mode (see
+        ``_open_segment``), so Stage 2 cannot re-fragment a group whose boundary
+        was selected under a different hard cap.  Monotonic safety feedback is
+        handled separately by re-running Stage 1 over only the unopened suffix.
         """
         if not tokens:
             return []
 
-        th = self._make_thresholds()
+        th = thresholds or self._make_thresholds()
         capacity = th.force_split_at
         source_tokens = self._coerce_tokens(tokens)
         segments: List[List[SegmentToken]] = []
@@ -547,7 +634,9 @@ class Spliter:
         Remaining work is queued and driven as previous segments flush.
         """
         self._pending.clear()
-        self._next_group_idx = 0
+        self._next_group_key = 0
+        self._next_output_group_idx = 0
+        self._group_output_idx.clear()
         self._enqueue_presplit_groups(tokens)
         self._input_complete = True
 
@@ -559,18 +648,169 @@ class Spliter:
     ) -> None:
         """Pre-split tokens into L1 groups and enqueue them as pending tokens.
 
-        Each group gets a monotonic ``group_idx``; the group's last token is
-        marked ``boundary`` so the driving core force-flushes at the group end.
+        Each group gets an internal planning key; its public ``group_idx`` is
+        allocated later in FIFO open order. The group's last token is marked
+        ``boundary`` so the driving core force-flushes at the group end.
         """
-        self._presplit_thresholds = self._make_thresholds()
-        for seg_tokens in self.pre_split(tokens):
+        plan = self._make_presplit_plan()
+        pending, next_group_key = self._build_planned_pending(
+            tokens,
+            plan=plan,
+            first_group_key=self._next_group_key,
+        )
+        self._pending.extend(pending)
+        self._next_group_key = next_group_key
+
+    def _build_planned_pending(
+        self,
+        tokens: List[SegmentToken],
+        *,
+        plan: _PresplitPlan,
+        first_group_key: int,
+    ) -> Tuple[List[_PendingToken], int]:
+        """Build queued groups whose Stage-1 and Stage-2 caps agree."""
+        pending: List[_PendingToken] = []
+        group_key = int(first_group_key)
+        for seg_tokens in self.pre_split(tokens, thresholds=plan.thresholds):
             if not seg_tokens:
                 continue
-            gid = self._next_group_idx
-            self._next_group_idx += 1
+            if len(seg_tokens) > plan.thresholds.force_split_at:
+                raise RuntimeError(
+                    "pre-split group exceeds its immutable capacity contract: "
+                    f"tokens={len(seg_tokens)} "
+                    f"capacity={plan.thresholds.force_split_at}"
+                )
             last = len(seg_tokens) - 1
             for i, tok in enumerate(seg_tokens):
-                self._pending.append(_PendingToken(tok, gid, boundary=(i == last)))
+                pending.append(
+                    _PendingToken(
+                        tok,
+                        group_key,
+                        boundary=(i == last),
+                        plan=plan,
+                    )
+                )
+            group_key += 1
+        return pending, group_key
+
+    def _tighten_pending_presplit_plans(self) -> None:
+        """Re-plan only unopened offline suffixes after safety tightens.
+
+        Open/flushing drivers retain their frozen cap.  For each still-hidden
+        packet cohort, all remaining tokens are packed together under the new,
+        smaller cap.  Repacking the whole suffix is essential: applying the
+        live cap independently to every old group was the source of repeated
+        ``108+1`` / ``106+3`` residual segments.
+
+        Safety is monotonic, so this path never merges groups after a duration
+        observation falls.  Packet boundaries remain intact because one
+        `_PresplitPlan` object is shared only by groups from the same packet.
+        """
+        if not self._pending:
+            return
+
+        live_plan = self._make_presplit_plan()
+        pending = list(self._pending)
+        offline = [pt for pt in pending if pt.group_key is not None]
+        if not offline:
+            return
+        if not any(
+            pt.plan is not None
+            and pt.plan.thresholds.force_split_at
+            > live_plan.thresholds.force_split_at
+            for pt in offline
+        ):
+            return
+
+        # A pending continuation of an already exposed group must never be
+        # renumbered.  Obey-mode planned groups cannot enter this state, but
+        # retain a defensive fail-safe for mixed/legacy traffic.
+        protected = set(self._group_next_local)
+        if any(pt.group_key in protected for pt in offline):
+            logger.warning(
+                "Skipped pending safety replan because an exposed group "
+                "continuation is still queued"
+            )
+            return
+
+        first_key = min(
+            int(pt.group_key) for pt in offline if pt.group_key is not None
+        )
+        rebuilt: List[_PendingToken] = []
+        next_key = first_key
+        i = 0
+        while i < len(pending):
+            head = pending[i]
+            if head.group_key is None:
+                rebuilt.append(head)
+                i += 1
+                continue
+            old_plan = head.plan
+            if old_plan is None:
+                raise RuntimeError(
+                    f"pre-split group {head.group_key} is missing its capacity contract"
+                )
+
+            # Object identity is the packet/cohort identity.  Equal-valued
+            # plans from two LONG_SEGMENT packets must remain separate.
+            block: List[_PendingToken] = []
+            while (
+                i < len(pending)
+                and pending[i].group_key is not None
+                and pending[i].plan is old_plan
+            ):
+                block.append(pending[i])
+                i += 1
+
+            if old_plan.thresholds.force_split_at > live_plan.thresholds.force_split_at:
+                block_plan = _PresplitPlan(
+                    safety_ratio=live_plan.safety_ratio,
+                    thresholds=live_plan.thresholds,
+                )
+                block_tokens = [pt.token for pt in block]
+                block_pending, next_key = self._build_planned_pending(
+                    block_tokens,
+                    plan=block_plan,
+                    first_group_key=next_key,
+                )
+                rebuilt.extend(block_pending)
+                if self._record_decisions:
+                    self._split_decisions.append(
+                        {
+                            "obs": "presplit_replan",
+                            "old_capacity": old_plan.thresholds.force_split_at,
+                            "new_capacity": live_plan.thresholds.force_split_at,
+                            "token_count": len(block_tokens),
+                            "old_group_count": sum(pt.boundary for pt in block),
+                            "new_group_count": sum(pt.boundary for pt in block_pending),
+                            "safety_ratio": round(live_plan.safety_ratio, 3),
+                        }
+                    )
+                continue
+
+            # This packet was already planned at least as conservatively.
+            current_group: List[SegmentToken] = []
+            for pt in block:
+                current_group.append(pt.token)
+                if not pt.boundary:
+                    continue
+                last = len(current_group) - 1
+                rebuilt.extend(
+                    _PendingToken(
+                        token,
+                        next_key,
+                        boundary=(index == last),
+                        plan=old_plan,
+                    )
+                    for index, token in enumerate(current_group)
+                )
+                next_key += 1
+                current_group = []
+            if current_group:
+                raise RuntimeError("unterminated pre-split group in pending queue")
+
+        self._pending = deque(rebuilt)
+        self._next_group_key = max(self._next_group_key, next_key)
 
     def push_group_tokens(
         self,
@@ -631,7 +871,7 @@ class Spliter:
         is_stream = cur_key is None
         flushed = False
 
-        while self._pending and self._pending[0].group_idx == cur_key:
+        while self._pending and self._pending[0].group_key == cur_key:
             pt = self._pending.popleft()
             evt = self._make_event(
                 pt.token.token_id, pt.token.text, pt.token.punct_level
@@ -666,7 +906,7 @@ class Spliter:
         # group than the open segment, close the open segment at a clean
         # boundary so the new group starts fresh. Does not trigger in pure
         # streaming/offline sessions (one group key throughout).
-        if not flushed and self._pending and self._pending[0].group_idx != cur_key:
+        if not flushed and self._pending and self._pending[0].group_key != cur_key:
             end_actions, _ = self._results_to_actions(
                 active_idx,
                 driver.feed(SpliterEvent(type=ET.END)),
@@ -696,36 +936,49 @@ class Spliter:
         """Create a driver for the next pending token's group, assign its
         ``(group_idx, local_idx)`` coordinate (Option ①), emit START, and
         return the new segment index."""
-        key = self._pending[0].group_idx
-        # Recompute thresholds with the latest EMA before each new segment so
-        # long offline queues benefit from ratio learning by earlier segments.
-        thresholds = self._make_thresholds()
+        pending_head = self._pending[0]
+        key = pending_head.group_key
         if key is not None:
-            self._presplit_thresholds = thresholds
+            plan = pending_head.plan
+            if plan is None:
+                raise RuntimeError(
+                    f"pre-split group {key} is missing its capacity contract"
+                )
             # Obey mode: Stage 1 (pre_split bin-packing) already chose this
             # group's boundary, fed as a forced END at the group's last token.
             # Raise the driver's L1/L2/L3 thresholds to capacity so it does not
-            # re-fragment the packed group at an internal punctuation; force_split_at
-            # stays as the KV-overflow safety floor (the group is sized <= it).
-            cap = thresholds.force_split_at
+            # re-fragment the packed group at internal punctuation.  Crucially,
+            # use the exact Stage-1 plan rather than a live ratio: changing the
+            # cap here used to split 109-token groups into 108+1 / 106+3 tails.
+            cap = plan.thresholds.force_split_at
             thresholds = SplitThresholds(
                 min_tokens_l1=cap,
                 min_tokens_l2=cap,
                 min_tokens_l3=cap,
                 force_split_at=cap,
             )
-        idx, driver = self._create_driver(thresholds)
-        self._seg_ema_ratio[idx] = self._ema_ratio
-        if key is None:
-            # Streaming: each segment is its own group. Allocate from the shared
-            # _next_group_idx (NOT segment_idx) so streaming and offline group ids
-            # never collide when auto mixes both paths in one session. In a
-            # pure-streaming session this still equals segment_idx (counters move
-            # in lockstep), so behavior is unchanged.
-            group_idx, local_idx = self._next_group_idx, 0
-            self._next_group_idx += 1
+            segment_safety_ratio = plan.safety_ratio
         else:
-            group_idx, local_idx = key, self._group_next_local.get(key, 0)
+            # True streaming has no Stage-1 boundary contract.  A newly opened
+            # segment may therefore use the latest monotonic safety ratio.
+            thresholds = self._make_thresholds()
+            segment_safety_ratio = self.safety_ratio
+        idx, driver = self._create_driver(thresholds)
+        self._seg_ema_ratio[idx] = self.ema_ratio
+        self._seg_safety_ratio[idx] = segment_safety_ratio
+        if key is None:
+            # Streaming: every opened segment is one public group.
+            group_idx, local_idx = self._next_output_group_idx, 0
+            self._next_output_group_idx += 1
+        else:
+            # Offline planning keys are intentionally private. Allocate the
+            # public reorder coordinate only when this FIFO group actually
+            # opens; all local fragments of the same planned group reuse it.
+            if key not in self._group_output_idx:
+                self._group_output_idx[key] = self._next_output_group_idx
+                self._next_output_group_idx += 1
+            group_idx = self._group_output_idx[key]
+            local_idx = self._group_next_local.get(key, 0)
         self._seg_coords[idx] = (group_idx, local_idx)
         self._seg_group_key[idx] = key
         start_actions, _ = self._results_to_actions(
@@ -753,8 +1006,12 @@ class Spliter:
         for sa in actions:
             if sa.segment_idx == idx:
                 sa.group_final = group_final
-        if key is not None and not group_exhausted:
-            self._group_next_local[key] = self._seg_coords[idx][1] + 1
+        if key is not None:
+            if not group_exhausted:
+                self._group_next_local[key] = self._seg_coords[idx][1] + 1
+            else:
+                self._group_next_local.pop(key, None)
+                self._group_output_idx.pop(key, None)
 
     # ------------------------------------------------------------------
     # Public API: streaming
@@ -843,8 +1100,82 @@ class Spliter:
         self._seg_coords.pop(segment_idx, None)
         self._seg_group_key.pop(segment_idx, None)
         self._seg_ema_ratio.pop(segment_idx, None)
+        self._seg_safety_ratio.pop(segment_idx, None)
 
         return self._drive_events()
+
+    def set_duration_ratio(self, ratio: float) -> None:
+        """Apply legacy external duration feedback without weakening safety."""
+        safety_before = self.safety_ratio
+        self._ratios.set_duration_ratio(ratio)
+        if self.safety_ratio > safety_before:
+            self._tighten_pending_presplit_plans()
+
+    def observe_segment(
+        self,
+        actual_audio_steps: int,
+        actual_text_tokens: int,
+        *,
+        outcome: RatioOutcome,
+        segment_idx: Optional[int] = None,
+    ) -> RatioObservation:
+        """Route one result to duration estimation or safety backoff.
+
+        Natural ``codec_eos`` observations may update the duration EMA.
+        Overflow/loop/length observations are censored or hallucination-
+        inflated, so they only tighten the independent capacity controller.
+        Other failures affect neither estimator.
+        """
+        segment_safety = (
+            self.safety_ratio_for_segment(segment_idx)
+            if segment_idx is not None
+            else None
+        )
+        observation = self._ratios.observe(
+            audio_steps=actual_audio_steps,
+            text_tokens=actual_text_tokens,
+            outcome=outcome,
+            segment_safety_ratio=segment_safety,
+        )
+        if observation.safety_tightened:
+            self._tighten_pending_presplit_plans()
+
+        if outcome is RatioOutcome.KV_OVERFLOW:
+            logger.warning(
+                "Safety ratio overflow backoff: observed_lower_bound=%.3f "
+                "safety=%.3f→%.3f (steps=%d tokens=%d segment=%s)",
+                observation.observed_ratio,
+                observation.safety_before,
+                observation.safety_after,
+                observation.audio_steps,
+                observation.text_tokens,
+                segment_idx,
+            )
+        elif outcome in (RatioOutcome.LOOP_ABORT, RatioOutcome.LENGTH_ABORT):
+            logger.warning(
+                "Safety ratio failure backoff: outcome=%s safety=%.3f→%.3f "
+                "(steps=%d tokens=%d segment=%s)",
+                outcome.value,
+                observation.safety_before,
+                observation.safety_after,
+                observation.audio_steps,
+                observation.text_tokens,
+                segment_idx,
+            )
+        elif observation.duration_sample_accepted:
+            logger.debug(
+                "Duration EMA update: observed=%.3f duration=%.3f→%.3f "
+                "safety=%.3f (steps=%d tokens=%d segment=%s)",
+                observation.observed_ratio,
+                observation.duration_before,
+                observation.duration_after,
+                observation.safety_after,
+                observation.audio_steps,
+                observation.text_tokens,
+                segment_idx,
+            )
+
+        return observation
 
     def update_ratio(
         self,
@@ -853,49 +1184,25 @@ class Spliter:
         *,
         overflow: bool = False,
     ) -> None:
-        """Update EMA audio:text ratio from engine feedback.
+        """Backward-compatible wrapper around typed segment observation.
 
-        Thresholds are frozen for every open segment.  The updated EMA is used
-        only by segments opened after this feedback arrives.
+        ``overflow=True`` no longer feeds a censored sample into the duration
+        EMA.  It tightens only the independent safety controller.
 
         Parameters
         ----------
         overflow : bool
-            When True, uses ``ema_overflow_alpha`` (default 0.5) for faster
-            convergence after a KV cache overflow event.
+            When True, uses ``ema_overflow_alpha`` (default 0.5) for safety
+            backoff and also respects the overflow ratio as a censored lower
+            bound.  It never updates the duration EMA.
         """
-        if actual_text_tokens <= 0:
-            return
-        observed = actual_audio_steps / actual_text_tokens
-        old_ratio = self._ema_ratio
-        if overflow:
-            alpha = self._ema_overflow_alpha
-            self._ema_ratio = (1.0 - alpha) * self._ema_ratio + alpha * observed
-            self._ema_ratio = max(
-                self._ema_min_ratio, min(self._ema_max_ratio, self._ema_ratio)
-            )
-            logger.warning(
-                "EMA overflow update: observed=%.3f ema=%.3f→%.3f (steps=%d tokens=%d)",
-                observed,
-                old_ratio,
-                self._ema_ratio,
-                actual_audio_steps,
-                actual_text_tokens,
-            )
-        else:
-            alpha = self._ema_alpha
-            self._ema_ratio = (1.0 - alpha) * self._ema_ratio + alpha * observed
-            self._ema_ratio = max(
-                self._ema_min_ratio, min(self._ema_max_ratio, self._ema_ratio)
-            )
-            logger.debug(
-                "EMA update: observed=%.3f ema=%.3f→%.3f (steps=%d tokens=%d)",
-                observed,
-                old_ratio,
-                self._ema_ratio,
-                actual_audio_steps,
-                actual_text_tokens,
-            )
+        self.observe_segment(
+            actual_audio_steps,
+            actual_text_tokens,
+            outcome=(
+                RatioOutcome.KV_OVERFLOW if overflow else RatioOutcome.CODEC_EOS
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Full reset
@@ -903,17 +1210,21 @@ class Spliter:
 
     def reset(self) -> None:
         self._pending.clear()
-        self._presplit_thresholds = None
-        self._next_group_idx = 0
+        self._next_group_key = 0
+        self._next_output_group_idx = 0
         self._input_complete = False
         self._drivers.clear()
         self._next_segment_idx = 0
         self._seg_coords.clear()
         self._seg_group_key.clear()
         self._seg_ema_ratio.clear()
+        self._seg_safety_ratio.clear()
         self._group_next_local.clear()
+        self._group_output_idx.clear()
         self._flushing.clear()
         self._done.clear()
+        self._ratios.reset()
+        self._split_decisions.clear()
 
     def _coerce_tokens(self, tokens) -> List[SegmentToken]:
         """Accept legacy tuple tokens at the API edge, normalize internally."""

@@ -22,6 +22,8 @@ from __future__ import annotations
 
 
 from engine.frontend.spliter.spliter import Spliter
+from engine.frontend.spliter.ratio import RatioOutcome
+from engine.frontend.spliter.reorder import AudioReorder
 from engine.text_normalization import strip_emoji, split_pending_emoji
 
 
@@ -203,8 +205,8 @@ def test_auto_mixed_streaming_then_long_packet_no_group_collision():
     """Auto mode mixing streaming + offline in one session must not collide
     group ids. A small streaming residual (its own group) followed by a long
     packet that engages Stage 1 (occupancy-aware gate) must yield distinct
-    group ids — streaming and offline groups share one _next_group_idx
-    namespace. Regression guard for the namespace-collision bug."""
+    group ids. Public reorder ids are assigned in FIFO open order, independently
+    from offline planning keys. Regression guard for namespace collisions."""
     sp = Spliter(engine_max_decode_len=150, ema_ratio=10.0)
     a1 = sp.feed_auto(_toks("今天天气真的很不错"))  # 9 tokens fit C=13
     a2 = sp.feed_auto(
@@ -219,6 +221,88 @@ def test_auto_mixed_streaming_then_long_packet_no_group_collision():
     assert all(g != 0 for s, g in groups_by_seg.items() if s != 0), (
         groups_by_seg
     )  # no collision
+
+
+def test_auto_backpressure_keeps_stream_before_later_offline_groups():
+    """Pending streaming text must not be reordered behind a later long packet.
+
+    The first segment occupies the only slot while flushing. A short streaming
+    packet queues before a long Stage-1 packet. Offline planning may allocate
+    internal keys eagerly, but public AudioReorder group ids must follow actual
+    FIFO open order: first segment, queued stream, then offline groups.
+    """
+    sp = Spliter(
+        engine_max_decode_len=120,
+        prefill_len=12,
+        safety_margin=8,
+        ema_ratio=2.0,
+        safety_ratio_initial=2.0,
+        ema_overflow_alpha=1.0,
+        safety_failure_multiplier=1.0,
+        max_concurrent=1,
+    )
+
+    first = sp.feed_tokens([(token, "a") for token in range(50)])
+    assert _summarize(first)[0]["group"] == 0
+    assert sp.feed_auto([(100, "s"), (101, "s")]) == []
+    assert sp.feed_auto([(200 + token, "b") for token in range(94)]) == []
+
+    queued_stream = _summarize(sp.on_segment_done(0))
+    assert [(s["seg"], s["group"], s["text"]) for s in queued_stream] == [
+        (1, 1, "ss")
+    ]
+
+    # Tighten after the queued stream has already received its public id. In
+    # the old shared namespace, replanning B created a tail with that same id.
+    sp.observe_segment(
+        5,
+        2,
+        outcome=RatioOutcome.KV_OVERFLOW,
+        segment_idx=1,
+    )
+
+    offline_first = _summarize(sp.on_segment_done(1))
+    assert offline_first[0]["group"] == 2
+    assert offline_first[0]["text"] == "b" * 40
+
+    offline_second = _summarize(sp.on_segment_done(2))
+    offline_tail = _summarize(sp.on_segment_done(3))
+    assert [(s["group"], len(s["text"])) for s in offline_second + offline_tail] == [
+        (3, 40),
+        (4, 14),
+    ]
+
+    all_segments = (
+        _summarize(first) + queued_stream + offline_first + offline_second + offline_tail
+    )
+    assert [segment["group"] for segment in all_segments] == [0, 1, 2, 3, 4]
+    assert "".join(segment["text"] for segment in all_segments) == (
+        "a" * 50 + "ss" + "b" * 94
+    )
+
+    reorder = AudioReorder()
+    delivered: list[bytes] = []
+    for segment in reversed(all_segments):
+        delivered.extend(
+            reorder.push(
+                segment["group"],
+                segment["local"],
+                segment["text"].encode(),
+            )
+        )
+        delivered.extend(
+            reorder.mark_done(
+                segment["group"],
+                segment["local"],
+                group_final=segment["final"],
+            )
+        )
+    assert b"".join(delivered).decode() == "a" * 50 + "ss" + "b" * 94
+    assert reorder.pending_state() == {
+        "next_emit": [5, 0],
+        "buffered_keys": 0,
+        "buffered_chunks": 0,
+    }
 
 
 def test_emoji_whole_keycap_in_one_packet_is_stripped():

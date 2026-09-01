@@ -2529,6 +2529,17 @@ class EngineLoop:
                 "loop_recovery_count": seg.loop_recovery_count,
             }
 
+        # Preserve the failed attempt's censored evidence before resetting the
+        # segment.  The frontend uses it only for monotonic safety backoff;
+        # retry failures must never enter the normal duration EMA.
+        retry_audio_steps = max(0, int(seg.audio_frames_seen))
+        if seg.slot is not None:
+            retry_audio_steps = max(
+                0,
+                int(seg.slot.frame_idx) - int(seg.decode_start_frame),
+            )
+        retry_text_tokens = max(0, int(seg.text_tokens_consumed))
+
         seg.retry_idx += 1
         self._release_segment_slot(seg)
         seg.state = "pending_prefill"
@@ -2558,6 +2569,8 @@ class EngineLoop:
                 metrics={
                     "retry_idx": seg.retry_idx,
                     "retry_reason": reason,
+                    "audio_steps": retry_audio_steps,
+                    "text_tokens": retry_text_tokens,
                     **retry_loop_metrics,
                 },
             ),
@@ -2568,6 +2581,8 @@ class EngineLoop:
             segment_idx=seg.segment_idx,
             retry_idx=seg.retry_idx,
             retry_reason=reason,
+            audio_steps=retry_audio_steps,
+            text_tokens=retry_text_tokens,
             **retry_loop_metrics,
         )
         logger.info(

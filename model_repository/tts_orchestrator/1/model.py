@@ -359,7 +359,24 @@ class TritonPythonModel:
         )
         cfg.spliter.ema_ratio_initial = float(
             _param_string(
-                params, "ratio_initial", os.environ.get("RATIO_INITIAL", "5.5")
+                params,
+                "ratio_initial",
+                _env_string(
+                    "ENGINE_SPLITER_EMA_RATIO_INITIAL",
+                    "RATIO_INITIAL",
+                    default=str(cfg.spliter.ema_ratio_initial),
+                ),
+            )
+        )
+        cfg.spliter.safety_ratio_initial = float(
+            _param_string(
+                params,
+                "safety_ratio_initial",
+                _env_string(
+                    "ENGINE_SPLITER_SAFETY_RATIO_INITIAL",
+                    "SAFETY_RATIO_INITIAL",
+                    default=str(cfg.spliter.safety_ratio_initial),
+                ),
             )
         )
         cfg.spliter.ema_alpha = float(
@@ -377,6 +394,28 @@ class TritonPythonModel:
         )
         cfg.spliter.ema_max_ratio = float(
             _param_string(params, "ratio_max", os.environ.get("RATIO_MAX", "10.0"))
+        )
+        cfg.spliter.ema_min_observation_tokens = int(
+            _param_string(
+                params,
+                "ratio_min_observation_tokens",
+                _env_string(
+                    "ENGINE_SPLITER_EMA_MIN_OBSERVATION_TOKENS",
+                    "RATIO_MIN_OBSERVATION_TOKENS",
+                    default=str(cfg.spliter.ema_min_observation_tokens),
+                ),
+            )
+        )
+        cfg.spliter.safety_failure_multiplier = float(
+            _param_string(
+                params,
+                "safety_failure_multiplier",
+                _env_string(
+                    "ENGINE_SPLITER_SAFETY_FAILURE_MULTIPLIER",
+                    "SAFETY_FAILURE_MULTIPLIER",
+                    default=str(cfg.spliter.safety_failure_multiplier),
+                ),
+            )
         )
         cfg.spliter.l1_split_cap_ratio = float(
             _param_string(

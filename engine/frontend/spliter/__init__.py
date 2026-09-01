@@ -9,6 +9,7 @@ from .driver import (
     compute_thresholds,
 )
 from .spliter import Spliter, SegmentAction
+from .ratio import RatioObservation, RatioOutcome, SplitRatioController
 from .reorder import AudioReorder
 
 __all__ = (
@@ -25,5 +26,8 @@ __all__ = (
     "compute_thresholds",
     "Spliter",
     "SegmentAction",
+    "RatioObservation",
+    "RatioOutcome",
+    "SplitRatioController",
     "AudioReorder",
 )

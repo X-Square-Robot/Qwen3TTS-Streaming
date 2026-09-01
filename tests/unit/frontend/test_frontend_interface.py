@@ -15,7 +15,11 @@ from engine.core.types import (
     ResultType,
     SessionConfig,
 )
-from engine.frontend.interface import FrontendInterface, _normalize_tts_text
+from engine.frontend.interface import (
+    FrontendInterface,
+    _metric_bool,
+    _normalize_tts_text,
+)
 from engine.frontend.diagnostic_text import (
     DEFAULT_ENGINE_MODEL_VERSION,
     DEFAULT_ENGINE_VERSION,
@@ -25,6 +29,16 @@ from engine.frontend.diagnostic_text import (
     resolve_diagnostic_text,
 )
 from engine.core.text_journal import CanonicalTextJournal
+
+
+@pytest.mark.parametrize("value", [True, 1, "1", "true", "YES", "on"])
+def test_metric_bool_true_values(value):
+    assert _metric_bool(value) is True
+
+
+@pytest.mark.parametrize("value", [False, 0, None, "0", "false", "NO", "off", ""])
+def test_metric_bool_false_values(value):
+    assert _metric_bool(value) is False
 
 
 def test_tts_text_normalization_strips_emoji_noise():
@@ -74,6 +88,29 @@ def test_count_text_tokens_uses_synthesis_normalization_and_tokenizer():
     assert interface.count_text_tokens("😊🚀") == 0
 
 
+def test_direct_frontend_constructor_inherits_legacy_ratio_for_safety() -> None:
+    interface = FrontendInterface(
+        engine_inbox=asyncio.Queue(maxsize=16),
+        tokenizer=_CharTokenizer(),
+        max_sessions=2,
+        engine_max_decode_len=120,
+        ema_ratio=2.0,
+    )
+
+    assert interface._safety_ratio_initial == pytest.approx(2.0)
+
+
+def test_frontend_rejects_safety_baseline_above_ratio_max_at_startup() -> None:
+    with pytest.raises(ValueError, match="ema_max_ratio"):
+        FrontendInterface(
+            engine_inbox=asyncio.Queue(maxsize=16),
+            tokenizer=_CharTokenizer(),
+            max_sessions=2,
+            safety_ratio_initial=5.5,
+            ema_max_ratio=5.0,
+        )
+
+
 def test_diagnostic_text_alias_is_exact_and_uses_independent_versions():
     version_text = format_engine_model_version(
         DEFAULT_ENGINE_VERSION,
@@ -102,6 +139,9 @@ def test_version_query_synthesizes_engine_model_version(input_mode):
             tokenizer=_CharTokenizer(),
             max_sessions=2,
             engine_max_decode_len=256,
+            # This test covers diagnostic replacement, not production safety
+            # segmentation; keep the historical two-slot fixture.
+            safety_ratio_initial=4.5,
         )
         session = await interface.create_session(
             f"version-query-{input_mode.value}",
@@ -490,6 +530,7 @@ def test_token_mode_serial_segments_defers_session_done_until_buffer_drains():
             # sentences form exactly two serial segments under the exact cap.
             engine_max_decode_len=48,
             ema_ratio=2.0,
+            safety_ratio_initial=2.0,
             max_concurrent_segments=1,
         )
 
@@ -549,6 +590,71 @@ def test_token_mode_serial_segments_defers_session_done_until_buffer_drains():
 
         await session.result_queue.put(
             EngineResult(type=ResultType.SESSION_DONE, session_id="serial-token")
+        )
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+
+def test_full_text_overflow_replans_hidden_suffix_before_opening_next_segment():
+    async def run():
+        inbox = asyncio.Queue(maxsize=512)
+        interface = FrontendInterface(
+            engine_inbox=inbox,
+            tokenizer=_CharTokenizer(),
+            max_sessions=2,
+            engine_max_decode_len=120,
+            prefill_len=12,
+            ema_ratio=2.0,
+            safety_ratio_initial=2.0,
+            ema_overflow_alpha=1.0,
+            safety_failure_multiplier=1.0,
+            max_concurrent_segments=1,
+        )
+        session = await interface.create_session(
+            "full-replan",
+            config=SessionConfig(
+                task_type="custom_voice",
+                speaker="Serena",
+                input_mode=InputMode.FULL_TEXT,
+                group_policy=GroupPolicy.AUTO,
+            ),
+        )
+
+        await interface.push_text_input("full-replan", "甲" * 150)
+        await interface.mark_input_complete("full-replan")
+        initial = await _drain_requests(inbox)
+        assert sum(
+            len(request.token_ids or [])
+            for request in initial
+            if request.segment_idx == 0
+        ) == 50
+
+        await session.result_queue.put(
+            EngineResult(
+                type=ResultType.SEGMENT_END,
+                session_id="full-replan",
+                segment_idx=0,
+                metrics={
+                    "audio_steps": 105,
+                    "text_tokens": 50,
+                    "overflow": True,
+                    "eos_reason": "kv_overflow",
+                },
+            )
+        )
+        await asyncio.sleep(0)
+
+        after_overflow = await _drain_requests(inbox)
+        assert sum(
+            len(request.token_ids or [])
+            for request in after_overflow
+            if request.segment_idx == 1
+        ) == 47
+        assert session.spliter.safety_ratio == pytest.approx(2.1)
+
+        await session.result_queue.put(
+            EngineResult(type=ResultType.SESSION_DONE, session_id="full-replan")
         )
         await asyncio.sleep(0)
 

@@ -44,6 +44,7 @@ from .dispatcher import Dispatcher
 from .hold_window import DeliveryHoldWindow, PrefixGateGuardBypass
 from .spliter import Spliter
 from .spliter.driver import ActionType
+from .spliter.ratio import RatioObservation, RatioOutcome
 from .spliter.reorder import AudioReorder
 
 if TYPE_CHECKING:
@@ -80,6 +81,72 @@ def _metric_int(value: Any) -> Optional[int]:
         return None
 
 
+def _metric_bool(value: Any) -> bool:
+    """Parse bool-like engine metadata without treating ``"False"`` as true."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def _observe_spliter_ratio(
+    session: Session,
+    *,
+    segment_idx: int,
+    audio_steps: Any,
+    text_tokens: Any,
+    outcome: RatioOutcome,
+) -> Optional[RatioObservation]:
+    """Route typed backend feedback while preserving legacy test doubles."""
+    spliter = session.spliter
+    if spliter is None:
+        return None
+    steps = _metric_int(audio_steps) or 0
+    tokens = _metric_int(text_tokens) or 0
+    observer = getattr(spliter, "observe_segment", None)
+    if callable(observer):
+        observation = observer(
+            steps,
+            tokens,
+            outcome=outcome,
+            segment_idx=segment_idx,
+        )
+        LifecycleLogger.emit(
+            session_id=session.session_id,
+            phase="ratio_observation",
+            segment_idx=segment_idx,
+            session_level=session.config.observability_level,
+            min_level=obs.ObsLevel.DEBUG,
+            outcome=observation.outcome.value,
+            observed_ratio=round(observation.observed_ratio, 4),
+            duration_before=round(observation.duration_before, 4),
+            duration_after=round(observation.duration_after, 4),
+            safety_before=round(observation.safety_before, 4),
+            safety_after=round(observation.safety_after, 4),
+            duration_sample_accepted=observation.duration_sample_accepted,
+            safety_tightened=observation.safety_tightened,
+            audio_steps=observation.audio_steps,
+            text_tokens=observation.text_tokens,
+        )
+        return observation
+
+    # Compatibility for compact/legacy spliter doubles: retain the old clean
+    # and overflow callback, while abort/retry failures remain skipped because
+    # those doubles do not own the new safety controller.
+    updater = getattr(spliter, "update_ratio", None)
+    if (
+        callable(updater)
+        and steps > 0
+        and tokens > 0
+        and outcome in (RatioOutcome.CODEC_EOS, RatioOutcome.KV_OVERFLOW)
+    ):
+        updater(
+            steps,
+            tokens,
+            overflow=(outcome is RatioOutcome.KV_OVERFLOW),
+        )
+    return None
+
+
 class FrontendInterface:
     """Gateway-facing session and text interface."""
 
@@ -92,11 +159,14 @@ class FrontendInterface:
         engine_max_decode_len: int = 512,
         prefill_len: int = 12,
         ema_ratio: float = 4.5,
+        safety_ratio_initial: Optional[float] = None,
         max_concurrent_segments: int = 2,
         ema_alpha: float = 0.1,
         ema_overflow_alpha: float = 0.5,
         ema_min_ratio: float = 2.0,
         ema_max_ratio: float = 10.0,
+        ema_min_observation_tokens: int = 8,
+        safety_failure_multiplier: float = 1.25,
         safety_margin: int = 8,
         l1_split_cap_ratio: float = 0.70,
         l2_split_cap_ratio: float = 0.80,
@@ -111,11 +181,22 @@ class FrontendInterface:
         self._engine_max = engine_max_decode_len
         self._prefill_len = prefill_len
         self._ema_ratio = ema_ratio
+        self._safety_ratio_initial = (
+            ema_ratio if safety_ratio_initial is None else safety_ratio_initial
+        )
         self._max_concurrent = max_concurrent_segments
         self._ema_alpha = ema_alpha
         self._ema_overflow_alpha = ema_overflow_alpha
         self._ema_min_ratio = ema_min_ratio
         self._ema_max_ratio = ema_max_ratio
+        if max(float(ema_ratio), float(self._safety_ratio_initial)) > float(
+            ema_max_ratio
+        ):
+            raise ValueError(
+                "ema_max_ratio must cover both duration and safety initial ratios"
+            )
+        self._ema_min_observation_tokens = ema_min_observation_tokens
+        self._safety_failure_multiplier = safety_failure_multiplier
         self._safety_margin = safety_margin
         self._l1_split_cap_ratio = l1_split_cap_ratio
         self._l2_split_cap_ratio = l2_split_cap_ratio
@@ -184,11 +265,14 @@ class FrontendInterface:
             engine_max_decode_len=self._engine_max,
             prefill_len=self._prefill_len,
             ema_ratio=self._ema_ratio,
+            safety_ratio_initial=self._safety_ratio_initial,
             max_concurrent=self._max_concurrent,
             ema_alpha=self._ema_alpha,
             ema_overflow_alpha=self._ema_overflow_alpha,
             ema_min_ratio=self._ema_min_ratio,
             ema_max_ratio=self._ema_max_ratio,
+            ema_min_observation_tokens=self._ema_min_observation_tokens,
+            safety_failure_multiplier=self._safety_failure_multiplier,
             safety_margin=self._safety_margin,
             l1_split_cap_ratio=self._l1_split_cap_ratio,
             l2_split_cap_ratio=self._l2_split_cap_ratio,
@@ -596,7 +680,14 @@ class FrontendInterface:
                 if isinstance(frozen_ratios, dict) and seg_idx in frozen_ratios:
                     ema = float(frozen_ratios[seg_idx] or 0.0)
                 else:
-                    ema = float(getattr(session.spliter, "_ema_ratio", 0.0) or 0.0)
+                    ema = float(
+                        getattr(
+                            session.spliter,
+                            "ema_ratio",
+                            getattr(session.spliter, "_ema_ratio", 0.0),
+                        )
+                        or 0.0
+                    )
                 text_tokens = int(metrics.get("text_tokens", 0) or 0)
                 if ema > 0 and text_tokens > 0:
                     expected = int(ema * text_tokens * 1.15) + 2
@@ -729,6 +820,15 @@ class FrontendInterface:
                     session.text_progress_estimators.pop(result.segment_idx, None)
                     session.segment_progress_frames.pop(result.segment_idx, None)
                     rm = result.metrics or {}
+                    _observe_spliter_ratio(
+                        session,
+                        segment_idx=result.segment_idx,
+                        audio_steps=rm.get("audio_steps", 0),
+                        text_tokens=rm.get("text_tokens", 0),
+                        outcome=RatioOutcome.from_retry_reason(
+                            str(rm.get("retry_reason", ""))
+                        ),
+                    )
                     logger.info(
                         "Segment retry: %s seg=%d reason=%s attempt=%s "
                         "(discarded %d buffered chunks)",
@@ -833,21 +933,20 @@ class FrontendInterface:
                     if result.metrics:
                         audio_steps = result.metrics.get("audio_steps", 0)
                         text_tokens = result.metrics.get("text_tokens", 0)
-                        overflow = result.metrics.get("overflow", False)
+                        overflow = _metric_bool(
+                            result.metrics.get("overflow", False)
+                        )
                         eos_reason = str(result.metrics.get("eos_reason", ""))
-                        # Aborted segments report hallucination-inflated
-                        # audio_steps; feeding them into the audio:text EMA
-                        # would skew every later split budget.
-                        if (
-                            audio_steps > 0
-                            and text_tokens > 0
-                            and not eos_reason.endswith("_abort")
-                        ):
-                            session.spliter.update_ratio(
-                                audio_steps,
-                                text_tokens,
+                        _observe_spliter_ratio(
+                            session,
+                            segment_idx=seg_idx,
+                            audio_steps=audio_steps,
+                            text_tokens=text_tokens,
+                            outcome=RatioOutcome.from_eos_reason(
+                                eos_reason,
                                 overflow=overflow,
-                            )
+                            ),
+                        )
 
                     if on_event:
                         metrics = {
@@ -924,7 +1023,14 @@ class FrontendInterface:
 
                 elif result.type == ResultType.RATIO_UPDATE:
                     if session.spliter and result.ema_ratio > 0:
-                        session.spliter._ema_ratio = result.ema_ratio
+                        setter = getattr(session.spliter, "set_duration_ratio", None)
+                        if callable(setter):
+                            setter(result.ema_ratio)
+                        else:
+                            # Legacy test doubles only; production Spliter
+                            # routes this through the duration-only API so a
+                            # stale external ratio cannot weaken safety.
+                            session.spliter._ema_ratio = result.ema_ratio
 
                 elif result.type == ResultType.WARNING:
                     if on_event:
@@ -1250,7 +1356,11 @@ class FrontendInterface:
             else:
                 # Keep custom/legacy spliter test doubles source-compatible;
                 # production Spliter instances always expose the frozen API.
-                ema_ratio = getattr(session.spliter, "_ema_ratio", 4.5)
+                ema_ratio = getattr(
+                    session.spliter,
+                    "ema_ratio",
+                    getattr(session.spliter, "_ema_ratio", 4.5),
+                )
             estimator = EmaTextProgressEstimator(
                 segment_idx=segment_idx,
                 ema_ratio=ema_ratio,

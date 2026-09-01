@@ -62,11 +62,14 @@ def compute_thresholds(
 ) -> SplitThresholds:
     """Compute the frozen token thresholds for one segment.
 
-    ``remaining_kv`` is the KV budget after prefill.  ``safety_margin`` is
-    reserved before converting that budget to the predicted text-token
-    capacity ``cap``.  The punctuation thresholds are ceilings of their
-    configured capacity ratios, while ``force_split_at`` remains exactly
-    ``cap``; tier spacing must never enlarge the resource-derived capacity.
+    ``remaining_kv`` is the KV budget after prefill.  ``ema_ratio`` is the
+    caller's conservative planning ratio (kept as the historical parameter
+    name for API compatibility), not necessarily the duration EMA.
+    ``safety_margin`` is reserved before converting that budget to the
+    predicted text-token capacity ``cap``.  The punctuation thresholds are
+    ceilings of their configured capacity ratios, while ``force_split_at``
+    remains exactly ``cap``; tier spacing must never enlarge the
+    resource-derived capacity.
 
     For small capacities two tiers may coincide.  That is intentional: the
     punctuation preference still determines which boundary is chosen, while
@@ -106,7 +109,7 @@ Three-tier punctuation threshold state machine
 ================================================
 
 The Driver uses 4 thresholds (min_tokens_l1 <= … <= force_split_at) computed
-from remaining KV budget and the EMA audio:text ratio.
+from remaining KV budget and a conservative audio:text planning ratio.
 
 Guards use the length *after* the triggering token is appended:
   - next_count >= min_tokens_l1 AND punct_level == 1 (L1) → split

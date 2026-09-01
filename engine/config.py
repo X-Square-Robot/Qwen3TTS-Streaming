@@ -220,11 +220,19 @@ class ReferenceCacheConfig:
 class SpliterConfig:
     """Text segmentation / Spliter parameters."""
 
+    # Two independent estimators: duration EMA is learned from clean EOS and
+    # drives progress attribution; safety ratio is the conservative lower
+    # bound used to derive the hard text-token capacity.
     ema_ratio_initial: float = 4.5
+    safety_ratio_initial: float = 5.5
     ema_alpha: float = 0.1
+    # Backward-compatible name: now controls safety backoff after censored
+    # overflow/failure feedback instead of contaminating the duration EMA.
     ema_overflow_alpha: float = 0.5
     ema_min_ratio: float = 2.0
     ema_max_ratio: float = 10.0
+    ema_min_observation_tokens: int = 8
+    safety_failure_multiplier: float = 1.25
     max_concurrent_segments: int = 2
     prefill_len: int = 12
     safety_margin: int = 8

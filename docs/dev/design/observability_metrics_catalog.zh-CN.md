@@ -118,7 +118,7 @@ L2 在 L1 之上叠加决策理由记录，结构化、派生、人读、不含 
 
 | ⭐ | obs | 触发 | 字段 | 来源 | 现状 |
 |---|---|---|---|---|---|
-| ⭐ | `split_decision` | 每个切点 | path(offline/streaming), trigger(l1_punct/force_fallback_l1/force_hard_cut/driver_l1-3), remaining_kv, prefill_len, ema_ratio, thresholds{min_tokens_l1, force_split_at, l1/l2/l3_cap}, token_count_at_split, last_l1_pos, chosen_level, reason, text_preview | spliter.py:pre_split / driver.py | 🆕 |
+| ⭐ | `split_decision` | 每个切点 | path(offline/streaming), trigger(l1_punct/force_fallback_l1/force_hard_cut/driver_l1-3), remaining_kv, prefill_len, ema_ratio(兼容的容量比别名), duration_ema_ratio, safety_ratio, thresholds{min_tokens_l1, force_split_at, l1/l2/l3_cap}, token_count_at_split, last_l1_pos, chosen_level, reason, text_preview | spliter.py:pre_split / driver.py | 🆕 |
 | | `presplit_group` | 离线预切完成 | groups_created, tokens_per_group[], last_l1_pos, hard_cut_engaged, forced_split_count | spliter.py:_enqueue_presplit_groups | 🆕 |
 | | `driver_transition` | 流式 FSM 跳转 | driver_state, token_count, threshold_met{l1,l2,l3,force}, fsm_rule_name, action_type, is_final | driver.py / spliter/core.py | 🆕 |
 | | `punct_classify` | 标点 token(可采样) | token_text, punct_level, saw_level3_break, trailing_closer_handled | spliter.py:classify_punct_level | 🆕 |

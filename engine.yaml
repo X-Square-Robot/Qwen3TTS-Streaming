@@ -78,9 +78,16 @@ reference_cache:
   max_entries: 16            # cached ref-audio preprocessing results (separate from prefix KV)
 
 spliter:
+  # Clean completions update duration EMA for progress/hold estimation only.
   ema_ratio_initial: 4.5
+  # Conservative capacity baseline.  Unlike duration EMA, this never falls;
+  # max_seq_len=512 therefore starts with a safe 89-token hard cap.
+  safety_ratio_initial: 5.5
   ema_alpha: 0.1
+  # Safety-controller backoff after overflow/loop/length failure.
   ema_overflow_alpha: 0.5
+  ema_min_observation_tokens: 8
+  safety_failure_multiplier: 1.25
   max_concurrent_segments: 2
   prefill_len: 12
   # Min tokens before split at L1/L2/L3 punct — each is cap * ratio

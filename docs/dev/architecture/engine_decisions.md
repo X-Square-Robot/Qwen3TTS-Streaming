@@ -196,14 +196,30 @@ This means the main problem introduced by "a very long presplit" is **queuing an
 
 ### EMA and Offline Long Text
 
-For very long offline requests, future groups cannot keep reusing the initial split thresholds. As earlier segments complete, the EMA of the audio/text ratio keeps updating, so:
+Duration estimation and capacity planning are separate contracts:
 
-- Each active driver's thresholds remain frozen from the moment that segment opens
-- Newly launched offline groups recompute and freeze their thresholds based on the **latest EMA**
+- The two-sided duration EMA is updated only from sufficiently large segments
+  that reach natural codec EOS.  It is used for text progress and guarded-tail
+  estimation.
+- A conservative safety ratio derives the text-token capacity.  It never falls
+  within a session; overflow and confirmed loop/length failures may only
+  tighten it.
+- Offline Stage 1 snapshots one immutable capacity plan per planning epoch.
+  Every group produced by that plan is opened with the same hard cap. Stage 2
+  must not recompute a live cap for an already planned group: doing so used to
+  turn groups into tiny residual segments when feedback raised the ratio,
+  while feedback in the other direction could not merge boundaries.
+- When safety (not duration) tightens, Stage 1 may explicitly replace the plan
+  for a wholly unopened packet suffix. It repacks all remaining tokens in that
+  cohort together under the smaller cap, while active/flushing groups and
+  packet boundaries remain frozen. This prevents both repeated tiny tails and
+  an unsafe old plan surviving after an overflow/loop signal.
+- True streaming has no ahead-of-time group contract, so a newly opened
+  streaming segment may use the latest monotonic safety ratio.  An already-open
+  driver always keeps its frozen thresholds.
 
-Freezing avoids changing a segment's stopping rule midway when delayed feedback
-arrives. Recomputing at each later opening still prevents the latter half of a
-long request from using the initial estimate indefinitely.
+This keeps split boundaries deterministic and prevents normal short-duration
+observations from expanding the safety budget of a long request.
 
 ### When to Introduce a Triton Shell
 
