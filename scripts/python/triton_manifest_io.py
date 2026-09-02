@@ -10,6 +10,10 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+# Version of the ONNX/export graph contract encoded by export_09.  This is
+# deliberately distinct from the Triton manifest schema version.
+EXPORT_PROTOCOL_VERSION = "v1"
+
 
 def load_weights_config(path: Path) -> Dict[str, Any]:
     with open(path, encoding="utf-8") as f:
@@ -146,6 +150,10 @@ def load_manifest(
             manifest["talker"] = weights_to_talker_section(load_weights_config(wc))
             logger.info("Filled manifest.talker from orchestrator weights/config.json")
 
+    # Older exports predate the explicit graph-contract field.  Keep them
+    # readable while making the distinction from schema_version explicit.
+    manifest.setdefault("export_protocol_version", EXPORT_PROTOCOL_VERSION)
+
     orch = manifest.get("orchestrator")
     defaults = variant_orchestrator_defaults(variant, package_model_package_dir)
     if orch is None:
@@ -255,6 +263,7 @@ def build_manifest_for_export(
     return {
         "schema_version": 2,
         "variant": variant,
+        "export_protocol_version": EXPORT_PROTOCOL_VERSION,
         "engine_mode": engine_mode,
         "engine_dtype": engine_dtype,
         "triton_io_float_dtype": triton_io_float_dtype,

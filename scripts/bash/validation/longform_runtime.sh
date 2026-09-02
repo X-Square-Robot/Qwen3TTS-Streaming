@@ -30,7 +30,7 @@ verify_frozen_package() {
     echo "frozen TRT plan hash mismatch: $observed" >&2
     exit 1
   fi
-  if [[ "$(tr -d '\r\n' < "$package_version_dir/MODEL_VERSION")" != "rime@20260820_580_5090_v1-zehan@20260818" ]]; then
+  if [[ "$(tr -d '\r\n' < "$package_version_dir/MODEL_VERSION")" != "zehan@20260818" ]]; then
     echo "unexpected frozen MODEL_VERSION" >&2
     exit 1
   fi

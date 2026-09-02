@@ -69,13 +69,13 @@ if [[ ! -f "$manifest_path" ]]; then
 fi
 if [[ "$engine_mode" != "trt" ]]; then
     echo "Engine Docker requires a TensorRT model package, got engine_mode=${engine_mode:-unknown}: $manifest_path" >&2
-    echo "Re-assemble with: bash scripts/bash/compose.sh prepare --gateway engine --engine-mode trt --model-version ${model_version}" >&2
+    echo "Re-assemble with: bash scripts/bash/compose.sh prepare --gateway engine --engine-mode trt --triton-model-version ${model_version}" >&2
     exit 1
 fi
 if [[ ! -f "$runtime_artifact" ]]; then
     if [[ -f "${engine_dir}/model.onnx" ]]; then
         echo "Engine Docker requires a TensorRT model package, but found ONNX runtime only: ${engine_dir}/model.onnx" >&2
-        echo "Re-assemble with: bash scripts/bash/compose.sh prepare --gateway engine --engine-mode trt --model-version ${model_version}" >&2
+        echo "Re-assemble with: bash scripts/bash/compose.sh prepare --gateway engine --engine-mode trt --triton-model-version ${model_version}" >&2
     else
         echo "TensorRT runtime artifact not found: ${runtime_artifact}" >&2
         echo "Run Phase B and assemble the shared model_repository in trt mode." >&2

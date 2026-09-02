@@ -14,6 +14,11 @@
       "type": "string",
       "description": "Model variant id (e.g. custom-1.7b)"
     },
+    "export_protocol_version": {
+      "type": "string",
+      "pattern": "^v[0-9]+$",
+      "description": "ONNX/export graph contract version; distinct from manifest schema_version"
+    },
     "engine_mode": {
       "type": "string",
       "enum": ["onnx", "trt"],

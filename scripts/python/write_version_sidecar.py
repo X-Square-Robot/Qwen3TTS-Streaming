@@ -6,13 +6,29 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from engine.runtime.model_version import validate_model_version
+from engine.runtime.engine_build_version import (
+    ENGINE_BUILD_VERSION_FILENAME,
+    validate_engine_build_version,
+)
+from engine.runtime.model_version import (
+    MODEL_VERSION_FILENAME,
+    validate_model_version,
+    validate_version_identity,
+)
 
 
 def write_version_sidecar(output: Path, *, version: str) -> str:
     """Write one canonical version line and set mode ``0444``."""
 
-    validated = validate_model_version(version, source=str(output))
+    # Keep the CLI safe for both sidecar types while allowing callers to use it
+    # for another opaque immutable identity when the filename is different.
+    if output.name == MODEL_VERSION_FILENAME:
+        validator = validate_model_version
+    elif output.name == ENGINE_BUILD_VERSION_FILENAME:
+        validator = validate_engine_build_version
+    else:
+        validator = validate_version_identity
+    validated = validator(version, source=str(output))
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
         output.chmod(0o644)

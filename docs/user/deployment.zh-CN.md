@@ -43,17 +43,16 @@ bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway engine-docker
 
 配置优先级是：命令行参数 > 已导出的环境变量 > manifest/default。常用环境变量包括 `MODEL_VERSION`、`EXPORT_DEVICE`、`BUILD_GPU_DEVICE`、`RUNTIME_GPU_DEVICE`、`MAX_BATCH_SIZE`、`MAX_INPUT_LEN`、`MAX_SEQ_LEN`、`RUNTIME_MAX_BATCH_SIZE`、`RUNTIME_MAX_SEQ_LEN`；但推荐日常都从 autorun 参数进入，便于复现。
 
-不带 command 启动 `autorun.sh` 时，TUI 的“发布与打包信息”区可以直接输入模型发布版本、引擎编译版本、打包人和打包日期。相同字段也提供非交互参数：
+不带 command 启动 `autorun.sh` 时，TUI 的“发布与打包信息”区要求输入模型发布版本、打包人和打包日期。TRT 引擎编译版本由 Phase B 根据实际编译环境自动生成。模型发布版本也提供非交互参数：
 
 ```bash
 bash scripts/bash/autorun.sh package -m custom-1.7b \
   --model-release-version 'zehan@20260818' \
-  --engine-build-version 'rime@20260820_580_5090_v1' \
   --packager rime \
   --package-date 2026-08-20
 ```
 
-`--model-version 2` 仍只表示 Triton 数字目录；`--model-release-version` 才是模型包中的 `MODEL_VERSION`。`all` 和 `all-1.7b` 不接受统一的 `--model-release-version`，避免把多个模型错误地重标成同一版本。
+`--triton-model-version 2`（旧参数 `--model-version 2` 仍兼容）只表示 Triton 数字目录；`--model-release-version` 才是模型包中的 `MODEL_VERSION`。`all` 和 `all-1.7b` 不接受统一的 `--model-release-version`，避免把多个模型错误地重标成同一版本。
 
 ### Phase B 参数
 
@@ -84,12 +83,12 @@ Phase C:
 
 ### 模型版本号
 
-默认会组装 Triton model version 目录 `1`。如果需要生成其他版本目录，可以通过 `--model-version <N>` 指定；这会把共享模型包放到 `workspace/model_repository/tts_orchestrator/<N>`，并让 standalone、engine Docker 和 Triton 都从 `/models/tts_orchestrator/<N>` 读取。
+默认会组装 Triton model version 目录 `1`。如果需要生成其他版本目录，可以通过 `--triton-model-version <N>` 指定（`--model-version` 仍是兼容别名）；这会把共享模型包放到 `workspace/model_repository/tts_orchestrator/<N>`，并让 standalone、engine Docker 和 Triton 都从 `/models/tts_orchestrator/<N>` 读取。
 
 ```bash
 bash scripts/bash/autorun.sh deploy -m custom-1.7b \
   --gateway triton \
-  --model-version 2
+  --triton-model-version 2
 ```
 
 这个版本号是 Triton model repository 的版本目录，不是 Hugging Face / ModelScope 权重 revision。HTTP 客户端如果显式带版本，需要请求 `/v2/models/tts_orchestrator/versions/<N>/infer`；不显式带版本时则由 Triton 按仓库状态选择可用版本。
@@ -100,7 +99,11 @@ bash scripts/bash/autorun.sh deploy -m custom-1.7b \
 zehan@20260601
 ```
 
-Phase A 会把它复制到 `workspace/exported/<variant>/MODEL_VERSION`；TUI 输入的显式版本优先，并写入同一位置。Phase C 再复制到模型包根目录 `tts_orchestrator/<N>/MODEL_VERSION`，两处文件都设置为 `0444`。组装、仓库校验和引擎启动都会拒绝缺失或空的文件。引擎编译版本独立管理，可在 TUI 中输入或用 `--engine-build-version` 指定；autorun 会把它写入只读 `ENGINE_BUILD_VERSION`，Phase C 将其带入模型包，运行时直接从包内读取。
+Phase A 会把它复制到 `workspace/exported/<variant>/MODEL_VERSION`；TUI 输入的显式版本优先，并写入同一位置。Phase C 再复制到模型包根目录 `tts_orchestrator/<N>/MODEL_VERSION`，两处文件都设置为 `0444`。组装、仓库校验和引擎启动都会拒绝缺失、可写或格式不合法的文件。模型版本必须是 `研究员@YYYYMMDD`，例如 `zehan@20260818`。
+
+从旧版本升级时，如果导出目录中的 `MODEL_VERSION` 仍是把 engine build ID 和模型版本拼接在一起的旧值，Phase A 不会继续传播它；请在 autorun 中填写 `--model-release-version`（或在 TUI 中填写）后重新导出/打包。
+
+TRT 引擎版本使用单独的 `ENGINE_BUILD_VERSION`。Phase B 在目标 GPU 上编译完成后，按 `编译人@编译日期_驱动大版本_适配设备_导图协议版本` 自动生成，例如 `rime@20260902_580_5090_v1`，并将它随 `artifact_manifest.json` 和 engine artifact 带入 Phase C。正常流程不再要求手工输入或覆盖引擎编译版本；完整的 engine SHA256 和 TensorRT/GPU/profile 信息仍保存在 artifact manifest 中。
 
 模型包的打包溯源与模型发布版本分开保存。Phase C 会在同一模型包根目录生成只读的 `PACKAGE_INFO.json`：
 

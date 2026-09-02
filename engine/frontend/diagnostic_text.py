@@ -7,8 +7,7 @@ from dataclasses import dataclass, field
 
 VERSION_QUERY_TEXT = "自变量语音合成版本号"
 DEFAULT_ENGINE_VERSION = "v0.2.0a14"
-DEFAULT_ENGINE_BUILD_VERSION = "rime@20260820_580_5090_v1"
-DEFAULT_MODEL_VERSION = "rime@20260820_580_5090_v1-zehan@20260818"
+DEFAULT_MODEL_VERSION = "zehan@20260818"
 
 
 def format_engine_model_version(engine_version: str, model_version: str) -> str:
@@ -92,7 +91,6 @@ class DiagnosticTextRouter:
 
 __all__ = [
     "DEFAULT_ENGINE_MODEL_VERSION",
-    "DEFAULT_ENGINE_BUILD_VERSION",
     "DEFAULT_ENGINE_VERSION",
     "DEFAULT_MODEL_VERSION",
     "DiagnosticTextResolution",

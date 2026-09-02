@@ -43,17 +43,16 @@ bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway engine-docker
 
 Configuration precedence is: command-line arguments > exported environment variables > manifest/default. Common environment variables include `MODEL_VERSION`, `EXPORT_DEVICE`, `BUILD_GPU_DEVICE`, `RUNTIME_GPU_DEVICE`, `MAX_BATCH_SIZE`, `MAX_INPUT_LEN`, `MAX_SEQ_LEN`, `RUNTIME_MAX_BATCH_SIZE`, `RUNTIME_MAX_SEQ_LEN`; but for day-to-day use it is recommended to go through autorun parameters for reproducibility.
 
-When `autorun.sh` starts without a command, its **Release and package metadata** TUI section accepts the model release, engine build identity, packager, and package date directly. The same fields have non-interactive options:
+When `autorun.sh` starts without a command, its **Release and package metadata** TUI section asks for the model release, packager, and package date. Phase B generates the TensorRT engine build identity from the actual build environment. The model release still has a non-interactive option:
 
 ```bash
 bash scripts/bash/autorun.sh package -m custom-1.7b \
   --model-release-version 'zehan@20260818' \
-  --engine-build-version 'rime@20260820_580_5090_v1' \
   --packager rime \
   --package-date 2026-08-20
 ```
 
-`--model-version 2` remains the Triton numeric directory; `--model-release-version` is the value stored in the package's `MODEL_VERSION`. Combined variants `all` and `all-1.7b` reject one shared model release value so distinct models cannot be relabeled accidentally.
+`--triton-model-version 2` (the legacy `--model-version 2` alias remains supported) is the Triton numeric directory; `--model-release-version` is the value stored in the package's `MODEL_VERSION`. Combined variants `all` and `all-1.7b` reject one shared model release value so distinct models cannot be relabeled accidentally.
 
 ### Phase B Parameters
 
@@ -84,12 +83,12 @@ Phase C:
 
 ### Model Version Number
 
-By default, the Triton model version directory `1` is assembled. If you need to generate a different version directory, specify it with `--model-version <N>`; this places the shared model package under `workspace/model_repository/tts_orchestrator/<N>` and makes standalone, engine Docker, and Triton all read from `/models/tts_orchestrator/<N>`.
+By default, the Triton model version directory `1` is assembled. If you need to generate a different version directory, specify it with `--triton-model-version <N>` (`--model-version` remains a compatibility alias); this places the shared model package under `workspace/model_repository/tts_orchestrator/<N>` and makes standalone, engine Docker, and Triton all read from `/models/tts_orchestrator/<N>`.
 
 ```bash
 bash scripts/bash/autorun.sh deploy -m custom-1.7b \
   --gateway triton \
-  --model-version 2
+  --triton-model-version 2
 ```
 
 This version number is the Triton model repository version directory, not a Hugging Face / ModelScope weights revision. HTTP clients that explicitly pass a version must request `/v2/models/tts_orchestrator/versions/<N>/infer`; when no version is passed explicitly, Triton selects an available version based on the repository state.
@@ -100,7 +99,11 @@ The model's own release identity is separate and travels with the model. A sourc
 zehan@20260601
 ```
 
-Phase A copies it to `workspace/exported/<variant>/MODEL_VERSION`; an explicit TUI value takes precedence and is written to the same location. Phase C copies it again to the model-package root at `tts_orchestrator/<N>/MODEL_VERSION`; both files use mode `0444`. Export, repository validation, and engine startup reject a missing or empty file. The engine build identity is managed independently and can be entered in the TUI or supplied with `--engine-build-version`; autorun writes it to read-only `ENGINE_BUILD_VERSION`, Phase C carries it into the model package, and runtime reads it directly from that package.
+Phase A copies it to `workspace/exported/<variant>/MODEL_VERSION`; an explicit TUI value takes precedence and is written to the same location. Phase C copies it again to the model-package root at `tts_orchestrator/<N>/MODEL_VERSION`; both files use mode `0444`. Export, repository validation, and engine startup reject a missing, writable, or malformed file. A model release must use `researcher@YYYYMMDD`, for example `zehan@20260818`.
+
+When upgrading from an older export whose `MODEL_VERSION` combines the engine build ID and model release, Phase A will not propagate the legacy value. Supply `--model-release-version` (or enter it in the TUI) and re-export/repackage.
+
+TensorRT uses a separate `ENGINE_BUILD_VERSION`. After Phase B compiles on the target GPU, it is generated as `builder@build-date_driver-major_target-device_export-protocol`, for example `rime@20260902_580_5090_v1`, and carried into Phase C with `artifact_manifest.json` and the engine artifact. Normal workflows do not prompt for or override this value; the artifact manifest remains the source of the complete engine SHA256, TensorRT/GPU, and profile metadata.
 
 Model-package provenance is stored separately from the model release identity. Phase C creates a read-only `PACKAGE_INFO.json` in the same model-package root:
 

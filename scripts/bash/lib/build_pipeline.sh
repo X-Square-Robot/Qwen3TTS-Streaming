@@ -26,6 +26,7 @@
 #                                      <build_gpu_device>
 #    compile_engines_in_bundle        <bundle_root>
 #    write_artifact_manifest          <bundle_root>
+#    write_engine_build_sidecars_from_host <exported_dir> [build_device]
 #    collect_local_engines_to_workspace <bundle_root> <exported_dir>
 #    pack_engine_artifact_bundle      <bundle_root> <out_tar_zst>
 #
@@ -285,6 +286,7 @@ manifest = {
     "bundle_schema_version": 1,
     "created_at_utc": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
     "variants": [v for v in variants.split(",") if v],
+    "export_protocol_version": os.environ.get("QWEN3_TTS_EXPORT_PROTOCOL_VERSION", "v1"),
     "engine_dtype": dtype,
     "triton_io_float_dtype": io_dtype or dtype,
     "max_batch_size": int(mb),
@@ -469,11 +471,13 @@ write_artifact_manifest() {
     local cuda_version
     cuda_version=$(cross_host_json_value "$target_profile" cuda_runtime 2>/dev/null || true)
 
-    python3 - "$bundle_root" "$build_manifest" "$target_profile" \
+    PYTHONPATH="${_LIB_DIR}/../../python${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 - "$bundle_root" "$build_manifest" "$target_profile" \
         "$tensorrt_version" "$actual_driver" "$actual_sm" "$cuda_version" "$actual_gpu_name" <<'PY'
 import datetime as dt
 import hashlib
 import json
+import os
 import socket
 import sys
 from pathlib import Path
@@ -482,6 +486,9 @@ root = Path(sys.argv[1])
 build = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
 target = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
 tensorrt_version, driver, sm, cuda_version, build_gpu_name = sys.argv[4:9]
+target_gpus = target.get("gpus") or []
+target_gpu = target_gpus[0] if target_gpus else {}
+driver = driver or str(target.get("driver_version") or "")
 
 engines = {}
 for engine in sorted((root / "workspace" / "exported").glob("**/*.engine")):
@@ -492,12 +499,13 @@ for engine in sorted((root / "workspace" / "exported").glob("**/*.engine")):
             h.update(chunk)
     engines[rel] = {"sha256": h.hexdigest(), "size": engine.stat().st_size}
 
-gpus = target.get("gpus") or []
-gpu = gpus[0] if gpus else {}
+gpu = target_gpu
 manifest = {
     "artifact_schema_version": 1,
     "built_at_utc": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
     "build_host": socket.gethostname(),
+    "engine_builder": os.environ.get("QWEN3_TTS_ENGINE_BUILDER") or os.environ.get("USER") or "unknown",
+    "export_protocol_version": str(build.get("export_protocol_version") or "v1"),
     "ngc_tag": build["ngc_tag"],
     "ngc_image": build["ngc_image"],
     "tensorrt_version": tensorrt_version,
@@ -514,12 +522,116 @@ manifest = {
     "max_seq_len": build["max_seq_len"],
     "engines": engines,
 }
+from engine_build_identity import build_engine_build_version_from_artifact
+
+protocols = {
+    str(
+        json.loads(path.read_text(encoding="utf-8")).get(
+            "export_protocol_version", manifest["export_protocol_version"]
+        )
+    )
+    for path in sorted(
+        (root / "workspace" / "exported").glob("*/triton_manifest.json")
+    )
+}
+if len(protocols) > 1:
+    raise SystemExit(
+        "variant exports use incompatible export_protocol_version values: "
+        + ", ".join(sorted(protocols))
+    )
+if protocols:
+    manifest["export_protocol_version"] = next(iter(protocols))
+manifest["engine_build_version"] = build_engine_build_version_from_artifact(manifest)
+for variant_dir in sorted((root / "workspace" / "exported").iterdir()):
+    if not variant_dir.is_dir() or not any(variant_dir.glob("*.engine")):
+        continue
+    sidecar = variant_dir / "ENGINE_BUILD_VERSION"
+    if sidecar.exists():
+        sidecar.chmod(0o644)
+    sidecar.write_text(manifest["engine_build_version"] + "\n", encoding="utf-8")
+    sidecar.chmod(0o444)
 (root / "artifact_manifest.json").write_text(
     json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
     encoding="utf-8",
 )
 PY
     log_info "Artifact manifest written: $bundle_root/artifact_manifest.json"
+}
+
+# ---------------------------------------------------------------------------
+#  write_engine_build_sidecars_from_host <exported_dir> [build_device]
+#
+#  Direct Phase-B builds do not have a unified bundle in which
+#  write_artifact_manifest can persist the generated identity.  Generate the
+#  same identity from the local build host so a subsequent Triton assembly
+#  still receives an automatic ENGINE_BUILD_VERSION.  Unified builds call this
+#  too, then replace the value with the richer artifact-manifest identity.
+# ---------------------------------------------------------------------------
+write_engine_build_sidecars_from_host() {
+    local exported_dir="$1"
+    local build_device="${2:-${BUILD_GPU_DEVICE:-0}}"
+    [ -d "$exported_dir" ] || {
+        log_error "Exported directory not found: $exported_dir"
+        return 1
+    }
+
+    local probe_device="$build_device"
+    if [ -z "$probe_device" ] || [ "$probe_device" = "auto" ] || [ "$probe_device" = "all" ]; then
+        probe_device="0"
+    fi
+    probe_device="${probe_device#cuda:}"
+    probe_device="${probe_device#device=}"
+
+    local driver gpu_name gpu_sm
+    driver=$(detect_driver_version 2>/dev/null || true)
+    if command -v nvidia-smi &>/dev/null; then
+        gpu_name=$(nvidia-smi --id="$probe_device" --query-gpu=name \
+            --format=csv,noheader 2>/dev/null | head -1 | sed 's/^ *//;s/ *$//')
+        local compute_cap
+        compute_cap=$(nvidia-smi --id="$probe_device" --query-gpu=compute_cap \
+            --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+        if [ -n "$compute_cap" ]; then
+            gpu_sm="sm_${compute_cap//./}"
+        fi
+    fi
+    if [ -z "$driver" ] || [ -z "$gpu_name" ]; then
+        log_error "Cannot generate ENGINE_BUILD_VERSION: GPU name/driver unavailable"
+        log_error "Run Phase B on an NVIDIA host with nvidia-smi available"
+        return 1
+    fi
+
+    local builder="${QWEN3_TTS_ENGINE_BUILDER:-${USER:-unknown}}"
+    local protocol="${QWEN3_TTS_EXPORT_PROTOCOL_VERSION:-v1}"
+    local built_at_utc
+    built_at_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    local repo_root
+    repo_root="$(cd "${_LIB_DIR}/../../.." && pwd)"
+    PYTHONPATH="$repo_root/scripts/python${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 - "$exported_dir" "$builder" "$built_at_utc" "$driver" "$gpu_name" "$gpu_sm" "$protocol" <<'PY'
+import sys
+from pathlib import Path
+
+from engine_build_identity import build_engine_build_version
+
+exported, builder, built_at, driver, gpu_name, gpu_sm, protocol = sys.argv[1:]
+identity = build_engine_build_version(
+    builder=builder,
+    built_at_utc=built_at,
+    driver_version=driver,
+    gpu_name=gpu_name,
+    gpu_sm=gpu_sm,
+    export_protocol_version=protocol,
+)
+for variant_dir in sorted(Path(exported).iterdir()):
+    if not variant_dir.is_dir() or not any(variant_dir.glob("*.engine")):
+        continue
+    sidecar = variant_dir / "ENGINE_BUILD_VERSION"
+    if sidecar.exists():
+        sidecar.chmod(0o644)
+    sidecar.write_text(identity + "\n", encoding="utf-8")
+    sidecar.chmod(0o444)
+print(identity)
+PY
 }
 
 # ---------------------------------------------------------------------------
@@ -540,6 +652,7 @@ collect_local_engines_to_workspace() {
     # rsync if available for clean delta copy; fall back to cp -a
     if command -v rsync &>/dev/null; then
         rsync -a --include='*/' --include='*.engine' --include='triton_manifest.json' \
+            --include='ENGINE_BUILD_VERSION' \
             --include='.engine_dtype' --exclude='*' \
             "$bundle_root/workspace/exported/" "$exported_dir/"
     else
@@ -552,6 +665,9 @@ collect_local_engines_to_workspace() {
             cp -a "$d"*.engine "$exported_dir/$name/" 2>/dev/null || true
             if [ -f "$d/triton_manifest.json" ]; then
                 cp -a "$d/triton_manifest.json" "$exported_dir/$name/"
+            fi
+            if [ -f "$d/ENGINE_BUILD_VERSION" ]; then
+                cp -a "$d/ENGINE_BUILD_VERSION" "$exported_dir/$name/"
             fi
         done
     fi
@@ -601,6 +717,9 @@ pack_engine_artifact_bundle() {
         cp -a "$v_dir"*.engine "$tmp/exported/$v/" 2>/dev/null || true
         if [ -f "$v_dir/triton_manifest.json" ]; then
             cp -a "$v_dir/triton_manifest.json" "$tmp/exported/$v/"
+        fi
+        if [ -f "$v_dir/ENGINE_BUILD_VERSION" ]; then
+            cp -a "$v_dir/ENGINE_BUILD_VERSION" "$tmp/exported/$v/"
         fi
     done
 

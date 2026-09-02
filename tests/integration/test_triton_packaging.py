@@ -44,6 +44,11 @@ def _write_custom_export(exported_dir: Path) -> None:
         json.dumps(
             {
                 "artifact_schema_version": 1,
+                "built_at_utc": "2026-08-20T10:00:00+00:00",
+                "engine_builder": "engine-builder",
+                "export_protocol_version": "v1",
+                "driver_version": "580.173.02",
+                "gpu_name": "NVIDIA GeForce RTX 5090",
                 "ngc_tag": "25.03",
                 "ngc_image": "nvcr.io/nvidia/tritonserver:25.03-py3",
                 "tensorrt_version": "10.9.0",
@@ -81,6 +86,12 @@ def _write_custom_export(exported_dir: Path) -> None:
         "zehan@20260601\n",
         encoding="utf-8",
     )
+    (variant_dir / "MODEL_VERSION").chmod(0o444)
+    (variant_dir / "ENGINE_BUILD_VERSION").write_text(
+        "engine-builder@20260820_580_5090_v1\n",
+        encoding="utf-8",
+    )
+    (variant_dir / "ENGINE_BUILD_VERSION").chmod(0o444)
     (variant_dir / "talker_code2wav_fused.engine").write_bytes(b"fake-plan")
     weights_dir = variant_dir / "weights"
     weights_dir.mkdir()
@@ -136,7 +147,6 @@ assemble_model_repo "$1" "$2" "$3" "$4" "1"
         check=True,
         env={
             **os.environ,
-            "QWEN3_TTS_ENGINE_BUILD_VERSION": "engine-builder@20260820_v1",
             "QWEN3_TTS_PACKAGER": "packager-test",
             "QWEN3_TTS_PACKAGE_DATE": package_date,
         },
@@ -244,6 +254,7 @@ def test_build_manifest_for_export_roundtrip():
     }
     m = build_manifest_for_export("custom-1.7b", wc, lay)
     assert m["schema_version"] == 2
+    assert m["export_protocol_version"] == "v1"
     assert m.get("triton_io_float_dtype") == "bf16"
     assert m["package"]["layout"] == "triton_model_version"
     assert m["package"]["runtime_artifacts"]["trt"] == "runtime/model.plan"
@@ -333,7 +344,7 @@ def test_custom_trt_package_excludes_verification_and_icl_assets(tmp_path):
     assert (package_dir / "MODEL_VERSION").stat().st_mode & 0o222 == 0
     engine_version_path = package_dir / "ENGINE_BUILD_VERSION"
     assert engine_version_path.read_text(encoding="utf-8") == (
-        "engine-builder@20260820_v1\n"
+        "engine-builder@20260820_580_5090_v1\n"
     )
     assert engine_version_path.stat().st_mode & 0o222 == 0
     package_info_path = package_dir / "PACKAGE_INFO.json"

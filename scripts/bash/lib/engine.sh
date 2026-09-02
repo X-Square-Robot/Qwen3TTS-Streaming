@@ -102,7 +102,7 @@ PY
 )
     if [ -z "$resolved_paths" ]; then
         log_error "Failed to resolve shared model package: $model_package"
-        log_error "Run: bash scripts/bash/compose.sh prepare --gateway engine --engine-mode trt --model-version $model_version"
+        log_error "Run: bash scripts/bash/compose.sh prepare --gateway engine --engine-mode trt --triton-model-version $model_version"
         return 1
     fi
 
@@ -119,7 +119,7 @@ PY
     if [ ! -d "$_ENGINE_MODEL_PACKAGE_DIR" ]; then
         log_error "Shared model package not found: $_ENGINE_MODEL_PACKAGE_DIR"
         log_error "Expected: model_repository/tts_orchestrator/$model_version/{runtime,weights,tokenizer}"
-        log_error "Run: bash scripts/bash/compose.sh prepare --gateway engine --engine-mode trt --model-version $model_version"
+        log_error "Run: bash scripts/bash/compose.sh prepare --gateway engine --engine-mode trt --triton-model-version $model_version"
         return 1
     fi
     if [ ! -d "$_ENGINE_DIR" ]; then
@@ -629,11 +629,6 @@ engine_start_docker() {
         -e "QWEN_LOG_BACKUP_COUNT=${QWEN_LOG_BACKUP_COUNT:-10}"
         -e "QWEN_LOG_STDOUT=${QWEN_LOG_STDOUT:-1}"
     )
-    if [[ -n "${QWEN3_TTS_ENGINE_BUILD_VERSION:-}" ]]; then
-        env_args+=(
-            -e "QWEN3_TTS_ENGINE_BUILD_VERSION=$QWEN3_TTS_ENGINE_BUILD_VERSION"
-        )
-    fi
     if [[ -n "$max_seq_len" ]]; then
         env_args+=( -e "ENGINE_SCHEDULER_MAX_SEQ_LEN=$max_seq_len" )
     fi

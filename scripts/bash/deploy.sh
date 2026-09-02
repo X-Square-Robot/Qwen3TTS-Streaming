@@ -102,7 +102,9 @@ Options:
   --gateway <mode>       Gateway: standalone | triton | engine (alias: engine-docker) (default: standalone)
   --engine-image <tag>   Image tag for engine-docker (default: Phase B NGC tag)
   --variant <name>       Model variant (default: auto-discover)
-  --model-version <N>    Triton model version directory (default: 1)
+  --triton-model-version <N>
+                         Triton model version directory (default: 1)
+  --model-version <N>    Compatibility alias for --triton-model-version
   --build, --rebuild-image
                           Rebuild runtime image from current code before use
   --dry-run              Show what would be done
@@ -136,7 +138,7 @@ Examples:
   deploy.sh run --gateway triton                 # Triton mode
   deploy.sh run --gateway engine-docker          # Engine Dockerfile + container
   deploy.sh run --foreground                     # standalone, foreground
-  deploy.sh run --model-version 2                # use tts_orchestrator/2 package
+  deploy.sh run --triton-model-version 2         # use tts_orchestrator/2 package
   deploy.sh stop                                 # stop whatever is running
   deploy.sh status                               # show status for both modes
   deploy.sh assemble --engine-mode trt           # Triton: assemble model repo
@@ -186,7 +188,8 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --gateway)        GATEWAY_MODE="$2"; shift 2 ;;
         --variant)        VARIANT="$2"; shift 2 ;;
-        --model-version)  MODEL_VERSION="$2"; shift 2 ;;
+        --triton-model-version|--model-version)
+            MODEL_VERSION="$2"; shift 2 ;;
         --dry-run)        DRY_RUN=true; shift ;;
         --build|--rebuild-image) FORCE_IMAGE_BUILD=true; shift ;;
         --engine-image)   ENGINE_IMAGE="$2"; ENGINE_IMAGE_EXPLICIT=true; shift 2 ;;
@@ -434,7 +437,7 @@ _compose_prepare_engine() {
         --variant "$VARIANT"
         --engine-mode trt
         --repo-dir "$MODEL_REPO_DIR"
-        --model-version "$MODEL_VERSION"
+        --triton-model-version "$MODEL_VERSION"
     )
     prepare_args+=(${COMPOSE_EXTRA[@]+"${COMPOSE_EXTRA[@]}"})
     $DRY_RUN && prepare_args+=(--dry-run)
@@ -471,7 +474,7 @@ cmd_package() {
         triton)
             local build_args=(
                 --variant "$VARIANT"
-                --model-version "$MODEL_VERSION"
+                --triton-model-version "$MODEL_VERSION"
                 --engine-mode trt
             )
             $DRY_RUN && build_args+=(--dry-run)
@@ -582,7 +585,7 @@ cmd_run_triton() {
         --device "$GPU_DEVICE"
         --max-batch "$MAX_BATCH"
         --max-seq-len "$MAX_SEQ_LEN"
-        --model-version "$MODEL_VERSION"
+        --triton-model-version "$MODEL_VERSION"
     )
     if ! $has_image_override; then
         local triton_image="${TRITON_IMAGE:-}"
@@ -651,7 +654,7 @@ cmd_run_engine_docker() {
         --device "$GPU_DEVICE"
         --max-batch "$MAX_BATCH"
         --max-sessions "$MAX_SESSIONS"
-        --model-version "$MODEL_VERSION"
+        --triton-model-version "$MODEL_VERSION"
     )
     append_optarg compose_args --max-seq-len "$MAX_SEQ_LEN"
     compose_args+=(${COMPOSE_EXTRA[@]+"${COMPOSE_EXTRA[@]}"})
@@ -716,7 +719,7 @@ cmd_forward_triton() {
     local subcmd="$1"
     local forward_args=()
     [ -n "$VARIANT" ] && forward_args+=(--variant "$VARIANT")
-    forward_args+=(--model-version "$MODEL_VERSION")
+    forward_args+=(--triton-model-version "$MODEL_VERSION")
     $DRY_RUN && forward_args+=(--dry-run)
     forward_args+=("${TRITON_ARGS[@]}")
 

@@ -225,6 +225,18 @@ assemble_model_repo() {
         log_error "MODEL_VERSION must come from the source model and be copied by export_01"
         return 1
     fi
+    local model_release_version
+    if ! model_release_version=$(PYTHONPATH="$repo_root" python3 - "$variant_dir" <<'PY'
+import sys
+from engine.runtime.model_version import load_model_version
+
+print(load_model_version(sys.argv[1]))
+PY
+); then
+        log_error "  invalid $variant_dir/MODEL_VERSION"
+        log_error "MODEL_VERSION must use researcher@YYYYMMDD format"
+        return 1
+    fi
 
     mkdir -p "$repo_dir"
     rm -rf \
@@ -315,12 +327,16 @@ assemble_model_repo() {
     }
 
     mkdir -p "$runtime_dir"
-    cp -f "$variant_dir/MODEL_VERSION" "$orch_model_dir/MODEL_VERSION"
+    printf '%s\n' "$model_release_version" > "$orch_model_dir/MODEL_VERSION"
     chmod 0444 "$orch_model_dir/MODEL_VERSION"
     log_info "  MODEL_VERSION: $(tr -d '\r\n' < "$orch_model_dir/MODEL_VERSION")"
 
-    local engine_build_version="${QWEN3_TTS_ENGINE_BUILD_VERSION:-}"
-    if [ -z "$engine_build_version" ] && [ -f "$variant_dir/ENGINE_BUILD_VERSION" ]; then
+    # The build identity is produced by Phase B from the actual target-host
+    # metadata.  It must travel with a TensorRT artifact; packaging never
+    # invents or prompts for a replacement value. ONNX-only debug packages do
+    # not have an engine build identity to carry.
+    local engine_build_version=""
+    if [ -f "$variant_dir/ENGINE_BUILD_VERSION" ]; then
         engine_build_version=$(PYTHONPATH="$repo_root" python3 - "$variant_dir" <<'PY'
 import sys
 from engine.runtime.engine_build_version import load_engine_build_version
@@ -332,22 +348,36 @@ PY
             return 1
         }
     fi
-    if [ -z "$engine_build_version" ]; then
-        engine_build_version=$(python3 - "$repo_root/engine/frontend/diagnostic_text.py" <<'PY'
-import runpy
+    if [ -z "$engine_build_version" ] && [ -f "$exported_dir/artifact_manifest.json" ]; then
+        if ! engine_build_version=$(PYTHONPATH="$repo_root" python3 - "$exported_dir/artifact_manifest.json" <<'PY'
+import json
 import sys
+from engine.runtime.engine_build_version import validate_engine_build_version
 
-print(runpy.run_path(sys.argv[1])["DEFAULT_ENGINE_BUILD_VERSION"])
+payload = json.loads(open(sys.argv[1], encoding="utf-8").read())
+print(validate_engine_build_version(str(payload.get("engine_build_version") or "")))
 PY
-)
+); then
+            log_error "  invalid artifact_manifest.json engine_build_version"
+            return 1
+        fi
     fi
-    if ! PYTHONPATH="$repo_root" python3 "$repo_root/scripts/python/write_version_sidecar.py" \
-        --output "$orch_model_dir/ENGINE_BUILD_VERSION" \
-        --version "$engine_build_version"; then
-        log_error "  failed to write ENGINE_BUILD_VERSION"
+    if [ "$engine_mode" = "trt" ] && [ -z "$engine_build_version" ]; then
+        log_error "Missing generated ENGINE_BUILD_VERSION for $variant"
+        log_error "Run Phase B or import a TensorRT artifact bundle before packaging"
         return 1
     fi
-    log_info "  ENGINE_BUILD_VERSION: $engine_build_version"
+    if [ -n "$engine_build_version" ]; then
+        if ! PYTHONPATH="$repo_root" python3 "$repo_root/scripts/python/write_version_sidecar.py" \
+            --output "$orch_model_dir/ENGINE_BUILD_VERSION" \
+            --version "$engine_build_version"; then
+            log_error "  failed to write ENGINE_BUILD_VERSION"
+            return 1
+        fi
+        log_info "  ENGINE_BUILD_VERSION: $engine_build_version"
+    else
+        log_info "  ENGINE_BUILD_VERSION: skipped (ONNX package has no TRT build)"
+    fi
 
     local package_info_path="$orch_model_dir/PACKAGE_INFO.json"
     local packager="${QWEN3_TTS_PACKAGER:-}"
@@ -800,8 +830,12 @@ PY
     else
         log_info "  tts_orchestrator/$model_version/MODEL_VERSION: OK"
     fi
+    local has_trt_engine=false
+    case "$runtime_engine" in
+        *.plan|*.engine) has_trt_engine=true ;;
+    esac
     local engine_build_identity
-    if ! engine_build_identity=$(PYTHONPATH="$repo_root" python3 - "$orch_dir" <<'PY'
+    if $has_trt_engine && ! engine_build_identity=$(PYTHONPATH="$repo_root" python3 - "$orch_dir" <<'PY'
 import sys
 from engine.runtime.engine_build_version import load_engine_build_version
 
@@ -810,8 +844,10 @@ PY
 ); then
         log_error "  tts_orchestrator/$model_version/ENGINE_BUILD_VERSION: invalid"
         missing=$((missing + 1))
-    else
+    elif $has_trt_engine; then
         log_info "  tts_orchestrator/$model_version/ENGINE_BUILD_VERSION: OK ($engine_build_identity)"
+    else
+        log_info "  tts_orchestrator/$model_version/ENGINE_BUILD_VERSION: skipped (ONNX package)"
     fi
     local package_provenance
     if ! package_provenance=$(PYTHONPATH="$repo_root" python3 - "$orch_dir" <<'PY'

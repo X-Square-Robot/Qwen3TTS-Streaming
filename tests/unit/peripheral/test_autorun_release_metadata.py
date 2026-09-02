@@ -34,8 +34,6 @@ def test_autorun_dry_run_accepts_release_and_package_metadata_without_writing():
         "2",
         "--model-release-version",
         "zehan@20260820",
-        "--engine-build-version",
-        "rime@20260820_580_5090_v2",
         "--packager",
         "packager-test",
         "--package-date",
@@ -46,13 +44,11 @@ def test_autorun_dry_run_accepts_release_and_package_metadata_without_writing():
     assert result.returncode == 0, result.stderr
     output = result.stdout + result.stderr
     assert "模型版本:  zehan@20260820" in output
-    assert "引擎编译:  rime@20260820_580_5090_v2" in output
+    assert "引擎编译:  Phase B 自动生成" in output
     assert "打包人:    packager-test" in output
     assert "打包日期:  2026-08-20" in output
     assert "Would write MODEL_VERSION=zehan@20260820" in output
-    assert "Would write ENGINE_BUILD_VERSION=rime@20260820_580_5090_v2" in (
-        output
-    )
+    assert "引擎编译版本" not in output
     assert model_sidecar.read_bytes() == before
 
 
@@ -76,7 +72,7 @@ def test_autorun_rejects_one_model_release_for_combined_variant():
         "-m",
         "all-1.7b",
         "--model-release-version",
-        "one-version-for-many-models",
+        "researcher@20260820",
         "--dry-run",
     )
 

@@ -3,6 +3,7 @@
 from engine.runtime.engine_build_version import (
     ENGINE_BUILD_VERSION_FILENAME,
     load_engine_build_version,
+    validate_engine_build_version,
 )
 from engine.runtime.fingerprint import (
     ArtifactManifest,
@@ -49,6 +50,7 @@ __all__ = [
     "format_report",
     "load_artifact_manifest",
     "load_engine_build_version",
+    "validate_engine_build_version",
     "load_model_version",
     "load_package_info",
     "load_read_only_version_file",

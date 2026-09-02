@@ -75,7 +75,9 @@ Commands:
 
 Options:
   --variant <name>       Target model variant (default: auto-discover first)
-  --model-version <N>    Triton model version directory (default: 1)
+  --triton-model-version <N>
+                         Triton model version directory (default: 1)
+  --model-version <N>    Compatibility alias for --triton-model-version
   --engine-mode onnx|trt Use ONNX or TensorRT engines (default: trt)
   --image <uri>          Override NGC container image
   --repo-dir <path>      Override model_repository output path
@@ -171,7 +173,8 @@ shift
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --variant)        VARIANT="$2"; shift 2 ;;
-        --model-version)  MODEL_VERSION="$2"; shift 2 ;;
+        --triton-model-version|--model-version)
+            MODEL_VERSION="$2"; shift 2 ;;
         --engine-mode)    ENGINE_MODE="$2"; shift 2 ;;
         --image)          USER_IMAGE="$2"; shift 2 ;;
         --repo-dir)       MODEL_REPO_DIR="$2"; shift 2 ;;
@@ -271,8 +274,8 @@ cmd_assemble() {
     echo ""
     if [ $status -eq 0 ]; then
         log_info "Next steps:"
-        log_info "  1. Pull container:  bash scripts/bash/build_triton.sh pull --model-version $MODEL_VERSION"
-        log_info "  2. Start server:    bash scripts/bash/build_triton.sh run --model-version $MODEL_VERSION"
+        log_info "  1. Pull container:  bash scripts/bash/build_triton.sh pull --triton-model-version $MODEL_VERSION"
+        log_info "  2. Start server:    bash scripts/bash/build_triton.sh run --triton-model-version $MODEL_VERSION"
     fi
 
     return $status
@@ -451,7 +454,7 @@ cmd_run() {
         --gateway triton
         --variant "$VARIANT"
         --repo-dir "$MODEL_REPO_DIR"
-        --model-version "$MODEL_VERSION"
+        --triton-model-version "$MODEL_VERSION"
         --image "$TRITON_IMAGE"
         --device "$TRITON_GPU_DEVICE"
     )

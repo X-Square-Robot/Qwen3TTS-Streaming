@@ -32,6 +32,8 @@
 #    BUILD_GPU_DEVICE GPU for TRT build (auto | all | N | cuda:N; default: auto)
 #
 #  Output: workspace/exported/<variant>/*.engine, workspace/exported/tokenizer/*.engine
+#  After a successful build, each variant also receives an automatically
+#  generated ENGINE_BUILD_VERSION sidecar.
 # ===========================================================================
 
 set -euo pipefail
@@ -794,6 +796,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --cp-precision T            Code Predictor precision (default: follow --dtype, i.e. bf16)"
             echo "  --code2wav-precision T      Code2Wav precision (default: follow --dtype/bf16; fp16 opt-in, low-concurrency only)"
             echo "  --triton-io-float-dtype T   Float I/O dtype (default: same as --dtype)"
+            echo "  ENGINE_BUILD_VERSION       Generated automatically from builder/date/driver/device/protocol"
             echo "  --dry-run              Show docker commands without executing"
             echo "  --pull-only            Pull the container image and exit"
             echo "  -h, --help             Show this help"
@@ -1023,6 +1026,12 @@ log_info "  Succeeded: $SUCCEEDED (talker_code2wav_fused variants)"
 if [ "$SUCCEEDED" -gt 0 ] && ! $DRY_RUN; then
     echo "$ENGINE_DTYPE" > "$EXPORTED_DIR/.engine_dtype"
     log_info "Saved ENGINE_DTYPE=$ENGINE_DTYPE to $EXPORTED_DIR/.engine_dtype"
+    if engine_build_identity=$(write_engine_build_sidecars_from_host "$EXPORTED_DIR" "$RESOLVED_BUILD_GPU_DEVICE"); then
+        log_info "Generated ENGINE_BUILD_VERSION=$engine_build_identity"
+    else
+        log_error "Failed to generate ENGINE_BUILD_VERSION"
+        exit 1
+    fi
     echo ""
     log_info "Engines: $EXPORTED_DIR/<variant>/*.engine, $TOKENIZER_DIR/*.engine"
     log_info "Next: bash scripts/bash/build_triton.sh assemble --engine-mode trt && build_triton.sh run"

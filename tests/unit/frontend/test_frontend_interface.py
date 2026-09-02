@@ -118,7 +118,7 @@ def test_diagnostic_text_alias_is_exact_and_uses_independent_versions():
     )
     assert version_text == (
         "引擎版本号：v0.2.0a14，"
-        "模型版本号：rime@20260820_580_5090_v1-zehan@20260818"
+        "模型版本号：zehan@20260818"
     )
     assert version_text == DEFAULT_ENGINE_MODEL_VERSION
     assert resolve_diagnostic_text(VERSION_QUERY_TEXT, version_text) == version_text

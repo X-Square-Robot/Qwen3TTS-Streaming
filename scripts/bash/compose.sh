@@ -71,7 +71,9 @@ Options:
   --variant <name>       Model variant (auto-discover when possible)
   --engine-mode <mode>   trt | onnx for model_repository assembly (default: trt)
   --repo-dir <path>      Shared model_repository path
-  --model-version <N>    Triton model version directory (default: 1)
+  --triton-model-version <N>
+                         Triton model version directory (default: 1)
+  --model-version <N>    Compatibility alias for --triton-model-version
   --image <tag>          Override service image tag for selected gateway
   --container <name>     Override container name for selected gateway
   --port <N>             Engine gRPC port
@@ -1010,7 +1012,8 @@ while [[ $# -gt 0 ]]; do
         --variant) VARIANT="$2"; shift 2 ;;
         --engine-mode) ENGINE_MODE="$2"; shift 2 ;;
         --repo-dir) MODEL_REPO_DIR="$2"; shift 2 ;;
-        --model-version) MODEL_VERSION="$2"; shift 2 ;;
+        --triton-model-version|--model-version)
+            MODEL_VERSION="$2"; shift 2 ;;
         --image) IMAGE_OVERRIDE="$2"; shift 2 ;;
         --container) CONTAINER_OVERRIDE="$2"; shift 2 ;;
         --port) ENGINE_PORT="$2"; shift 2 ;;

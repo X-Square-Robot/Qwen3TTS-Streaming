@@ -167,6 +167,7 @@ manifest = {
     "bundle_schema_version": 1,
     "created_at_utc": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
     "variants": [v for v in variants.split(",") if v],
+    "export_protocol_version": os.environ.get("QWEN3_TTS_EXPORT_PROTOCOL_VERSION", "v1"),
     "engine_dtype": dtype,
     "triton_io_float_dtype": io_dtype or dtype,
     "max_batch_size": int(mb),
