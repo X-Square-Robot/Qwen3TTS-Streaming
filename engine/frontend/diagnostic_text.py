@@ -7,24 +7,37 @@ from dataclasses import dataclass, field
 
 VERSION_QUERY_TEXT = "自变量语音合成版本号"
 DEFAULT_ENGINE_VERSION = "v0.2.0a14"
+DEFAULT_ENGINE_BUILD_VERSION = "unknown"
 DEFAULT_MODEL_VERSION = "zehan@20260818"
 
 
-def format_engine_model_version(engine_version: str, model_version: str) -> str:
-    """Build the labeled spoken form from independently managed versions."""
+def format_engine_model_version(
+    engine_version: str,
+    model_version: str,
+    engine_build_version: str = DEFAULT_ENGINE_BUILD_VERSION,
+) -> str:
+    """Build the spoken form from tag, model release, and TRT build identity."""
 
     engine = str(engine_version or "").strip()
     model = str(model_version or "").strip()
+    build = str(engine_build_version or "").strip()
     if not engine:
         raise ValueError("engine version must not be empty")
     if not model:
         raise ValueError("model version must not be empty")
-    return f"引擎版本号：{engine}，模型版本号：{model}"
+    if not build:
+        raise ValueError("engine build version must not be empty")
+    return (
+        f"引擎版本号：{engine}，"
+        f"模型版本号：{model}，"
+        f"引擎编译版本号：{build}"
+    )
 
 
 DEFAULT_ENGINE_MODEL_VERSION = format_engine_model_version(
     DEFAULT_ENGINE_VERSION,
     DEFAULT_MODEL_VERSION,
+    DEFAULT_ENGINE_BUILD_VERSION,
 )
 
 
@@ -91,6 +104,7 @@ class DiagnosticTextRouter:
 
 __all__ = [
     "DEFAULT_ENGINE_MODEL_VERSION",
+    "DEFAULT_ENGINE_BUILD_VERSION",
     "DEFAULT_ENGINE_VERSION",
     "DEFAULT_MODEL_VERSION",
     "DiagnosticTextResolution",

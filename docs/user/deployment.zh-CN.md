@@ -103,6 +103,8 @@ Phase A 会把它复制到 `workspace/exported/<variant>/MODEL_VERSION`；TUI �
 
 从旧版本升级时，如果导出目录中的 `MODEL_VERSION` 仍是把 engine build ID 和模型版本拼接在一起的旧值，Phase A 不会继续传播它；请在 autorun 中填写 `--model-release-version`（或在 TUI 中填写）后重新导出/打包。
 
+发送精确文本 `自变量语音合成版本号` 时，后门播报会依次包含 Git tag、模型发布版本和 TRT 引擎编译版本，例如：`引擎版本号：v0.2.0a14，模型版本号：zehan@20260818，引擎编译版本号：rime@20260902_580_5090_v1`。
+
 TRT 引擎版本使用单独的 `ENGINE_BUILD_VERSION`。Phase B 在目标 GPU 上编译完成后，按 `编译人@编译日期_驱动大版本_适配设备_导图协议版本` 自动生成，例如 `rime@20260902_580_5090_v1`，并将它随 `artifact_manifest.json` 和 engine artifact 带入 Phase C。正常流程不再要求手工输入或覆盖引擎编译版本；完整的 engine SHA256 和 TensorRT/GPU/profile 信息仍保存在 artifact manifest 中。
 
 模型包的打包溯源与模型发布版本分开保存。Phase C 会在同一模型包根目录生成只读的 `PACKAGE_INFO.json`：

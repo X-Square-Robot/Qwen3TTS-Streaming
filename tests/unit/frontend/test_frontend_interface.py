@@ -21,6 +21,7 @@ from engine.frontend.interface import (
     _normalize_tts_text,
 )
 from engine.frontend.diagnostic_text import (
+    DEFAULT_ENGINE_BUILD_VERSION,
     DEFAULT_ENGINE_MODEL_VERSION,
     DEFAULT_ENGINE_VERSION,
     DEFAULT_MODEL_VERSION,
@@ -115,12 +116,23 @@ def test_diagnostic_text_alias_is_exact_and_uses_independent_versions():
     version_text = format_engine_model_version(
         DEFAULT_ENGINE_VERSION,
         DEFAULT_MODEL_VERSION,
+        DEFAULT_ENGINE_BUILD_VERSION,
     )
     assert version_text == (
         "引擎版本号：v0.2.0a14，"
-        "模型版本号：zehan@20260818"
+        "模型版本号：zehan@20260818，"
+        "引擎编译版本号：unknown"
     )
     assert version_text == DEFAULT_ENGINE_MODEL_VERSION
+    assert format_engine_model_version(
+        DEFAULT_ENGINE_VERSION,
+        DEFAULT_MODEL_VERSION,
+        "rime@20260902_580_5090_v1",
+    ) == (
+        "引擎版本号：v0.2.0a14，"
+        "模型版本号：zehan@20260818，"
+        "引擎编译版本号：rime@20260902_580_5090_v1"
+    )
     assert resolve_diagnostic_text(VERSION_QUERY_TEXT, version_text) == version_text
     assert resolve_diagnostic_text(
         f"请合成{VERSION_QUERY_TEXT}", version_text

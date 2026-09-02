@@ -103,6 +103,8 @@ Phase A copies it to `workspace/exported/<variant>/MODEL_VERSION`; an explicit T
 
 When upgrading from an older export whose `MODEL_VERSION` combines the engine build ID and model release, Phase A will not propagate the legacy value. Supply `--model-release-version` (or enter it in the TUI) and re-export/repackage.
 
+When the exact text `自变量语音合成版本号` is synthesized, the diagnostic response now includes the Git tag, model release, and TRT engine build version in order, for example: `引擎版本号：v0.2.0a14，模型版本号：zehan@20260818，引擎编译版本号：rime@20260902_580_5090_v1`.
+
 TensorRT uses a separate `ENGINE_BUILD_VERSION`. After Phase B compiles on the target GPU, it is generated as `builder@build-date_driver-major_target-device_export-protocol`, for example `rime@20260902_580_5090_v1`, and carried into Phase C with `artifact_manifest.json` and the engine artifact. Normal workflows do not prompt for or override this value; the artifact manifest remains the source of the complete engine SHA256, TensorRT/GPU, and profile metadata.
 
 Model-package provenance is stored separately from the model release identity. Phase C creates a read-only `PACKAGE_INFO.json` in the same model-package root:
