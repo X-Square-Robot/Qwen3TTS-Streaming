@@ -228,6 +228,25 @@ class TestFusedPrecisionEmitter:
         assert fused_layer_precisions(m) == "/talker_fused/cp/*:fp32"
         assert fused_precision_constraints(m) == "obey"
 
+    def test_rope_fp32_pin_targets_only_angle_paths(self):
+        """RoPE FP32 pin keeps position_ids I/O unchanged and narrows layer scope."""
+        from trt_fused_io_formats import (
+            fused_layer_precisions,
+            fused_precision_constraints,
+        )
+
+        m = {"engine_dtype": "bf16", "rope_precision": "fp32"}
+        emitted = fused_layer_precisions(m)
+        parts = emitted.split(",")
+        assert fused_precision_constraints(m) == "obey"
+        assert "/talker_fused/talker_unified/Cos:fp32" in parts
+        assert "/talker_fused/talker_unified/Sin:fp32" in parts
+        assert "/talker_fused/cp/rotary_emb*/Cos:fp32" in parts
+        assert "/talker_fused/cp/rotary_emb*/Sin:fp32" in parts
+        assert "/code2wav/Cos:fp32" in parts
+        assert "/code2wav/Sin:fp32" in parts
+        assert "/talker_fused/*:fp32" not in parts
+
     def test_speed_and_repro_pins_coexist_prefer(self):
         """A speed pin forces prefer even when a fp32 repro pin coexists."""
         from trt_fused_io_formats import fused_precision_constraints

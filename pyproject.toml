@@ -48,8 +48,14 @@ engine = [
     "protobuf>=5.29.6,<7",
     "pyyaml>=6.0",
 ]
+validation = [
+    "cn2an>=0.5.23,<1",
+    "librosa>=0.10,<1",
+    "rapidfuzz>=3.0,<4",
+    "soundfile>=0.12,<1",
+]
 dev = [
-    "qwen3tts-streaming[test,client,demo]",
+    "qwen3tts-streaming[test,client,demo,validation]",
 ]
 
 [build-system]

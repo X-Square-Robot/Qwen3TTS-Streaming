@@ -66,6 +66,34 @@ _SUBMODULE_WILDCARDS = {
     "code2wav": "/code2wav/*",
 }
 
+# RoPE is intentionally narrower than the complete talker/cp subgraphs.  The
+# position/angle path is kept in FP32 while the surrounding transformer stays
+# on the engine's global precision (normally BF16).  The fused exporter emits
+# one talker-level angle path, one rotary_emb block per CP stage, and one
+# decoder RoPE path in the code2wav subgraph.  The latter matters for audio
+# fidelity: unlike talker/CP it cannot change token selection, but its absolute
+# cache positions can also exceed the exact-in-BF16 integer range.
+_ROPE_LAYER_PRECISION_PATTERNS = (
+    "/talker_fused/talker_unified/Mul",
+    "/talker_fused/talker_unified/Concat",
+    "/talker_fused/talker_unified/Cos",
+    "/talker_fused/talker_unified/Mul_1",
+    "/talker_fused/talker_unified/Sin",
+    "/talker_fused/talker_unified/Mul_2",
+    "/talker_fused/cp/rotary_emb*/MatMul",
+    "/talker_fused/cp/rotary_emb*/Concat_1",
+    "/talker_fused/cp/rotary_emb*/Cos",
+    "/talker_fused/cp/rotary_emb*/Mul_1",
+    "/talker_fused/cp/rotary_emb*/Sin",
+    "/talker_fused/cp/rotary_emb*/Mul_2",
+    "/code2wav/Mul_4",
+    "/code2wav/Concat_3",
+    "/code2wav/Cos",
+    "/code2wav/Mul_5",
+    "/code2wav/Sin",
+    "/code2wav/Mul_6",
+)
+
 
 def _submodule_precisions(manifest: Dict[str, Any]) -> Dict[str, str]:
     """Resolve normalized per-submodule precisions from the manifest.
@@ -75,9 +103,15 @@ def _submodule_precisions(manifest: Dict[str, Any]) -> Dict[str, str]:
     """
     global_dtype = _normalize_engine_dtype(str(manifest.get("engine_dtype", "bf16")))
     out = {}
-    for key in ("backbone", "cp", "code2wav"):
+    for key in ("backbone", "cp", "code2wav", "rope"):
         raw = manifest.get(f"{key}_precision")
-        out[key] = _normalize_engine_dtype(str(raw)) if raw else global_dtype
+        # RoPE has no independent fallback domain: absent means no FP32 pin.
+        if key == "rope" and (
+            raw is None or str(raw).strip().lower() in {"", "none", "off", "disabled"}
+        ):
+            out[key] = "none"
+        else:
+            out[key] = _normalize_engine_dtype(str(raw)) if raw else global_dtype
     return out
 
 
@@ -123,6 +157,11 @@ def fused_layer_precisions(manifest: Dict[str, Any]) -> str:
         # cp shares the backbone precision, one catch-all wildcard pins them
         # both without overlapping the cp pin (not expressible otherwise).
         parts.append(f"/talker_fused/*:{backbone}")
+    if precs["rope"] != "none":
+        parts.extend(
+            f"{pattern}:{precs['rope']}"
+            for pattern in _ROPE_LAYER_PRECISION_PATTERNS
+        )
     return ",".join(parts)
 
 
@@ -149,6 +188,8 @@ def fused_precision_constraints(manifest: Dict[str, Any]) -> str:
     for key in ("cp", "code2wav"):
         if precs[key] != backbone and precs[key] in speed_pins:
             return "prefer"
+    if precs["rope"] != "none" and precs["rope"] != backbone:
+        return "obey"
     return "obey"
 
 

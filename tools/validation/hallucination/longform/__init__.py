@@ -1,0 +1,63 @@
+"""Public contracts for the 0818 three-arm long-form hallucination study."""
+
+from .metrics import (
+    AlignmentOpcode,
+    canonicalize_numbers,
+    character_error_metrics,
+    evaluate_comparison_gate,
+    evaluate_invalid_sample_rules,
+    evaluate_invalidity,
+    levenshtein_opcodes,
+    normalize_transcript,
+    paired_bootstrap_comparison,
+    paired_hierarchical_bootstrap,
+    repetition_spans,
+    wilson_interval,
+)
+from .models import (
+    ArmKind,
+    ArmRunRecord,
+    ReferenceSentence,
+    ReviewLabel,
+    RunStatus,
+    SentenceOutcome,
+    parse_reference_sentences,
+    split_reference_sentences,
+)
+from .review import (
+    SEVERE_LABELS,
+    aggregate_reviews,
+    assert_blinded_manifest,
+    build_blind_manifest,
+    derive_severe_hallucination,
+    severe_label,
+)
+
+__all__ = [
+    "AlignmentOpcode",
+    "ArmKind",
+    "ArmRunRecord",
+    "ReferenceSentence",
+    "ReviewLabel",
+    "RunStatus",
+    "SentenceOutcome",
+    "SEVERE_LABELS",
+    "aggregate_reviews",
+    "assert_blinded_manifest",
+    "build_blind_manifest",
+    "canonicalize_numbers",
+    "character_error_metrics",
+    "derive_severe_hallucination",
+    "evaluate_comparison_gate",
+    "evaluate_invalid_sample_rules",
+    "evaluate_invalidity",
+    "levenshtein_opcodes",
+    "normalize_transcript",
+    "paired_bootstrap_comparison",
+    "paired_hierarchical_bootstrap",
+    "parse_reference_sentences",
+    "repetition_spans",
+    "severe_label",
+    "split_reference_sentences",
+    "wilson_interval",
+]

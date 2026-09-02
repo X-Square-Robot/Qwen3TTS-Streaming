@@ -84,7 +84,12 @@ def infer_stream_sequence(
     first_ts = [None]
     audio_format: dict[str, Any] = {"encoding": "pcm_f32", "sample_rate": SAMPLE_RATE}
 
-    def callback(result_obj=None, error=None):
+    # tritonclient.grpc invokes callbacks with the keyword ``result``.  Keep
+    # the local name descriptive while accepting that keyword without
+    # shadowing the ``StreamResult`` accumulated below.
+    def callback(result_obj=None, error=None, **kwargs):
+        if result_obj is None:
+            result_obj = kwargs.get("result")
         if error:
             err_str = str(error)
             if "CAPABILITIES:" not in err_str:

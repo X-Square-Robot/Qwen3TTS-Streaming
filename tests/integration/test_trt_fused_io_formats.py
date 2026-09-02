@@ -91,7 +91,9 @@ def test_cli_smoke():
         check=True,
     )
     lines = r.stdout.strip().splitlines()
-    assert len(lines) == 3
+    assert len(lines) == 5
     assert "bf16:chw" in lines[0]
     assert "bf16:chw" in lines[1]
     assert lines[2] == "--bf16"
+    assert lines[3] == ""
+    assert lines[4] == "obey"

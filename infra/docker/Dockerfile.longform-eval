@@ -1,0 +1,57 @@
+# Reproducible Triton 25.10 runtime for the frozen 0818 long-form evaluation.
+#
+# This image is deliberately assembled only from two already-published,
+# immutable NGC-25.10-derived images.  It performs no package installation:
+# the released standalone image owns the exact PyTorch/Python dependencies,
+# while the matching Triton image contributes only Triton Server and its
+# Python backend.  The frozen model repository is bind-mounted read-only by
+# scripts/bash/validation/longform_runtime.sh.
+ARG TRITON_SOURCE_IMAGE=nvcr.io/nvidia/tritonserver:25.10-py3
+ARG PYTORCH_SOURCE_IMAGE=cr.x2robot.cn/audio/qwen3tt-streaming:trt25.10_580_cu13_v0.1.2a6
+
+FROM ${TRITON_SOURCE_IMAGE} AS triton-source
+FROM ${PYTORCH_SOURCE_IMAGE} AS longform-eval
+
+COPY --from=triton-source /opt/tritonserver/ /opt/tritonserver/
+COPY --from=triton-source /usr/lib/x86_64-linux-gnu/libb64.so.0d /usr/lib/x86_64-linux-gnu/libb64.so.0d
+COPY --from=triton-source /usr/lib/x86_64-linux-gnu/libdcgm*.so.4.4.0 /usr/lib/x86_64-linux-gnu/
+COPY --from=triton-source /usr/lib/x86_64-linux-gnu/libxml2.so.2.9.14 /usr/lib/x86_64-linux-gnu/libxml2.so.2.9.14
+COPY --from=triton-source /usr/lib/x86_64-linux-gnu/libicuuc.so.74.2 /usr/lib/x86_64-linux-gnu/libicuuc.so.74.2
+COPY --from=triton-source /usr/lib/x86_64-linux-gnu/libicudata.so.74.2 /usr/lib/x86_64-linux-gnu/libicudata.so.74.2
+COPY --from=triton-source /usr/lib/x86_64-linux-gnu/libarchive.so.13.7.2 /usr/lib/x86_64-linux-gnu/libarchive.so.13.7.2
+
+ENV PATH=/opt/tritonserver/bin:${PATH} \
+    PYTHONPATH=/opt/tritonserver/backends/python \
+    QWEN3TTS_LONGFORM_EVAL_RUNTIME=triton25.10-pytorch25.10-v0.1.2a6
+
+LABEL io.qwen3tts.purpose="0818-longform-hallucination-evaluation" \
+      io.qwen3tts.triton-source="nvcr.io/nvidia/tritonserver@sha256:9ff4dd7a1c52487b35e98208ce9bbdb6580b036cdc8943a64587e1c2685de662" \
+      io.qwen3tts.pytorch-source="cr.x2robot.cn/audio/qwen3tt-streaming@sha256:4c314475904ebc446addc3450a37348fb0bbf02efdc0f93908f079bf50b1a084"
+
+RUN set -eu; \
+    ln -sfn libdcgm.so.4.4.0 /usr/lib/x86_64-linux-gnu/libdcgm.so.4; \
+    for module in config diag health introspect nvswitch policy sysmon; do \
+        ln -sfn \
+            "libdcgmmodule${module}.so.4.4.0" \
+            "/usr/lib/x86_64-linux-gnu/libdcgmmodule${module}.so.4"; \
+    done; \
+    ln -sfn libxml2.so.2.9.14 /usr/lib/x86_64-linux-gnu/libxml2.so.2; \
+    ln -sfn libicuuc.so.74.2 /usr/lib/x86_64-linux-gnu/libicuuc.so.74; \
+    ln -sfn libicudata.so.74.2 /usr/lib/x86_64-linux-gnu/libicudata.so.74; \
+    ln -sfn libarchive.so.13.7.2 /usr/lib/x86_64-linux-gnu/libarchive.so.13; \
+    ldconfig; \
+    for binary in \
+        /opt/tritonserver/bin/tritonserver \
+        /opt/tritonserver/backends/python/triton_python_backend_stub \
+        /opt/tritonserver/backends/python/libtriton_python.so; do \
+        dependencies="$(LD_LIBRARY_PATH="/opt/tritonserver/lib:${LD_LIBRARY_PATH:-}" \
+            ldd "$binary")" || exit 1; \
+        if printf '%s\n' "$dependencies" | grep -q 'not found'; then \
+            printf '%s\n' "$dependencies"; \
+            exit 1; \
+        fi; \
+    done; \
+    python3 -c "import grpc, numpy, soxr, tensorrt, tokenizers, torch, yaml; print({'torch': torch.__version__, 'cuda': torch.version.cuda, 'tokenizers': tokenizers.__version__, 'tensorrt': tensorrt.__version__, 'grpcio': grpc.__version__, 'numpy': numpy.__version__, 'soxr': soxr.__version__, 'pyyaml': yaml.__version__})"; \
+    python3 -c "import triton_python_backend_utils"
+
+CMD ["tritonserver", "--model-repository=/models", "--strict-model-config=false", "--disable-auto-complete-config", "--log-verbose=0"]
