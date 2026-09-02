@@ -89,6 +89,18 @@ export BACKBONE_PRECISION CP_PRECISION CODE2WAV_PRECISION
 BUILD_GPU_DEVICE="${BUILD_GPU_DEVICE:-auto}"
 RESOLVED_BUILD_GPU_DEVICE=""
 
+# RoPE angle evaluation is an internal numerical-safety policy, not a user
+# tuning knob.  Keep it enabled for every autorun/Phase-B build; the only
+# escape hatch is the deliberately hidden debug environment variable below.
+ROPE_POLICY_PY="${REPO_ROOT}/scripts/python/ensure_rope_precision.py"
+
+_rope_fp32_disabled() {
+    case "${QWEN3_DISABLE_ROPE_FP32:-}" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 if [ -n "${QWEN3_IN_BUNDLE_ROOT:-}" ]; then
     EXPORTED_DIR="${QWEN3_IN_BUNDLE_ROOT}/workspace/exported"
 else
@@ -627,6 +639,31 @@ discover_trt_variants() {
     echo "${found[@]}"
 }
 
+apply_rope_precision_policy() {
+    local variant="$1"
+    local manifest="$EXPORTED_DIR/$variant/triton_manifest.json"
+
+    if [ ! -f "$manifest" ]; then
+        log_warn "No triton_manifest.json for $variant; RoPE precision policy not recorded"
+        return 0
+    fi
+    if [ ! -f "$ROPE_POLICY_PY" ]; then
+        log_error "Missing RoPE precision policy helper: $ROPE_POLICY_PY"
+        return 1
+    fi
+
+    if $DRY_RUN; then
+        if _rope_fp32_disabled; then
+            log_info "[DRY RUN] RoPE FP32 pin disabled by internal debug environment"
+        else
+            log_info "[DRY RUN] RoPE FP32 pin enabled by default"
+        fi
+        return 0
+    fi
+
+    python3 "$ROPE_POLICY_PY" --manifest "$manifest"
+}
+
 update_variant_manifest_profile() {
     local variant="$1"
     local mark_built="${2:-false}"
@@ -891,6 +928,13 @@ fi
 
 variant_csv=$(IFS=,; echo "${VARIANTS[*]}")
 _resolve_build_profile_defaults "$variant_csv"
+
+# Apply the hidden numerical-safety default before any manifest is consumed by
+# trt_fused_io_formats.py.  This must happen before make-bundle/remote-build as
+# well as the local compile so every Phase-B route carries the same policy.
+for variant in "${VARIANTS[@]}"; do
+    apply_rope_precision_policy "$variant" || exit 1
+done
 
 if [ "$COMMAND" = "make-bundle" ]; then
     if $DRY_RUN; then

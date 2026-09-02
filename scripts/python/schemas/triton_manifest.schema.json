@@ -44,6 +44,11 @@
       "enum": ["fp32", "bf16", "fp16", "fp8"],
       "description": "Code2Wav decoder compute precision; defaults to engine_dtype if unspecified"
     },
+    "rope_precision": {
+      "type": "string",
+      "enum": ["fp32", "bf16", "fp16", "fp8"],
+      "description": "RoPE position/angle compute precision; Phase B defaults this narrow path to FP32"
+    },
     "engine_profile": {
       "type": "object",
       "description": "Actual TensorRT profile and build metadata used by Phase B",
@@ -76,6 +81,11 @@
           "type": "string",
           "enum": ["fp32", "bf16", "fp16", "fp8"],
           "description": "Code2Wav compute precision used during build"
+        },
+        "rope_precision": {
+          "type": "string",
+          "enum": ["fp32", "bf16", "fp16", "fp8"],
+          "description": "RoPE position/angle compute precision used during build"
         },
         "max_batch_size": { "type": "integer", "minimum": 1 },
         "max_input_len": { "type": "integer", "minimum": 1 },
