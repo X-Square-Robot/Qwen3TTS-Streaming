@@ -30,6 +30,8 @@ from ..core.types import (
     SessionState,
     TokenizedText,
 )
+from .text_commitment import AudioCreditEstimator, IncrementalTextCommitter, SemanticStartGate
+from .text_commitment.types import TextNormalizationConfig as CommitterConfig, FallbackPolicy
 from ..core.lifecycle import LifecycleLogger
 from ..core import observability as obs
 from ..core.timing import ServerTimingAccumulator
@@ -211,6 +213,8 @@ class FrontendInterface:
 
         self._sessions: Dict[str, Session] = {}
         self._consumer_tasks: Dict[str, asyncio.Task] = {}
+        self._tn_tasks: Dict[str, asyncio.Task] = {}
+        self._tn_locks: Dict[str, asyncio.Lock] = {}
         self._diagnostic_text_routers: Dict[str, DiagnosticTextRouter] = {}
 
     @property
@@ -257,6 +261,35 @@ class FrontendInterface:
         self._prepare_session_config(config)
 
         session = Session(session_id=session_id, config=config)
+        tn_cfg = config.text_normalization
+        # Backward-compatible per-session overrides via existing free-form policy.
+        opts = config.output_policy.config
+        if "tn_enabled" in opts:
+            tn_cfg.enabled = _metric_bool(opts["tn_enabled"])
+        if "tn_semantic_max_wait_ms" in opts:
+            tn_cfg.semantic_max_wait_ms = float(opts["tn_semantic_max_wait_ms"])
+        if "tn_semantic_idle_wait_ms" in opts:
+            tn_cfg.semantic_idle_wait_ms = float(opts["tn_semantic_idle_wait_ms"])
+        if "tn_fallback" in opts:
+            tn_cfg.fallback = str(opts["tn_fallback"])
+        if "tn_projection" in opts:
+            tn_cfg.projection = str(opts["tn_projection"])
+        try:
+            fallback_policy = FallbackPolicy(tn_cfg.fallback)
+        except ValueError:
+            fallback_policy = FallbackPolicy.CARDINAL_OR_LITERAL
+        session.text_committer = IncrementalTextCommitter(
+            CommitterConfig(
+                enabled=tn_cfg.enabled,
+                language=tn_cfg.language,
+                semantic_max_wait_ms=tn_cfg.semantic_max_wait_ms,
+                semantic_idle_wait_ms=tn_cfg.semantic_idle_wait_ms,
+                fallback=fallback_policy,
+                projection=tn_cfg.projection,
+                max_pending_chars=tn_cfg.max_pending_chars,
+            )
+        )
+        session.audio_credit_estimator = AudioCreditEstimator(codec_frame_rate=12.5)
         session.text_journal = CanonicalTextJournal(
             _normalize_tts_text,
             strip_leading_whitespace=True,
@@ -281,6 +314,7 @@ class FrontendInterface:
         session.reorder = AudioReorder()
         session.event_callback = on_event
         self._sessions[session_id] = session
+        self._tn_locks[session_id] = asyncio.Lock()
         self._diagnostic_text_routers[session_id] = DiagnosticTextRouter()
 
         # Resolve per-session observability level (raise-only override of the
@@ -339,6 +373,8 @@ class FrontendInterface:
             )
         )
         self._consumer_tasks[session_id] = task
+        if config.text_normalization.enabled:
+            self._tn_tasks[session_id] = asyncio.create_task(self._text_commit_ticker(session))
 
         await self._dispatcher.submit_new_session(session)
         logger.info("Session %s created (active: %d)", session_id, self.active_count)
@@ -360,22 +396,106 @@ class FrontendInterface:
         session = self._sessions.get(session_id)
         if session is None or session.state == SessionState.DONE:
             return
+        lock = self._tn_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._tn_locks[session_id] = lock
+        async with lock:
+            await self._push_text_input_locked(session, text)
+
+    def observe_raw_token_arrival(self, session_id: str, count: int = 1) -> None:
+        """Record upstream LLM-token arrivals for Phase-1 rate estimation.
+
+        The transport payload is text and cannot reliably reconstruct the LLM's
+        tokenizer, so adapters that know the upstream token count should call
+        this explicitly.  It is intentionally separate from ``push_text_input``.
+        """
+        session = self._sessions.get(session_id)
+        if session is not None and session.audio_credit_estimator is not None:
+            session.audio_credit_estimator.observe_raw_tokens(count)
+
+    def observe_played_audio(self, session_id: str, elapsed_ms: float) -> None:
+        """Feed a gateway/playhead playback estimate into audio credit."""
+        session = self._sessions.get(session_id)
+        if session is not None and session.audio_credit_estimator is not None:
+            session.audio_credit_estimator.observe_played_audio(elapsed_ms)
+
+    def streaming_rate_metrics(self, session_id: str) -> Optional[dict[str, float | int]]:
+        """Return a transport-neutral Phase-1 metrics snapshot."""
+        session = self._sessions.get(session_id)
+        if session is None or session.audio_credit_estimator is None:
+            return None
+        snapshot = session.audio_credit_estimator.snapshot()
+        return {
+            "raw_tokens": snapshot.raw_tokens,
+            "normalized_tokens": snapshot.normalized_tokens,
+            "codec_frames": snapshot.codec_frames,
+            "lambda_raw": snapshot.lambda_raw,
+            "lambda_norm": snapshot.lambda_norm,
+            "t_service_ms": snapshot.t_service_ms,
+            "audio_credit_ms": snapshot.audio_credit_ms,
+            "safe_wait_ms": snapshot.safe_wait_ms,
+        }
+
+    async def _push_text_input_locked(self, session: "Session", text: str) -> None:
         mode = session.config.input_mode
+        # A timeout is a semantic commit decision, not a tokenizer concern.
+        timeout_decision = session.text_committer.poll()
+        if timeout_decision.commits:
+            await self._ingest_commits(session, timeout_decision.commits)
+        self._emit_text_commit_events(session, timeout_decision.events)
         if mode == InputMode.FULL_TEXT:
-            # Whole text is buffered and normalized at completion, so there is no
-            # per-packet emoji seam to heal here.
-            normalized, _ = session.text_journal.append(text or "")
-            if normalized.strip():
-                session.append_text(normalized)
+            # Keep the journal canonical while deferring all tokenization until
+            # the single final committer flush.
+            session.text_journal.append(text or "")
+            session.append_text(text or "")
             return
 
         # Streaming modes: hold back a trailing partial-emoji suffix so an emoji
         # split across packets (e.g. a keycap base) does not leak into speech.
         raw = session._emoji_carry + (text or "")
         body, session._emoji_carry = split_pending_emoji(raw)
-        router = self._diagnostic_text_routers[session_id]
+        router = self._diagnostic_text_routers[session.session_id]
         for routed_text in router.push(body):
-            await self._ingest_streaming_text(session, routed_text)
+            decision = session.text_committer.feed(strip_emoji(routed_text))
+            await self._ingest_commits(session, decision.commits)
+            self._emit_text_commit_events(session, decision.events)
+
+    async def _text_commit_ticker(self, session: "Session") -> None:
+        """Wake on semantic deadlines even when the upstream stalls."""
+        try:
+            while session.state != SessionState.DONE and not session.input_complete:
+                deadline = session.text_committer.next_deadline
+                if deadline is None:
+                    await asyncio.sleep(0.02)
+                    continue
+                await asyncio.sleep(max(0.0, deadline - asyncio.get_running_loop().time()))
+                lock = self._tn_locks.get(session.session_id)
+                if lock is None:
+                    return
+                async with lock:
+                    decision = session.text_committer.poll()
+                    if decision.commits:
+                        await self._ingest_commits(session, decision.commits)
+                    self._emit_text_commit_events(session, decision.events)
+        except asyncio.CancelledError:
+            return
+
+    async def _ingest_commits(self, session: "Session", commits) -> None:
+        for commit in commits:
+            await self._ingest_streaming_text(session, commit.tts_text)
+
+    def _emit_text_commit_events(self, session: "Session", events: tuple[str, ...]) -> None:
+        callback = getattr(session, "event_callback", None)
+        if not callable(callback):
+            return
+        for event in events:
+            try:
+                result = callback(session.session_id, {"type": event})
+                if asyncio.iscoroutine(result):
+                    asyncio.create_task(result)
+            except Exception:
+                logger.exception("text commit event callback failed")
 
     async def _ingest_streaming_text(self, session: "Session", body: str) -> None:
         """Normalize a streaming text body, tokenize, route to the spliter per
@@ -424,12 +544,16 @@ class FrontendInterface:
         if session is None or session.state == SessionState.DONE:
             return
         session.mark_input_complete()
+        decision = session.text_committer.feed(text or "", final=True)
+        text = "".join(c.tts_text for c in decision.commits)
         if session.text_journal is not None:
             session.text_journal.finish()
-        if session.text_journal is None or not session.text_journal.normalized_text:
-            text, _ = session.text_journal.append(text or "")
-        else:
+        if not text and session.text_journal is not None:
             text = session.text_journal.normalized_text
+        if session.text_journal is not None and text and not session.text_journal.raw_text:
+            # Direct feed_full_text callers may not have populated the journal;
+            # streaming FULL_TEXT callers already appended the raw payload.
+            session.text_journal.append(text)
         text = session.text_journal.trim_normalized()
         resolved_text = resolve_diagnostic_text(text, self._engine_model_version)
         if resolved_text != text:
@@ -478,6 +602,9 @@ class FrontendInterface:
                     raw = session._emoji_carry + routed_text
                     body, session._emoji_carry = split_pending_emoji(raw)
                     await self._ingest_streaming_text(session, body)
+            final_decision = session.text_committer.feed("", final=True)
+            await self._ingest_commits(session, final_decision.commits)
+            self._emit_text_commit_events(session, final_decision.events)
         session.mark_input_complete()
         if session.text_journal is not None:
             session.text_journal.finish()
@@ -545,6 +672,27 @@ class FrontendInterface:
             ENGINE_SAMPLE_RATE * 4,
         )
 
+    def _semantic_start_gate_for(self, session: Session) -> Optional[SemanticStartGate]:
+        """Resolve the optional Phase-1 initial semantic release gate."""
+        # Prefix VAD must inspect its raw onset at synthesis speed; delaying it
+        # behind a semantic gate would change the existing VAD contract.
+        if isinstance(session.config.timing.extra.get("_prefix_gate_guard_bypass"), PrefixGateGuardBypass):
+            return None
+        cfg = session.config.output_policy.config or {}
+        enabled = str(cfg.get("semantic_start_gate", "false")).strip().lower()
+        if enabled not in ("1", "true", "yes", "on"):
+            return None
+        try:
+            min_ms = float(cfg.get("semantic_start_min_audio_ms", 160.0))
+            max_ms = float(cfg.get("semantic_start_max_hold_ms", 300.0))
+        except (TypeError, ValueError):
+            min_ms, max_ms = 160.0, 300.0
+        return SemanticStartGate(
+            bytes_per_sec=ENGINE_SAMPLE_RATE * 4,
+            min_audio_ms=min_ms,
+            max_hold_ms=max_ms,
+        )
+
     async def _consume_results(
         self,
         session: Session,
@@ -566,6 +714,9 @@ class FrontendInterface:
         hold = self._guarded_hold_for(session)
         hold_lock = asyncio.Lock() if hold is not None else None
         hold_ticker: Optional[asyncio.Task] = None
+        semantic_gate = self._semantic_start_gate_for(session)
+        semantic_gate_lock = asyncio.Lock() if semantic_gate is not None else None
+        semantic_ticker: Optional[asyncio.Task] = None
         prefix_gate_guard_bypass = session.config.timing.extra.get(
             "_prefix_gate_guard_bypass"
         )
@@ -580,10 +731,46 @@ class FrontendInterface:
         hold_verdicts: dict = {}
         prefill_done_seen: set = set()
 
-        async def _send_chunks(chunks: list) -> None:
+        async def _send_now(chunks: list) -> None:
             if on_audio:
                 for chunk in chunks:
                     await on_audio(session.session_id, chunk)
+
+        async def _send_chunks(chunks: list) -> None:
+            """Apply the optional semantic start gate before client release."""
+            if not chunks:
+                return
+            if semantic_gate is None:
+                await _send_now(chunks)
+                return
+            async with semantic_gate_lock:
+                if semantic_gate.released:
+                    await _send_now(chunks)
+                    return
+                semantic_gate.push(chunks)
+                safe_wait_ms = 0.0
+                estimator = session.audio_credit_estimator
+                if estimator is not None:
+                    safe_wait_ms = estimator.snapshot().safe_wait_ms
+                released = semantic_gate.release_due(
+                    semantic_pending=bool(session.text_committer.pending_raw),
+                    safe_wait_ms=safe_wait_ms,
+                )
+                await _send_now(released)
+
+        async def _release_semantic_due(*, force: bool = False) -> None:
+            if semantic_gate is None:
+                return
+            async with semantic_gate_lock:
+                released = semantic_gate.flush() if force else semantic_gate.release_due(
+                    semantic_pending=bool(session.text_committer.pending_raw),
+                    safe_wait_ms=(
+                        session.audio_credit_estimator.snapshot().safe_wait_ms
+                        if session.audio_credit_estimator is not None
+                        else 0.0
+                    ),
+                )
+                await _send_now(released)
 
         async def _deliver(chunks: list) -> None:
             """Route in-order chunks to the client, via the hold if guarded."""
@@ -639,6 +826,14 @@ class FrontendInterface:
 
             async with hold_lock:
                 dropped = 0
+                if semantic_gate is not None and (
+                    verdict["discard_all"] or verdict["discard_bytes"] > 0
+                ):
+                    semantic_gate.discard_segment(
+                        verdict["seg_idx"],
+                        discard_all=verdict["discard_all"],
+                        discard_bytes=verdict["discard_bytes"],
+                    )
                 if verdict["discard_all"]:
                     dropped = hold.discard()
                 elif verdict["discard_bytes"] > 0:
@@ -711,6 +906,14 @@ class FrontendInterface:
                             await _send_chunks(hold.release_due())
 
             hold_ticker = asyncio.create_task(_hold_tick())
+        if semantic_gate is not None:
+
+            async def _semantic_tick() -> None:
+                while True:
+                    await asyncio.sleep(0.02)
+                    await _release_semantic_due()
+
+            semantic_ticker = asyncio.create_task(_semantic_tick())
 
         try:
             while True:
@@ -720,6 +923,11 @@ class FrontendInterface:
                     session.record_first_audio()
                     audio = result.audio_bytes or b""
                     session.total_audio_bytes += len(audio)
+                    if session.audio_credit_estimator is not None and audio:
+                        frame_bytes = ENGINE_SAMPLE_RATE * 4 * 80 // 1000
+                        session.audio_credit_estimator.observe_codec_frames(
+                            max(1, round(len(audio) / frame_bytes))
+                        )
 
                     # Propagate raw audio timestamp from engine thread
                     if result.metrics and "first_raw_audio_at" in result.metrics:
@@ -890,6 +1098,14 @@ class FrontendInterface:
                             hold_verdicts[(meta.group_idx, meta.local_idx)] = verdict
 
                     if hold is None:
+                        if semantic_gate is not None:
+                            verdict = _hold_verdict(seg_idx, result.metrics or {})
+                            if verdict["discard_all"] or verdict["discard_bytes"] > 0:
+                                semantic_gate.discard_segment(
+                                    seg_idx,
+                                    discard_all=verdict["discard_all"],
+                                    discard_bytes=verdict["discard_bytes"],
+                                )
                         await _deliver(
                             reorder.mark_done(
                                 meta.group_idx,
@@ -947,6 +1163,8 @@ class FrontendInterface:
                                 overflow=overflow,
                             ),
                         )
+                        if session.audio_credit_estimator is not None:
+                            session.audio_credit_estimator.observe_normalized_tokens(int(text_tokens or 0))
 
                     if on_event:
                         metrics = {
@@ -977,6 +1195,16 @@ class FrontendInterface:
                         if "prefill_duration_ms" in (result.metrics or {}):
                             metrics["segment_prefill_ms"] = str(
                                 result.metrics["prefill_duration_ms"]
+                            )
+                        if session.audio_credit_estimator is not None:
+                            rate = session.audio_credit_estimator.snapshot()
+                            metrics.update(
+                                {
+                                    "lambda_raw": f"{rate.lambda_raw:.3f}",
+                                    "lambda_norm": f"{rate.lambda_norm:.3f}",
+                                    "audio_credit_ms": f"{rate.audio_credit_ms:.3f}",
+                                    "safe_wait_ms": f"{rate.safe_wait_ms:.3f}",
+                                }
                             )
                         eos_reason = str(
                             (result.metrics or {}).get("eos_reason", "")
@@ -1054,6 +1282,7 @@ class FrontendInterface:
                     if hold is not None:
                         async with hold_lock:
                             await _send_chunks(hold.flush())
+                    await _release_semantic_due(force=True)
                     session.state = SessionState.DONE
                     # Surface the L1 batch / text facts to the client protocol
                     # (done_meta merges these), enabling L0 client self-analysis.
@@ -1065,6 +1294,16 @@ class FrontendInterface:
                         "".join(final_text_parts)
                     )
                     done_metrics["server_total_segments"] = str(session.segments_done)
+                    if session.audio_credit_estimator is not None:
+                        rate = session.audio_credit_estimator.snapshot()
+                        done_metrics.update(
+                            {
+                                "lambda_raw": rate.lambda_raw,
+                                "lambda_norm": rate.lambda_norm,
+                                "audio_credit_ms": rate.audio_credit_ms,
+                                "safe_wait_ms": rate.safe_wait_ms,
+                            }
+                        )
                     try:
                         if on_done:
                             await on_done(session.session_id, done_metrics)
@@ -1089,6 +1328,7 @@ class FrontendInterface:
                     if hold is not None:
                         async with hold_lock:
                             await _send_chunks(hold.flush())
+                    await _release_semantic_due(force=True)
                     logger.error(
                         "Session %s error: %s", session.session_id, result.error_msg
                     )
@@ -1121,6 +1361,8 @@ class FrontendInterface:
         finally:
             if hold_ticker is not None:
                 hold_ticker.cancel()
+            if semantic_ticker is not None:
+                semantic_ticker.cancel()
             self._cleanup_session(session.session_id, expected=session)
 
     def _emit_session_summary(
@@ -1185,6 +1427,11 @@ class FrontendInterface:
             return
         session = self._sessions.pop(session_id, None)
         self._consumer_tasks.pop(session_id, None)
+        tn_tasks = getattr(self, "_tn_tasks", {})
+        tn_task = tn_tasks.pop(session_id, None)
+        if tn_task and not tn_task.done():
+            tn_task.cancel()
+        getattr(self, "_tn_locks", {}).pop(session_id, None)
         diagnostic_routers = getattr(self, "_diagnostic_text_routers", None)
         if diagnostic_routers is not None:
             diagnostic_routers.pop(session_id, None)

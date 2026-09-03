@@ -81,6 +81,17 @@ class OutputPolicyConfig:
 
 
 @dataclass
+class TextNormalizationConfig:
+    enabled: bool = True
+    language: str = "mixed_zh_en"
+    semantic_max_wait_ms: float = 200.0
+    semantic_idle_wait_ms: float = 80.0
+    fallback: str = "cardinal_or_literal"
+    projection: str = "readable_values"
+    max_pending_chars: int = 512
+
+
+@dataclass
 class TimingConfig:
     request_id: str = ""
     turn_id: str = ""
@@ -165,6 +176,7 @@ class SessionConfig:
     group_policy: GroupPolicy = GroupPolicy.AUTO
     audio: AudioConfig = field(default_factory=AudioConfig)
     output_policy: OutputPolicyConfig = field(default_factory=OutputPolicyConfig)
+    text_normalization: TextNormalizationConfig = field(default_factory=TextNormalizationConfig)
     timing: TimingConfig = field(default_factory=TimingConfig)
     # Resolved per-session observability level (raise-only override of the global
     # floor, clamped to max_session_level). None ⇒ use the global level.

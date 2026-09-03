@@ -1,0 +1,20 @@
+# Synthetic streaming-TN cases. One input per line; comments are ignored.
+是99%的概率
+21st is the ordinal suffix case
+inter + national should stay one English word
+2026-07-28
+$13.5 and 5%
+3*2=6
+1/2=0.5
+3* then 2 then = then 6
+https://example.com/a?x=1
+test.user@example.com
+```python\nx=1\n# comment\nprint("string literal")\n```
+**标题** [正文](https://example.com)
+{"answer":42,"ok":true,"nested":{"text":"hello\\\"world"}}
+𠮷是一个生僻字
+👩‍💻 1️⃣ #️⃣ 👍🏽
+99后缀晚到
+是99
+第2名只差0.01秒
+价格是A$13.5，温度是-5°C

@@ -82,6 +82,8 @@ class Session:
     # the start of an emoji sequence split across packets (see split_pending_emoji).
     _emoji_carry: str = ""
     text_journal: Optional[CanonicalTextJournal] = None
+    text_committer: Any = None
+    audio_credit_estimator: Any = None
 
     # Segment tracking
     segments_submitted: int = 0
