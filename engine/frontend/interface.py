@@ -493,8 +493,17 @@ class FrontendInterface:
     def _emit_text_commit_events(self, session: "Session", events: tuple[str, ...]) -> None:
         callback = getattr(session, "event_callback", None)
         if not callable(callback):
-            return
+            callback = None
         for event in events:
+            LifecycleLogger.emit(
+                session_id=session.session_id,
+                phase=event,
+                request_id=session.config.timing.request_id or None,
+                turn_id=session.config.timing.turn_id or None,
+                session_level=session.config.observability_level,
+            )
+            if callback is None:
+                continue
             try:
                 result = callback(session.session_id, {"type": event})
                 if asyncio.iscoroutine(result):
