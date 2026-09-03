@@ -42,7 +42,7 @@ if ! docker image inspect "$BUILD_TAG" &>/dev/null; then
   fi
 fi
 
-log_info "Checking torch, tokenizers, tensorrt..."
+log_info "Checking torch, tokenizers, tensorrt, wetext..."
 docker run --rm "$BUILD_TAG" python3 -c "
 import sys
 import torch
@@ -51,7 +51,9 @@ import tokenizers
 print(f'tokenizers {tokenizers.__version__}', file=sys.stderr)
 import tensorrt
 print(f'tensorrt {tensorrt.__version__}', file=sys.stderr)
-" || { log_error "torch/tokenizers/tensorrt check failed"; exit 1; }
+import wetext
+print('wetext runtime ready', file=sys.stderr)
+" || { log_error "torch/tokenizers/tensorrt/wetext check failed"; exit 1; }
 
 log_info "Checking baked engine package under /opt/qwen3-tts..."
 docker run --rm "$BUILD_TAG" python3 -c "

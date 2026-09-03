@@ -1029,6 +1029,7 @@ RUN python3 -m pip install --no-cache-dir \
     networkx \
     sympy \
     tokenizers \
+    wetext==0.1.7 \
     && python3 -m pip install --no-cache-dir \
     --timeout 120 \
     --retries 10 \
@@ -1048,7 +1049,8 @@ RUN python3 -m pip install --no-cache-dir \
     "tensorrt==\${TENSORRT_PYTHON_VERSION}" \
     "tensorrt_cu13_bindings==\${TENSORRT_PYTHON_VERSION}" \
     "tensorrt_cu13_libs==\${TENSORRT_PYTHON_VERSION}" \
-    "tensorrt-cu13==\${TENSORRT_PYTHON_VERSION}"
+    "tensorrt-cu13==\${TENSORRT_PYTHON_VERSION}" \
+    && python3 -c "import wetext; print('wetext runtime ready')"
 
 RUN install -d /opt/qwen3tts/bin /var/log/qwen3tts
 

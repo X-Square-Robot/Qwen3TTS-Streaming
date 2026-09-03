@@ -28,12 +28,23 @@ class WetextAdapter:
     def normalize(self, text: str, *, lang: str, kind: SpanKind) -> Optional[str]:
         if not text:
             return ""
+        if not any(ch.isalnum() for ch in text):
+            return None
+        # A hyphenated pickup/model code is not a mathematical negative
+        # number.  Some wetext graphs interpret ``B-0109`` as ``B`` followed
+        # by a signed number, so route it to the deterministic code fallback.
+        if lang == "zh" and kind == SpanKind.ENGLISH_WORD and re.fullmatch(r"[A-Za-z]+-\d+", text):
+            return None
         normalizer = self._normalizers.get(lang)
         if normalizer is None:
             return None
         try:
             value = normalizer.normalize(text)  # public API only
-            return value if isinstance(value, str) and value else text
+            # An unchanged value means the graph did not provide a useful
+            # verbalization.  Returning None lets the caller take the
+            # deterministic, observable fallback path (units and formulae in
+            # particular are not covered by every wetext graph version).
+            return value if isinstance(value, str) and value and value != text else None
         except Exception:
             logger.exception("text.normalizer.failed", extra={"lang": lang, "kind": kind.value})
             return None
@@ -52,7 +63,12 @@ class WetextAdapter:
             return [value] if value else []
         try:
             values = method(text)
-            return [str(item) for item in values if str(item)]
+            candidates: list[str] = []
+            for item in values:
+                candidate = getattr(item, "text", item)
+                if candidate:
+                    candidates.append(str(candidate))
+            return candidates
         except Exception:
             logger.exception("text.normalizer.candidates_failed", extra={"lang": lang, "kind": kind.value})
             return []
@@ -69,6 +85,13 @@ class WetextAdapter:
             return None
 
     def fallback(self, text: str, *, lang: str, kind: SpanKind, policy: FallbackPolicy) -> str:
+        if lang == "zh" and kind == SpanKind.ENGLISH_WORD:
+            particulate = re.fullmatch(r"PM(\d+(?:\.\d+)?)", text, re.I)
+            if particulate:
+                return "PM" + _zh_cardinal(particulate.group(1))
+            code = re.fullmatch(r"([A-Za-z]+)-(\d+)", text)
+            if code:
+                return code.group(1) + "杠" + _zh_digit_sequence(code.group(2))
         if policy == FallbackPolicy.CARDINAL_OR_LITERAL and kind in (SpanKind.NUMBER, SpanKind.ORDINAL):
             structured = _structured_number_fallback(text, lang=lang)
             if structured:
@@ -89,6 +112,10 @@ class WetextAdapter:
 
 
 _ZH_DIGITS = "零一二三四五六七八九"
+
+
+def _zh_digit_sequence(text: str) -> str:
+    return "".join(_ZH_DIGITS[int(d)] for d in text)
 
 
 def _zh_cardinal(text: str) -> str:
@@ -132,38 +159,54 @@ def _en_cardinal(text: str) -> str:
         last = words[-1]
         words[-1] = irregular.get(last, last[:-1] + "ieth" if last.endswith("y") else last + "th")
         return " ".join(words)
+    sign = ""
+    if text.startswith(("+", "-")):
+        sign = "positive " if text[0] == "+" else "negative "
+        text = text[1:]
     percent = text.endswith("%")
     if percent:
         text = text[:-1]
     if "." in text and re.fullmatch(r"\d+\.\d+", text):
         whole, frac = text.split(".", 1)
         value = _en_cardinal(whole) + " point " + " ".join(_en_cardinal(d) for d in frac)
-        return value + (" percent" if percent else "")
+        return sign + value + (" percent" if percent else "")
     if not text.isdigit():
         return ""
     n = int(text)
-    ones = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
+    value = _en_int(n)
+    return sign + value + (" percent" if percent else "")
+
+
+def _en_int(n: int) -> str:
+    ones = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
+    teens = ("ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen")
+    tens = ("", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety")
     if n < 10:
         return ones[n]
     if n < 20:
-        return ["ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"][n - 10]
+        return teens[n - 10]
     if n < 100:
-        tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
         return tens[n // 10] + (" " + ones[n % 10] if n % 10 else "")
-    return text
+    if n < 1000:
+        return ones[n // 100] + " hundred" + (" " + _en_int(n % 100) if n % 100 else "")
+    for scale, name in ((1_000_000_000, "billion"), (1_000_000, "million"), (1_000, "thousand")):
+        if n >= scale:
+            remainder = n % scale
+            return _en_int(n // scale) + " " + name + (" " + _en_int(remainder) if remainder else "")
+    return str(n)
 
 
 def _math_fallback(text: str) -> str:
     """Verbalize a small arithmetic expression without evaluating it."""
-    if not re.fullmatch(r"\d+(?:\s*[+*/×÷=-]\s*\d+)+", text):
+    if not re.fullmatch(r"\d+(?:\.\d+)?(?:\s*[+*/×÷=<>≤≥-]\s*\d+(?:\.\d+)?)+", text):
         return ""
-    operators = {"*": "乘", "×": "乘", "/": "除以", "÷": "除以", "+": "加", "-": "减", "=": "等于"}
-    parts = re.split(r"\s*([+*/×÷=-])\s*", text)
+    operators = {"*": "乘", "×": "乘", "/": "除以", "÷": "除以", "+": "加", "-": "减", "=": "等于", ">": "大于", "<": "小于", "≥": "大于等于", "≤": "小于等于"}
+    parts = re.split(r"\s*([+*/×÷=<>≤≥-])\s*", text)
     out: list[str] = []
     for part in parts:
         if part in operators:
             out.append(operators[part])
-        elif part.isdigit():
+        elif re.fullmatch(r"\d+(?:\.\d+)?", part):
             out.append(_zh_cardinal(part))
         else:
             return ""
@@ -171,19 +214,29 @@ def _math_fallback(text: str) -> str:
 
 
 def _structured_number_fallback(text: str, *, lang: str) -> str:
-    if lang != "zh":
-        return ""
-    currency = re.fullmatch(r"(A\$|HKD|[$€￥£])([+\-]?\d+(?:\.\d+)?)", text)
+    currency = re.fullmatch(r"(A\$|HKD|[$€￥£¥])([+\-]?\d+(?:\.\d+)?)", text)
     if currency:
-        names = {"A$": "澳元", "HKD": "港币", "$": "美元", "€": "欧元", "￥": "人民币", "£": "英镑"}
-        return _zh_cardinal(currency.group(2)) + names[currency.group(1)]
-    unit = re.fullmatch(r"([+\-]?\d+(?:\.\d+)?)(m²|km/h|km|kg|ms|°C|m|mm|cm|%)", text)
+        if lang == "zh":
+            names = {"A$": "澳元", "HKD": "港币", "$": "美元", "€": "欧元", "￥": "人民币", "¥": "人民币", "£": "英镑"}
+            return _zh_cardinal(currency.group(2)) + names[currency.group(1)]
+        names = {"A$": "Australian dollars", "HKD": "Hong Kong dollars", "$": "dollars", "€": "euros", "￥": "Chinese yuan", "¥": "Chinese yuan", "£": "pounds"}
+        value = _en_cardinal(currency.group(2))
+        return value + " " + names[currency.group(1)] if value else ""
+    unit = re.fullmatch(r"([+\-]?\d+(?:\.\d+)?)(m²|km/h|km|kg|ms|°C|℃|m|mm|cm|[μµ]g/m³|%)", text)
     if unit and unit.group(2) != "%":
-        names = {"m²": "平方米", "km/h": "千米每小时", "km": "千米", "kg": "千克", "ms": "毫秒", "°C": "摄氏度", "m": "米", "mm": "毫米", "cm": "厘米"}
-        return _zh_cardinal(unit.group(1)) + names[unit.group(2)]
+        if lang == "zh":
+            names = {"m²": "平方米", "km/h": "千米每小时", "km": "千米", "kg": "千克", "ms": "毫秒", "°C": "摄氏度", "℃": "摄氏度", "m": "米", "mm": "毫米", "cm": "厘米", "μg/m³": "微克每立方米", "µg/m³": "微克每立方米"}
+            return _zh_cardinal(unit.group(1)) + names[unit.group(2)]
+        names = {"m²": "square meters", "km/h": "kilometers per hour", "km": "kilometers", "kg": "kilograms", "ms": "milliseconds", "°C": "degrees Celsius", "℃": "degrees Celsius", "m": "meters", "mm": "millimeters", "cm": "centimeters", "μg/m³": "micrograms per cubic meter", "µg/m³": "micrograms per cubic meter"}
+        value = _en_cardinal(unit.group(1))
+        return value + " " + names[unit.group(2)] if value else ""
     date = re.fullmatch(r"(\d{4})[-/.](\d{1,2})(?:[-/.](\d{1,2}))?", text)
     if date:
         year, month, day = date.groups()
-        result = "".join(_ZH_DIGITS[int(d)] for d in year) + "年" + _zh_cardinal(month) + "月"
-        return result + (_zh_cardinal(day) + "日" if day else "")
+        if lang == "zh":
+            result = "".join(_ZH_DIGITS[int(d)] for d in year) + "年" + _zh_cardinal(month) + "月"
+            return result + (_zh_cardinal(day) + "日" if day else "")
+        months = ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")
+        result = months[int(month) - 1] + (" " + _en_cardinal(day) + "," if day else "")
+        return result + " " + _en_cardinal(year)
     return ""

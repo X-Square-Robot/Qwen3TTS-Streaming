@@ -15,7 +15,7 @@ from .projector import project_readable
 _ASCII_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_@.$:/+\-\\]*")
 _NUMERIC = re.compile(r"^[+\-]?\d+(?:[.,]\d+)?(?:%|[A-Za-z]{1,8})?$")
 _ORDINAL = re.compile(r"^\d{1,6}(?:st|nd|rd|th)$", re.I)
-_MATH_CHARS = set("0123456789.+-*/=^×÷()")
+_MATH_CHARS = set("0123456789.+-*/=^×÷()<>≤≥")
 
 
 def _is_emoji(ch: str) -> bool:
@@ -51,6 +51,9 @@ class IncrementalTextCommitter:
         self._json_escape = False
         self._plain_buffer = ""
         self._plain_start = 0
+        # Defer a space after a number until we see whether an operator
+        # follows (e.g. ``5 > 3``).  It is emitted as plain text otherwise.
+        self._pending_gap = ""
 
     @property
     def pending_raw(self) -> str:
@@ -168,6 +171,9 @@ class IncrementalTextCommitter:
                 elif ch in "*_`[#":
                     self._flush_plain()
                     self._pending = _Pending(ch, self.committed_raw_end, SpanKind.MARKDOWN, now, now)
+                elif ch in "$€￥£¥+-":
+                    self._flush_plain()
+                    self._pending = _Pending(ch, self.committed_raw_end, SpanKind.NUMBER, now, now)
                 elif ch.isspace() or unicodedata.category(ch).startswith("P") and ch not in "%$@#":
                     self._emit_plain(ch)
                 elif ord(ch) > 127 and not ch.isascii():
@@ -177,27 +183,54 @@ class IncrementalTextCommitter:
                     self._flush_plain()
                     self._pending = _Pending(ch, self.committed_raw_end, self._classify(ch), now, now)
                 continue
-            # CJK or whitespace closes an ASCII semantic span. Punctuation closes
-            # all spans except symbols that are part of numbers/formulas.
-            if ch.isspace() or (not ch.isascii() and not _is_emoji(ch)):
-                if self._pending.kind == SpanKind.NUMBER and ch in "°²":
+            # Keep whitespace inside a confirmed math expression.  For a plain
+            # number, defer whitespace until the next character tells us
+            # whether an operator follows (for example ``5 >``).
+            if ch.isspace():
+                if self._pending.kind == SpanKind.MATH:
+                    self._pending_gap += ch
+                    self._pending.last_at = now
+                    continue
+                if self._pending.kind == SpanKind.NUMBER:
+                    self._pending_gap += ch
+                    self._pending.last_at = now
+                    continue
+                self._close_pending()
+                self._emit_plain(ch)
+                continue
+            # CJK closes an ASCII semantic span. Punctuation closes all spans
+            # except symbols that are part of numbers/formulas.
+            if not ch.isascii() and not _is_emoji(ch):
+                if self._pending.kind in (SpanKind.NUMBER, SpanKind.ENGLISH_WORD) and re.match(r"^[+\-]?\d", self._pending.raw) and ch in "°²³℃μµ":
                     self._pending.raw += ch
                     self._pending.last_at = now
                     self._pending.kind = self._classify(self._pending.raw)
                     continue
-                self._close_pending()
-                if ch.isspace() or unicodedata.category(ch).startswith("P"):
-                    self._emit_plain(ch)
-                else:
-                    self._emit_plain(ch)
+                self._close_pending(lang_hint="zh")
+                self._emit_plain(ch)
             elif ch in "。！？；,，.!?;:" and self._pending.kind != SpanKind.URL:
-                if self._pending.kind == SpanKind.NUMBER and ch in ".:" and self._pending.raw[-1:].isdigit():
+                if self._pending.kind in (SpanKind.NUMBER, SpanKind.MATH, SpanKind.ENGLISH_WORD) and ch in ".:" and self._pending.raw[-1:].isdigit():
                     self._pending.raw += ch
                     self._pending.last_at = now
                     continue
                 self._close_pending()
                 self._emit_plain(ch)
             else:
+                if self._pending_gap and self._pending.kind in (SpanKind.NUMBER, SpanKind.MATH):
+                    can_extend_math = (
+                        self._pending.kind == SpanKind.NUMBER and ch in "+*/×÷=<>≤≥-"
+                    ) or (
+                        self._pending.kind == SpanKind.MATH and (ch.isdigit() or ch in "+*/×÷=<>≤≥-")
+                    )
+                    if can_extend_math:
+                        self._pending.raw += self._pending_gap + ch
+                        self._pending_gap = ""
+                        self._pending.last_at = now
+                        self._pending.kind = SpanKind.MATH
+                        continue
+                    self._close_pending(lang_hint="en" if ch.isascii() and ch.isalpha() else None)
+                    self._append(ch, now)
+                    continue
                 self._pending.raw += ch
                 self._pending.last_at = now
                 self._pending.kind = self._classify(self._pending.raw)
@@ -215,26 +248,32 @@ class IncrementalTextCommitter:
         self._close_pending(reason=reason)
         return []
 
-    def _close_pending(self, *, reason: str = "boundary") -> TextCommit:
+    def _close_pending(self, *, reason: str = "boundary", lang_hint: str | None = None) -> TextCommit:
         p = self._pending
         force_literal = self._force_literal_next
         self._force_literal_next = False
         lang = self._current_lang if self.config.language == "mixed_zh_en" else ("zh" if self.config.language.startswith("zh") else "en")
+        if lang_hint in ("zh", "en") and self.config.language == "mixed_zh_en":
+            lang = lang_hint
         if any(ord(c) > 127 for c in p.raw):
             lang = "zh"
-        elif p.kind != SpanKind.NUMBER and any(c.isalpha() for c in p.raw):
+        elif lang_hint is None and p.kind != SpanKind.NUMBER and any(c.isalpha() for c in p.raw):
             lang = "en"
         decimal_number = p.kind == SpanKind.NUMBER and re.fullmatch(r"[+\-]?\d+(?:\.\d+)?%?", p.raw)
-        value = (
-            project_readable(p.raw)
-            if p.kind in (SpanKind.JSON, SpanKind.MARKDOWN)
-            else (
-                self.adapter.fallback(p.raw, lang=lang, kind=p.kind, policy=self.config.fallback)
-                if decimal_number and not force_literal
-                else (None if force_literal else self.adapter.normalize(p.raw, lang=lang, kind=p.kind))
-            )
-        )
+        math_value = self.adapter.fallback(p.raw, lang=lang, kind=p.kind, policy=self.config.fallback) if p.kind == SpanKind.MATH else ""
+        if p.kind in (SpanKind.JSON, SpanKind.MARKDOWN):
+            value = project_readable(p.raw)
+        elif force_literal:
+            value = None
+        elif p.kind == SpanKind.MATH:
+            value = math_value
+        elif decimal_number:
+            value = self.adapter.fallback(p.raw, lang=lang, kind=p.kind, policy=self.config.fallback)
+        else:
+            value = self.adapter.normalize(p.raw, lang=lang, kind=p.kind)
         kind = CommitKind.NORMALIZED
+        if p.kind == SpanKind.MATH and math_value == p.raw:
+            kind = CommitKind.FALLBACK
         if value is None:
             value = self.adapter.fallback(p.raw, lang=lang, kind=p.kind, policy=self.config.fallback)
             kind = CommitKind.FALLBACK
@@ -243,7 +282,12 @@ class IncrementalTextCommitter:
         self.committed_spoken_text += value
         self.commit_fence += 1
         self._pending = _Pending()
+        self._current_lang = lang
         self._outbox.append(commit)
+        if self._pending_gap:
+            gap = self._pending_gap
+            self._pending_gap = ""
+            self._emit_plain(gap)
         return commit
 
     def _fallback_pending(self, *, reason: str) -> TextCommit:
@@ -289,15 +333,15 @@ class IncrementalTextCommitter:
 
     @staticmethod
     def _classify(raw: str) -> SpanKind:
-        if any(c in _MATH_CHARS for c in raw) and any(c in "*=×÷" for c in raw):
+        if any(c in _MATH_CHARS for c in raw) and any(c in "*=×÷<>≤≥" for c in raw):
             return SpanKind.MATH
         if "@" in raw:
             return SpanKind.EMAIL
-        if re.fullmatch(r"(?:A\$|HKD|[$€￥£])\d+(?:\.\d+)?", raw):
+        if re.fullmatch(r"(?:A\$|HKD|[$€￥£¥])\d+(?:\.\d+)?", raw):
             return SpanKind.NUMBER
         if re.fullmatch(r"\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?", raw):
             return SpanKind.NUMBER
-        if re.fullmatch(r"[+\-]?\d+(?:\.\d+)?(?:m²|km/h|km|kg|ms|°C|m|mm|cm)", raw):
+        if re.fullmatch(r"[+\-]?\d+(?:\.\d+)?(?:m²|km/h|km|kg|ms|°C|℃|m|mm|cm|[μµ]g/m³)", raw):
             return SpanKind.NUMBER
         if "://" in raw or raw.startswith(("www.", "http")):
             return SpanKind.URL

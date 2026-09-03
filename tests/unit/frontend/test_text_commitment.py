@@ -1,5 +1,5 @@
 from engine.frontend.text_commitment.committer import IncrementalTextCommitter
-from engine.frontend.text_commitment.types import CommitKind, SpanKind
+from engine.frontend.text_commitment.types import SpanKind
 from engine.core.session import Session
 from engine.core.types import SessionConfig
 from engine.frontend.interface import FrontendInterface
@@ -48,6 +48,40 @@ def test_markdown_and_math_projection_do_not_leak_structure():
     c = IncrementalTextCommitter()
     out = c.feed("3*2=6", final=True)
     assert "三乘二等于六" == "".join(x.tts_text for x in out.commits)
+
+
+def test_structured_numeric_fallbacks_cover_decimal_units_currency_and_inequality():
+    cases = {
+        "1/2=0.5": {"一除以二等于零点五"},
+        # wetext uses the natural Chinese measure ordering; the fallback uses
+        # the equally readable number-first form when wetext is unavailable.
+        "7μg/m³": {"每立方米七微克", "七微克每立方米"},
+        "¥10.09": {"十点零九元", "十点零九人民币"},
+        "5 > 3": {"五大于三"},
+        "-5°C": {"负五摄氏度"},
+        "PM2.5": {"PM二点五", "PM two.five"},
+        "B-0109": {"B杠零一零九", "B-oh one oh nine"},
+    }
+    for raw, expected in cases.items():
+        output = "".join(item.tts_text for item in IncrementalTextCommitter().feed(raw, final=True).commits)
+        assert output in expected, (raw, output)
+
+
+def test_numeric_spans_follow_english_context():
+    c = IncrementalTextCommitter()
+    output = "".join(item.tts_text for item in c.feed("20% of 100 is 20", final=True).commits)
+    assert output == "twenty percent of one hundred is twenty"
+
+
+def test_numeric_spans_follow_chinese_script_context():
+    cases = {
+        "概率是20%": "概率是百分之二十",
+        "20%概率": "百分之二十概率",
+        "the chance is 20%": "the chance is twenty percent",
+    }
+    for raw, expected in cases.items():
+        output = "".join(item.tts_text for item in IncrementalTextCommitter().feed(raw, final=True).commits)
+        assert output == expected, (raw, output)
 
 
 def test_emoji_sequences_are_filtered_without_leaking_components():

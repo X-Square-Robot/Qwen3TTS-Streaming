@@ -122,6 +122,14 @@ ENV QWEN_LOG_DIR=/var/log/qwen3tts \
     QWEN_LOG_BACKUP_COUNT=10 \
     QWEN_LOG_STDOUT=1
 
+# The streaming frontend enables TN by default.  Keep the runtime image
+# self-contained so it cannot silently fall back merely because wetext was not
+# present in the selected Triton base image.
+RUN python3 -m pip install --no-cache-dir \
+    --index-url "${PIP_INDEX_URL:-https://mirrors.bfsu.edu.cn/pypi/web/simple}" \
+    wetext==0.1.7 \
+    && python3 -c "import wetext; print('wetext runtime ready')"
+
 RUN install -d /opt/qwen3tts/bin /var/log/qwen3tts
 
 # In-container bounded log capture (stdout remains enabled by default).

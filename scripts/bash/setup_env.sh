@@ -207,7 +207,7 @@ install_dependencies() {
 
     # Serving / protocol test deps used by the standalone engine gateway and
     # the unified endpoint test tools.
-    pip_install aiohttp grpcio grpcio-tools requests "tritonclient[grpc]"
+    pip_install aiohttp grpcio grpcio-tools requests "tritonclient[grpc]" wetext==0.1.7
 }
 
 # ---- Step 4: Model download ----------------------------------------------

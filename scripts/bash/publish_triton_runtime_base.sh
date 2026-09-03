@@ -68,7 +68,7 @@ fi
 
 docker build "${build_args[@]}" "$repo_root"
 docker run --rm --entrypoint python3 "$runtime_base_image" -c \
-    "import aiohttp, attr, packaging, torch, tokenizers, tensorrt, yaml, grpc, numpy, soxr; print(f'torch={torch.__version__} cuda={torch.version.cuda} tensorrt={tensorrt.__version__} attrs={attr.__version__} packaging={packaging.__version__}')"
+    "import aiohttp, attr, packaging, torch, tokenizers, tensorrt, yaml, grpc, numpy, soxr, wetext; print(f'torch={torch.__version__} cuda={torch.version.cuda} tensorrt={tensorrt.__version__} attrs={attr.__version__} packaging={packaging.__version__} wetext=ready')"
 docker push "$runtime_base_image"
 
 echo "Published Triton runtime base: $runtime_base_image"

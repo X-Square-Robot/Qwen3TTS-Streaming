@@ -52,6 +52,8 @@ def test_triton_image_contains_sidecar_runtime_dependencies_and_protocol():
     assert "    attrs \\\n" in dockerfile
     assert "aiohttp" in dockerfile
     assert "import aiohttp, attr" in dockerfile
+    assert "'wetext==0.1.7'" in dockerfile
+    assert "import aiohttp, attr, packaging, wetext" in dockerfile
     assert "ARG TRITON_RUNTIME_BASE_IMAGE=triton-deps" in dockerfile
     assert "ARG TRITON_RUNTIME_PARENT_IMAGE=triton-heavy-deps" in dockerfile
     assert "FROM ${BASE_IMAGE} AS triton-heavy-deps" in dockerfile
@@ -195,3 +197,14 @@ def test_runtime_images_fail_closed_when_demo_artifact_is_missing():
         assert "test -s /app/demo/index.html" in dockerfile
         assert "xmultimodalinteraction-qwen3tts-browser-*.tgz" in dockerfile
         assert "Demo artifact missing" in dockerfile
+
+
+def test_tn_runtime_dependency_is_baked_into_standalone_and_generated_images():
+    engine = _read("infra/docker/Dockerfile.engine")
+    generated = _read("scripts/bash/build_triton.sh")
+    setup = _read("scripts/bash/setup_env.sh")
+    assert "'wetext==0.1.7'" in engine
+    assert "import torch, tokenizers, yaml, grpc, numpy, soxr, wetext" in engine
+    assert "wetext==0.1.7" in generated
+    assert "import wetext; print('wetext runtime ready')" in generated
+    assert "wetext==0.1.7" in setup

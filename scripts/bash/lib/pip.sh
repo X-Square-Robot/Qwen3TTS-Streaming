@@ -455,6 +455,7 @@ required = {
     "torchaudio":   "torchaudio",
     "transformers": "transformers",
     "qwen_tts":     "qwen-tts",
+    "wetext":       "wetext",
 }
 
 optional = {

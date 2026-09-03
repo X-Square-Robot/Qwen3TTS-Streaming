@@ -258,6 +258,7 @@ def runtime_identity() -> dict[str, Any]:
         "grpcio",
         "PyYAML",
         "soxr",
+        "wetext",
         "aiohttp",
         "qwen3-tts-client",
         "funasrnano",
