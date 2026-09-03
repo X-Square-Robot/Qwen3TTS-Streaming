@@ -15,6 +15,8 @@ from .projector import project_readable
 _ASCII_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_@.$:/+\-\\]*")
 _NUMERIC = re.compile(r"^[+\-]?\d+(?:[.,]\d+)?(?:%|[A-Za-z]{1,8})?$")
 _ORDINAL = re.compile(r"^\d{1,6}(?:st|nd|rd|th)$", re.I)
+_VERSION = re.compile(r"^(?:v)?\d+(?:[._-]\d+)+(?:[A-Za-z]+\d*)?$", re.I)
+_IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9._-]*@[0-9][A-Za-z0-9._-]*$")
 _MATH_CHARS = set("0123456789.+-*/=^×÷()<>≤≥")
 
 
@@ -46,7 +48,7 @@ class IncrementalTextCommitter:
         self._outbox: list[TextCommit] = []
         self._late_extension = False
         self._force_literal_next = False
-        self._current_lang = "zh"
+        self._current_lang = "unknown" if self.config.language == "mixed_zh_en" else ("zh" if self.config.language.startswith("zh") else "en")
         self._json_in_string = False
         self._json_escape = False
         self._plain_buffer = ""
@@ -209,6 +211,10 @@ class IncrementalTextCommitter:
                 self._close_pending(lang_hint="zh")
                 self._emit_plain(ch)
             elif ch in "。！？；,，.!?;:" and self._pending.kind != SpanKind.URL:
+                if ch == "." and self._pending.kind in (SpanKind.ENGLISH_WORD, SpanKind.EMAIL, SpanKind.IDENTIFIER, SpanKind.VERSION):
+                    self._pending.raw += ch
+                    self._pending.last_at = now
+                    continue
                 if self._pending.kind in (SpanKind.NUMBER, SpanKind.MATH, SpanKind.ENGLISH_WORD) and ch in ".:" and self._pending.raw[-1:].isdigit():
                     self._pending.raw += ch
                     self._pending.last_at = now
@@ -257,25 +263,26 @@ class IncrementalTextCommitter:
             lang = lang_hint
         if any(ord(c) > 127 for c in p.raw):
             lang = "zh"
-        elif lang_hint is None and p.kind != SpanKind.NUMBER and any(c.isalpha() for c in p.raw):
+        elif lang_hint is None and p.kind in (SpanKind.ENGLISH_WORD, SpanKind.EMAIL, SpanKind.URL) and any(c.isalpha() for c in p.raw):
             lang = "en"
+        route_lang = lang if lang in ("zh", "en") else "zh"
         decimal_number = p.kind == SpanKind.NUMBER and re.fullmatch(r"[+\-]?\d+(?:\.\d+)?%?", p.raw)
-        math_value = self.adapter.fallback(p.raw, lang=lang, kind=p.kind, policy=self.config.fallback) if p.kind == SpanKind.MATH else ""
+        custom_value = self.adapter.fallback(p.raw, lang=route_lang, kind=p.kind, policy=self.config.fallback) if p.kind in (SpanKind.MATH, SpanKind.IDENTIFIER, SpanKind.VERSION) else ""
         if p.kind in (SpanKind.JSON, SpanKind.MARKDOWN):
             value = project_readable(p.raw)
         elif force_literal:
             value = None
-        elif p.kind == SpanKind.MATH:
-            value = math_value
+        elif p.kind in (SpanKind.MATH, SpanKind.IDENTIFIER, SpanKind.VERSION):
+            value = custom_value
         elif decimal_number:
-            value = self.adapter.fallback(p.raw, lang=lang, kind=p.kind, policy=self.config.fallback)
+            value = self.adapter.fallback(p.raw, lang=route_lang, kind=p.kind, policy=self.config.fallback)
         else:
-            value = self.adapter.normalize(p.raw, lang=lang, kind=p.kind)
+            value = self.adapter.normalize(p.raw, lang=route_lang, kind=p.kind)
         kind = CommitKind.NORMALIZED
-        if p.kind == SpanKind.MATH and math_value == p.raw:
+        if p.kind in (SpanKind.MATH, SpanKind.IDENTIFIER, SpanKind.VERSION) and custom_value == p.raw:
             kind = CommitKind.FALLBACK
         if value is None:
-            value = self.adapter.fallback(p.raw, lang=lang, kind=p.kind, policy=self.config.fallback)
+            value = self.adapter.fallback(p.raw, lang=route_lang, kind=p.kind, policy=self.config.fallback)
             kind = CommitKind.FALLBACK
         commit = self._make_commit(
             p.raw,
@@ -283,7 +290,7 @@ class IncrementalTextCommitter:
             p.kind,
             kind,
             value,
-            LanguageKind.EN if lang == "en" else LanguageKind.ZH,
+            LanguageKind.EN if lang == "en" else LanguageKind.ZH if lang == "zh" else LanguageKind.UNKNOWN,
         )
         self.committed_raw_end = p.start + len(p.raw)
         self.committed_spoken_text += value
@@ -344,13 +351,21 @@ class IncrementalTextCommitter:
             self.commit_fence,
             ((start, start + len(raw)),),
             raw,
-            language or (LanguageKind.EN if self._current_lang == "en" else LanguageKind.ZH),
+            language or {
+                "en": LanguageKind.EN,
+                "zh": LanguageKind.ZH,
+                "unknown": LanguageKind.UNKNOWN,
+            }.get(self._current_lang, LanguageKind.UNKNOWN),
         )
 
     @staticmethod
     def _classify(raw: str) -> SpanKind:
         if any(c in _MATH_CHARS for c in raw) and any(c in "*=×÷<>≤≥" for c in raw):
             return SpanKind.MATH
+        if _VERSION.fullmatch(raw):
+            return SpanKind.VERSION
+        if _IDENTIFIER.fullmatch(raw):
+            return SpanKind.IDENTIFIER
         if "@" in raw:
             return SpanKind.EMAIL
         if re.fullmatch(r"(?:A\$|HKD|[$€￥£¥])\d+(?:\.\d+)?", raw):

@@ -91,6 +91,23 @@ def test_commit_records_selected_language_route():
     assert any(item.language == LanguageKind.ZH for item in chinese)
 
 
+def test_version_and_build_identifiers_are_not_sent_to_generic_wetext_rules():
+    raw = "引擎版本号：0.2.1a1，模型版本号：zehan@20260818，引擎编译版本号：rime@20260902_580_5090_v1"
+    expected = "引擎版本号：零点二点一a一，模型版本号：zehan艾特二零二六零八一八，引擎编译版本号：rime艾特二零二六零九零二下划线五八零下划线五零九零下划线v一"
+    full = IncrementalTextCommitter().feed(raw, final=True)
+    assert "".join(item.tts_text for item in full.commits) == expected
+    assert [item.span_kind for item in full.commits if item.raw_text.startswith("0.")] == [SpanKind.VERSION]
+    assert [item.span_kind for item in full.commits if item.raw_text.startswith("zehan")] == [SpanKind.IDENTIFIER]
+    assert [item.span_kind for item in full.commits if item.raw_text.startswith("rime")] == [SpanKind.IDENTIFIER]
+
+    streamed = IncrementalTextCommitter()
+    output = []
+    for chunk in (raw[:16], raw[16:31], raw[31:49], raw[49:]):
+        output.extend(item.tts_text for item in streamed.feed(chunk).commits)
+    output.extend(item.tts_text for item in streamed.feed("", final=True).commits)
+    assert "".join(output) == expected
+
+
 def test_emoji_sequences_are_filtered_without_leaking_components():
     c = IncrementalTextCommitter()
     out = []

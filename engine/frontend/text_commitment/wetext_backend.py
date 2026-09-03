@@ -85,6 +85,10 @@ class WetextAdapter:
             return None
 
     def fallback(self, text: str, *, lang: str, kind: SpanKind, policy: FallbackPolicy) -> str:
+        if policy == FallbackPolicy.CARDINAL_OR_LITERAL and kind == SpanKind.VERSION:
+            return _version_fallback(text, lang=lang)
+        if policy == FallbackPolicy.CARDINAL_OR_LITERAL and kind == SpanKind.IDENTIFIER:
+            return _identifier_fallback(text, lang=lang)
         if lang == "zh" and kind == SpanKind.ENGLISH_WORD:
             particulate = re.fullmatch(r"PM(\d+(?:\.\d+)?)", text, re.I)
             if particulate:
@@ -112,10 +116,41 @@ class WetextAdapter:
 
 
 _ZH_DIGITS = "零一二三四五六七八九"
+_EN_DIGITS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
 
 
 def _zh_digit_sequence(text: str) -> str:
     return "".join(_ZH_DIGITS[int(d)] for d in text)
+
+
+def _en_digit_sequence(text: str) -> str:
+    return " ".join(_EN_DIGITS[int(d)] for d in text)
+
+
+def _identifier_fallback(text: str, *, lang: str) -> str:
+    if lang == "zh":
+        separators = {"@": "艾特", "_": "下划线", "-": "杠", ".": "点"}
+        parts: list[str] = []
+        for token in re.findall(r"[A-Za-z]+|\d+|[^A-Za-z0-9]", text):
+            if token.isdigit():
+                parts.append(_zh_digit_sequence(token))
+            elif token in separators:
+                parts.append(separators[token])
+            else:
+                parts.append(token)
+        return "".join(parts)
+    separators = {"@": "at", "_": "underscore", "-": "hyphen", ".": "dot"}
+    parts = []
+    for token in re.findall(r"[A-Za-z]+|\d+|[^A-Za-z0-9]", text):
+        if token.isdigit():
+            parts.append(_en_digit_sequence(token))
+        else:
+            parts.append(separators.get(token, token))
+    return " ".join(part for part in parts if part)
+
+
+def _version_fallback(text: str, *, lang: str) -> str:
+    return _identifier_fallback(text, lang=lang)
 
 
 def _zh_cardinal(text: str) -> str:

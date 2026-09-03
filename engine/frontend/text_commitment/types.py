@@ -13,6 +13,8 @@ class SpanKind(str, Enum):
     MATH = "math"
     URL = "url"
     EMAIL = "email"
+    IDENTIFIER = "identifier"
+    VERSION = "version"
     MARKDOWN = "markdown"
     JSON = "json"
     EMOJI = "emoji"
@@ -20,6 +22,7 @@ class SpanKind(str, Enum):
 
 
 class LanguageKind(str, Enum):
+    UNKNOWN = "unknown"
     ZH = "zh"
     EN = "en"
 
