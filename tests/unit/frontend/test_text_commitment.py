@@ -1,5 +1,9 @@
 from engine.frontend.text_commitment.committer import IncrementalTextCommitter
 from engine.frontend.text_commitment.types import CommitKind, SpanKind
+from engine.core.session import Session
+from engine.core.types import SessionConfig
+from engine.frontend.interface import FrontendInterface
+import json
 
 
 def test_percent_waits_for_suffix_and_commits_append_only():
@@ -61,3 +65,17 @@ def test_code_fence_keeps_comments_and_string_literals_only():
     text = "".join(x.tts_text for x in out.commits)
     assert "# hello" in text and '"world"' in text
     assert "x=1" not in text and "print" not in text
+
+
+def test_tn_commit_log_contains_raw_and_spoken_text(caplog):
+    interface = FrontendInterface.__new__(FrontendInterface)
+    session = Session("log", SessionConfig())
+    commit = IncrementalTextCommitter().feed("是99%的", final=True).commits[0]
+    with caplog.at_level("INFO", logger="engine.lifecycle"):
+        interface._log_tn_commits(session, (commit,))
+    payloads = [json.loads(record.message) for record in caplog.records if record.name == "engine.lifecycle"]
+    assert payloads
+    payload = payloads[-1]
+    assert payload["phase"] == "text.tn_commit"
+    assert payload["raw_text"]
+    assert payload["spoken_text"]

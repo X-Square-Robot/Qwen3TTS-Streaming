@@ -442,6 +442,7 @@ class FrontendInterface:
         # A timeout is a semantic commit decision, not a tokenizer concern.
         timeout_decision = session.text_committer.poll()
         if timeout_decision.commits:
+            self._log_tn_commits(session, timeout_decision.commits)
             await self._ingest_commits(session, timeout_decision.commits)
         self._emit_text_commit_events(session, timeout_decision.events)
         if mode == InputMode.FULL_TEXT:
@@ -458,6 +459,8 @@ class FrontendInterface:
         router = self._diagnostic_text_routers[session.session_id]
         for routed_text in router.push(body):
             decision = session.text_committer.feed(strip_emoji(routed_text))
+            self._log_tn_commits(session, decision.commits)
+            self._log_tn_pending(session, decision)
             await self._ingest_commits(session, decision.commits)
             self._emit_text_commit_events(session, decision.events)
 
@@ -476,7 +479,9 @@ class FrontendInterface:
                 async with lock:
                     decision = session.text_committer.poll()
                     if decision.commits:
+                        self._log_tn_commits(session, decision.commits)
                         await self._ingest_commits(session, decision.commits)
+                    self._log_tn_pending(session, decision)
                     self._emit_text_commit_events(session, decision.events)
         except asyncio.CancelledError:
             return
@@ -496,6 +501,40 @@ class FrontendInterface:
                     asyncio.create_task(result)
             except Exception:
                 logger.exception("text commit event callback failed")
+
+    def _log_tn_commits(self, session: "Session", commits) -> None:
+        """Record raw→spoken TN decisions under the text privacy policy."""
+        for commit in commits:
+            LifecycleLogger.emit(
+                session_id=session.session_id,
+                phase="text.tn_commit",
+                request_id=session.config.timing.request_id or None,
+                turn_id=session.config.timing.turn_id or None,
+                session_level=session.config.observability_level,
+                raw_start=commit.raw_start,
+                raw_end=commit.raw_end,
+                raw_text=obs.text_preview(commit.raw_text),
+                spoken_text=obs.text_preview(commit.tts_text),
+                span_kind=commit.span_kind.value,
+                commit_kind=commit.commit_kind.value,
+                commit_fence=commit.fence,
+                normalization_changed=commit.raw_text != commit.tts_text,
+            )
+
+    def _log_tn_pending(self, session: "Session", decision) -> None:
+        if not decision.pending_raw:
+            return
+        LifecycleLogger.emit(
+            session_id=session.session_id,
+            phase="text.tn_pending",
+            request_id=session.config.timing.request_id or None,
+            turn_id=session.config.timing.turn_id or None,
+            session_level=session.config.observability_level,
+            min_level=obs.ObsLevel.DEBUG,
+            pending_raw=obs.text_preview(decision.pending_raw),
+            pending_kind=decision.pending_kind.value if decision.pending_kind else None,
+            reason=decision.reason,
+        )
 
     async def _ingest_streaming_text(self, session: "Session", body: str) -> None:
         """Normalize a streaming text body, tokenize, route to the spliter per
@@ -545,6 +584,8 @@ class FrontendInterface:
             return
         session.mark_input_complete()
         decision = session.text_committer.feed(text or "", final=True)
+        self._log_tn_commits(session, decision.commits)
+        self._log_tn_pending(session, decision)
         text = "".join(c.tts_text for c in decision.commits)
         if session.text_journal is not None:
             session.text_journal.finish()
@@ -603,6 +644,8 @@ class FrontendInterface:
                     body, session._emoji_carry = split_pending_emoji(raw)
                     await self._ingest_streaming_text(session, body)
             final_decision = session.text_committer.feed("", final=True)
+            self._log_tn_commits(session, final_decision.commits)
+            self._log_tn_pending(session, final_decision)
             await self._ingest_commits(session, final_decision.commits)
             self._emit_text_commit_events(session, final_decision.events)
         session.mark_input_complete()

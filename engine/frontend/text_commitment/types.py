@@ -50,6 +50,7 @@ class TextCommit:
     commit_kind: CommitKind = CommitKind.NORMALIZED
     fence: int = 0
     mapping: tuple[tuple[int, int], ...] = ()
+    raw_text: str = ""
 
 
 @dataclass(frozen=True)

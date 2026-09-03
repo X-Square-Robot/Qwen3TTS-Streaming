@@ -276,7 +276,16 @@ class IncrementalTextCommitter:
         return out
 
     def _make_commit(self, raw: str, start: int, span_kind: SpanKind, commit_kind: CommitKind, value: str | None = None) -> TextCommit:
-        return TextCommit(start, start + len(raw), raw if value is None else value, span_kind, commit_kind, self.commit_fence, ((start, start + len(raw)),))
+        return TextCommit(
+            start,
+            start + len(raw),
+            raw if value is None else value,
+            span_kind,
+            commit_kind,
+            self.commit_fence,
+            ((start, start + len(raw)),),
+            raw,
+        )
 
     @staticmethod
     def _classify(raw: str) -> SpanKind:
