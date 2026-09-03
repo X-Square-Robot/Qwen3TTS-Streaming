@@ -526,6 +526,7 @@ class FrontendInterface:
                 spoken_text=obs.text_preview(commit.tts_text),
                 span_kind=commit.span_kind.value,
                 commit_kind=commit.commit_kind.value,
+                language=commit.language.value,
                 commit_fence=commit.fence,
                 normalization_changed=commit.raw_text != commit.tts_text,
             )

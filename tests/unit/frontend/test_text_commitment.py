@@ -1,5 +1,5 @@
 from engine.frontend.text_commitment.committer import IncrementalTextCommitter
-from engine.frontend.text_commitment.types import SpanKind
+from engine.frontend.text_commitment.types import LanguageKind, SpanKind
 from engine.core.session import Session
 from engine.core.types import SessionConfig
 from engine.frontend.interface import FrontendInterface
@@ -84,6 +84,13 @@ def test_numeric_spans_follow_chinese_script_context():
         assert output == expected, (raw, output)
 
 
+def test_commit_records_selected_language_route():
+    english = IncrementalTextCommitter().feed("20% of 100 is 20", final=True).commits
+    chinese = IncrementalTextCommitter().feed("概率是20%", final=True).commits
+    assert any(item.language == LanguageKind.EN for item in english)
+    assert any(item.language == LanguageKind.ZH for item in chinese)
+
+
 def test_emoji_sequences_are_filtered_without_leaking_components():
     c = IncrementalTextCommitter()
     out = []
@@ -113,3 +120,4 @@ def test_tn_commit_log_contains_raw_and_spoken_text(caplog):
     assert payload["phase"] == "text.tn_commit"
     assert payload["raw_text"]
     assert payload["spoken_text"]
+    assert payload["language"] == "zh"

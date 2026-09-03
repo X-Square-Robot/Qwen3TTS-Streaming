@@ -19,6 +19,11 @@ class SpanKind(str, Enum):
     LITERAL = "literal"
 
 
+class LanguageKind(str, Enum):
+    ZH = "zh"
+    EN = "en"
+
+
 class CommitKind(str, Enum):
     NORMALIZED = "normalized"
     FALLBACK = "fallback"
@@ -51,6 +56,7 @@ class TextCommit:
     fence: int = 0
     mapping: tuple[tuple[int, int], ...] = ()
     raw_text: str = ""
+    language: LanguageKind = LanguageKind.ZH
 
 
 @dataclass(frozen=True)

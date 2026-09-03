@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from ...text_normalization import is_emoji_char
 
-from .types import CommitDecision, CommitKind, SpanKind, TextCommit, TextNormalizationConfig
+from .types import CommitDecision, CommitKind, LanguageKind, SpanKind, TextCommit, TextNormalizationConfig
 from .wetext_backend import WetextAdapter
 from .projector import project_readable
 
@@ -277,7 +277,14 @@ class IncrementalTextCommitter:
         if value is None:
             value = self.adapter.fallback(p.raw, lang=lang, kind=p.kind, policy=self.config.fallback)
             kind = CommitKind.FALLBACK
-        commit = self._make_commit(p.raw, p.start, p.kind, kind, value)
+        commit = self._make_commit(
+            p.raw,
+            p.start,
+            p.kind,
+            kind,
+            value,
+            LanguageKind.EN if lang == "en" else LanguageKind.ZH,
+        )
         self.committed_raw_end = p.start + len(p.raw)
         self.committed_spoken_text += value
         self.commit_fence += 1
@@ -319,7 +326,15 @@ class IncrementalTextCommitter:
         self._outbox = []
         return out
 
-    def _make_commit(self, raw: str, start: int, span_kind: SpanKind, commit_kind: CommitKind, value: str | None = None) -> TextCommit:
+    def _make_commit(
+        self,
+        raw: str,
+        start: int,
+        span_kind: SpanKind,
+        commit_kind: CommitKind,
+        value: str | None = None,
+        language: LanguageKind | None = None,
+    ) -> TextCommit:
         return TextCommit(
             start,
             start + len(raw),
@@ -329,6 +344,7 @@ class IncrementalTextCommitter:
             self.commit_fence,
             ((start, start + len(raw)),),
             raw,
+            language or (LanguageKind.EN if self._current_lang == "en" else LanguageKind.ZH),
         )
 
     @staticmethod
