@@ -90,6 +90,10 @@ def _iter_profile_shapes(
     max_seq_len: int,
     n_c2w_layers: int,
     cp_num_stages: int,
+    cursor_enabled: bool = False,
+    cursor_max_labels: int = 512,
+    cursor_d: int = 256,
+    cursor_history: int = 30,
 ) -> Iterable[Tuple[str, Tuple[int, ...], Tuple[int, ...], Tuple[int, ...]]]:
     b_opt = 1
     opt_s_past = 128
@@ -169,6 +173,23 @@ def _iter_profile_shapes(
             return tuple(int(x) for x in spec.split("x"))
 
         yield (f"c2w_{name}", _parse(smin), _parse(sopt), _parse(smax))
+
+    if cursor_enabled:
+        cursor_specs = [
+            ("cursor_label_ids", (1, cursor_max_labels), (b_opt, cursor_max_labels), (max_batch_size, cursor_max_labels)),
+            ("cursor_label_count", (1,), (b_opt,), (max_batch_size,)),
+            ("cursor_active", (1,), (b_opt,), (max_batch_size,)),
+            ("cursor_mu_in", (1,), (b_opt,), (max_batch_size,)),
+            ("cursor_frames_since_advance_in", (1,), (b_opt,), (max_batch_size,)),
+            ("cursor_delta_history_in", (1, 8), (b_opt, 8), (max_batch_size, 8)),
+            ("cursor_conv_history_in", (1, cursor_history, cursor_d), (b_opt, cursor_history, cursor_d), (max_batch_size, cursor_history, cursor_d)),
+            ("cursor_last_trunk_input_in", (1, cursor_d), (b_opt, cursor_d), (max_batch_size, cursor_d)),
+            ("cursor_seen_frames_in", (1,), (b_opt,), (max_batch_size,)),
+            ("cursor_text_start_frame", (1,), (b_opt,), (max_batch_size,)),
+            ("cursor_override_valid", (1,), (b_opt,), (max_batch_size,)),
+            ("cursor_override_mu", (1,), (b_opt,), (max_batch_size,)),
+        ]
+        yield from cursor_specs
 
 
 def _set_io_dtypes(
@@ -251,6 +272,10 @@ def main() -> None:
         max_seq_len=args.max_seq_len,
         n_c2w_layers=int(manifest["code2wav_fused"]["num_code2wav_hidden_layers"]),
         cp_num_stages=int(arch.get("cp_num_stages", 15)),
+        cursor_enabled=bool((manifest.get("native_cursor") or {}).get("enabled", False)),
+        cursor_max_labels=int((manifest.get("native_cursor") or {}).get("max_labels", 512)),
+        cursor_d=int((manifest.get("native_cursor") or {}).get("embedding_dim", 256)),
+        cursor_history=int((manifest.get("native_cursor") or {}).get("history_width", 30)),
     ):
         profile.set_shape(name, min_shape, opt_shape, max_shape)
     config.add_optimization_profile(profile)

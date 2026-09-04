@@ -67,6 +67,10 @@ def compute_fused_profiles(
     max_seq="512",
     n_c2w=8,
     n_cp=CP_NUM_STAGES,
+    cursor_enabled=False,
+    cursor_max_labels=512,
+    cursor_d=256,
+    cursor_history=30,
 ):
     """Return (min, opt, max) trtexec shape strings for talker_code2wav_fused.
 
@@ -128,6 +132,33 @@ def compute_fused_profiles(
         f"c2w_past_kv:{Bmax}x{n_c2w * 2}x{C2W_KV_HEADS}x{C2W_SLIDING_WINDOW - 1}x{C2W_HEAD_DIM}",
     ]
 
+    if cursor_enabled:
+        cursor_specs_min = [
+            f"cursor_label_ids:1x{int(cursor_max_labels)}",
+            "cursor_label_count:1",
+            "cursor_active:1",
+            "cursor_mu_in:1",
+            "cursor_frames_since_advance_in:1",
+            "cursor_delta_history_in:1x8",
+            f"cursor_conv_history_in:1x{int(cursor_history)}x{int(cursor_d)}",
+            f"cursor_last_trunk_input_in:1x{int(cursor_d)}",
+            "cursor_seen_frames_in:1",
+            "cursor_text_start_frame:1",
+            "cursor_override_valid:1",
+            "cursor_override_mu:1",
+        ]
+        def _with_batch(spec: str, batch: str) -> str:
+            name, shape = spec.split(":", 1)
+            dims = shape.split("x")
+            dims[0] = str(batch)
+            return f"{name}:{'x'.join(dims)}"
+
+        cursor_specs_opt = [_with_batch(spec, Bopt) for spec in cursor_specs_min]
+        cursor_specs_max = [_with_batch(spec, Bmax) for spec in cursor_specs_min]
+        parts_min.extend(cursor_specs_min)
+        parts_opt.extend(cursor_specs_opt)
+        parts_max.extend(cursor_specs_max)
+
     for name, smin, sopt, smax in c2w_conv_transconv_specs(str(Bmax)):
         parts_min.append(f"c2w_{name}:{smin}")
         parts_opt.append(f"c2w_{name}:{sopt}")
@@ -145,6 +176,10 @@ def compute_fused_decode_profiles(
     max_seq="512",
     n_c2w=8,
     n_cp=CP_NUM_STAGES,
+    cursor_enabled=False,
+    cursor_max_labels=512,
+    cursor_d=256,
+    cursor_history=30,
 ):
     """Return (min, opt, max) shape strings for the decode-only profile.
 
@@ -164,8 +199,7 @@ def compute_fused_decode_profiles(
     c2w_warm = C2W_SLIDING_WINDOW - 1
 
     def parts(batch, s_past, c2w_kv_len):
-        return ",".join(
-            [
+        values = [
                 f"input_embeds:{batch}x1x{H}",
                 f"position_ids:{batch}x3x1x1",
                 f"attention_bias:{batch}x1x1x{int(s_past) + 1}",
@@ -178,12 +212,28 @@ def compute_fused_decode_profiles(
                 f"c2w_attention_bias:{batch}x1x1x{int(c2w_kv_len) + 1}",
                 f"talker_past_kv:{batch}x{talker_kv_dim1}x{KV}x{s_past}x{HD}",
                 f"c2w_past_kv:{batch}x{c2w_kv_dim1}x{C2W_KV_HEADS}x{c2w_kv_len}x{C2W_HEAD_DIM}",
-            ]
-            + [
+            ] + [
                 f"c2w_{name}:{batch}x{spec_min[2:]}"
                 for name, spec_min, _, _ in c2w_conv_transconv_specs(str(batch))
             ]
-        )
+        if cursor_enabled:
+            values.extend(
+                [
+                    f"cursor_label_ids:{batch}x{int(cursor_max_labels)}",
+                    f"cursor_label_count:{batch}",
+                    f"cursor_active:{batch}",
+                    f"cursor_mu_in:{batch}",
+                    f"cursor_frames_since_advance_in:{batch}",
+                    f"cursor_delta_history_in:{batch}x8",
+                    f"cursor_conv_history_in:{batch}x{int(cursor_history)}x{int(cursor_d)}",
+                    f"cursor_last_trunk_input_in:{batch}x{int(cursor_d)}",
+                    f"cursor_seen_frames_in:{batch}",
+                    f"cursor_text_start_frame:{batch}",
+                    f"cursor_override_valid:{batch}",
+                    f"cursor_override_mu:{batch}",
+                ]
+            )
+        return ",".join(values)
 
     smin = parts(1, 0, 1)
     sopt = parts(Bmax, 128, c2w_warm)
@@ -195,7 +245,8 @@ def main():
     if len(sys.argv) < 6:
         print(
             "Usage: trt_fused_talk_c2w_profiles.py H KV_HEADS HEAD_DIM NUM_LAYERS MAX_BATCH "
-            "[MAX_INPUT_LEN] [MAX_SEQ_LEN] [NUM_C2W_DECODER_LAYERS] [CP_NUM_STAGES]",
+            "[MAX_INPUT_LEN] [MAX_SEQ_LEN] [NUM_C2W_DECODER_LAYERS] [CP_NUM_STAGES] "
+            "[CURSOR_ENABLED] [CURSOR_MAX_LABELS] [CURSOR_D] [CURSOR_HISTORY]",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -204,9 +255,25 @@ def main():
     max_seq = sys.argv[7] if len(sys.argv) > 7 else "512"
     n_c2w = int(sys.argv[8]) if len(sys.argv) > 8 else 8
     n_cp = int(sys.argv[9]) if len(sys.argv) > 9 else CP_NUM_STAGES
+    cursor_enabled = bool(int(sys.argv[10])) if len(sys.argv) > 10 else False
+    cursor_max_labels = int(sys.argv[11]) if len(sys.argv) > 11 else 512
+    cursor_d = int(sys.argv[12]) if len(sys.argv) > 12 else 256
+    cursor_history = int(sys.argv[13]) if len(sys.argv) > 13 else 30
 
     smin, sopt, smax = compute_fused_profiles(
-        H, KV, HD, NL, Bmax, max_in, max_seq, n_c2w, n_cp
+        H,
+        KV,
+        HD,
+        NL,
+        Bmax,
+        max_in,
+        max_seq,
+        n_c2w,
+        n_cp,
+        cursor_enabled,
+        cursor_max_labels,
+        cursor_d,
+        cursor_history,
     )
     print(smin)
     print(sopt)
@@ -214,7 +281,18 @@ def main():
     # Lines 4-6: decode-only profile (profile 1).  Callers that only read the
     # first three lines are unaffected.
     dmin, dopt, dmax = compute_fused_decode_profiles(
-        H, KV, HD, NL, Bmax, max_seq, n_c2w, n_cp
+        H,
+        KV,
+        HD,
+        NL,
+        Bmax,
+        max_seq,
+        n_c2w,
+        n_cp,
+        cursor_enabled,
+        cursor_max_labels,
+        cursor_d,
+        cursor_history,
     )
     print(dmin)
     print(dopt)

@@ -401,6 +401,7 @@ class GPUFuture:
     _seq: int = 1
     _c2w_conv_output_names: List[str] = field(default_factory=list)
     _c2w_transconv_output_names: List[str] = field(default_factory=list)
+    _cursor_output_names: List[str] = field(default_factory=list)
     _codec_eos_id: int = 2150
     _used_pingpong: bool = False
     _inputs: Dict[str, Any] = field(default_factory=dict)
@@ -431,6 +432,7 @@ class GPUFuture:
         wav = raw.get("wav")
         codec_sum = raw.get("codec_sum")
         full_codec = raw.get("full_codec")
+        codec0 = raw.get("codec0")
         updated_tc = raw.get("updated_token_counts")
 
         # Batch-level state tensors; the engine loop slices rows on demand
@@ -443,7 +445,10 @@ class GPUFuture:
         codec_eos_id = self._codec_eos_id
         eos_flags = []
         audio_chunks = []
-        if full_codec is not None:
+        if codec0 is not None:
+            codec0_list = codec0.cpu().tolist()
+            eos_list = [t == codec_eos_id for t in codec0_list]
+        elif full_codec is not None:
             # Codebook-0 token ids come back to the CPU (B int64s on the
             # already-synced stream) so the engine loop can run the token
             # loop guard; EOS detection reuses the same copy.
@@ -476,6 +481,11 @@ class GPUFuture:
             padded_past_len=self._padded_past_len,
             batch_c2w_conv=conv_tensors,
             batch_c2w_transconv=transconv_tensors,
+            cursor_outputs={
+                name: raw.get(name)
+                for name in self._cursor_output_names
+                if raw.get(name) is not None
+            },
             codec_sum=codec_sum,
             updated_tc=updated_tc,
             used_pingpong=self._used_pingpong,
@@ -513,6 +523,9 @@ class StepOutput:
     # the per-slot split lists, which remain for test-constructed outputs.
     batch_c2w_conv: Optional[List[Optional[torch.Tensor]]] = None
     batch_c2w_transconv: Optional[List[Optional[torch.Tensor]]] = None
+    # Batch-level native-cursor outputs. The engine loop updates per-slot
+    # neural state; CPU TN/reanchor/projector code consumes estimates later.
+    cursor_outputs: Dict[str, Optional[torch.Tensor]] = field(default_factory=dict)
     codec_sum: Optional[torch.Tensor] = None
     updated_tc: Optional[torch.Tensor] = None
     used_pingpong: bool = False
@@ -864,6 +877,12 @@ class Executor:
         self._c2w_conv_output_names: list[str] = []
         self._c2w_transconv_input_names: list[str] = []
         self._c2w_transconv_output_names: list[str] = []
+        self._cursor_enabled = False
+        self._cursor_input_names: list[str] = []
+        self._cursor_output_names: list[str] = []
+        self._cursor_max_labels = 0
+        self._cursor_d = 0
+        self._cursor_history = 0
         self._manifest: dict = {}
         self._debug_dumper = EngineDebugDumper(
             engine_dir=self._engine_dir,
@@ -917,6 +936,17 @@ class Executor:
 
         return capability_from_adapter(self._speech_state_adapter)
 
+    @property
+    def native_cursor_enabled(self) -> bool:
+        """Whether the loaded fused plan exposes a validated cursor branch."""
+        return bool(getattr(self, "_cursor_enabled", False))
+
+    @property
+    def native_cursor_capability(self) -> dict:
+        """Manifest capability used by request-level progress routing."""
+        value = self._manifest.get("native_cursor") or {}
+        return dict(value) if self.native_cursor_enabled else {"enabled": False}
+
     # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------
@@ -944,6 +974,7 @@ class Executor:
             self._apply_runtime_profile_limits()
             self._validate_io_dtype_consistency()
             self._discover_c2w_io_names()
+            self._discover_cursor_io_names()
 
         else:
             logger.warning("No TRT plan found, running in stub mode")
@@ -1000,6 +1031,23 @@ class Executor:
             shape = list(self._c2w_transconv_shapes[idx])
             shape[0] = B
             shapes[name] = tuple(shape)
+        if self._cursor_enabled:
+            shapes.update(
+                {
+                    "cursor_label_ids": (B, self._cursor_max_labels),
+                    "cursor_label_count": (B,),
+                    "cursor_active": (B,),
+                    "cursor_mu_in": (B,),
+                    "cursor_frames_since_advance_in": (B,),
+                    "cursor_delta_history_in": (B, 8),
+                    "cursor_conv_history_in": (B, self._cursor_history, self._cursor_d),
+                    "cursor_last_trunk_input_in": (B, self._cursor_d),
+                    "cursor_seen_frames_in": (B,),
+                    "cursor_text_start_frame": (B,),
+                    "cursor_override_valid": (B,),
+                    "cursor_override_mu": (B,),
+                }
+            )
         return shapes
 
     def _init_graph_decode(self) -> None:
@@ -1245,6 +1293,60 @@ class Executor:
             len(self._c2w_transconv_input_names),
             len(self._c2w_conv_output_names),
             len(self._c2w_transconv_output_names),
+        )
+
+    def _discover_cursor_io_names(self) -> None:
+        """Discover optional fused native-cursor bindings from the manifest.
+
+        A standard plan has no cursor capability and follows the legacy path.
+        For a cursor-enabled plan, names come from the export manifest so an
+        ABI change is explicit rather than inferred from tensor ordering.
+        """
+        capability = self._manifest.get("native_cursor") or {}
+        if not capability.get("enabled") or self._fused_engine is None:
+            return
+        if str(self._manifest.get("variant", "")) != "custom-1.7b":
+            raise RuntimeError(
+                "native cursor is only validated for the custom-1.7b artifact"
+            )
+        expected_codec_vocab = int(getattr(self._config, "codec_vocab_size", 3072))
+        if int(capability.get("codec_vocab_size", expected_codec_vocab)) != expected_codec_vocab:
+            raise RuntimeError(
+                "native cursor/Talker codec vocabulary mismatch: "
+                f"cursor={capability.get('codec_vocab_size')} talker={expected_codec_vocab}"
+            )
+        expected_codebooks = int(getattr(self._config, "cp_num_stages", 15)) + 1
+        if int(capability.get("num_codebooks", expected_codebooks)) != expected_codebooks:
+            raise RuntimeError(
+                "native cursor/Talker codebook count mismatch: "
+                f"cursor={capability.get('num_codebooks')} talker={expected_codebooks}"
+            )
+        input_names, output_names = self._fused_engine.get_io_names()
+        declared_inputs = list(capability.get("input_names") or [])
+        declared_outputs = list(capability.get("output_names") or [])
+        if not declared_inputs or not declared_outputs:
+            raise RuntimeError(
+                "native cursor capability is enabled but its binding names are empty"
+            )
+        self._cursor_input_names = [n for n in declared_inputs if n in input_names]
+        self._cursor_output_names = [n for n in declared_outputs if n in output_names]
+        missing = sorted(set(declared_inputs) - set(self._cursor_input_names))
+        missing_out = sorted(set(declared_outputs) - set(self._cursor_output_names))
+        if missing or missing_out:
+            raise RuntimeError(
+                "native cursor manifest/engine ABI mismatch: "
+                f"missing inputs={missing} outputs={missing_out}"
+            )
+        self._cursor_enabled = bool(self._cursor_input_names and self._cursor_output_names)
+        self._cursor_max_labels = int(capability.get("max_labels", 512))
+        self._cursor_d = int(capability.get("embedding_dim", 256))
+        self._cursor_history = int(capability.get("history_width", 30))
+        logger.info(
+            "Native cursor bindings: enabled=%s labels=%d d=%d history=%d",
+            self._cursor_enabled,
+            self._cursor_max_labels,
+            self._cursor_d,
+            self._cursor_history,
         )
 
     @property
@@ -1599,6 +1701,10 @@ class Executor:
         slot.c2w_transconv_states = [
             raw[n].clone() for n in self._c2w_transconv_output_names
         ]
+        self.update_cursor_state(
+            slot,
+            {name: raw.get(name) for name in self._cursor_output_names},
+        )
         slot.init_pingpong_buffers()
 
         slot.frame_idx = int(slot.frame_idx) + FUSED_CHUNK_T
@@ -1622,14 +1728,17 @@ class Executor:
 
         wav = raw.get("wav")
         full_codec = raw.get("full_codec")
+        codec0 = raw.get("codec0")
         prefill_audio: Optional[bytes] = None
         prefill_eos = False
         if wav is not None:
             prefill_audio = wav.cpu().float().reshape(-1).numpy().tobytes()
-        if (
-            full_codec is not None
-            and int(full_codec[0, 0].item()) == self._codec_eos_id
-        ):
+        eos_token = (
+            int(codec0[0].item())
+            if codec0 is not None
+            else int(full_codec[0, 0].item()) if full_codec is not None else None
+        )
+        if eos_token == self._codec_eos_id:
             prefill_eos = True
         return prefill_audio, prefill_eos
 
@@ -1846,14 +1955,17 @@ class Executor:
 
         wav = raw.get("wav")
         full_codec = raw.get("full_codec")
+        codec0 = raw.get("codec0")
         prefill_audio: Optional[bytes] = None
         prefill_eos = False
         if wav is not None:
             prefill_audio = wav.cpu().float().reshape(-1).numpy().tobytes()
-        if (
-            full_codec is not None
-            and int(full_codec[0, 0].item()) == self._codec_eos_id
-        ):
+        eos_token = (
+            int(codec0[0].item())
+            if codec0 is not None
+            else int(full_codec[0, 0].item()) if full_codec is not None else None
+        )
+        if eos_token == self._codec_eos_id:
             prefill_eos = True
         return prefill_audio, prefill_eos
 
@@ -1992,6 +2104,7 @@ class Executor:
             _seq=1,
             _c2w_conv_output_names=self._c2w_conv_output_names,
             _c2w_transconv_output_names=self._c2w_transconv_output_names,
+            _cursor_output_names=self._cursor_output_names,
             _codec_eos_id=self._codec_eos_id,
             _used_pingpong=output_overrides is not None,
             _inputs=input_snapshot,
@@ -2155,6 +2268,7 @@ class Executor:
             _seq=1,
             _c2w_conv_output_names=self._c2w_conv_output_names,
             _c2w_transconv_output_names=self._c2w_transconv_output_names,
+            _cursor_output_names=self._cursor_output_names,
             _codec_eos_id=self._codec_eos_id,
             _used_pingpong=False,
             _inputs=input_snapshot,
@@ -2605,6 +2719,47 @@ class Executor:
                 shape[0] = batch
                 d[name] = torch.zeros(shape, device=self._device, dtype=cfg.dtype)
 
+        # --- Optional native cursor state ---
+        # The adapter may replace these per-slot tensors when a TN label plan
+        # is available. Until then, inactive zero state keeps a cursor-enabled
+        # plan ABI-safe without pretending that BPE ids are cursor labels.
+        if self._cursor_enabled:
+            def _cursor_batch(
+                attr: str,
+                tail_shape: tuple[int, ...],
+                dtype: torch.dtype,
+            ) -> torch.Tensor:
+                rows = []
+                for slot in slots:
+                    value = getattr(slot, attr, None)
+                    expected = (1,) + tail_shape
+                    if value is None or tuple(value.shape) != expected:
+                        value = torch.zeros(expected, device=self._device, dtype=dtype)
+                    else:
+                        value = value.to(device=self._device, dtype=dtype).contiguous()
+                    rows.append(value)
+                return torch.cat(rows, dim=0).contiguous()
+
+            cursor_specs = {
+                "cursor_label_ids": ("cursor_label_ids", (self._cursor_max_labels,), torch.int64),
+                "cursor_label_count": ("cursor_label_count", (), torch.int64),
+                "cursor_active": ("cursor_active", (), torch.int64),
+                "cursor_mu_in": ("cursor_mu", (), cfg.dtype),
+                "cursor_frames_since_advance_in": ("cursor_frames_since_advance", (), cfg.dtype),
+                "cursor_delta_history_in": ("cursor_delta_history", (8,), cfg.dtype),
+                "cursor_conv_history_in": ("cursor_conv_history", (self._cursor_history, self._cursor_d), cfg.dtype),
+                "cursor_last_trunk_input_in": ("cursor_last_trunk_input", (self._cursor_d,), cfg.dtype),
+                "cursor_seen_frames_in": ("cursor_seen_frames", (), torch.int64),
+                "cursor_text_start_frame": ("cursor_text_start_frame", (), torch.int64),
+                "cursor_override_valid": ("cursor_override_valid", (), torch.int64),
+                "cursor_override_mu": ("cursor_override_mu", (), cfg.dtype),
+            }
+            for name in self._cursor_input_names:
+                spec = cursor_specs.get(name)
+                if spec is None:
+                    raise RuntimeError(f"unknown native cursor input binding: {name}")
+                d[name] = _cursor_batch(*spec)
+
         return d
 
     def _build_output_names(self) -> List[str]:
@@ -2620,7 +2775,125 @@ class Executor:
         ]
         names.extend(self._c2w_conv_output_names)
         names.extend(self._c2w_transconv_output_names)
+        names.extend(self._cursor_output_names)
         return names
+
+    def update_cursor_state(
+        self,
+        slot: SlotKVState,
+        outputs: Dict[str, Optional[torch.Tensor]],
+        row: int = 0,
+    ) -> None:
+        """Commit one fused cursor step's recurrent outputs to a slot.
+
+        Text labels and reanchor overrides are owned by the CPU adapter; this
+        method only forwards neural state.  Every value is cloned because
+        eager output buffers and CUDA-graph staging are reused on the next
+        execution.
+        """
+        if not self._cursor_enabled:
+            return
+        fields = {
+            "cursor_mu": "cursor_mu",
+            "cursor_frames_since_advance": "cursor_frames_since_advance",
+            "cursor_delta_history": "cursor_delta_history",
+            "cursor_conv_history": "cursor_conv_history",
+            "cursor_last_trunk_input": "cursor_last_trunk_input",
+            "cursor_seen_frames": "cursor_seen_frames",
+        }
+        for output_name, attr in fields.items():
+            value = outputs.get(output_name)
+            if value is None:
+                continue
+            setattr(slot, attr, value[row : row + 1].clone())
+        if slot.cursor_override_valid is not None:
+            slot.cursor_override_valid.zero_()
+
+    def set_cursor_text_plan(
+        self,
+        slot: SlotKVState,
+        label_ids: torch.Tensor,
+        *,
+        label_count: Optional[int] = None,
+        active: bool = True,
+        text_start_frame: int = 0,
+    ) -> None:
+        """Install a CPU TN-produced padded label plan on one slot.
+
+        ``label_ids`` must already be produced by the primary streaming TN
+        layer. This API deliberately accepts labels, not raw text or Talker
+        BPE ids, and pads to the manifest's fixed ``M_max`` capacity.
+        """
+        if not self._cursor_enabled:
+            return
+        ids = torch.as_tensor(label_ids, device=self._device, dtype=torch.int64)
+        if ids.dim() == 2:
+            if ids.shape[0] != 1:
+                raise ValueError("cursor label plan must have one row per slot")
+            ids = ids[0]
+        if ids.dim() != 1:
+            raise ValueError(f"cursor label plan must be [M], got {tuple(ids.shape)}")
+        count = int(ids.numel() if label_count is None else label_count)
+        if count < 0 or count > int(ids.numel()) or count > self._cursor_max_labels:
+            raise ValueError(
+                f"cursor label_count={count} exceeds plan capacity {self._cursor_max_labels}"
+            )
+        padded = torch.zeros(
+            1, self._cursor_max_labels, device=self._device, dtype=torch.int64
+        )
+        if count:
+            padded[:, :count] = ids[:count].view(1, count)
+        slot.cursor_label_ids = padded
+        slot.cursor_label_count = torch.tensor(
+            [count], device=self._device, dtype=torch.int64
+        )
+        slot.cursor_active = torch.tensor(
+            [1 if active else 0], device=self._device, dtype=torch.int64
+        )
+        slot.cursor_text_start_frame = torch.tensor(
+            [int(text_start_frame)], device=self._device, dtype=torch.int64
+        )
+        self._ensure_cursor_state(slot)
+
+    def set_cursor_reanchor(self, slot: SlotKVState, mu: float) -> None:
+        """Inject one CPU-computed TN tail-rewrite reanchor for the next step."""
+        if not self._cursor_enabled:
+            return
+        self._ensure_cursor_state(slot)
+        slot.cursor_override_mu = torch.tensor(
+            [float(mu)], device=self._device, dtype=self._config.dtype
+        )
+        slot.cursor_override_valid = torch.ones(
+            1, device=self._device, dtype=torch.int64
+        )
+
+    def _ensure_cursor_state(self, slot: SlotKVState) -> None:
+        """Lazily allocate zero neural state for a cursor-enabled slot."""
+        if slot.cursor_mu is not None:
+            return
+        dtype = self._config.dtype
+        slot.cursor_mu = torch.zeros(1, device=self._device, dtype=dtype)
+        slot.cursor_frames_since_advance = torch.zeros(1, device=self._device, dtype=dtype)
+        slot.cursor_delta_history = torch.zeros(1, 8, device=self._device, dtype=dtype)
+        slot.cursor_conv_history = torch.zeros(
+            1, self._cursor_history, self._cursor_d, device=self._device, dtype=dtype
+        )
+        slot.cursor_last_trunk_input = torch.zeros(1, self._cursor_d, device=self._device, dtype=dtype)
+        slot.cursor_seen_frames = torch.zeros(1, device=self._device, dtype=torch.int64)
+        if slot.cursor_label_ids is None:
+            slot.cursor_label_ids = torch.zeros(
+                1, self._cursor_max_labels, device=self._device, dtype=torch.int64
+            )
+        if slot.cursor_label_count is None:
+            slot.cursor_label_count = torch.zeros(1, device=self._device, dtype=torch.int64)
+        if slot.cursor_active is None:
+            slot.cursor_active = torch.zeros(1, device=self._device, dtype=torch.int64)
+        if slot.cursor_text_start_frame is None:
+            slot.cursor_text_start_frame = torch.zeros(1, device=self._device, dtype=torch.int64)
+        if slot.cursor_override_valid is None:
+            slot.cursor_override_valid = torch.zeros(1, device=self._device, dtype=torch.int64)
+        if slot.cursor_override_mu is None:
+            slot.cursor_override_mu = torch.zeros(1, device=self._device, dtype=dtype)
 
     def _build_dump_metadata(
         self,

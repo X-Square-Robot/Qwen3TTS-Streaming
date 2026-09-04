@@ -22,6 +22,10 @@ Outputs:
     c2w_new_kv         — [B, n_c2w*2, c2w_heads, chunk_t, c2w_head_dim]
     c2w_new_conv_state_*, c2w_new_transconv_overlap_*
 
+When ``--cursor-head`` is supplied, the graph additionally receives fixed-size
+``cursor_*`` label/state inputs and appends the cursor state outputs plus a
+``codec0`` ABI alias.  The standard export path keeps the legacy I/O contract.
+
 Depends on: tokenizer (code2wav decoder) + TTS variant (talker).
 
 Also writes ``triton_manifest.json``; Phase C requires this file.
@@ -36,11 +40,12 @@ Also writes ``triton_manifest.json``; Phase C requires this file.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import sys
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -58,6 +63,10 @@ from code2wav_streaming import (
     num_code2wav_hidden_layers,
 )
 from talker_unified_modules import build_talker_unified_fused_module, LOGITS_TOPK
+from native_cursor_modules import (
+    CursorStreamingStep,
+    build_cursor_head_from_checkpoint,
+)
 from triton_manifest_io import build_manifest_for_export
 
 from utils import (
@@ -124,12 +133,47 @@ class TalkerCode2WavFusedONNX(nn.Module):
         c2w_past_kv:    [B, n_c2w*2, c2w_heads, S_c2w, c2w_head_dim]
         conv_transconv_states: 17 conv + 4 transconv (heterogeneous shapes)
         """
+        outputs, _ = self._forward_impl(
+            input_embeds,
+            position_ids,
+            attention_bias,
+            token_counts,
+            gumbel_noise,
+            cp_gumbel_noise,
+            temperature,
+            penalty,
+            cache_position,
+            c2w_attention_bias,
+            talker_past_kv,
+            c2w_past_kv,
+            conv_transconv_states,
+            None,
+        )
+        return outputs
+
+    def _forward_impl(
+        self,
+        input_embeds: torch.Tensor,
+        position_ids: torch.Tensor,
+        attention_bias: torch.Tensor,
+        token_counts: torch.Tensor,
+        gumbel_noise: torch.Tensor,
+        cp_gumbel_noise: torch.Tensor,
+        temperature: torch.Tensor,
+        penalty: torch.Tensor,
+        cache_position: torch.Tensor,
+        c2w_attention_bias: torch.Tensor,
+        talker_past_kv: torch.Tensor,
+        c2w_past_kv: torch.Tensor,
+        conv_transconv_states: tuple[torch.Tensor, ...],
+        cursor_inputs: Optional[tuple[torch.Tensor, ...]],
+    ) -> tuple[tuple[torch.Tensor, ...], Optional[tuple[torch.Tensor, ...]]]:
+        """Run the common Talker -> optional cursor -> Code2Wav pipeline."""
         n = self.num_layers
         n_c2w = self.n_c2w_layers
 
         # Unpack talker KV: [B, L*2, H, S, D] -> list of [B, H, S, D]
         past_kv = [talker_past_kv[:, i, :, :, :] for i in range(n * 2)]
-
         codec_sum, full_codec, hidden, logits, updated_token_counts, *present_kv = (
             self.talker_fused(
                 input_embeds,
@@ -143,33 +187,28 @@ class TalkerCode2WavFusedONNX(nn.Module):
                 *past_kv,
             )
         )
-
-        # Pack talker delta KV: list of [B, H, S_step, D] -> [B, L*2, H, S_step, D]
         talker_new_kv = torch.stack(present_kv, dim=1)
+
+        cursor_outputs: Optional[tuple[torch.Tensor, ...]] = None
+        if cursor_inputs is not None:
+            # The sampled token is connected directly to the cursor branch;
+            # no host round-trip or second matcher invocation is introduced.
+            cursor_outputs = self.cursor_step(full_codec[:, 0], *cursor_inputs)
 
         # Unpack C2W KV: [B, N*2, H, S, D] -> list of [B, H, S, D]
         c2w_kv_list = [c2w_past_kv[:, i, :, :, :] for i in range(n_c2w * 2)]
-
-        _cb = 2048
-        fc = full_codec.long().clamp(0, _cb - 1)
-        codes = fc.unsqueeze(-1)
-
+        fc = full_codec.long().clamp(0, 2048 - 1)
         c2w_out = self.code2wav(
-            codes,
+            fc.unsqueeze(-1),
             cache_position,
             c2w_attention_bias,
             *c2w_kv_list,
             *conv_transconv_states,
         )
         wav = c2w_out[0]
-
-        # Pack C2W delta KV
-        c2w_new_kv = list(c2w_out[1 : 1 + 2 * n_c2w])
-        c2w_new_kv = torch.stack(c2w_new_kv, dim=1)
-
+        c2w_new_kv = torch.stack(list(c2w_out[1 : 1 + 2 * n_c2w]), dim=1)
         new_conv_transconv = c2w_out[1 + 2 * n_c2w :]
-
-        return (
+        outputs = (
             wav,
             codec_sum,
             full_codec,
@@ -180,6 +219,88 @@ class TalkerCode2WavFusedONNX(nn.Module):
             c2w_new_kv,
             *new_conv_transconv,
         )
+        return outputs, cursor_outputs
+
+
+class TalkerCode2WavCursorFusedONNX(TalkerCode2WavFusedONNX):
+    """Cursor-enabled variant with a fixed-shape per-slot cursor contract."""
+
+    def __init__(
+        self,
+        talker_fused: nn.Module,
+        code2wav: Code2WavStreamingWrapper,
+        n_c2w_layers: int,
+        cursor_step: CursorStreamingStep,
+        cursor_max_labels: int,
+    ) -> None:
+        super().__init__(talker_fused, code2wav, n_c2w_layers)
+        if cursor_max_labels <= 0:
+            raise ValueError("cursor_max_labels must be positive")
+        self.cursor_step = cursor_step
+        self.cursor_max_labels = int(cursor_max_labels)
+
+    def forward(
+        self,
+        input_embeds: torch.Tensor,
+        position_ids: torch.Tensor,
+        attention_bias: torch.Tensor,
+        token_counts: torch.Tensor,
+        gumbel_noise: torch.Tensor,
+        cp_gumbel_noise: torch.Tensor,
+        temperature: torch.Tensor,
+        penalty: torch.Tensor,
+        cache_position: torch.Tensor,
+        c2w_attention_bias: torch.Tensor,
+        talker_past_kv: torch.Tensor,
+        c2w_past_kv: torch.Tensor,
+        cursor_label_ids: torch.Tensor,
+        cursor_label_count: torch.Tensor,
+        cursor_active: torch.Tensor,
+        cursor_mu: torch.Tensor,
+        cursor_frames_since_advance: torch.Tensor,
+        cursor_delta_history: torch.Tensor,
+        cursor_conv_history: torch.Tensor,
+        cursor_last_trunk_input: torch.Tensor,
+        cursor_seen_frames: torch.Tensor,
+        cursor_text_start_frame: torch.Tensor,
+        cursor_override_valid: torch.Tensor,
+        cursor_override_mu: torch.Tensor,
+        *conv_transconv_states: torch.Tensor,
+    ) -> Tuple[torch.Tensor, ...]:
+        outputs, cursor_outputs = self._forward_impl(
+            input_embeds,
+            position_ids,
+            attention_bias,
+            token_counts,
+            gumbel_noise,
+            cp_gumbel_noise,
+            temperature,
+            penalty,
+            cache_position,
+            c2w_attention_bias,
+            talker_past_kv,
+            c2w_past_kv,
+            conv_transconv_states,
+            (
+                cursor_label_ids,
+                cursor_label_count,
+                cursor_active,
+                cursor_mu,
+                cursor_frames_since_advance,
+                cursor_delta_history,
+                cursor_conv_history,
+                cursor_last_trunk_input,
+                cursor_seen_frames,
+                cursor_text_start_frame,
+                cursor_override_valid,
+                cursor_override_mu,
+            ),
+        )
+        assert cursor_outputs is not None
+        # Keep the legacy audio ABI first; cursor bindings are appended so an
+        # executor can discover them from the manifest without reordering old
+        # outputs.  codec0 is an ABI alias of full_codec[:, 0].
+        return (*outputs, *cursor_outputs, outputs[2][:, 0])
 
 
 def _export_talker_code2wav_fused_onnx(
@@ -190,7 +311,13 @@ def _export_talker_code2wav_fused_onnx(
     opset_version: int = 18,
     engine_dtype: str = "bf16",
     triton_io_float_dtype: str = "bf16",
+    cursor_head_path: Optional[str] = None,
+    cursor_max_labels: int = 512,
 ) -> str:
+    if cursor_head_path and variant != "custom-1.7b":
+        raise ValueError(
+            "native cursor export is limited to the validated custom-1.7b variant"
+        )
     tokenizer_path = resolve_tokenizer_path(None)
     tokenizer_model = load_speech_tokenizer(
         tokenizer_path, device=device, dtype=torch.float32
@@ -221,7 +348,38 @@ def _export_talker_code2wav_fused_onnx(
         getattr(c2w_cfg, "hidden_size", 512) // c2w_cfg.num_attention_heads,
     )
 
-    fused = TalkerCode2WavFusedONNX(talker_fused, code2wav, n_c2w).to(device).eval()
+    cursor_meta = None
+    if cursor_head_path:
+        cursor_head, cursor_meta = build_cursor_head_from_checkpoint(cursor_head_path)
+        head_bytes = Path(cursor_head_path).read_bytes()
+        cursor_meta["head_sha256"] = hashlib.sha256(head_bytes).hexdigest()
+        if int(cursor_meta["codec_vocab_size"]) != int(vocab_size):
+            raise ValueError(
+                "native cursor codec vocabulary does not match Talker: "
+                f"cursor={cursor_meta['codec_vocab_size']} talker={vocab_size}"
+            )
+        if not cursor_meta.get("vocab_sha256"):
+            checkpoint_for_vocab = torch.load(
+                cursor_head_path, map_location="cpu", weights_only=False
+            )
+            ordered_vocab = sorted(
+                ((str(k), int(v)) for k, v in checkpoint_for_vocab["vocab"].items()),
+                key=lambda item: item[1],
+            )
+            payload = json.dumps(
+                ordered_vocab, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            cursor_meta["vocab_sha256"] = hashlib.sha256(payload).hexdigest()
+        cursor_step = CursorStreamingStep(cursor_head.to(device).eval())
+        fused = TalkerCode2WavCursorFusedONNX(
+            talker_fused,
+            code2wav,
+            n_c2w,
+            cursor_step,
+            cursor_max_labels,
+        ).to(device).eval()
+    else:
+        fused = TalkerCode2WavFusedONNX(talker_fused, code2wav, n_c2w).to(device).eval()
 
     # ---- Dummy inputs ----
     B, one, S_past = 1, 1, 0
@@ -322,6 +480,31 @@ def _export_talker_code2wav_fused_onnx(
         *conv_transconv_tensors,
     )
 
+    if cursor_meta is not None:
+        # Cursor labels and recurrent state use fixed dimensions.  Values may
+        # change per slot/per frame without changing the TRT/CUDA-graph shape.
+        cursor_inputs = (
+            torch.zeros(B, cursor_max_labels, device=device, dtype=torch.long),
+            torch.zeros(B, device=device, dtype=torch.long),
+            torch.zeros(B, device=device, dtype=torch.int64),
+            torch.zeros(B, device=device, dtype=torch.float32),
+            torch.zeros(B, device=device, dtype=torch.float32),
+            torch.zeros(B, 8, device=device, dtype=torch.float32),
+            torch.zeros(
+                B,
+                int(cursor_meta["left_context"] + cursor_meta["right_context"]),
+                int(cursor_head.d),
+                device=device,
+                dtype=ONNX_EXPORT_DTYPE,
+            ),
+            torch.zeros(B, int(cursor_head.d), device=device, dtype=ONNX_EXPORT_DTYPE),
+            torch.zeros(B, device=device, dtype=torch.long),
+            torch.zeros(B, device=device, dtype=torch.long),
+            torch.zeros(B, device=device, dtype=torch.int64),
+            torch.zeros(B, device=device, dtype=torch.float32),
+        )
+        dummy_inputs = dummy_inputs[:12] + cursor_inputs + dummy_inputs[12:]
+
     with torch.no_grad():
         out = fused(*dummy_inputs)
 
@@ -340,6 +523,23 @@ def _export_talker_code2wav_fused_onnx(
         "talker_past_kv",
         "c2w_past_kv",
     ]
+    if cursor_meta is not None:
+        input_names.extend(
+            [
+                "cursor_label_ids",
+                "cursor_label_count",
+                "cursor_active",
+                "cursor_mu_in",
+                "cursor_frames_since_advance_in",
+                "cursor_delta_history_in",
+                "cursor_conv_history_in",
+                "cursor_last_trunk_input_in",
+                "cursor_seen_frames_in",
+                "cursor_text_start_frame",
+                "cursor_override_valid",
+                "cursor_override_mu",
+            ]
+        )
     for name in conv_transconv_names_cold:
         input_names.append(f"c2w_{name}")
 
@@ -357,6 +557,22 @@ def _export_talker_code2wav_fused_onnx(
         output_names.append(f"c2w_new_conv_state_{i}")
     for i in range(NUM_TRANSCONV):
         output_names.append(f"c2w_new_transconv_overlap_{i}")
+    if cursor_meta is not None:
+        output_names.extend(
+            [
+                "cursor_valid",
+                "cursor_mu",
+                "cursor_delta",
+                "cursor_confidence",
+                "cursor_candidate_label",
+                "cursor_frames_since_advance",
+                "cursor_delta_history",
+                "cursor_conv_history",
+                "cursor_last_trunk_input",
+                "cursor_seen_frames",
+                "codec0",
+            ]
+        )
 
     # ---- Dynamic axes ----
     dynamic_axes = {
@@ -381,6 +597,34 @@ def _export_talker_code2wav_fused_onnx(
         "talker_new_kv": {0: "batch", 3: "S_step"},
         "c2w_new_kv": {0: "batch", 3: "chunk_t"},
     }
+    if cursor_meta is not None:
+        dynamic_axes.update(
+            {
+                "cursor_label_ids": {0: "batch"},
+                "cursor_label_count": {0: "batch"},
+                "cursor_active": {0: "batch"},
+                "cursor_mu_in": {0: "batch"},
+                "cursor_frames_since_advance_in": {0: "batch"},
+                "cursor_delta_history_in": {0: "batch"},
+                "cursor_conv_history_in": {0: "batch"},
+                "cursor_last_trunk_input_in": {0: "batch"},
+                "cursor_seen_frames_in": {0: "batch"},
+                "cursor_text_start_frame": {0: "batch"},
+                "cursor_override_valid": {0: "batch"},
+                "cursor_override_mu": {0: "batch"},
+                "cursor_valid": {0: "batch"},
+                "cursor_mu": {0: "batch"},
+                "cursor_delta": {0: "batch"},
+                "cursor_confidence": {0: "batch"},
+                "cursor_candidate_label": {0: "batch"},
+                "cursor_frames_since_advance": {0: "batch"},
+                "cursor_delta_history": {0: "batch"},
+                "cursor_conv_history": {0: "batch"},
+                "cursor_last_trunk_input": {0: "batch"},
+                "cursor_seen_frames": {0: "batch"},
+                "codec0": {0: "batch"},
+            }
+        )
     for name in conv_transconv_names_cold:
         key = f"c2w_{name}"
         if key in input_names:
@@ -425,6 +669,25 @@ def _export_talker_code2wav_fused_onnx(
         "logits_topk": LOGITS_TOPK,
         "cp_num_stages": cp_num_stages,
     }
+    if cursor_meta is not None:
+        layout["native_cursor"] = {
+            "enabled": True,
+            "max_labels": int(cursor_max_labels),
+            "embedding_dim": int(cursor_head.d),
+            "history_width": int(cursor_meta["left_context"] + cursor_meta["right_context"]),
+            "num_codebooks": int(cp_num_stages + 1),
+            **cursor_meta,
+            "cursor_head_sha256": str(cursor_meta.get("head_sha256", "")),
+            "cursor_vocab_sha256": str(cursor_meta.get("vocab_sha256", "")),
+            "cursor_rules_sha256": str(cursor_meta.get("rules_sha256", "")),
+            "input_names": input_names[12:24],
+            "output_names": output_names[-11:],
+            "state_shapes": {
+                "conv_history": [B, int(cursor_meta["left_context"] + cursor_meta["right_context"]), int(cursor_head.d)],
+                "last_trunk_input": [B, int(cursor_head.d)],
+                "delta_history": [B, 8],
+            },
+        }
 
     weights_cfg_path = output_dir / "weights" / "config.json"
     weights_cfg: dict = {}
@@ -530,6 +793,27 @@ def _export_talker_code2wav_fused_onnx(
         c2w_kv2,
         *conv_transconv_tensors2,
     )
+    if cursor_meta is not None:
+        cursor_inputs2 = (
+            torch.zeros(B2, cursor_max_labels, dtype=torch.long),
+            torch.zeros(B2, dtype=torch.long),
+            torch.zeros(B2, dtype=torch.int64),
+            torch.zeros(B2),
+            torch.zeros(B2),
+            torch.zeros(B2, 8),
+            torch.zeros(
+                B2,
+                int(cursor_meta["left_context"] + cursor_meta["right_context"]),
+                int(cursor_head.d),
+                dtype=ONNX_EXPORT_DTYPE,
+            ),
+            torch.zeros(B2, int(cursor_head.d), dtype=ONNX_EXPORT_DTYPE),
+            torch.zeros(B2, dtype=torch.long),
+            torch.zeros(B2, dtype=torch.long),
+            torch.zeros(B2, dtype=torch.int64),
+            torch.zeros(B2),
+        )
+        cpu_inputs_2 = cpu_inputs_2[:12] + cursor_inputs2 + cpu_inputs_2[12:]
     with torch.no_grad():
         cpu_out_2 = cpu_fused(*cpu_inputs_2)
 
@@ -564,6 +848,8 @@ def export_talker_code2wav_fused(
     device: str = "cpu",
     engine_dtype: str = "bf16",
     triton_io_float_dtype: str = "bf16",
+    cursor_head_path: Optional[str] = None,
+    cursor_max_labels: int = 512,
 ) -> dict:
     model_path = resolve_model_path(variant, models_dir)
     out_dir = ensure_output_dir(output_dir, variant)
@@ -576,6 +862,8 @@ def export_talker_code2wav_fused(
         device=device,
         engine_dtype=engine_dtype,
         triton_io_float_dtype=triton_io_float_dtype,
+        cursor_head_path=cursor_head_path,
+        cursor_max_labels=cursor_max_labels,
     )
     del model
     if device != "cpu":
@@ -601,6 +889,21 @@ def main():
         choices=("bf16", "fp16", "fp32"),
         help="Float I/O binding + Triton TYPE_* (must match Phase B trtexec --inputIOFormats/--outputFormats)",
     )
+    parser.add_argument(
+        "--cursor-head",
+        type=str,
+        default=None,
+        help=(
+            "Path to a released native-cursor checkpoint. When supplied, export "
+            "the cursor-enabled fused graph (custom-1.7b only)."
+        ),
+    )
+    parser.add_argument(
+        "--cursor-max-labels",
+        type=int,
+        default=512,
+        help="Fixed padded label capacity for the cursor-enabled graph.",
+    )
     add_common_args(parser)
     args = parser.parse_args()
     device = resolve_device(args.device)
@@ -617,6 +920,8 @@ def main():
                 device,
                 engine_dtype=args.engine_dtype,
                 triton_io_float_dtype=args.triton_io_float_dtype,
+                cursor_head_path=args.cursor_head,
+                cursor_max_labels=args.cursor_max_labels,
             )
             for k, v in results.items():
                 logger.info(f"[{variant}] {k}: {v}")

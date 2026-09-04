@@ -417,13 +417,21 @@ build_talker_code2wav_fused_trt() {
     fi
     local n_c2w=8
     local n_cp=15
+    local cursor_enabled=0
+    local cursor_max_labels=512
+    local cursor_d=256
+    local cursor_history=30
     if [ -f "$variant_dir/triton_manifest.json" ]; then
         n_c2w=$(python3 -c "import json; d=json.load(open('$variant_dir/triton_manifest.json')); print(int(d['code2wav_fused']['num_code2wav_hidden_layers']))")
         n_cp=$(python3 -c "import json; d=json.load(open('$variant_dir/triton_manifest.json')); print(int(d.get('architecture', {}).get('cp_num_stages', 15)))")
+        cursor_enabled=$(python3 -c "import json; d=json.load(open('$variant_dir/triton_manifest.json')); print(1 if d.get('native_cursor', {}).get('enabled', False) else 0)")
+        cursor_max_labels=$(python3 -c "import json; d=json.load(open('$variant_dir/triton_manifest.json')); print(int(d.get('native_cursor', {}).get('max_labels', 512)))")
+        cursor_d=$(python3 -c "import json; d=json.load(open('$variant_dir/triton_manifest.json')); print(int(d.get('native_cursor', {}).get('embedding_dim', 256)))")
+        cursor_history=$(python3 -c "import json; d=json.load(open('$variant_dir/triton_manifest.json')); print(int(d.get('native_cursor', {}).get('history_width', 30)))")
     fi
     local fused_min fused_opt fused_max fused_dec_min fused_dec_opt fused_dec_max
     local profile_out
-    profile_out=$(python3 "$profile_py" "$H" "$KV_HEADS" "$HEAD_DIM" "$NUM_LAYERS" "$MAX_BATCH_SIZE" "$MAX_INPUT_LEN" "$MAX_SEQ_LEN" "$n_c2w" "$n_cp")
+    profile_out=$(python3 "$profile_py" "$H" "$KV_HEADS" "$HEAD_DIM" "$NUM_LAYERS" "$MAX_BATCH_SIZE" "$MAX_INPUT_LEN" "$MAX_SEQ_LEN" "$n_c2w" "$n_cp" "$cursor_enabled" "$cursor_max_labels" "$cursor_d" "$cursor_history")
     fused_min=$(sed -n '1p' <<<"$profile_out")
     fused_opt=$(sed -n '2p' <<<"$profile_out")
     fused_max=$(sed -n '3p' <<<"$profile_out")

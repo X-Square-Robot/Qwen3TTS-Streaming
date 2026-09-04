@@ -145,6 +145,42 @@
         "cp_num_stages": { "type": "integer" }
       }
     },
+    "native_cursor": {
+      "type": "object",
+      "description": "Optional 2M native cursor branch fused into the Talker+Code2Wav graph",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "max_labels": { "type": "integer", "minimum": 1 },
+        "vocab_size": { "type": "integer", "minimum": 1 },
+        "offsets": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "left_context": { "type": "integer", "minimum": 0 },
+        "right_context": { "type": "integer", "minimum": 0 },
+        "embedding_dim": { "type": "integer", "minimum": 1 },
+        "history_width": { "type": "integer", "minimum": 0 },
+        "codec_vocab_size": { "type": "integer", "minimum": 1 },
+        "num_codebooks": { "type": "integer", "minimum": 1 },
+        "native_frame_us": { "type": "integer", "minimum": 1 },
+        "parameter_count": { "type": "integer", "minimum": 1 },
+        "cursor_head_sha256": { "type": "string" },
+        "cursor_vocab_sha256": { "type": "string" },
+        "cursor_rules_sha256": { "type": "string" },
+        "model_fingerprint": { "type": "string" },
+        "training_scope": { "type": "string" },
+        "input_names": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "output_names": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "state_shapes": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": true
+    },
     "orchestrator": {
       "type": "object",
       "description": "tts_orchestrator config.pbtxt parameters",

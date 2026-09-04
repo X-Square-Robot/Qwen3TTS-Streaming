@@ -117,6 +117,23 @@ class SlotKVState:
     last_codec_sum: Optional[torch.Tensor] = None
     token_counts: Optional[torch.Tensor] = None
 
+    # Optional native-cursor state. These tensors are populated only when a
+    # cursor-enabled fused plan is loaded and a CPU text-plan adapter supplies
+    # labels. Keeping them on the slot makes cursor state batch-safe and
+    # avoids a second neural inference path.
+    cursor_label_ids: Optional[torch.Tensor] = None
+    cursor_label_count: Optional[torch.Tensor] = None
+    cursor_active: Optional[torch.Tensor] = None
+    cursor_mu: Optional[torch.Tensor] = None
+    cursor_frames_since_advance: Optional[torch.Tensor] = None
+    cursor_delta_history: Optional[torch.Tensor] = None
+    cursor_conv_history: Optional[torch.Tensor] = None
+    cursor_last_trunk_input: Optional[torch.Tensor] = None
+    cursor_seen_frames: Optional[torch.Tensor] = None
+    cursor_text_start_frame: Optional[torch.Tensor] = None
+    cursor_override_valid: Optional[torch.Tensor] = None
+    cursor_override_mu: Optional[torch.Tensor] = None
+
     # Trailing text embeddings for streaming decode
     trailing: list = field(default_factory=list)
     text_idx: int = 0
@@ -319,6 +336,18 @@ class KVCachePool:
         slot.next_embed = None
         slot.last_codec_sum = None
         slot.token_counts = None
+        slot.cursor_label_ids = None
+        slot.cursor_label_count = None
+        slot.cursor_active = None
+        slot.cursor_mu = None
+        slot.cursor_frames_since_advance = None
+        slot.cursor_delta_history = None
+        slot.cursor_conv_history = None
+        slot.cursor_last_trunk_input = None
+        slot.cursor_seen_frames = None
+        slot.cursor_text_start_frame = None
+        slot.cursor_override_valid = None
+        slot.cursor_override_mu = None
         slot.talker_kv = None
         slot.c2w_kv = None
         slot.c2w_conv_states = None
@@ -360,6 +389,18 @@ class KVCachePool:
         slot.next_embed = None
         slot.last_codec_sum = None
         slot.token_counts = None
+        slot.cursor_label_ids = None
+        slot.cursor_label_count = None
+        slot.cursor_active = None
+        slot.cursor_mu = None
+        slot.cursor_frames_since_advance = None
+        slot.cursor_delta_history = None
+        slot.cursor_conv_history = None
+        slot.cursor_last_trunk_input = None
+        slot.cursor_seen_frames = None
+        slot.cursor_text_start_frame = None
+        slot.cursor_override_valid = None
+        slot.cursor_override_mu = None
         slot.talker_kv = None
         slot.c2w_kv = None
         slot.c2w_conv_states = None

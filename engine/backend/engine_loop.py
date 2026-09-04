@@ -1912,6 +1912,14 @@ class EngineLoop:
             if group is None:
                 continue
 
+            # The fused cursor branch returns only neural state here.  TN
+            # labels/reanchor/public coordinates remain CPU-owned and are
+            # handled by the frontend adapter; keeping this handoff adjacent
+            # to KV state processing preserves per-slot ordering.
+            update_cursor_state = getattr(self._executor, "update_cursor_state", None)
+            if update_cursor_state is not None:
+                update_cursor_state(slot, output.cursor_outputs, row=i)
+
             if output.batch_c2w_kv is not None:
                 if slot.c2w_pooled:
                     # Deferred: one batched sliding-window append for all

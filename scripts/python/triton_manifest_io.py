@@ -254,6 +254,12 @@ def build_manifest_for_export(
         ),
         "dtype": engine_dtype,
     }
+    native_cursor = code2wav_layout.get("native_cursor")
+    if native_cursor:
+        # Keep this capability at the top level as well as beside the fused
+        # layout so admission/routing can inspect it without understanding
+        # every Code2Wav detail.
+        architecture["native_cursor"] = dict(native_cursor)
 
     # Resolve mixed-precision defaults: unspecified fields fall back to engine_dtype
     resolved_backbone_precision = backbone_precision or engine_dtype
@@ -310,5 +316,8 @@ def build_manifest_for_export(
             "logits_topk": int(code2wav_layout.get("logits_topk", 50)),
             "cp_num_stages": int(code2wav_layout.get("cp_num_stages", 15)),
         },
+        "native_cursor": dict(native_cursor)
+        if native_cursor
+        else {"enabled": False},
         "orchestrator": orch,
     }

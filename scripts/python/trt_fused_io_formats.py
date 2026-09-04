@@ -203,16 +203,21 @@ def fused_input_output_io_format_strings(manifest: Dict[str, Any]) -> Tuple[str,
                  temperature(fp32), penalty(fp32),
                  cache_position(fp32), c2w_attention_bias,
                  talker_past_kv, c2w_past_kv,
+                 cursor_* (when native_cursor.enabled),
                  c2w_conv_state_* (17), c2w_transconv_overlap_* (4)
 
         Outputs: wav, codec_sum, full_codec(i64), hidden, logits,
                  updated_token_counts(i64),
                  talker_new_kv, c2w_new_kv,
-                 c2w_new_conv_state_* (17), c2w_new_transconv_overlap_* (4)
+                 c2w_new_conv_state_* (17), c2w_new_transconv_overlap_* (4),
+                 cursor_* and codec0 (when native_cursor.enabled)
     """
     c2w = manifest.get("code2wav_fused") or {}
     c2w_in = list(c2w.get("c2w_state_input_names") or [])
     c2w_out = list(c2w.get("c2w_state_output_names") or [])
+    cursor = manifest.get("native_cursor") or {}
+    cursor_in = list(cursor.get("input_names") or []) if cursor.get("enabled") else []
+    cursor_out = list(cursor.get("output_names") or []) if cursor.get("enabled") else []
 
     raw_io = (
         manifest.get("triton_io_float_dtype") or manifest.get("onnx_io_dtype") or "fp32"
@@ -235,6 +240,20 @@ def fused_input_output_io_format_strings(manifest: Dict[str, Any]) -> Tuple[str,
         fp_spec,  # talker_past_kv (packed)
         fp_spec,  # c2w_past_kv (packed)
     ]
+    for name in cursor_in:
+        # Cursor coordinates/history are floating point; label ids, validity
+        # flags and frame counters use the same integer ABI as the Talker.
+        if (
+            "label_ids" in name
+            or "label_count" in name
+            or "active" in name
+            or "seen_frames" in name
+            or "text_start_frame" in name
+            or "override_valid" in name
+        ):
+            in_parts.append(i64)
+        else:
+            in_parts.append(fp_spec)
     in_parts.extend([fp_spec] * len(c2w_in))
 
     out_parts: List[str] = [
@@ -248,6 +267,13 @@ def fused_input_output_io_format_strings(manifest: Dict[str, Any]) -> Tuple[str,
         fp_spec,  # c2w_new_kv (packed delta)
     ]
     out_parts.extend([fp_spec] * len(c2w_out))
+    for name in cursor_out:
+        if "valid" in name or "candidate_label" in name or "seen_frames" in name:
+            out_parts.append(i64)
+        elif name == "codec0":
+            out_parts.append(i64)
+        else:
+            out_parts.append(fp_spec)
 
     return ",".join(in_parts), ",".join(out_parts)
 
