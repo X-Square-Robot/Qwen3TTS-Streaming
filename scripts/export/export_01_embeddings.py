@@ -70,9 +70,9 @@ def export_embeddings(
     out_dir = ensure_output_dir(output_dir, variant) / "weights"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ``head.pt`` is an optional model-owned asset.  Keep it beside the
-    # exported embedding weights so the assembled package is self-describing:
-    # its presence opts the matching cursor-enabled export/runtime path in.
+    # The optional model-owned cursor checkpoint is kept beside the exported
+    # embedding weights so the assembled package is self-describing: its
+    # presence opts the matching cursor-enabled export/runtime path in.
     prepare_native_cursor_head(model_path, out_dir)
 
     exported_version_path = out_dir.parent / MODEL_VERSION_FILENAME

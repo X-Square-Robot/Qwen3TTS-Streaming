@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 FUSED_CHUNK_T = 1
 _FUSED_DUMMY_PAST_LEN = 1
 _MAX_TORCH_SEED = (1 << 63) - 1
+_NATIVE_CURSOR_HEAD_FILENAME = "qwen3_tts_12hz_la1_seed0.pt"
 
 
 def _stable_sampling_seed(base_seed: int, *parts: object) -> int:
@@ -1311,10 +1312,15 @@ class Executor:
         capability = self._manifest.get("native_cursor") or {}
         if not capability.get("enabled") or self._fused_engine is None:
             return
-        head_path = self._weights_dir / "head.pt" if self._weights_dir else None
+        head_path = (
+            self._weights_dir / _NATIVE_CURSOR_HEAD_FILENAME
+            if self._weights_dir
+            else None
+        )
         if head_path is None or not head_path.is_file():
             logger.warning(
-                "Native cursor plan is declared but weights/head.pt is missing; "
+                "Native cursor plan is declared but "
+                f"weights/{_NATIVE_CURSOR_HEAD_FILENAME} is missing; "
                 "disabling native cursor for this package"
             )
             return

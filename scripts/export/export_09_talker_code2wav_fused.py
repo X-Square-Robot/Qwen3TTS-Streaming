@@ -22,10 +22,10 @@ Outputs:
     c2w_new_kv         — [B, n_c2w*2, c2w_heads, chunk_t, c2w_head_dim]
     c2w_new_conv_state_*, c2w_new_transconv_overlap_*
 
-When the model-owned ``head.pt`` is present in the model/export ``weights``
-directory, the graph additionally receives fixed-size ``cursor_*`` label/state
-inputs and appends the cursor state outputs plus a ``codec0`` ABI alias.  The
-standard export path keeps the legacy I/O contract.
+When the model-owned ``qwen3_tts_12hz_la1_seed0.pt`` is present in the
+model/export ``weights`` directory, the graph additionally receives fixed-size
+``cursor_*`` label/state inputs and appends the cursor state outputs plus a
+``codec0`` ABI alias. The standard export path keeps the legacy I/O contract.
 
 Depends on: tokenizer (code2wav decoder) + TTS variant (talker).
 

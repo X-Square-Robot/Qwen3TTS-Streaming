@@ -49,6 +49,10 @@ DEFAULT_DTYPE = torch.bfloat16
 
 ONNX_EXPORT_DTYPE = torch.float32
 
+# Model-owned optional asset. Its presence in the model/package weights opts
+# the validated native-cursor graph in.
+NATIVE_CURSOR_HEAD_FILENAME = "qwen3_tts_12hz_la1_seed0.pt"
+
 
 def setup_logging(level: int = logging.INFO) -> None:
     logging.basicConfig(
@@ -200,16 +204,17 @@ def prepare_native_cursor_head(
     model_dir: Path,
     exported_weights_dir: Path,
 ) -> Optional[Path]:
-    """Resolve and stage the model-owned optional ``weights/head.pt`` asset.
+    """Resolve and stage the model-owned optional cursor-head asset.
 
-    ``head.pt`` is deliberately not a repository asset or an exporter CLI
-    argument.  A model release opts into the native cursor by shipping the
-    checkpoint alongside its weights.  HuggingFace-style releases commonly
-    put it at the model root, while an already materialized export puts it in
-    ``<variant>/weights``; both locations are accepted during the transition.
-    The returned path is always the exported ``weights/head.pt`` when a
-    package directory is available, so build/assemble steps carry the head
-    with the rest of the runtime weights.
+    The cursor checkpoint is deliberately not a repository asset or an
+    exporter CLI argument. A model release opts into the native cursor by
+    shipping ``NATIVE_CURSOR_HEAD_FILENAME`` alongside its weights.
+    HuggingFace-style releases commonly put it at the model root, while an
+    already materialized export puts it in ``<variant>/weights``; both
+    locations are accepted during the transition. The returned path is
+    always the exported package weight when a package directory is available,
+    so build/assemble steps carry the head with the rest of the runtime
+    weights.
 
     If both source and exported copies exist, they must be byte-identical.
     This prevents a stale exported head from silently enabling a graph for a
@@ -217,8 +222,11 @@ def prepare_native_cursor_head(
     """
     model_dir = Path(model_dir)
     exported_weights_dir = Path(exported_weights_dir)
-    package_head = exported_weights_dir / "head.pt"
-    candidates = [model_dir / "head.pt", model_dir / "weights" / "head.pt"]
+    package_head = exported_weights_dir / NATIVE_CURSOR_HEAD_FILENAME
+    candidates = [
+        model_dir / NATIVE_CURSOR_HEAD_FILENAME,
+        model_dir / "weights" / NATIVE_CURSOR_HEAD_FILENAME,
+    ]
     source_heads: list[Path] = []
     seen: set[Path] = set()
     for candidate in candidates:
@@ -243,7 +251,7 @@ def prepare_native_cursor_head(
         source_sha = _sha256_file(source_heads[0])
         if package_sha != source_sha:
             raise ValueError(
-                "exported weights/head.pt conflicts with the model-owned cursor head: "
+                "exported cursor head conflicts with the model-owned cursor head: "
                 f"{package_head} vs {source_heads[0]}"
             )
 

@@ -13,7 +13,10 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "export"))
 
 from native_cursor_modules import CursorHead, CursorStreamingStep  # noqa: E402
-from utils import prepare_native_cursor_head  # noqa: E402
+from utils import (  # noqa: E402
+    NATIVE_CURSOR_HEAD_FILENAME,
+    prepare_native_cursor_head,
+)
 
 
 class _TinyTalker(nn.Module):
@@ -279,13 +282,13 @@ def test_executor_cursor_plan_pads_without_using_bpe_ids() -> None:
 def test_model_owned_cursor_head_is_staged_with_exported_weights(tmp_path) -> None:
     model_dir = tmp_path / "0818-trained"
     model_dir.mkdir()
-    source_head = model_dir / "head.pt"
+    source_head = model_dir / NATIVE_CURSOR_HEAD_FILENAME
     source_head.write_bytes(b"native-cursor-head")
     exported_weights = tmp_path / "exported" / "custom-1.7b" / "weights"
 
     resolved = prepare_native_cursor_head(model_dir, exported_weights)
 
-    assert resolved == exported_weights / "head.pt"
+    assert resolved == exported_weights / NATIVE_CURSOR_HEAD_FILENAME
     assert resolved.read_bytes() == source_head.read_bytes()
 
 
@@ -294,7 +297,7 @@ def test_exported_cursor_head_can_enable_standalone_export(tmp_path) -> None:
     model_dir.mkdir()
     exported_weights = tmp_path / "exported" / "weights"
     exported_weights.mkdir(parents=True)
-    package_head = exported_weights / "head.pt"
+    package_head = exported_weights / NATIVE_CURSOR_HEAD_FILENAME
     package_head.write_bytes(b"packaged-head")
 
     resolved = prepare_native_cursor_head(model_dir, exported_weights)
@@ -305,10 +308,10 @@ def test_exported_cursor_head_can_enable_standalone_export(tmp_path) -> None:
 def test_conflicting_model_and_exported_cursor_heads_fail_closed(tmp_path) -> None:
     model_dir = tmp_path / "model"
     model_dir.mkdir()
-    (model_dir / "head.pt").write_bytes(b"source-head")
+    (model_dir / NATIVE_CURSOR_HEAD_FILENAME).write_bytes(b"source-head")
     exported_weights = tmp_path / "exported" / "weights"
     exported_weights.mkdir(parents=True)
-    (exported_weights / "head.pt").write_bytes(b"stale-head")
+    (exported_weights / NATIVE_CURSOR_HEAD_FILENAME).write_bytes(b"stale-head")
 
     with pytest.raises(ValueError, match="conflicts"):
         prepare_native_cursor_head(model_dir, exported_weights)
