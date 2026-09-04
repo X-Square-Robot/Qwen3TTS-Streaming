@@ -2,7 +2,9 @@
 Shared utilities and reusable nn.Modules for ONNX export scripts.
 """
 
+import hashlib
 import os
+import shutil
 import sys
 import logging
 from contextlib import contextmanager
@@ -184,6 +186,75 @@ def ensure_output_dir(output_dir: Optional[str], variant: str) -> Path:
     out = base / variant
     out.mkdir(parents=True, exist_ok=True)
     return out
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def prepare_native_cursor_head(
+    model_dir: Path,
+    exported_weights_dir: Path,
+) -> Optional[Path]:
+    """Resolve and stage the model-owned optional ``weights/head.pt`` asset.
+
+    ``head.pt`` is deliberately not a repository asset or an exporter CLI
+    argument.  A model release opts into the native cursor by shipping the
+    checkpoint alongside its weights.  HuggingFace-style releases commonly
+    put it at the model root, while an already materialized export puts it in
+    ``<variant>/weights``; both locations are accepted during the transition.
+    The returned path is always the exported ``weights/head.pt`` when a
+    package directory is available, so build/assemble steps carry the head
+    with the rest of the runtime weights.
+
+    If both source and exported copies exist, they must be byte-identical.
+    This prevents a stale exported head from silently enabling a graph for a
+    different model release.
+    """
+    model_dir = Path(model_dir)
+    exported_weights_dir = Path(exported_weights_dir)
+    package_head = exported_weights_dir / "head.pt"
+    candidates = [model_dir / "head.pt", model_dir / "weights" / "head.pt"]
+    source_heads: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        resolved = candidate.resolve()
+        if resolved not in seen:
+            source_heads.append(candidate)
+            seen.add(resolved)
+
+    if len(source_heads) > 1:
+        first_sha = _sha256_file(source_heads[0])
+        for candidate in source_heads[1:]:
+            if _sha256_file(candidate) != first_sha:
+                raise ValueError(
+                    "multiple model cursor heads found with different contents: "
+                    f"{source_heads[0]} and {candidate}"
+                )
+
+    if package_head.is_file() and source_heads:
+        package_sha = _sha256_file(package_head)
+        source_sha = _sha256_file(source_heads[0])
+        if package_sha != source_sha:
+            raise ValueError(
+                "exported weights/head.pt conflicts with the model-owned cursor head: "
+                f"{package_head} vs {source_heads[0]}"
+            )
+
+    if source_heads and not package_head.is_file():
+        exported_weights_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_heads[0], package_head)
+        logger.info("Staged native cursor head with exported weights: %s", package_head)
+
+    if package_head.is_file():
+        return package_head
+    return None
 
 
 def load_tts_model(

@@ -883,6 +883,7 @@ class Executor:
         self._cursor_max_labels = 0
         self._cursor_d = 0
         self._cursor_history = 0
+        self._cursor_head_path: Optional[Path] = None
         self._manifest: dict = {}
         self._debug_dumper = EngineDebugDumper(
             engine_dir=self._engine_dir,
@@ -946,6 +947,11 @@ class Executor:
         """Manifest capability used by request-level progress routing."""
         value = self._manifest.get("native_cursor") or {}
         return dict(value) if self.native_cursor_enabled else {"enabled": False}
+
+    @property
+    def native_cursor_head_path(self) -> Optional[Path]:
+        """Model-owned head asset that opted this package into native cursor."""
+        return self._cursor_head_path if self.native_cursor_enabled else None
 
     # ------------------------------------------------------------------
     # Initialization
@@ -1305,6 +1311,14 @@ class Executor:
         capability = self._manifest.get("native_cursor") or {}
         if not capability.get("enabled") or self._fused_engine is None:
             return
+        head_path = self._weights_dir / "head.pt" if self._weights_dir else None
+        if head_path is None or not head_path.is_file():
+            logger.warning(
+                "Native cursor plan is declared but weights/head.pt is missing; "
+                "disabling native cursor for this package"
+            )
+            return
+        self._cursor_head_path = head_path
         if str(self._manifest.get("variant", "")) != "custom-1.7b":
             raise RuntimeError(
                 "native cursor is only validated for the custom-1.7b artifact"

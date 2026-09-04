@@ -251,6 +251,19 @@ DISABLED-> 不发布文本进度
 标准 plan 与 cursor-enabled plan 的外部音频 ABI 保持一致，cursor output 通过 manifest
 能力声明和可选 binding 适配。
 
+### D11. `head.pt` 是随模型权重发布的可选能力资产
+
+`head.pt` 不再放在仓库、分支资源目录或由命令行路径注入。模型发布方将它放在模型
+权重目录中；导出阶段自动发现模型目录下的 `head.pt`（兼容过渡期也接受
+`model/weights/head.pt`），并将它复制到导出包的 `<variant>/weights/head.pt`。已经存在
+的导出权重目录若包含 `head.pt`，也可作为 standalone export 的输入；若源文件和导出
+文件同时存在但内容不同，导出必须失败，避免陈旧游标头静默启用。
+
+因此，`weights/head.pt` 的存在是“该模型请求启用游标”的资产级开关；它仍必须与
+`native_cursor.enabled=true` 的 cursor-enabled TRT plan、manifest fingerprint 和已验证的
+模型组合同时成立。没有 `head.pt` 时只生成/运行 standard TRT plan，不得通过 CLI 强行
+挂载另一个模型的游标头。
+
 ## 3. cursor-enabled TRT 图接口
 
 ### 3.1 额外输入
@@ -413,10 +426,12 @@ tail rewrite 时优先通过 `owner_id` 或稳定 raw span 重锚定，不能直
 - `scripts/export/native_cursor_modules.py`：将 released `la=1` 游标头转换为
   TensorRT 可导出的单帧 streaming step。每个 block 使用激活历史，最后一层保留
   pending lookahead；输入是固定长度 label/state，输出是下一帧的神经状态和数值估计。
-- `scripts/export/export_09_talker_code2wav_fused.py`：增加可选
-  `--cursor-head`，生成 `Talker -> Cursor -> Code2Wav` 的 cursor-enabled ONNX。游标
-  分支直接连接 Talker 内部采样出的 `full_codec[:, 0]`，不发生 host round-trip；显式
-  `codec0` 只作为 ABI alias 输出。
+- `scripts/export/export_09_talker_code2wav_fused.py`：自动发现模型/导出权重目录中的
+  `head.pt`，存在时生成 `Talker -> Cursor -> Code2Wav` 的 cursor-enabled ONNX；不存在时
+  保持 standard 图合同。游标分支直接连接 Talker 内部采样出的 `full_codec[:, 0]`，不发生
+  host round-trip；显式 `codec0` 只作为 ABI alias 输出。
+- `scripts/export/export_01_embeddings.py`：把模型发布目录中的 `head.pt` 随其他导出
+  权重复制到 `<variant>/weights/head.pt`，使 bundle 携带完整的能力资产。
 - `scripts/python/triton_manifest_io.py`、`trt_fused_io_formats.py`、
   `trt_fused_talk_c2w_profiles.py` 和 TRT host builder：声明 cursor capability、固定
   `[B, M_max]` label/profile、状态 shape 及 integer/float I/O 类型。

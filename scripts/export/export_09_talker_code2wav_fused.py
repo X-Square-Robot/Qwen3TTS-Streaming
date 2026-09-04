@@ -22,9 +22,10 @@ Outputs:
     c2w_new_kv         — [B, n_c2w*2, c2w_heads, chunk_t, c2w_head_dim]
     c2w_new_conv_state_*, c2w_new_transconv_overlap_*
 
-When ``--cursor-head`` is supplied, the graph additionally receives fixed-size
-``cursor_*`` label/state inputs and appends the cursor state outputs plus a
-``codec0`` ABI alias.  The standard export path keeps the legacy I/O contract.
+When the model-owned ``head.pt`` is present in the model/export ``weights``
+directory, the graph additionally receives fixed-size ``cursor_*`` label/state
+inputs and appends the cursor state outputs plus a ``codec0`` ABI alias.  The
+standard export path keeps the legacy I/O contract.
 
 Depends on: tokenizer (code2wav decoder) + TTS variant (talker).
 
@@ -76,6 +77,7 @@ from utils import (
     ensure_output_dir,
     load_speech_tokenizer,
     load_tts_model,
+    prepare_native_cursor_head,
     patch_decoder_transconv_for_trt,
     export_onnx,
     verify_onnx,
@@ -848,11 +850,11 @@ def export_talker_code2wav_fused(
     device: str = "cpu",
     engine_dtype: str = "bf16",
     triton_io_float_dtype: str = "bf16",
-    cursor_head_path: Optional[str] = None,
     cursor_max_labels: int = 512,
 ) -> dict:
     model_path = resolve_model_path(variant, models_dir)
     out_dir = ensure_output_dir(output_dir, variant)
+    cursor_head_path = prepare_native_cursor_head(model_path, out_dir / "weights")
     logger.info(f"Loading model: {variant} from {model_path}")
     model = load_tts_model(model_path, device="cpu", dtype=torch.float32)
     onnx_path = _export_talker_code2wav_fused_onnx(
@@ -890,15 +892,6 @@ def main():
         help="Float I/O binding + Triton TYPE_* (must match Phase B trtexec --inputIOFormats/--outputFormats)",
     )
     parser.add_argument(
-        "--cursor-head",
-        type=str,
-        default=None,
-        help=(
-            "Path to a released native-cursor checkpoint. When supplied, export "
-            "the cursor-enabled fused graph (custom-1.7b only)."
-        ),
-    )
-    parser.add_argument(
         "--cursor-max-labels",
         type=int,
         default=512,
@@ -920,7 +913,6 @@ def main():
                 device,
                 engine_dtype=args.engine_dtype,
                 triton_io_float_dtype=args.triton_io_float_dtype,
-                cursor_head_path=args.cursor_head,
                 cursor_max_labels=args.cursor_max_labels,
             )
             for k, v in results.items():

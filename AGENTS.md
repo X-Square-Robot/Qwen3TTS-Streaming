@@ -108,4 +108,11 @@
     route。官方模型没有匹配游标头时必须走 standard plan；native 运行中失败只能降级 EMA，
     不能中途重置 Talker/Code2Wav 状态或切换到官方 PyTorch backend。
 
+16. **`head.pt` 随模型权重发布，不作为仓库资源或 CLI 开关。** 导出器自动发现模型目录
+    （过渡期兼容 `model/weights/head.pt`）或已导出的 `<variant>/weights/head.pt`；模型侧
+    找到时将其复制到导出权重目录，供 bundle 一起发布。`weights/head.pt` 的存在表示该
+    模型请求启用游标，但只有匹配的 cursor-enabled TRT plan 和 manifest fingerprint 才能
+    真正启用；没有该文件必须保持 standard plan。源文件与导出副本不一致时必须失败，禁止
+    通过 `--cursor-head` 或其他外部路径静默挂载不属于当前权重的游标头。
+
 如需改变以上任一规则，先更新决策记录，写清理由、验证数据、兼容影响和迁移方案，再修改实现。
