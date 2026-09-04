@@ -12,7 +12,11 @@ import torch.nn as nn
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "export"))
 
-from native_cursor_modules import CursorHead, CursorStreamingStep  # noqa: E402
+from native_cursor_modules import (  # noqa: E402
+    CursorHead,
+    CursorStreamingStep,
+    build_cursor_head_from_checkpoint,
+)
 from utils import (  # noqa: E402
     NATIVE_CURSOR_HEAD_FILENAME,
     prepare_native_cursor_head,
@@ -124,6 +128,252 @@ def test_streaming_trunk_and_matcher_match_offline_lookahead() -> None:
         torch.testing.assert_close(got[0], want[0], rtol=1e-5, atol=1e-5)
         torch.testing.assert_close(got[1], want[1], rtol=1e-5, atol=1e-5)
         torch.testing.assert_close(got[2], want[2], rtol=1e-5, atol=1e-5)
+
+
+def test_streaming_cursor_matches_offline_reference_for_many_frames() -> None:
+    """Exercise recurrent state for a long enough run to expose drift."""
+    torch.manual_seed(20260904)
+    head = CursorHead(n_labels_plus_blank=17, d=16).eval()
+    step = CursorStreamingStep(head).eval()
+    b, frames, labels_count = 2, 96, 32
+    codec0 = torch.randint(0, head.emb.num_embeddings, (b, frames))
+    labels = torch.randint(1, head.n_labels_plus_blank, (b, labels_count))
+    known = torch.tensor([labels_count, labels_count - 5], dtype=torch.long)
+    active = torch.ones(b, dtype=torch.int64)
+    text_start = torch.tensor([0, 3], dtype=torch.long)
+
+    mu = torch.zeros(b)
+    frames_since = torch.zeros(b)
+    delta_history = torch.zeros(b, 8)
+    conv_history = torch.zeros(b, head.history_width, head.d)
+    last_trunk_input = torch.zeros(b, head.d)
+    seen_frames = torch.zeros(b, dtype=torch.long)
+    override_valid = torch.zeros(b, dtype=torch.int64)
+    override_mu = torch.zeros(b)
+
+    with torch.no_grad():
+        offline_h = head.forward_trunk(codec0)
+        text_h = head.encode_text(labels)
+        for frame_idx in range(frames):
+            state_before = (
+                mu.clone(),
+                frames_since.clone(),
+                delta_history.clone(),
+            )
+            actual = step(
+                codec0[:, frame_idx],
+                labels,
+                known,
+                active,
+                mu,
+                frames_since,
+                delta_history,
+                conv_history,
+                last_trunk_input,
+                seen_frames,
+                text_start,
+                override_valid,
+                override_mu,
+            )
+
+            if frame_idx > 0:
+                mu_before, frames_before, deltas_before = state_before
+                base = torch.floor(mu_before).long().view(b, 1)
+                loc = head.location_features(
+                    mu_before,
+                    frames_before,
+                    deltas_before.mean(dim=1),
+                ).view(b, 1, 3)
+                logits = head.window_logits(
+                    offline_h[:, frame_idx - 1 : frame_idx],
+                    text_h,
+                    base,
+                    loc,
+                    known.view(b, 1),
+                )
+                probability = logits.softmax(-1).view(b, -1)
+                delta_ref = (probability * head.offset_values).sum(-1)
+                valid_ref = active.bool() & (frame_idx - 1 >= text_start) & (known > 0)
+                delta_ref = torch.where(valid_ref, delta_ref, torch.zeros_like(delta_ref))
+                candidate = (mu_before + delta_ref).clamp_min(0.0)
+                candidate = torch.minimum(candidate, known.float())
+                mu_ref = torch.where(valid_ref, candidate, mu_before)
+                confidence_ref = torch.where(
+                    valid_ref,
+                    probability.max(-1).values,
+                    torch.zeros_like(delta_ref),
+                )
+                torch.testing.assert_close(actual[0], valid_ref.to(torch.int64))
+                torch.testing.assert_close(actual[1], mu_ref, rtol=1e-5, atol=1e-5)
+                torch.testing.assert_close(actual[2], delta_ref, rtol=1e-5, atol=1e-5)
+                torch.testing.assert_close(
+                    actual[3], confidence_ref, rtol=1e-5, atol=1e-5
+                )
+                torch.testing.assert_close(actual[4], torch.floor(mu_ref).long())
+
+            mu, frames_since, delta_history = actual[1], actual[5], actual[6]
+            conv_history, last_trunk_input, seen_frames = actual[7], actual[8], actual[9]
+
+
+def test_streaming_cursor_onnx_state_recurrence_matches_pytorch(tmp_path) -> None:
+    """Run the exported streaming step repeatedly, feeding its state back."""
+    head = CursorHead(n_labels_plus_blank=9, d=8).eval()
+    step = CursorStreamingStep(head).eval()
+    b, max_labels = 1, 6
+    initial = (
+        torch.tensor([3], dtype=torch.long),
+        torch.ones(b, max_labels, dtype=torch.long),
+        torch.tensor([max_labels], dtype=torch.long),
+        torch.ones(b, dtype=torch.int64),
+        torch.zeros(b),
+        torch.zeros(b),
+        torch.zeros(b, 8),
+        torch.zeros(b, head.history_width, head.d),
+        torch.zeros(b, head.d),
+        torch.zeros(b, dtype=torch.long),
+        torch.zeros(b, dtype=torch.long),
+        torch.zeros(b, dtype=torch.int64),
+        torch.zeros(b),
+    )
+    input_names = [
+        "codec0",
+        "label_ids",
+        "label_count",
+        "cursor_active",
+        "mu",
+        "frames_since_advance",
+        "delta_history",
+        "conv_history",
+        "last_trunk_input",
+        "seen_frames",
+        "text_start_frame",
+        "override_valid",
+        "override_mu",
+    ]
+    output_names = [f"output_{idx}" for idx in range(10)]
+    onnx_path = tmp_path / "cursor_step.onnx"
+    torch.onnx.export(
+        step,
+        initial,
+        str(onnx_path),
+        input_names=input_names,
+        output_names=output_names,
+        opset_version=18,
+        dynamo=False,
+    )
+    import onnxruntime as ort
+
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    torch_state = list(initial)
+    ort_state = list(initial)
+    session_input_names = {item.name for item in session.get_inputs()}
+    with torch.no_grad():
+        for frame_idx in range(20):
+            code = torch.tensor([frame_idx + 1], dtype=torch.long)
+            torch_args = [code, *torch_state[1:]]
+            expected = step(*torch_args)
+            feed = {
+                name: value.detach().cpu().numpy()
+                for name, value in zip(input_names, [code, *ort_state[1:]])
+                if name in session_input_names
+            }
+            actual = session.run(output_names, feed)
+            for got, want in zip(actual, expected):
+                torch.testing.assert_close(
+                    torch.from_numpy(got), want.cpu(), rtol=1e-4, atol=1e-4
+                )
+            torch_state[4:7] = [expected[1], expected[5], expected[6]]
+            torch_state[7:10] = [expected[7], expected[8], expected[9]]
+            ort_outputs = [torch.from_numpy(value) for value in actual]
+            ort_state[4:7] = [ort_outputs[1], ort_outputs[5], ort_outputs[6]]
+            ort_state[7:10] = [ort_outputs[7], ort_outputs[8], ort_outputs[9]]
+
+
+_RELEASED_CURSOR_HEAD = (
+    REPO_ROOT
+    / "workspace"
+    / "models"
+    / "Qwen3-TTS-12Hz-1.7B-CustomVoice"
+).resolve() / NATIVE_CURSOR_HEAD_FILENAME
+
+
+@pytest.mark.skipif(
+    not _RELEASED_CURSOR_HEAD.is_file(),
+    reason="released custom-1.7B cursor head is not mounted",
+)
+def test_released_cursor_head_streaming_matches_offline_for_many_frames() -> None:
+    """Regression against the model-owned 0818 head, not only a tiny random head."""
+    head, meta = build_cursor_head_from_checkpoint(_RELEASED_CURSOR_HEAD)
+    assert meta["left_context"] == 29
+    assert meta["right_context"] == 1
+    assert meta["parameter_count"] == 2_036_991
+    head.eval()
+    step = CursorStreamingStep(head).eval()
+    torch.manual_seed(20260905)
+    b, frames, max_labels = 2, 96, 48
+    codec0 = torch.randint(0, head.emb.num_embeddings, (b, frames))
+    labels = torch.randint(1, head.n_labels_plus_blank, (b, max_labels))
+    known = torch.tensor([max_labels, max_labels - 7], dtype=torch.long)
+    active = torch.ones(b, dtype=torch.int64)
+    text_start = torch.tensor([0, 4], dtype=torch.long)
+    mu = torch.zeros(b)
+    frames_since = torch.zeros(b)
+    delta_history = torch.zeros(b, 8)
+    conv_history = torch.zeros(b, head.history_width, head.d)
+    last_trunk_input = torch.zeros(b, head.d)
+    seen_frames = torch.zeros(b, dtype=torch.long)
+    override_valid = torch.zeros(b, dtype=torch.int64)
+    override_mu = torch.zeros(b)
+
+    with torch.no_grad():
+        offline_h = head.forward_trunk(codec0)
+        text_h = head.encode_text(labels)
+        for frame_idx in range(frames):
+            mu_before = mu.clone()
+            frames_before = frames_since.clone()
+            deltas_before = delta_history.clone()
+            actual = step(
+                codec0[:, frame_idx],
+                labels,
+                known,
+                active,
+                mu,
+                frames_since,
+                delta_history,
+                conv_history,
+                last_trunk_input,
+                seen_frames,
+                text_start,
+                override_valid,
+                override_mu,
+            )
+            if frame_idx > 0:
+                base = torch.floor(mu_before).long().view(b, 1)
+                loc = head.location_features(
+                    mu_before,
+                    frames_before,
+                    deltas_before.mean(dim=1),
+                ).view(b, 1, 3)
+                logits = head.window_logits(
+                    offline_h[:, frame_idx - 1 : frame_idx],
+                    text_h,
+                    base,
+                    loc,
+                    known.view(b, 1),
+                )
+                probability = logits.softmax(-1).view(b, -1)
+                delta_ref = (probability * head.offset_values).sum(-1)
+                valid_ref = active.bool() & (frame_idx - 1 >= text_start) & (known > 0)
+                delta_ref = torch.where(valid_ref, delta_ref, torch.zeros_like(delta_ref))
+                candidate = torch.minimum(
+                    (mu_before + delta_ref).clamp_min(0.0), known.float()
+                )
+                mu_ref = torch.where(valid_ref, candidate, mu_before)
+                torch.testing.assert_close(actual[0], valid_ref.to(torch.int64))
+                torch.testing.assert_close(actual[1], mu_ref, rtol=1e-5, atol=1e-5)
+                torch.testing.assert_close(actual[2], delta_ref, rtol=1e-5, atol=1e-5)
+            mu, frames_since, delta_history = actual[1], actual[5], actual[6]
+            conv_history, last_trunk_input, seen_frames = actual[7], actual[8], actual[9]
 
 
 def test_cursor_step_keeps_trunk_state_when_text_is_not_visible() -> None:
