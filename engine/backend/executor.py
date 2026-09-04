@@ -37,6 +37,12 @@ from .batch_helper import (
 )
 from .debug_dump import EngineDebugDumper
 from ..core.lifecycle import LifecycleLogger
+from ..core.speech_state import SpeechStateCapability
+from .speech_state import (
+    SpeechStateAdapter,
+    capability_from_adapter,
+    coerce_speech_state_adapter,
+)
 from .kv_cache_pool import KVCachePool, ModelConfig, SlotKVState
 
 logger = logging.getLogger(__name__)
@@ -810,6 +816,7 @@ class Executor:
         temperature: float = 0.9,
         repetition_penalty: float = 1.05,
         random_seed: int = 0,
+        speech_state_adapter: SpeechStateAdapter | None = None,
     ):
         self._engine_dir = Path(engine_dir) if engine_dir else None
         self._weights_dir = Path(weights_dir) if weights_dir else None
@@ -822,6 +829,12 @@ class Executor:
         self._temperature = temperature
         self._repetition_penalty = repetition_penalty
         self._random_seed = int(random_seed)
+        # The official model path has no acoustic state handoff yet.  Keeping
+        # a no-op adapter here makes the capability boundary explicit without
+        # changing any launch/prefill/decode behavior.
+        self._speech_state_adapter: SpeechStateAdapter = coerce_speech_state_adapter(
+            speech_state_adapter
+        )
 
         self._compute_stream = torch.cuda.Stream(device=self._device)
 
@@ -891,6 +904,18 @@ class Executor:
     def max_input_len(self) -> int:
         """Max prefill length the loaded TRT plan supports (0 if unknown)."""
         return self._max_input_len
+
+    @property
+    def speech_state_adapter(self) -> SpeechStateAdapter:
+        """Backend-owned adapter; callers must not retain its state payload."""
+
+        return self._speech_state_adapter
+
+    @property
+    def speech_state_capability(self) -> SpeechStateCapability:
+        """Stable, fail-closed capability advertised by the adapter."""
+
+        return capability_from_adapter(self._speech_state_adapter)
 
     # ------------------------------------------------------------------
     # Initialization

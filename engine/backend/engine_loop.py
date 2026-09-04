@@ -69,6 +69,11 @@ import numpy as np
 import torch
 
 from ..core.mlfq import MLFQConfig, MLFQMeta, MLFQScheduler
+from ..core.speech_state import (
+    SpeechStateCapability,
+    SpeechStateHandle,
+    coerce_speech_state_capability,
+)
 from ..core.types import (
     EngineRequest,
     EngineResult,
@@ -126,6 +131,9 @@ class EngineSegment:
         "prefix_probe_key",
         "prefix_probe_task_type",
         "prefix_probe_done",
+        # Reserved for a future backend-owned acoustic state checkpoint.  The
+        # loop never serializes or mutates the handle in the Phase-0 path.
+        "speech_state_handle",
     )
 
     def __init__(
@@ -177,6 +185,7 @@ class EngineSegment:
         self.prefix_probe_key: Optional[str] = None
         self.prefix_probe_task_type: Optional[TaskType] = None
         self.prefix_probe_done: bool = False
+        self.speech_state_handle: Optional[SpeechStateHandle] = None
 
 
 class EngineSessionGroup:
@@ -191,9 +200,15 @@ class EngineSessionGroup:
         "created_at",
         "overflow_token_ids",
         "first_text_dequeued_at",
+        "speech_state_capability",
     )
 
-    def __init__(self, session_id: str, request: EngineRequest):
+    def __init__(
+        self,
+        session_id: str,
+        request: EngineRequest,
+        speech_state_capability: Optional[SpeechStateCapability] = None,
+    ):
         self.session_id = session_id
         self.request = request
         self.result_queue: Optional[asyncio.Queue] = request.result_queue
@@ -202,6 +217,9 @@ class EngineSessionGroup:
         self.created_at: float = time.monotonic()
         self.overflow_token_ids: list[int] = []
         self.first_text_dequeued_at: Optional[float] = None
+        self.speech_state_capability = coerce_speech_state_capability(
+            speech_state_capability
+        )
 
     @property
     def active_slot_count(self) -> int:
@@ -269,6 +287,11 @@ class EngineLoop:
         self._inbox = engine_inbox
         self._async_loop = async_loop
         self._executor = executor
+        # Capability discovery is deliberately metadata-only.  Legacy executor
+        # test doubles do not expose these properties, so they safely resolve
+        # to the disabled descriptor and follow the exact old code path.
+        capability = getattr(executor, "speech_state_capability", None)
+        self._speech_state_capability = coerce_speech_state_capability(capability)
         self._prefill_builder = prefill_builder
         self._max_batch = max_batch_size
         self._max_idle_sec = max_idle_sec
@@ -377,6 +400,12 @@ class EngineLoop:
         this instead.
         """
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def speech_state_capability(self) -> SpeechStateCapability:
+        """Read-only model capability; no state transition is performed."""
+
+        return self._speech_state_capability
 
     # ------------------------------------------------------------------
     # Main loop
@@ -621,7 +650,11 @@ class EngineLoop:
                     req.session_id,
                 )
                 self._remove_session(req.session_id)
-            group = EngineSessionGroup(req.session_id, req)
+            group = EngineSessionGroup(
+                req.session_id,
+                req,
+                speech_state_capability=self._speech_state_capability,
+            )
             self._groups[req.session_id] = group
             self._total_sessions += 1
             logger.debug("New session group: %s", req.session_id)
@@ -3039,4 +3072,5 @@ class EngineLoop:
             "total_evictions": self._total_evictions,
             "total_timeouts": self._total_timeouts,
             "prefix_cache_stats": self._prefix_cache.stats,
+            "speech_state": self._speech_state_capability.to_dict(),
         }

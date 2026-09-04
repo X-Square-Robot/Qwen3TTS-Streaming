@@ -65,6 +65,7 @@ from .frontend.diagnostic_text import (
     format_engine_model_version,
 )
 from .core.mlfq import MLFQConfig
+from .core.speech_state import SpeechStateCapability
 from .core import observability as obs
 from .core.types import SessionConfig
 from .interface import normalize_capabilities, tenvad_available
@@ -72,6 +73,12 @@ from .frontend.interface import FrontendInterface
 from .frontend.spliter.tokenizer import LightQwen3TTSTokenizer
 from .backend.engine_loop import EngineLoop
 from .backend.executor import Executor
+from .backend.speech_state import (
+    NullSpeechStateAdapter,
+    SpeechStateAdapter,
+    capability_from_adapter,
+    coerce_speech_state_adapter,
+)
 from .backend.prefill import EmbeddingWeights, PrefillBuilder
 from .backend.ref_audio_processor import ReferenceAudioProcessor
 from .distribution.sdk import mount_sdk_routes
@@ -124,6 +131,7 @@ class TTSEngine:
         max_batch_size: int = 48,
         max_sessions: int = 128,
         max_seq_len: int = 512,
+        speech_state_adapter: SpeechStateAdapter | None = None,
     ):
         self._cfg = config or EngineConfig()
         self._model_arch = model_arch or ModelArchConfig()
@@ -147,6 +155,15 @@ class TTSEngine:
         )
         self._max_seq_len = (
             max_seq_len if max_seq_len != 512 else self._cfg.scheduler.max_seq_len
+        )
+        # Keep the adapter backend-owned.  Only its immutable capability is
+        # exposed to the async/session and gateway layers; no model behavior is
+        # changed until a future engine-thread handoff path explicitly opts in.
+        self._speech_state_adapter: SpeechStateAdapter = coerce_speech_state_adapter(
+            speech_state_adapter
+        )
+        self._speech_state_capability: SpeechStateCapability = capability_from_adapter(
+            self._speech_state_adapter
         )
         self._validate_runtime_profile_bounds()
         self._cfg.scheduler.max_batch_size = self._max_batch
@@ -280,7 +297,7 @@ class TTSEngine:
                 package_paths.engine_mode,
                 runtime_artifact,
             )
-        self._executor = Executor(
+        executor_kwargs = dict(
             engine_dir=self._engine_dir,
             weights_dir=self._weights_dir,
             device_id=self._device_id,
@@ -292,6 +309,12 @@ class TTSEngine:
             repetition_penalty=sampling.repetition_penalty,
             random_seed=sampling.random_seed,
         )
+        # Do not even add a new keyword on the official/legacy path.  This
+        # keeps injected Executor test doubles and older embedders source
+        # compatible while still allowing an explicit custom adapter.
+        if not isinstance(self._speech_state_adapter, NullSpeechStateAdapter):
+            executor_kwargs["speech_state_adapter"] = self._speech_state_adapter
+        self._executor = Executor(**executor_kwargs)
         try:
             self._executor.load()
         except Exception as exc:
@@ -309,6 +332,16 @@ class TTSEngine:
             raise
         self._max_batch = self._executor.max_batch_size
         self._max_seq_len = self._executor.max_seq_len
+        loaded_capability = getattr(self._executor, "speech_state_capability", None)
+        if isinstance(loaded_capability, SpeechStateCapability):
+            self._speech_state_capability = loaded_capability
+        else:
+            # Older/injected Executor implementations have no capability
+            # property; retain the fail-closed descriptor rather than making a
+            # new optional protocol field a startup requirement.
+            self._speech_state_capability = capability_from_adapter(
+                getattr(self._executor, "speech_state_adapter", None)
+            )
 
         # Cross-check the loaded plan's prefill bound against the manifest so a
         # mismatch surfaces at startup rather than mid-stream on the first
@@ -325,7 +358,7 @@ class TTSEngine:
             )
 
         sc = self._cfg.spliter
-        self._frontend = FrontendInterface(
+        frontend_kwargs = dict(
             engine_inbox=self._async_inbox,
             tokenizer=self._tokenizer,
             max_sessions=self._max_sessions,
@@ -348,6 +381,9 @@ class TTSEngine:
             guarded_delivery_window_ms=self._cfg.server.guarded_delivery_window_ms,
             engine_model_version=engine_model_version,
         )
+        if not isinstance(self._speech_state_adapter, NullSpeechStateAdapter):
+            frontend_kwargs["speech_state_capability"] = self._speech_state_capability
+        self._frontend = FrontendInterface(**frontend_kwargs)
         prefill_builder = None
         if self._weights_dir:
             try:
@@ -615,13 +651,23 @@ class TTSEngine:
         """
         return self._engine_loop is not None and self._engine_loop.thread_alive()
 
+    @property
+    def speech_state_capability(self) -> SpeechStateCapability:
+        """Model/runtime state-handoff capability (disabled by default)."""
+
+        return self._speech_state_capability
+
     def health_stats(self) -> dict:
         """Return engine health metrics (safe to call from asyncio thread)."""
         if self._engine_loop is None:
-            return {"running": False}
+            return {
+                "running": False,
+                "speech_state": self._speech_state_capability.to_dict(),
+            }
         stats = self._engine_loop.health_stats()
         stats["variant"] = self._model_arch.variant
         stats["loaded_model_type"] = self._loaded_model_type()
+        stats["speech_state"] = self._speech_state_capability.to_dict()
         if self._model_arch.supported_task_types:
             stats["declared_supported_task_types"] = list(
                 self._model_arch.supported_task_types
@@ -647,6 +693,7 @@ class TTSEngine:
             {
                 "variant": self._model_arch.variant,
                 "loaded_model_type": self._loaded_model_type(),
+                "speech_state": self._speech_state_capability.to_dict(),
                 # Release stamp (git tag) baked into the image at build time
                 # (ENGINE_VERSION); the SDK<->engine wheel pairing key the
                 # client checks at connect. Rides this versioned capabilities

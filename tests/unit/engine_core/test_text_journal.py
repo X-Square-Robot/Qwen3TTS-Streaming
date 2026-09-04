@@ -160,3 +160,21 @@ def test_session_global_trim_finish_releases_held_digit_after_leading_space():
 
     assert journal.normalized_text == "1"
     assert journal.raw_span(0, 1) == (1, 2)
+
+
+def test_append_spoken_preserves_raw_source_for_tn_expansion():
+    journal = CanonicalTextJournal(
+        _normalize_tts_text,
+        strip_leading_whitespace=True,
+    )
+
+    assert journal.append_spoken("是99%", 0, 1, "是") == ("是", 0)
+    assert journal.append_spoken("是99%", 1, 4, "百分之九十九") == (
+        "百分之九十九",
+        1,
+    )
+    assert journal.raw_text == "是99%"
+    assert journal.normalized_text == "是百分之九十九"
+    assert journal.raw_span(1, len(journal.normalized_text)) == (1, 4)
+    journal.finalize_projection()
+    assert journal.input_final is True

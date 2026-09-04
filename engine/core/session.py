@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from .speech_state import SpeechStateCapability
 from .types import EngineResult, SessionConfig, SessionState
 from .text_journal import CanonicalTextJournal
 
@@ -111,6 +112,14 @@ class Session:
     # Metrics
     total_steps: int = 0
     total_audio_bytes: int = 0
+
+    # Static, fail-closed model capability copied at session creation.  Keep it
+    # at the end to preserve the positional constructor ABI of legacy callers.
+    # The asyncio-side Session never owns a checkpoint/opaque handle; those
+    # remain on the engine thread and backend adapter.
+    speech_state_capability: SpeechStateCapability = field(
+        default_factory=SpeechStateCapability.disabled
+    )
 
     def append_text(self, text: str) -> None:
         self._text_buffer += text

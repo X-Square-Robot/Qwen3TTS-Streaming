@@ -26,6 +26,194 @@ class CanonicalTextJournal:
     input_final: bool = False
     strip_leading_whitespace: bool = False
 
+    def install_projection(
+        self,
+        raw_text: str,
+        normalized_text: str,
+        normalized_to_raw: list[int] | tuple[int, ...] | None = None,
+    ) -> None:
+        """Install a completed raw→spoken projection.
+
+        The ordinary :meth:`append` path deliberately only permits a
+        canonical normalizer to extend an existing prefix.  Text
+        normalization (TN), however, can expand a raw span (``99%`` →
+        ``百分之九十九``), so feeding the spoken result back through
+        ``append`` would either discard it or raise the prefix-rewrite guard.
+        A completed FULL_TEXT request can use this method to publish the final
+        projection while retaining the original raw coordinate space.
+
+        ``normalized_to_raw`` contains one raw boundary for every spoken
+        boundary (therefore its length is ``len(normalized_text) + 1``).  The
+        map is intentionally coarse when a verbalized span has no finer
+        alignment: all of its spoken characters may map to the source span.
+        Boundary validation here keeps progress anchors monotonic and prevents
+        malformed adapter data from escaping into the transport contract.
+        """
+
+        raw = str(raw_text or "")
+        normalized = str(normalized_text or "")
+        if normalized_to_raw is None:
+            # Identity is useful for callers that install a literal spoken
+            # projection.  For an expansion, callers must provide a map.
+            if len(raw) != len(normalized):
+                raise ValueError(
+                    "normalized_to_raw is required when raw and spoken lengths differ"
+                )
+            boundaries = list(range(len(normalized) + 1))
+        else:
+            boundaries = [int(value) for value in normalized_to_raw]
+            if len(boundaries) != len(normalized) + 1:
+                raise ValueError(
+                    "normalized_to_raw must have len(normalized_text) + 1 entries"
+                )
+
+        if boundaries and (boundaries[0] < 0 or boundaries[-1] > len(raw)):
+            raise ValueError("normalized_to_raw boundaries exceed raw text")
+        if any(left > right for left, right in zip(boundaries, boundaries[1:])):
+            raise ValueError("normalized_to_raw boundaries must be monotonic")
+
+        self.raw_text = raw
+        self.normalized_text = normalized
+        self.normalized_to_raw = boundaries or [len(raw)]
+        self.raw_to_normalized = _inverse_boundaries(
+            self.raw_text,
+            self.normalized_to_raw,
+        )
+        self.input_final = True
+
+    def update_raw_source(self, raw_text: str) -> None:
+        """Refresh the raw coordinate source without changing spoken text.
+
+        The streaming TN controller can have an open semantic span which is
+        not yet eligible for TTS.  Its source still belongs in the session
+        journal, though, so diagnostics and progress consumers see the actual
+        upstream text rather than only the committed spoken prefix.  This
+        method deliberately leaves ``normalized_text`` untouched.
+        """
+
+        if self.input_final:
+            raise ValueError("cannot update a finalized text projection")
+        raw = str(raw_text or "")
+        boundaries = [
+            max(0, min(len(raw), int(value)))
+            for value in (self.normalized_to_raw or [0])
+        ]
+        self.raw_text = raw
+        self.normalized_to_raw = _monotonic(boundaries)
+        self.raw_to_normalized = _inverse_boundaries(
+            self.raw_text,
+            self.normalized_to_raw,
+        )
+
+    def append_spoken(
+        self,
+        raw_text: str,
+        raw_start: int,
+        raw_end: int,
+        spoken_text: str,
+        *,
+        mapping: list[tuple[int, int]] | tuple[tuple[int, int], ...] | None = None,
+    ) -> tuple[str, int]:
+        """Append an already-decided TN commit and retain raw coordinates.
+
+        ``append`` is intentionally a raw→canonical prefix operation.  It is
+        therefore unsuitable for a causal TN commit such as ``99%`` →
+        ``百分之九十九``.  This companion API accepts the spoken append-only
+        delta, while ``raw_text`` remains the complete upstream source.  The
+        source span is used as a conservative alignment for expansions; a
+        backend-provided mapping is accepted for validation and future finer
+        grained alignment but never allowed to move the fence backwards.
+        """
+
+        if self.input_final:
+            raise ValueError("cannot append to a finalized text projection")
+        old_normalized = self.normalized_text
+        value = str(spoken_text or "")
+        delta = str(self.normalize(value)) if value else ""
+        if self.strip_leading_whitespace and not old_normalized:
+            delta = delta.lstrip()
+        elif old_normalized and delta and old_normalized[-1].isspace():
+            # A whitespace commit can be split from the following commit.  Do
+            # not create a duplicate canonical separator at that boundary.
+            delta = delta.lstrip()
+
+        source = str(raw_text or "")
+        start = max(0, min(len(source), int(raw_start)))
+        end = max(start, min(len(source), int(raw_end)))
+        if mapping:
+            # Mapping is diagnostic data.  Validate it here so malformed
+            # adapter output cannot poison the public raw-coordinate map, then
+            # use the union as a conservative span for the spoken expansion.
+            try:
+                mapped = [
+                    (max(0, int(left)), max(0, int(right)))
+                    for left, right in mapping
+                ]
+                if mapped:
+                    start = max(0, min(len(source), min(left for left, _ in mapped)))
+                    end = max(
+                        start,
+                        min(len(source), max(right for _, right in mapped)),
+                    )
+            except (TypeError, ValueError):
+                # Fall back to the commit fence supplied by the controller.
+                pass
+
+        old_boundaries = list(self.normalized_to_raw or [0])
+        if len(old_boundaries) != len(old_normalized) + 1:
+            raise ValueError("normalized_to_raw is out of sync with normalized_text")
+        self.raw_text = source
+        if delta:
+            join = max(old_boundaries[-1], start)
+            if value == source[start:end] and len(delta) == len(value):
+                # Literal commits retain exact character provenance.  This is
+                # especially important after session-leading whitespace has
+                # been trimmed: the first spoken character must span its own
+                # raw code point rather than a zero-width boundary.
+                suffix = list(range(start, end + 1))
+                suffix[0] = join
+            else:
+                suffix = [join] * len(delta) + [end]
+            boundaries = old_boundaries[:-1] + suffix
+        else:
+            # Deleted/format-only commits still advance the source journal,
+            # but do not manufacture spoken characters.
+            boundaries = old_boundaries
+            if boundaries:
+                boundaries[-1] = max(boundaries[-1], end)
+        boundaries = [max(0, min(len(source), int(value))) for value in boundaries]
+        self.normalized_text = old_normalized + delta
+        self.normalized_to_raw = _monotonic(boundaries)
+        self.raw_to_normalized = _inverse_boundaries(
+            self.raw_text,
+            self.normalized_to_raw,
+        )
+        return delta, len(old_normalized)
+
+    def finalize_projection(self) -> None:
+        """Mark an incremental TN projection complete without re-normalizing.
+
+        Re-running :meth:`finish` on ``raw_text`` would erase a TN expansion,
+        because the journal's ordinary normalizer does not know the semantic
+        decisions already made by the committer.  Finalization therefore only
+        closes the append fence and recomputes the inverse map defensively.
+        """
+
+        self.input_final = True
+        if self.normalized_to_raw:
+            # Any trailing filtered grapheme/format suffix has no spoken
+            # character of its own.  Fold it into the final boundary just as
+            # the ordinary journal's terminal projection does, so a complete
+            # raw span still covers the whole source (e.g. a keycap sequence).
+            self.normalized_to_raw[-1] = max(
+                self.normalized_to_raw[-1],
+                len(self.raw_text),
+            )
+        self.raw_to_normalized = _inverse_boundaries(
+            self.raw_text,
+            self.normalized_to_raw,
+        )
+
     def append(self, raw_delta: str) -> tuple[str, int]:
         old_normalized = self.normalized_text
         self.raw_text += raw_delta or ""

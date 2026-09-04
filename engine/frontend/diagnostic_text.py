@@ -73,6 +73,18 @@ class DiagnosticTextRouter:
     _pending: list[str] = field(default_factory=list)
     _passthrough: bool = False
 
+    @property
+    def pending_text(self) -> str:
+        """Raw query-prefix text held back by the router.
+
+        The prefix is intentionally not sent to the tokenizer until it is
+        known whether the packet sequence is the exact diagnostics query.
+        Exposing it read-only lets the session journal retain a complete raw
+        coordinate source while preserving that release fence.
+        """
+
+        return "".join(self._pending)
+
     def push(self, text: str) -> tuple[str, ...]:
         if not text:
             return ()

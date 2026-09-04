@@ -1,5 +1,9 @@
 from engine.frontend.text_commitment.committer import IncrementalTextCommitter
-from engine.frontend.text_commitment.types import LanguageKind, SpanKind
+from engine.frontend.text_commitment.types import (
+    LanguageKind,
+    SpanKind,
+    TextNormalizationConfig,
+)
 from engine.core.session import Session
 from engine.core.types import SessionConfig
 from engine.frontend.interface import FrontendInterface
@@ -48,6 +52,146 @@ def test_markdown_and_math_projection_do_not_leak_structure():
     c = IncrementalTextCommitter()
     out = c.feed("3*2=6", final=True)
     assert "三乘二等于六" == "".join(x.tts_text for x in out.commits)
+
+
+def test_ascii_and_unicode_multiplication_stay_in_one_formula_span():
+    expected = "四乘六等于二十四"
+    for raw in ("4x6=24", "4×6=24", "4 x 6 = 24"):
+        result = IncrementalTextCommitter().feed(raw, final=True)
+        assert len(result.commits) == 1
+        assert result.commits[0].span_kind is SpanKind.MATH
+        assert result.commits[0].tts_text == expected
+
+
+def test_formula_parentheses_are_kept_until_balanced():
+    raw = "3 * (2 + 1) = 9"
+    result = IncrementalTextCommitter().feed(raw, final=True)
+    assert len(result.commits) == 1
+    assert result.commits[0].span_kind is SpanKind.MATH
+    assert result.commits[0].tts_text == "三乘左括号二加一右括号等于九"
+
+
+def test_leading_grouped_formula_and_comparison_operators_are_readable():
+    grouped = IncrementalTextCommitter().feed("(3+2)*4=20", final=True)
+    assert "".join(item.tts_text for item in grouped.commits) == (
+        "左括号三加二右括号乘四等于二十"
+    )
+    for raw, expected in (
+        ("2>=1", "二大于等于一"),
+        ("2<=1", "二小于等于一"),
+        ("2!=1", "二不等于一"),
+        ("2^3=8", "二的幂三等于八"),
+    ):
+        result = IncrementalTextCommitter().feed(raw, final=True)
+        assert "".join(item.tts_text for item in result.commits) == expected
+
+    markdown = IncrementalTextCommitter().feed("*bold*", final=True)
+    assert "".join(item.tts_text for item in markdown.commits) == "bold"
+
+
+def test_inline_markdown_delimiters_and_images_are_split_from_adjacent_words():
+    cases = {
+        "before**bold**after": "beforeboldafter",
+        "before*italic*after": "beforeitalicafter",
+        "before__bold__after": "beforeboldafter",
+        "before~~strike~~after": "beforestrikeafter",
+        "before![alt](https://example.test/image.png)after": "beforeafter",
+        "* item": "item",
+    }
+    for raw, expected in cases.items():
+        one_shot = IncrementalTextCommitter().feed(raw, final=True)
+        assert "".join(item.tts_text for item in one_shot.commits) == expected
+
+        # Every delimiter and body character may arrive in its own transport
+        # packet.  The image/link URL must never be emitted as spoken text.
+        streamed = IncrementalTextCommitter()
+        output: list[str] = []
+        for char in raw:
+            output.extend(item.tts_text for item in streamed.feed(char).commits)
+        output.extend(item.tts_text for item in streamed.feed("", final=True).commits)
+        assert "".join(output) == expected
+
+
+def test_math_star_is_not_consumed_as_markdown_formatting():
+    for raw, expected in (
+        ("3*2=6", "三乘二等于六"),
+        ("3 * 2 = 6", "三乘二等于六"),
+    ):
+        result = IncrementalTextCommitter().feed(raw, final=True)
+        assert len(result.commits) == 1
+        assert result.commits[0].span_kind is SpanKind.MATH
+        assert result.commits[0].tts_text == expected
+
+
+def test_markdown_code_fence_closes_as_one_span():
+    raw = '```python\n# comment\nprint("read me")\n```'
+    result = IncrementalTextCommitter().feed(raw, final=True)
+    assert len(result.commits) == 1
+    assert result.commits[0].span_kind is SpanKind.MARKDOWN
+    assert result.commits[0].tts_text == '# comment "read me"'
+
+
+def test_hyphenated_numeric_range_is_not_arithmetic_without_context():
+    for raw in ("3-2", "3 - 2"):
+        result = IncrementalTextCommitter().feed(raw, final=True)
+        assert len(result.commits) == 1
+        assert result.commits[0].span_kind is SpanKind.NUMBER
+        assert result.commits[0].tts_text == "三至二"
+
+    arithmetic = IncrementalTextCommitter().feed("3-2=1", final=True)
+    assert arithmetic.commits[0].span_kind is SpanKind.MATH
+    assert arithmetic.commits[0].tts_text == "三减二等于一"
+
+
+def test_markdown_line_prefix_markers_are_not_spoken():
+    for raw, body in (("- item", "item"), ("+ item", "item"), ("> quote", "quote"), (">quote", "quote")):
+        result = IncrementalTextCommitter().feed(raw, final=True)
+        assert "".join(x.tts_text for x in result.commits) == body
+
+
+def test_json_array_projects_scalar_values_and_survives_packet_splits():
+    raw = '["answer", 42, true, {"nested": "ok"}]'
+    one_shot = "".join(x.tts_text for x in IncrementalTextCommitter().feed(raw, final=True).commits)
+    streamed = IncrementalTextCommitter()
+    output: list[str] = []
+    for ch in raw:
+        output.extend(x.tts_text for x in streamed.feed(ch).commits)
+    output.extend(x.tts_text for x in streamed.feed("", final=True).commits)
+    assert one_shot == "answer 42 True ok"
+    assert "".join(output) == one_shot
+    assert all("[" not in value and "]" not in value for value in output)
+
+
+def test_right_closing_delimiters_do_not_extend_numeric_or_formula_spans():
+    for raw, expected in (
+        ("99%)", "99%)"),
+        ("99%）", "99%）"),
+        ("3*2=6)", "三乘二等于六)"),
+        ("3*2=6）", "三乘二等于六）"),
+    ):
+        result = IncrementalTextCommitter().feed(raw, final=True)
+        assert "".join(item.tts_text for item in result.commits) == expected
+        assert result.commits[-1].raw_text in (")", "）")
+
+
+def test_ordered_markdown_list_marker_is_suppressed_but_decimal_survives():
+    listed = IncrementalTextCommitter().feed("1. item", final=True)
+    assert "".join(item.tts_text for item in listed.commits) == "item"
+
+    listed_many_digits = IncrementalTextCommitter().feed("12. item", final=True)
+    assert "".join(item.tts_text for item in listed_many_digits.commits) == "item"
+
+    decimal = IncrementalTextCommitter().feed("1.5", final=True)
+    assert "".join(item.tts_text for item in decimal.commits) == "1.5"
+
+
+def test_structured_span_max_length_falls_back_and_does_not_pin_session():
+    config = TextNormalizationConfig(max_pending_chars=4)
+    committer = IncrementalTextCommitter(config)
+    decision = committer.feed('["abcdef')
+    assert decision.fallback is True
+    assert "text.fallback" in decision.events
+    assert committer.pending_raw == ""
 
 
 def test_structured_numeric_fallbacks_cover_decimal_units_currency_and_inequality():

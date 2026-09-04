@@ -2,32 +2,75 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from typing import Optional
 
+from .normalizer_backend import (
+    NormalizerBackend,
+    WetextNormalizerBackend,
+)
 from .types import FallbackPolicy, SpanKind
+from .wetext_stream import WetextStream
 
 logger = logging.getLogger(__name__)
 
+_MODEL_CODE = re.compile(r"^[A-Za-z]+-(\d+)$")
+_TIME = re.compile(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?([AaPp][Mm])?$")
+_RANGE = re.compile(r"^(\d+(?:\.\d+)?)\s*([-~])\s*(\d+(?:\.\d+)?)$")
+
+
+def _compatibility_spelling(text: str) -> str:
+    """Canonicalize compatibility code points without composing graphemes."""
+
+    # Whole-string NFKC would compose ``e`` + a combining acute into ``é``.
+    # Per-codepoint mapping handles full-width digits/operators while retaining
+    # the grapheme/source boundaries used by streaming diagnostics.
+    preserve = set("⁰¹²³⁴⁵⁶⁷⁸⁹₀₁₂₃₄₅₆₇₈₉")
+    return "".join(
+        ch if ch in preserve else unicodedata.normalize("NFKC", ch)
+        for ch in text
+    )
+
+
+def _canonical_math_spelling(text: str) -> str:
+    """Canonicalize compatibility and multi-character math operators."""
+
+    canonical = _compatibility_spelling(text)
+    canonical = re.sub(r"!\s*=", "≠", canonical)
+    canonical = re.sub(r">\s*=", "≥", canonical)
+    canonical = re.sub(r"<\s*=", "≤", canonical)
+    return canonical.replace("==", "=")
+
 
 class WetextAdapter:
-    """Small public-API adapter.  wetext is optional and never owns commit state."""
+    """Small public-API adapter for the installed wetext runtime.
 
-    def __init__(self) -> None:
-        self._normalizers: dict[str, object] = {}
-        try:
-            from wetext import Normalizer  # type: ignore
+    TN grammar ownership stays in wetext.  This class only normalizes return
+    types, contains runtime failures, and exposes a closed-span stream call;
+    session cursors and commit fences remain in the frontend.
+    """
 
-            for lang in ("zh", "en"):
-                try:
-                    self._normalizers[lang] = Normalizer(lang=lang, operator="tn")
-                except Exception:
-                    logger.exception("text.normalizer.init_failed", extra={"lang": lang})
-        except Exception:
-            logger.info("wetext unavailable; using literal/cardinal fallback")
+    def __init__(self, *, backend: NormalizerBackend | None = None) -> None:
+        # Keep one production adapter for both the closed-span path and the
+        # shadow prefix oracle.  The older ``WetextAdapter`` name remains as a
+        # narrow compatibility facade for existing callers and owns only the
+        # deterministic fallback functions below.
+        self.backend: NormalizerBackend = backend or WetextNormalizerBackend(
+            eager=True
+        )
+
+    @property
+    def available_languages(self) -> tuple[str, ...]:
+        values = getattr(self.backend, "available_languages", ())
+        return tuple(getattr(value, "value", value) for value in values)
 
     def normalize(self, text: str, *, lang: str, kind: SpanKind) -> Optional[str]:
         if not text:
             return ""
+        # Canonicalize compatibility spellings before handing a semantic span
+        # to wetext.  The committer retains the original raw text/offsets, so
+        # this does not alter source-coordinate diagnostics.
+        text = _compatibility_spelling(text)
         if not any(ch.isalnum() for ch in text):
             return None
         # A hyphenated pickup/model code is not a mathematical negative
@@ -35,19 +78,76 @@ class WetextAdapter:
         # by a signed number, so route it to the deterministic code fallback.
         if lang == "zh" and kind == SpanKind.ENGLISH_WORD and re.fullmatch(r"[A-Za-z]+-\d+", text):
             return None
-        normalizer = self._normalizers.get(lang)
-        if normalizer is None:
-            return None
         try:
-            value = normalizer.normalize(text)  # public API only
+            result = self.backend.normalize_closed(
+                text,
+                language=lang,
+                domain=kind,
+            )
+            value = getattr(result, "output_text", None)
+            if value is None:
+                value = getattr(result, "text", result)
             # An unchanged value means the graph did not provide a useful
             # verbalization.  Returning None lets the caller take the
             # deterministic, observable fallback path (units and formulae in
             # particular are not covered by every wetext graph version).
             return value if isinstance(value, str) and value and value != text else None
         except Exception:
-            logger.exception("text.normalizer.failed", extra={"lang": lang, "kind": kind.value})
+            logger.warning(
+                "text.normalizer.failed",
+                extra={"lang": lang, "kind": kind.value},
+            )
             return None
+
+    def normalize_closed_stream(
+        self,
+        text: str,
+        *,
+        lang: str,
+        kind: SpanKind,
+    ) -> Optional[str]:
+        """Run the public closed-span normalizer on a homogeneous span.
+
+        The backend may use WeText's one-shot ``Normalizer`` API (the current
+        production adapter) while its separate prefix wrapper exposes
+        ``StreamNormalizer`` snapshots for shadow/oracle use.  This method
+        returns only a closed result and converts runtime failures to ``None``
+        so the committer can apply its configured, observable fallback policy.
+        """
+
+        if not text:
+            return ""
+        text = _compatibility_spelling(text)
+        try:
+            result = self.backend.normalize_closed(
+                text,
+                language=lang,
+                domain=kind,
+            )
+            value = getattr(result, "output_text", None)
+            if value is None:
+                value = getattr(result, "text", result)
+        except Exception as exc:  # third-party normalizers may raise arbitrary errors
+            logger.warning(
+                "text.normalizer.stream_failed",
+                extra={
+                    "lang": lang,
+                    "kind": kind.value,
+                    "error_code": getattr(exc, "code", type(exc).__name__),
+                },
+            )
+            return None
+        return value if isinstance(value, str) and value else None
+
+    def stream(self, *, lang: str) -> WetextStream:
+        """Create an isolated stream for shadow/oracle evaluation.
+
+        The caller owns the returned object and must not share it across
+        sessions.  It is exposed separately from ``normalize`` so a snapshot
+        cannot accidentally enter the production commit path.
+        """
+
+        return WetextStream(lang)
 
     def normalize_candidates(self, text: str, *, lang: str, kind: SpanKind) -> list[str]:
         """Return n-best candidates when the installed wetext exposes them.
@@ -56,35 +156,45 @@ class WetextAdapter:
         chooses one append-only result and never consumes StreamNormalizer
         snapshots.
         """
-        normalizer = self._normalizers.get(lang)
-        method = getattr(normalizer, "normalize_candidates", None)
-        if not callable(method):
-            value = self.normalize(text, lang=lang, kind=kind)
-            return [value] if value else []
         try:
-            values = method(text)
-            candidates: list[str] = []
-            for item in values:
-                candidate = getattr(item, "text", item)
-                if candidate:
-                    candidates.append(str(candidate))
-            return candidates
+            values = self.backend.candidates(
+                text,
+                language=lang,
+                domain=kind,
+                nbest=16,
+            )
+            return [
+                str(getattr(item, "spoken_text", getattr(item, "text", item)))
+                for item in values
+                if getattr(item, "spoken_text", getattr(item, "text", item))
+            ]
         except Exception:
-            logger.exception("text.normalizer.candidates_failed", extra={"lang": lang, "kind": kind.value})
+            logger.warning(
+                "text.normalizer.candidates_failed",
+                extra={"lang": lang, "kind": kind.value},
+            )
             return []
 
     def normalize_with_mapping(self, text: str, *, lang: str, kind: SpanKind):
-        normalizer = self._normalizers.get(lang)
-        method = getattr(normalizer, "normalize_with_mapping", None)
-        if not callable(method):
-            return None
         try:
-            return method(text)
+            values = self.backend.normalize_with_mapping(
+                text,
+                language=lang,
+                domain=kind,
+                nbest=1,
+            )
+            return values[0] if values else None
         except Exception:
-            logger.exception("text.normalizer.mapping_failed", extra={"lang": lang, "kind": kind.value})
+            logger.warning(
+                "text.normalizer.mapping_failed",
+                extra={"lang": lang, "kind": kind.value},
+            )
             return None
 
     def fallback(self, text: str, *, lang: str, kind: SpanKind, policy: FallbackPolicy) -> str:
+        # Keep deterministic fallback behavior aligned with wetext for
+        # full-width digits/operators and other Unicode compatibility forms.
+        text = _compatibility_spelling(text)
         if policy == FallbackPolicy.CARDINAL_OR_LITERAL and kind == SpanKind.VERSION:
             return _version_fallback(text, lang=lang)
         if policy == FallbackPolicy.CARDINAL_OR_LITERAL and kind == SpanKind.IDENTIFIER:
@@ -109,7 +219,7 @@ class WetextAdapter:
             if value:
                 return value
         if kind == SpanKind.MATH:
-            value = _math_fallback(text)
+            value = _math_fallback(text, lang=lang)
             if value:
                 return value
         return text
@@ -128,6 +238,17 @@ def _en_digit_sequence(text: str) -> str:
 
 
 def _identifier_fallback(text: str, *, lang: str) -> str:
+    model_code = _MODEL_CODE.fullmatch(text)
+    if model_code and lang == "en":
+        # Product/pickup identifiers conventionally pronounce zero as "oh";
+        # retain the visible hyphen as a pause marker without letting the
+        # generic TN graph reinterpret the code as a negative number.
+        prefix = text[: model_code.start(1)]
+        digits = " ".join(
+            "oh" if digit == "0" else _EN_DIGITS[int(digit)]
+            for digit in model_code.group(1)
+        )
+        return prefix + digits
     if lang == "zh":
         separators = {"@": "艾特", "_": "下划线", "-": "杠", ".": "点"}
         parts: list[str] = []
@@ -231,21 +352,104 @@ def _en_int(n: int) -> str:
     return str(n)
 
 
-def _math_fallback(text: str) -> str:
+def _math_fallback(text: str, *, lang: str = "zh") -> str:
     """Verbalize a small arithmetic expression without evaluating it."""
-    if not re.fullmatch(r"\d+(?:\.\d+)?(?:\s*[+*/×÷=<>≤≥-]\s*\d+(?:\.\d+)?)+", text):
+    text = _canonical_math_spelling(text)
+    operand = r"[+\-]?\d+(?:\.\d+)?"
+    if lang == "en":
+        operators = {
+            "*": " times ",
+            "×": " times ",
+            "x": " times ",
+            "X": " times ",
+            "/": " divided by ",
+            "÷": " divided by ",
+            "+": " plus ",
+            "-": " minus ",
+            "=": " equals ",
+            ">": " greater than ",
+            "<": " less than ",
+            "≥": " greater than or equal to ",
+            "≤": " less than or equal to ",
+            "^": " to the power of ",
+            "≠": " not equal to ",
+        }
+    else:
+        operators = {
+            "*": "乘",
+            "×": "乘",
+            "x": "乘",
+            "X": "乘",
+            "/": "除以",
+            "÷": "除以",
+            "+": "加",
+            "-": "减",
+            "=": "等于",
+            ">": "大于",
+            "<": "小于",
+            "≥": "大于等于",
+            "≤": "小于等于",
+            "^": "的幂",
+            "≠": "不等于",
+        }
+    # Scan operands/operators instead of splitting on ``-``.  A minus can be
+    # either a binary subtraction operator or a unary sign on the following
+    # operand (``3*-2``), and a regular ``re.split`` cannot distinguish those
+    # forms without losing the sign.  Parentheses are retained as explicit
+    # spoken delimiters; they are never evaluated by this fallback.
+    expression = text.strip()
+    parts: list[str] = []
+    position = 0
+    expect_operand = True
+    operator_count = 0
+    paren_depth = 0
+    while position < len(expression):
+        while position < len(expression) and expression[position].isspace():
+            position += 1
+        if position >= len(expression):
+            break
+        char = expression[position]
+        if expect_operand:
+            if char == "(":
+                parts.append(char)
+                paren_depth += 1
+                position += 1
+                continue
+            operand_match = re.match(operand, expression[position:])
+            if operand_match is None:
+                return ""
+            parts.append(operand_match.group(0))
+            position += operand_match.end()
+            expect_operand = False
+            continue
+        if char == ")":
+            if paren_depth <= 0:
+                return ""
+            parts.append(char)
+            paren_depth -= 1
+            position += 1
+            continue
+        if char not in operators:
+            return ""
+        parts.append(char)
+        operator_count += 1
+        position += 1
+        expect_operand = True
+    if not parts or expect_operand or paren_depth or operator_count == 0:
         return ""
-    operators = {"*": "乘", "×": "乘", "/": "除以", "÷": "除以", "+": "加", "-": "减", "=": "等于", ">": "大于", "<": "小于", "≥": "大于等于", "≤": "小于等于"}
-    parts = re.split(r"\s*([+*/×÷=<>≤≥-])\s*", text)
     out: list[str] = []
     for part in parts:
         if part in operators:
             out.append(operators[part])
-        elif re.fullmatch(r"\d+(?:\.\d+)?", part):
-            out.append(_zh_cardinal(part))
+        elif part == "(":
+            out.append(" left parenthesis " if lang == "en" else "左括号")
+        elif part == ")":
+            out.append(" right parenthesis " if lang == "en" else "右括号")
+        elif re.fullmatch(operand, part):
+            out.append(_zh_cardinal(part) if lang != "en" else _en_cardinal(part))
         else:
             return ""
-    return "".join(out)
+    return ("".join(out) if lang != "en" else "".join(out).strip())
 
 
 def _structured_number_fallback(text: str, *, lang: str) -> str:
@@ -274,4 +478,26 @@ def _structured_number_fallback(text: str, *, lang: str) -> str:
         months = ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")
         result = months[int(month) - 1] + (" " + _en_cardinal(day) + "," if day else "")
         return result + " " + _en_cardinal(year)
+    clock = _TIME.fullmatch(text)
+    if clock:
+        hour, minute, second, meridiem = clock.groups()
+        if lang == "zh":
+            value = _zh_cardinal(hour) + "点" + _zh_cardinal(minute) + "分"
+            if second is not None:
+                value += _zh_cardinal(second) + "秒"
+            if meridiem:
+                value = ("上午" if meridiem.lower() == "am" else "下午") + value
+            return value
+        value = _en_cardinal(hour) + " " + _en_cardinal(minute)
+        if second is not None:
+            value += " " + _en_cardinal(second)
+        if meridiem:
+            value += " " + meridiem.upper()
+        return value
+    value_range = _RANGE.fullmatch(text)
+    if value_range:
+        left, marker, right = value_range.groups()
+        if lang == "zh":
+            return _zh_cardinal(left) + ("到" if marker == "~" else "至") + _zh_cardinal(right)
+        return _en_cardinal(left) + (" to " if marker == "-" else " tilde ") + _en_cardinal(right)
     return ""

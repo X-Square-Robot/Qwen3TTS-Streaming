@@ -14,9 +14,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 from ..core.session import Session, SegmentOrderMeta
+from ..core.speech_state import (
+    SpeechStateCapability,
+    coerce_speech_state_capability,
+)
 from ..core.text_journal import CanonicalTextJournal
 from ..core.text_progress import EmaTextProgressEstimator
 from ..core.types import (
@@ -31,7 +36,11 @@ from ..core.types import (
     TokenizedText,
 )
 from .text_commitment import AudioCreditEstimator, IncrementalTextCommitter, SemanticStartGate
-from .text_commitment.types import TextNormalizationConfig as CommitterConfig, FallbackPolicy
+from .text_commitment.types import (
+    FallbackPolicy,
+    TextInputMetadata,
+    TextNormalizationConfig as CommitterConfig,
+)
 from ..core.lifecycle import LifecycleLogger
 from ..core import observability as obs
 from ..core.timing import ServerTimingAccumulator
@@ -72,6 +81,82 @@ def _normalize_tts_text(text: str) -> str:
     return text
 
 
+def _spoken_projection(
+    raw_text: str,
+    commits: tuple[Any, ...] | list[Any],
+) -> tuple[str, list[int]]:
+    """Build the final spoken text and its coarse raw-coordinate map.
+
+    A ``TextCommit`` can expand one source span into many spoken characters
+    (for example ``99%`` into a Chinese verbalization).  The regular journal
+    append path cannot represent that rewrite because it intentionally enforces
+    prefix monotonicity.  We therefore construct a source map from the
+    append-only commit records and normalize the *spoken* stream in a small
+    temporary journal before installing the completed projection.
+
+    The map is deliberately conservative: when the backend does not expose a
+    character-level alignment, every spoken character in one commit is
+    attributed to that commit's raw interval.  This is sufficient for progress
+    anchors and, importantly, never invents a raw offset outside the commit
+    fence.
+    """
+
+    source = str(raw_text or "")
+    spoken_parts: list[str] = []
+    boundaries: list[int] = []
+    previous_raw_end = 0
+    for commit in commits:
+        value = str(getattr(commit, "tts_text", "") or "")
+        if not value:
+            continue
+        raw_start = max(0, min(len(source), int(getattr(commit, "raw_start", 0))))
+        raw_end = max(
+            raw_start,
+            min(len(source), int(getattr(commit, "raw_end", raw_start))),
+        )
+        # Commits are append-only; tolerate a legacy/test double with a stale
+        # coordinate by clamping rather than allowing a backwards map.
+        raw_start = max(previous_raw_end, raw_start)
+        raw_end = max(raw_start, raw_end)
+        if not boundaries:
+            boundaries.append(raw_start)
+        else:
+            boundaries[-1] = max(boundaries[-1], raw_start)
+        source_slice = source[raw_start:raw_end]
+        if len(value) == len(source_slice) and value == source_slice:
+            # Literal commits retain character-level provenance (including a
+            # leading whitespace run that the temporary spoken journal may
+            # trim later).
+            boundaries.extend(range(raw_start + 1, raw_end + 1))
+        else:
+            if len(value) > 1:
+                boundaries.extend([raw_start] * (len(value) - 1))
+            boundaries.append(raw_end)
+        previous_raw_end = raw_end
+        spoken_parts.append(value)
+
+    spoken_raw = "".join(spoken_parts)
+    if not spoken_raw:
+        return "", [len(source)]
+
+    # Apply the same whitespace/emoji contract used by streaming journal
+    # appends.  Compose the temporary journal's boundaries back into the
+    # original raw coordinate space.
+    temporary = CanonicalTextJournal(
+        _normalize_tts_text,
+        strip_leading_whitespace=True,
+    )
+    temporary.append(spoken_raw)
+    temporary.finish()
+    normalized = temporary.trim_normalized()
+    temporary_boundaries = temporary.normalized_to_raw
+    composed: list[int] = []
+    for boundary in temporary_boundaries:
+        index = max(0, min(len(boundaries) - 1, int(boundary)))
+        composed.append(boundaries[index])
+    return normalized, composed
+
+
 def _metric_int(value: Any) -> Optional[int]:
     """Parse numeric engine metadata while tolerating legacy string values."""
 
@@ -88,6 +173,28 @@ def _metric_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in ("1", "true", "yes", "on")
     return bool(value)
+
+
+def _resolve_tn_language(tn_language: Any, session_language: Any) -> str:
+    """Resolve the language mode used by the causal TN controller.
+
+    ``SessionConfig.language`` is also consumed by the acoustic model and may
+    be ``auto``.  Only an explicit Chinese/English value is copied into TN;
+    otherwise the controller remains in mixed mode and can wait for local
+    script evidence around numeric/symbol spans.
+    """
+
+    raw_tn = str(tn_language or "mixed_zh_en").strip().lower().replace("_", "-")
+    if raw_tn in {"zh", "zh-cn", "zh-hans", "chinese"}:
+        return "zh"
+    if raw_tn in {"en", "en-us", "en-gb", "english"}:
+        return "en"
+    raw_session = str(session_language or "").strip().lower().replace("_", "-")
+    if raw_session in {"zh", "zh-cn", "zh-hans", "chinese"}:
+        return "zh"
+    if raw_session in {"en", "en-us", "en-gb", "english"}:
+        return "en"
+    return "mixed_zh_en"
 
 
 def _observe_spliter_ratio(
@@ -176,6 +283,7 @@ class FrontendInterface:
         guarded_delivery_default: bool = True,
         guarded_delivery_window_ms: int = 100,
         engine_model_version: str = DEFAULT_ENGINE_MODEL_VERSION,
+        speech_state_capability: Optional[SpeechStateCapability] = None,
     ):
         self._dispatcher = Dispatcher(engine_inbox)
         self._tokenizer = tokenizer
@@ -210,6 +318,11 @@ class FrontendInterface:
         self._engine_model_version = str(engine_model_version).strip()
         if not self._engine_model_version:
             raise ValueError("engine_model_version must not be empty")
+        # Session is asyncio-owned and may expose this read-only descriptor,
+        # but never owns the backend's opaque state handle or payload.
+        self._speech_state_capability = coerce_speech_state_capability(
+            speech_state_capability
+        )
 
         self._sessions: Dict[str, Session] = {}
         self._consumer_tasks: Dict[str, asyncio.Task] = {}
@@ -220,6 +333,12 @@ class FrontendInterface:
     @property
     def active_count(self) -> int:
         return len(self._sessions)
+
+    @property
+    def speech_state_capability(self) -> SpeechStateCapability:
+        """Static backend capability copied into newly created sessions."""
+
+        return self._speech_state_capability
 
     def count_text_tokens(self, text: str) -> int:
         """Count model input tokens using the synthesis tokenizer.
@@ -258,22 +377,59 @@ class FrontendInterface:
                 speaker=speaker_key,
                 ref_audio=ref_audio,
             )
+        else:
+            # Resolve per-session TN overrides on a private dataclass copy.
+            # Callers commonly reuse a ``SessionConfig`` template; mutating
+            # its nested normalization object here would leak one session's
+            # rollout/language choice into the next session.
+            config = replace(
+                config,
+                text_normalization=replace(config.text_normalization),
+            )
+        # Resolve the free-form per-session TN overrides without mutating the
+        # caller's nested config object.  ``text_commitment.types`` exposes a
+        # frozen config for direct committer users; accepting that object via
+        # ``SessionConfig`` must remain safe as well.  Building one replaced
+        # value also keeps the effective settings visible in ``session.config``.
+        tn_cfg = config.text_normalization
+        opts = config.output_policy.config or {}
+        tn_overrides: dict[str, Any] = {}
+        if "tn_enabled" in opts:
+            tn_overrides["enabled"] = _metric_bool(opts["tn_enabled"])
+        if "tn_semantic_max_wait_ms" in opts:
+            tn_overrides["semantic_max_wait_ms"] = float(
+                opts["tn_semantic_max_wait_ms"]
+            )
+        if "tn_semantic_idle_wait_ms" in opts:
+            tn_overrides["semantic_idle_wait_ms"] = float(
+                opts["tn_semantic_idle_wait_ms"]
+            )
+        if "tn_fallback" in opts:
+            tn_overrides["fallback"] = str(opts["tn_fallback"])
+        if "tn_projection" in opts:
+            tn_overrides["projection"] = str(opts["tn_projection"])
+        if "tn_language" in opts:
+            tn_overrides["language"] = str(opts["tn_language"])
+        if "tn_commit_mode" in opts:
+            tn_overrides["commit_mode"] = str(opts["tn_commit_mode"])
+        if tn_overrides:
+            tn_cfg = replace(tn_cfg, **tn_overrides)
+            config = replace(config, text_normalization=tn_cfg)
+
         self._prepare_session_config(config)
 
-        session = Session(session_id=session_id, config=config)
-        tn_cfg = config.text_normalization
-        # Backward-compatible per-session overrides via existing free-form policy.
-        opts = config.output_policy.config
-        if "tn_enabled" in opts:
-            tn_cfg.enabled = _metric_bool(opts["tn_enabled"])
-        if "tn_semantic_max_wait_ms" in opts:
-            tn_cfg.semantic_max_wait_ms = float(opts["tn_semantic_max_wait_ms"])
-        if "tn_semantic_idle_wait_ms" in opts:
-            tn_cfg.semantic_idle_wait_ms = float(opts["tn_semantic_idle_wait_ms"])
-        if "tn_fallback" in opts:
-            tn_cfg.fallback = str(opts["tn_fallback"])
-        if "tn_projection" in opts:
-            tn_cfg.projection = str(opts["tn_projection"])
+        session = Session(
+            session_id=session_id,
+            config=config,
+            speech_state_capability=self._speech_state_capability,
+        )
+        # An explicit model/session language is useful evidence for TN too.
+        # Keep ``auto``/unknown as mixed so a numeric-only island still waits
+        # instead of inheriting an accidental default graph.
+        effective_tn_language = _resolve_tn_language(
+            tn_cfg.language,
+            config.language,
+        )
         try:
             fallback_policy = FallbackPolicy(tn_cfg.fallback)
         except ValueError:
@@ -281,12 +437,13 @@ class FrontendInterface:
         session.text_committer = IncrementalTextCommitter(
             CommitterConfig(
                 enabled=tn_cfg.enabled,
-                language=tn_cfg.language,
+                language=effective_tn_language,
                 semantic_max_wait_ms=tn_cfg.semantic_max_wait_ms,
                 semantic_idle_wait_ms=tn_cfg.semantic_idle_wait_ms,
                 fallback=fallback_policy,
                 projection=tn_cfg.projection,
                 max_pending_chars=tn_cfg.max_pending_chars,
+                commit_mode=getattr(tn_cfg, "commit_mode", "closed_span"),
             )
         )
         session.audio_credit_estimator = AudioCreditEstimator(codec_frame_rate=12.5)
@@ -315,7 +472,12 @@ class FrontendInterface:
         session.event_callback = on_event
         self._sessions[session_id] = session
         self._tn_locks[session_id] = asyncio.Lock()
-        self._diagnostic_text_routers[session_id] = DiagnosticTextRouter()
+        diagnostic_router = DiagnosticTextRouter()
+        self._diagnostic_text_routers[session_id] = diagnostic_router
+        # Keep a read-only-by-convention reference on the session so the
+        # static raw-source helper can include a held exact-query prefix
+        # without coupling Session to the frontend router registry.
+        session._diagnostic_text_router = diagnostic_router
 
         # Resolve per-session observability level (raise-only override of the
         # global floor, clamped to max_session_level — see observability_tiers §3).
@@ -373,7 +535,7 @@ class FrontendInterface:
             )
         )
         self._consumer_tasks[session_id] = task
-        if config.text_normalization.enabled:
+        if session.text_committer.config.enabled:
             self._tn_tasks[session_id] = asyncio.create_task(self._text_commit_ticker(session))
 
         await self._dispatcher.submit_new_session(session)
@@ -391,17 +553,23 @@ class FrontendInterface:
             task.cancel()
         self._cleanup_session(session_id)
 
-    async def push_text_input(self, session_id: str, text: str) -> None:
+    async def push_text_input(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        metadata: TextInputMetadata | None = None,
+    ) -> None:
         """Feed transport text according to the session's declared input mode."""
         session = self._sessions.get(session_id)
-        if session is None or session.state == SessionState.DONE:
+        if session is None or session.state == SessionState.DONE or session.input_complete:
             return
         lock = self._tn_locks.get(session_id)
         if lock is None:
             lock = asyncio.Lock()
             self._tn_locks[session_id] = lock
         async with lock:
-            await self._push_text_input_locked(session, text)
+            await self._push_text_input_locked(session, text, metadata=metadata)
 
     def observe_raw_token_arrival(self, session_id: str, count: int = 1) -> None:
         """Record upstream LLM-token arrivals for Phase-1 rate estimation.
@@ -437,13 +605,46 @@ class FrontendInterface:
             "safe_wait_ms": snapshot.safe_wait_ms,
         }
 
-    async def _push_text_input_locked(self, session: "Session", text: str) -> None:
+    @staticmethod
+    def _tn_raw_source(session: "Session") -> str:
+        """Return the complete raw source, including held transport suffixes.
+
+        The diagnostic router may withhold an exact-query prefix for one or
+        more packets.  It is still part of the source coordinate space even
+        though it has not entered the committer yet; likewise an incomplete
+        emoji grapheme is retained until the next packet.  Keeping both here
+        makes raw offsets and operational logs lossless without releasing
+        provisional text to TTS.
+        """
+
+        committer = session.text_committer
+        router = getattr(session, "_diagnostic_text_router", None)
+        if router is None:
+            routers = getattr(session, "_diagnostic_text_routers", None)
+            if isinstance(routers, dict):
+                router = routers.get(session.session_id)
+        pending_query = str(getattr(router, "pending_text", "") or "")
+        return (
+            str(getattr(committer, "raw_text", "") or "")
+            + pending_query
+            + str(getattr(session, "_emoji_carry", "") or "")
+        )
+
+    async def _push_text_input_locked(
+        self,
+        session: "Session",
+        text: str,
+        *,
+        metadata: TextInputMetadata | None = None,
+    ) -> None:
         mode = session.config.input_mode
         # A timeout is a semantic commit decision, not a tokenizer concern.
         timeout_decision = session.text_committer.poll()
         if timeout_decision.commits:
             self._log_tn_commits(session, timeout_decision.commits)
             await self._ingest_commits(session, timeout_decision.commits)
+        if mode != InputMode.FULL_TEXT:
+            session.text_journal.update_raw_source(self._tn_raw_source(session))
         self._emit_text_commit_events(session, timeout_decision.events)
         if mode == InputMode.FULL_TEXT:
             # Keep the journal canonical while deferring all tokenization until
@@ -458,10 +659,18 @@ class FrontendInterface:
         body, session._emoji_carry = split_pending_emoji(raw)
         router = self._diagnostic_text_routers[session.session_id]
         for routed_text in router.push(body):
-            decision = session.text_committer.feed(strip_emoji(routed_text))
+            # Keep the original source delta for the committer.  It performs
+            # grapheme/emoji filtering itself so TextCommit raw offsets remain
+            # coordinates in the transport input; stripping here would shift
+            # every span that follows a deleted emoji.
+            decision = session.text_committer.feed(
+                routed_text,
+                metadata=metadata,
+            )
             self._log_tn_commits(session, decision.commits)
             self._log_tn_pending(session, decision)
             await self._ingest_commits(session, decision.commits)
+            session.text_journal.update_raw_source(self._tn_raw_source(session))
             self._emit_text_commit_events(session, decision.events)
 
     async def _text_commit_ticker(self, session: "Session") -> None:
@@ -473,14 +682,22 @@ class FrontendInterface:
                     await asyncio.sleep(0.02)
                     continue
                 await asyncio.sleep(max(0.0, deadline - asyncio.get_running_loop().time()))
+                # The upstream may have finalized the session while this task
+                # was asleep.  In that case the journal is intentionally
+                # closed and must not receive a late raw-source refresh.
+                if session.state == SessionState.DONE or session.input_complete:
+                    return
                 lock = self._tn_locks.get(session.session_id)
                 if lock is None:
                     return
                 async with lock:
+                    if session.state == SessionState.DONE or session.input_complete:
+                        return
                     decision = session.text_committer.poll()
                     if decision.commits:
                         self._log_tn_commits(session, decision.commits)
                         await self._ingest_commits(session, decision.commits)
+                    session.text_journal.update_raw_source(self._tn_raw_source(session))
                     self._log_tn_pending(session, decision)
                     self._emit_text_commit_events(session, decision.events)
         except asyncio.CancelledError:
@@ -488,7 +705,23 @@ class FrontendInterface:
 
     async def _ingest_commits(self, session: "Session", commits) -> None:
         for commit in commits:
-            await self._ingest_streaming_text(session, commit.tts_text)
+            # Keep the journal's source coordinate space in the raw upstream
+            # text.  Feeding ``commit.tts_text`` through the ordinary append
+            # path would make an expansion such as ``99%`` → ``百分之九十九``
+            # look like raw input and would invalidate progress anchors.
+            spoken, normalized_base = session.text_journal.append_spoken(
+                session.text_committer.raw_text,
+                commit.raw_start,
+                commit.raw_end,
+                commit.tts_text,
+                mapping=commit.mapping,
+            )
+            await self._ingest_streaming_text(
+                session,
+                spoken,
+                journaled=True,
+                normalized_base=normalized_base,
+            )
 
     def _emit_text_commit_events(self, session: "Session", events: tuple[str, ...]) -> None:
         callback = getattr(session, "event_callback", None)
@@ -546,11 +779,26 @@ class FrontendInterface:
             reason=decision.reason,
         )
 
-    async def _ingest_streaming_text(self, session: "Session", body: str) -> None:
+    async def _ingest_streaming_text(
+        self,
+        session: "Session",
+        body: str,
+        *,
+        journaled: bool = False,
+        normalized_base: int | None = None,
+    ) -> None:
         """Normalize a streaming text body, tokenize, route to the spliter per
         input mode, and dispatch. Shared by push_text_input and the end-of-input
         emoji-carry flush."""
-        text, normalized_base = session.text_journal.append(body or "")
+        if journaled:
+            text = body or ""
+            normalized_base = (
+                len(session.text_journal.normalized_text) - len(text)
+                if normalized_base is None
+                else normalized_base
+            )
+        else:
+            text, normalized_base = session.text_journal.append(body or "")
         if not text:
             return
         mode = session.config.input_mode
@@ -590,27 +838,70 @@ class FrontendInterface:
     async def feed_full_text(self, session_id: str, text: str) -> None:
         """Explicit offline mode: set complete text, pre-split, drive all segments."""
         session = self._sessions.get(session_id)
-        if session is None or session.state == SessionState.DONE:
+        if session is None or session.state == SessionState.DONE or session.input_complete:
             return
-        session.mark_input_complete()
-        decision = session.text_committer.feed(text or "", final=True)
+
+        lock = self._tn_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._tn_locks[session_id] = lock
+        async with lock:
+            await self._feed_full_text_locked(session, text)
+
+    async def _feed_full_text_locked(self, session: "Session", text: str) -> None:
+        """Locked implementation shared by direct FULL_TEXT and EOS flush."""
+        if session.state == SessionState.DONE:
+            return
+
+        # ``feed_full_text`` is also used by the FULL_TEXT transport path after
+        # it has accumulated packets in ``Session._text_buffer``.  Prefer the
+        # explicit complete argument when it already contains the buffered
+        # prefix.  Otherwise retain both pieces instead of silently discarding
+        # transport data.  Never feed ``normalized_text`` back into the
+        # committer: that value is the pre-TN canonical projection and may have
+        # already dropped markup/emoji or collapsed whitespace.
+        explicit_text = text or ""
+        buffered_text = session.drain_text()
+        if explicit_text and buffered_text:
+            if explicit_text.startswith(buffered_text):
+                raw_text = explicit_text
+            elif buffered_text.startswith(explicit_text):
+                raw_text = buffered_text
+            else:
+                raw_text = buffered_text + explicit_text
+        else:
+            raw_text = explicit_text or buffered_text
+        if not raw_text and session.text_journal is not None:
+            raw_text = session.text_journal.raw_text
+
+        decision = session.text_committer.feed(raw_text, final=True)
         self._log_tn_commits(session, decision.commits)
         self._log_tn_pending(session, decision)
-        text = "".join(c.tts_text for c in decision.commits)
-        if session.text_journal is not None:
-            session.text_journal.finish()
-        if not text and session.text_journal is not None:
-            text = session.text_journal.normalized_text
-        if session.text_journal is not None and text and not session.text_journal.raw_text:
-            # Direct feed_full_text callers may not have populated the journal;
-            # streaming FULL_TEXT callers already appended the raw payload.
-            session.text_journal.append(text)
-        text = session.text_journal.trim_normalized()
+        self._emit_text_commit_events(session, decision.events)
+
+        # Install the TN result as a completed projection while preserving the
+        # original raw coordinate space.  ``CanonicalTextJournal.append`` is
+        # intentionally unable to do this because a TN expansion is not an
+        # old-result prefix.
+        text, spoken_to_raw = _spoken_projection(raw_text, decision.commits)
+        if session.text_journal is None:
+            session.text_journal = CanonicalTextJournal(
+                _normalize_tts_text,
+                strip_leading_whitespace=True,
+            )
+        session.text_journal.install_projection(
+            raw_text,
+            text,
+            spoken_to_raw,
+        )
+        session.mark_input_complete()
+
         resolved_text = resolve_diagnostic_text(text, self._engine_model_version)
         if resolved_text != text:
             # The spoken diagnostic payload becomes the canonical text for
-            # tokenization and progress attribution.  Rebuilding the journal
-            # also keeps raw/normalized coordinate maps internally coherent.
+            # tokenization and progress attribution.  This is a server-owned
+            # exact query replacement, so retain the historical journal
+            # contract in which the replacement itself is the raw payload.
             journal = CanonicalTextJournal(
                 _normalize_tts_text,
                 strip_leading_whitespace=True,
@@ -620,12 +911,16 @@ class FrontendInterface:
             text = journal.trim_normalized()
             session.text_journal = journal
         if not text:
+            # Whitespace/format-only FULL_TEXT input still needs an explicit
+            # session-level completion after the committer has flushed it.
+            await self._dispatcher.maybe_send_session_tokens_done(session)
             return
 
         tokens = self._tokenize_segment_text(
             text, normalized_offset=0, journal=session.text_journal
         )
         if not tokens:
+            await self._dispatcher.maybe_send_session_tokens_done(session)
             return
 
         seg_actions = session.spliter.set_full_text(tokens)
@@ -637,53 +932,86 @@ class FrontendInterface:
         session = self._sessions.get(session_id)
         if session is None:
             return
+        lock = self._tn_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._tn_locks[session_id] = lock
+        async with lock:
+            await self._mark_input_complete_locked(session)
+
+    async def _mark_input_complete_locked(self, session: "Session") -> None:
+        """Flush the causal committer and close the text stream under its lock."""
+        if session.input_complete:
+            return
         mode = session.config.input_mode
+        if mode == InputMode.FULL_TEXT:
+            full_text = session.drain_text()
+            # The text buffer is the transport's raw source of truth.  If a
+            # legacy caller populated only the journal, use its raw history as
+            # a fallback; never use ``normalized_text`` here because it is
+            # pre-TN and may have discarded syntax needed for final routing.
+            if not full_text and session.text_journal is not None:
+                full_text = session.text_journal.raw_text
+            await self._feed_full_text_locked(session, full_text)
+            return
+
+        query_matched = False
         if mode != InputMode.FULL_TEXT:
-            router = self._diagnostic_text_routers[session_id]
+            router = self._diagnostic_text_routers[session.session_id]
             resolution = router.finish(self._engine_model_version)
+            query_matched = resolution.query_matched
             if resolution.query_matched:
-                # This is a server-owned final payload, so no later packet can
-                # turn its trailing digit into a keycap emoji. Finalize the
-                # journal before ingesting it to avoid withholding that digit.
+                # This is a server-owned final payload.  It intentionally
+                # bypasses TN because it is already a complete, formatted
+                # diagnostic sentence; use a fresh literal journal so a
+                # previous pre-TN snapshot cannot rewrite it.
                 session._emoji_carry = ""
-                session.text_journal.finish()
+                session.text_journal = CanonicalTextJournal(
+                    _normalize_tts_text,
+                    strip_leading_whitespace=True,
+                )
                 await self._ingest_streaming_text(session, resolution.chunks[0])
             else:
                 for routed_text in resolution.chunks:
                     raw = session._emoji_carry + routed_text
                     body, session._emoji_carry = split_pending_emoji(raw)
-                    await self._ingest_streaming_text(session, body)
-            final_decision = session.text_committer.feed("", final=True)
-            self._log_tn_commits(session, final_decision.commits)
-            self._log_tn_pending(session, final_decision)
-            await self._ingest_commits(session, final_decision.commits)
-            self._emit_text_commit_events(session, final_decision.events)
-        session.mark_input_complete()
-        if session.text_journal is not None:
-            session.text_journal.finish()
-
-        if mode == InputMode.FULL_TEXT:
-            full_text = session.drain_text()
-            # ``finish()`` can release a trailing keycap base that was held
-            # until the transport proved it was a literal digit.  The journal
-            # is the canonical source of truth after finalization; the
-            # incremental buffer may not contain that last character.
-            if session.text_journal is not None:
-                full_text = session.text_journal.normalized_text
-            if full_text.strip():
-                await self.feed_full_text(session_id, full_text)
-            else:
-                await self._dispatcher.submit_session_tokens_done(session_id)
-                session.engine_tokens_done_sent = True
-            return
-
+                    if not body:
+                        continue
+                    decision = session.text_committer.feed(body)
+                    self._log_tn_commits(session, decision.commits)
+                    self._log_tn_pending(session, decision)
+                    await self._ingest_commits(session, decision.commits)
+                    session.text_journal.update_raw_source(self._tn_raw_source(session))
+                    self._emit_text_commit_events(session, decision.events)
         # Flush any held partial-emoji carry as final streaming text before
-        # signalling end-of-input (a held keycap base with no modifier coming
-        # is just a normal digit and should still be spoken).
+        # asking the committer for its final decision.  A held keycap base with
+        # no modifier is a normal digit and must still pass through it.
         if session._emoji_carry:
             body = session._emoji_carry
             session._emoji_carry = ""
-            await self._ingest_streaming_text(session, body)
+            decision = session.text_committer.feed(body)
+            self._log_tn_commits(session, decision.commits)
+            self._log_tn_pending(session, decision)
+            await self._ingest_commits(session, decision.commits)
+            session.text_journal.update_raw_source(self._tn_raw_source(session))
+            self._emit_text_commit_events(session, decision.events)
+
+        final_decision = session.text_committer.feed("", final=True)
+        self._log_tn_commits(session, final_decision.commits)
+        self._log_tn_pending(session, final_decision)
+        await self._ingest_commits(session, final_decision.commits)
+        if not query_matched:
+            session.text_journal.update_raw_source(self._tn_raw_source(session))
+        self._emit_text_commit_events(session, final_decision.events)
+
+        session.mark_input_complete()
+        if session.text_journal is not None:
+            # Streaming modes have already installed their raw→canonical
+            # projection incrementally.  FULL_TEXT is handled below by the
+            # final TN flush, so finishing this pre-TN journal here would make
+            # us accidentally feed the old canonical snapshot to TN.
+            if mode != InputMode.FULL_TEXT:
+                session.text_journal.finalize_projection()
 
         if (
             mode == InputMode.LONG_SEGMENT
@@ -767,7 +1095,16 @@ class FrontendInterface:
         hold = self._guarded_hold_for(session)
         hold_lock = asyncio.Lock() if hold is not None else None
         hold_ticker: Optional[asyncio.Task] = None
-        semantic_gate = self._semantic_start_gate_for(session)
+        # Some integration/unit harnesses intentionally call this unbound
+        # coroutine with a narrow frontend test double.  Keep the Phase-1
+        # gate optional at that boundary instead of requiring every existing
+        # consumer to grow the new helper method.
+        semantic_gate_factory = getattr(self, "_semantic_start_gate_for", None)
+        semantic_gate = (
+            semantic_gate_factory(session)
+            if callable(semantic_gate_factory)
+            else None
+        )
         semantic_gate_lock = asyncio.Lock() if semantic_gate is not None else None
         semantic_ticker: Optional[asyncio.Task] = None
         prefix_gate_guard_bypass = session.config.timing.extra.get(

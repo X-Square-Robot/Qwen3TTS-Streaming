@@ -89,6 +89,9 @@ class TextNormalizationConfig:
     fallback: str = "cardinal_or_literal"
     projection: str = "readable_values"
     max_pending_chars: int = 512
+    # ``closed_span`` is the safe production mode.  Prefix snapshots from
+    # WeText are observations only and never become append-only commits.
+    commit_mode: str = "closed_span"
 
 
 @dataclass
