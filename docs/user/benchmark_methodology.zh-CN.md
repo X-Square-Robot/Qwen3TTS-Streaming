@@ -4,6 +4,11 @@
 
 本文档定义产品 Demo、README 和 release trace 使用的 benchmark 口径。所有公开性能数字都必须带上这些条件。
 
+统一的 `/demo/#/lab` 页面是交互式浏览器实验工具：基础 LLM PK 和并发实验通过实例
+公共 `/v1/realtime` 执行，并报告浏览器侧耗时。可选 `demo_api` 提供独立的服务端
+Triton/trace 接口。发布结果时必须记录来源，不能把浏览器实验或 `demo_api` 测量值直接
+与下方正式 engine benchmark 表比较。
+
 ## 指标定义
 
 | 指标 | 含义 |
@@ -35,6 +40,7 @@
 - warmup 策略：是否排除 warmup。
 - 并发数、请求数、失败数。
 - 测量位置：服务端、adapter、客户端。
+- 实验来源：内置 `/demo/#/lab` 的公共 Realtime、可选 `demo_api`，或直接 engine/Triton 客户端。
 - 是否使用 fixture trace。
 
 ## 单路 TTFT 的口径
@@ -71,7 +77,9 @@ TTFT 15ms。
 - throughput audio sec/sec。
 - 是否启用 live concurrency。
 
-可选 `demo_api` 的 live concurrency 默认关闭：
+内置“实验”页的浏览器并发不是 128 路正式 benchmark，而是面向当前实例的交互式对照。
+如需服务端并发任务，请启动 `demo_api` 并明确记录来源。Compose 的 `demo` profile 默认将
+live concurrency 设为 `0`；直接运行模块时默认是 `1`，因此应显式设置该变量：
 
 ```bash
 QWEN_DEMO_ENABLE_LIVE_CONCURRENCY=1 python -m demo_api --port 7860

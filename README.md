@@ -12,7 +12,9 @@
 [![Status](https://img.shields.io/badge/status-v0.1%20engineering%20preview-orange.svg)](#capability-status)
 [![GitHub stars](https://img.shields.io/github/stars/X-Square-Robot/Qwen3TTS-Streaming?style=social)](https://github.com/X-Square-Robot/Qwen3TTS-Streaming)
 
-<img src="docs/images/文本播放器.gif" width="720" alt="Text Player demo: streaming TTS playback synced to engine decode steps">
+<img src="docs/images/文本播放器.gif" width="720" alt="Historical pre-consolidation Text Player screenshot; open the current unified portal at /demo/">
+
+<small><em>Historical pre-consolidation capture; the current browser experience is the unified `/demo/` portal.</em></small>
 
 *Text tokens go in, audio chunks come out — in real time. See why that matters in [Token-Level Streaming](#token-level-streaming), then try it in the [built-in Demo](#built-in-demo-and-documentation).*
 
@@ -355,7 +357,20 @@ set `DEMO_ENABLED=false` at startup to disable it. The portal discovers the
 current instance and synthesizes through the
 Browser SDK, plays PCM through the system speaker, exposes capability-gated VAD
 and delivery controls, downloads WAV, and renders this repository's Markdown.
-No separate Demo API is required for the normal experience.
+No separate Demo API or Node process is required for the normal experience.
+
+Contributors working on the portal should start with the
+[`web/packages/demo` development guide](web/packages/demo/README.md); runtime
+operators who need the optional backend can use the
+[`demo_api` guide](demo_api/README.md).
+
+The former standalone `webui/` feature showcase has been consolidated into
+`web/packages/demo`; this is now the only browser frontend and portal entry
+point. Use `/demo/#/lab` for the unified engineering Lab. Its basic LLM
+PK and concurrency experiments use the instance's public `/v1/realtime` path;
+the optional `demo_api` backend powers the migrated deep-engineering panels
+(live TRT/Text Player trace, server-side LLM PK, and lane-level concurrency)
+and capability inspection, and never serves a second UI.
 
 CI packages the Browser SDK once as an npm tarball and embeds those exact bytes
 under `/demo/downloads/`. The SDK page generates an `npm install
@@ -363,10 +378,16 @@ under `/demo/downloads/`. The SDK page generates an `npm install
 need a repository checkout. GitLab releases additionally publish the same
 archive to the project npm Registry.
 
-The built-in Lab also provides LLM PK, concurrency requests, Text Player event
-traces, and JSON trace downloads over public Realtime. Results describe only
-the current browser-to-instance run; the page never substitutes fixtures or
-hard-coded performance numbers for a live backend.
+The built-in Lab provides LLM PK and concurrency requests over public Realtime.
+When an optional `demo_api` is configured through `DEMO_LAB_URL`, the same page
+also exposes the migrated live TRT/Text Player trace, server-side LLM PK, lane
+concurrency, and JSON/WAV downloads. Results describe only the current
+browser-to-instance run; the page never substitutes fixtures or hard-coded
+performance numbers for a live backend.
+
+The following media are retained as historical captures from the former
+standalone WebUI. They illustrate the experiments, but their layout and any
+numbers shown in them are not current UI or benchmark claims.
 
 **Historical LLM PK demo asset** — streaming vs. non-streaming, same timeline
 
@@ -388,6 +409,7 @@ Open `http://localhost:50052/demo/`. For the Triton deployment, use
 `--gateway triton` and open `http://localhost:50053/demo/`. Reverse proxies may
 mount the service below `/infer/<instance>`; all portal, SDK, WebSocket and asset
 links remain relative to that prefix.
+No Vite dev server or second WebUI process is needed for this runtime path.
 
 HTTP/WS is the default local protocol; mounting certificate files does not
 enable HTTPS automatically. For direct self-signed WSS testing, the Python SDK
@@ -407,10 +429,11 @@ as in FunASR Nano, to serve HTTPS/WSS directly from that same public port. See
 [direct HTTPS/WSS](docs/user/deployment.md#direct-httpswss-on-a-development-host)
 for the certificate mount contract.
 
-The built-in **Lab** tab runs LLM PK and concurrency experiments through the
-same public Realtime endpoint. Detailed decode-trace data remains available
-from the optional `demo_api` engineering backend and is entered from that same
-built-in page; it is never presented as the normal product experience:
+The built-in **Lab** tab runs basic LLM PK and concurrency experiments through
+the same public Realtime endpoint. When configured, the optional backend-only
+`demo_api` service adds the migrated live TRT/Text Player, server-side PK, and
+lane-concurrency panels from that same page; it is never presented as the
+normal product experience:
 
 ```bash
 bash scripts/bash/compose.sh up --gateway triton --variant custom-1.7b
@@ -454,6 +477,8 @@ Qwen3TTS-Streaming/
 │   └── src/qwen3tts_protocol/  #   Shared protocol layer (single source of truth)
 ├── demo_api/                   # Optional engineering-lab API (depends on the client package)
 ├── web/                        # Browser SDK and the single React/Vite product portal
+│   ├── packages/browser-sdk/   # Browser SDK package
+│   └── packages/demo/          # Unified /demo/ portal (experience/SDK/docs/Lab)
 ├── proto/                      # Single source of the protocol definition (tts.proto + generated code)
 ├── model_repository/           # Triton Python BLS model definitions
 ├── infra/

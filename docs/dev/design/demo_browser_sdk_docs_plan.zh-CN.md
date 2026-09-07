@@ -4,6 +4,11 @@
 > 跨浏览器矩阵和物理扬声器晋级门禁仍需在部署环境执行。逐项证据与执行入口见
 > [验收矩阵](demo_browser_sdk_docs_acceptance.zh-CN.md)。
 
+> 当前结构（2026-09-04）：原独立顶层 `webui/` 已并入 `web/packages/demo`，运行时只
+> 发布一个 `/demo/` 浏览器门户；`/demo/#/lab` 是统一的实验入口。`demo_api/` 仅是
+> 可选的后端工程实验 API（详细 decode trace 与能力查询），不再提供第二套前端。
+> 下文的“分阶段交付”保留为实施记录，涉及迁移的条目已完成。
+
 ## 目标与总体方案
 
 参考 FunASR Nano 的实例门户、SDK 分发和单源文档方案，将 Qwen3TTS-Streaming
@@ -51,7 +56,7 @@ QWEN3 TTS · STREAMING
 
 ## 代码组织
 
-将现有单包 `webui/` 迁入 npm workspace，迁移期间不保留两套前端实现：
+已将原单包 `webui/` 迁入 npm workspace，当前不保留两套前端实现：
 
 ```text
 web/
@@ -72,8 +77,9 @@ protocol/
 ```
 
 依赖保持单向：Demo 依赖 Browser SDK；Browser SDK 只依赖协议合同；运行时静态分发
-只读取已构建产物，不依赖 React、Node 或 demo_api。`demo_api/` 继续拥有 LLM PK、
-并发和 trace 等工程实验能力，不进入基本合成链路。
+只读取已构建产物，不依赖 React、Node 或 demo_api。基本 LLM PK/并发实验通过门户的
+公共 `/v1/realtime` 执行；`demo_api/` 作为可选后端提供详细 decode trace 与能力查询，
+不进入基本合成链路。
 
 ## 核心实现
 
@@ -201,9 +207,11 @@ Demo 沿用 React、Vite、TypeScript；使用 hash history 和相对 asset base
 
 #### “实验”页
 
-- 复用当前 LLM PK、Concurrency、Text Player trace 和 JSON 下载能力；
+- 统一从 `/demo/#/lab` 提供基础 LLM PK/Concurrency，并在可选后端可达时提供已迁移的
+  实时 TRT/Text Player、服务端 PK、多路并发和 JSON/WAV 下载能力；
 - 明确标记为工程实验区，与普通试听入口隔离；
-- 只有 `demo_api` 可达且 `lab_available=true` 时展示，不让基本 Demo 依赖 demo_api；
+- 基础 LLM PK/Concurrency 走公共 `/v1/realtime`；详细 trace 工具按 `demo_api` 能力
+  与 `lab.available` 门控，不让基本 Demo 依赖 demo_api；
 - fixture 只能作为离线 trace 查看，必须明显标记，不参与实时体验和公开性能口径。
 
 ### 4. 服务端静态站点与能力元数据
@@ -310,12 +318,12 @@ Demo 沿用 React、Vite、TypeScript；使用 hash history 和相对 asset base
    sidecar 与 health 端口合同一致；可独立优先发布。
 2. **能力合同统一**：补齐两种 runtime 的 `/v1/capabilities` parity、Demo config、
    JSON Schema 和跨 SDK golden vectors。
-3. **npm workspace 与 Browser SDK**：迁移现有 React WebUI，完成公开类型、Realtime
+3. **npm workspace 与 Browser SDK**（已完成）：迁移现有 React WebUI，完成公开类型、Realtime
    客户端、版本映射和 npm pack。
 4. **浏览器播放链路**：AudioWorklet、连续重采样、sample cursor、playback ACK、
    guarded delivery、恢复和 WAV 收集。
-5. **产品 Demo**：体验、参数、诊断、SDK、代码生成和 FunASR 同风格响应式 UI；现有
-   LLM PK/Concurrency 移入可选实验页。
+5. **产品 Demo**（已完成）：体验、参数、诊断、SDK、代码生成和 FunASR 同风格响应式 UI；
+   LLM PK/Concurrency 与 Text Player trace 统一进入 `/demo/#/lab`，详细 trace 后端保持可选。
 6. **Markdown 单源文档**：精选 manifest、站内链接、资产打包、docs-only 模式和
    GitLab Pages。
 7. **CI 与镜像集成**：一次构建多处复用、GitLab npm、GitHub assets、两种 runtime

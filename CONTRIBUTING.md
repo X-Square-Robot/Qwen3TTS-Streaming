@@ -19,6 +19,11 @@ export PYTHONPATH=client/src
 
 > A full engine run (export / build TRT / start the service) requires an NVIDIA GPU + NGC containers; see the [README Prerequisites](README.md#prerequisites) and the [Deployment Guide](docs/user/deployment.md). Pure logic development and unit tests do not require a GPU.
 
+For browser portal work, use the `web/` npm workspace and read the
+[`web/packages/demo` development guide](web/packages/demo/README.md). The former
+standalone `webui/` frontend is retired; live UI checks use the runtime's
+`/demo/` entry and optional `DEMO_LAB_URL` backend.
+
 ## Running Tests
 
 ```bash

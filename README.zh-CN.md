@@ -12,7 +12,9 @@
 [![Status](https://img.shields.io/badge/status-v0.1%20engineering%20preview-orange.svg)](#能力状态)
 [![GitHub stars](https://img.shields.io/github/stars/X-Square-Robot/Qwen3TTS-Streaming?style=social)](https://github.com/X-Square-Robot/Qwen3TTS-Streaming)
 
-<img src="docs/images/文本播放器.gif" width="720" alt="文本播放器演示：按 engine decode step 同步播放的流式 TTS">
+<img src="docs/images/文本播放器.gif" width="720" alt="合并前的 Text Player 历史截图；当前统一门户请打开 /demo/">
+
+<small><em>合并前的历史截图；当前浏览器体验统一由 `/demo/` 门户提供。</em></small>
 
 *文本 token 进去，音频 chunk 实时出来。为什么这很关键见 [Token 级流式](#token-级流式)，然后到[内置 Demo](#内置-demo-与统一文档)直接试听。*
 
@@ -345,11 +347,24 @@ mamba run -n qwen3-tts python tools/validation/serving_endpoints.py \
 `DEMO_ENABLED=false` 可将其关闭。
 门户会发现当前实例的能力，通过 Browser SDK 合成，通过系统扬声器播放，并提供由
 capabilities 门控的 VAD/交付参数、WAV 下载和本仓库 Markdown 文档；普通体验不依赖
-独立 Demo API。
+独立 Demo API 或 Node 进程。
 
-内置“实验”页还提供通过公共 Realtime 执行的 **LLM PK**、并发请求、Text Player
-事件轨迹和 JSON trace 下载。结果仅代表当前浏览器到当前实例的本次请求，不展示
-硬编码性能数字，也不会用 fixture 或模拟音频替代 live backend。
+需要修改门户的贡献者请先阅读
+[`web/packages/demo` 开发说明](web/packages/demo/README.zh-CN.md)；需要启用可选后端的
+维护者请参阅 [`demo_api` 说明](demo_api/README.zh-CN.md)。
+
+原独立的 `webui/` 特性展示前端已并入 `web/packages/demo`；现在只有这一套浏览器前端和
+一个门户入口。统一工程实验从 `/demo/#/lab` 进入：基础 LLM PK 与并发实验使用实例
+公共 `/v1/realtime`；可选的 `demo_api` 后端承载已迁移的深度工程面板（实时 TRT/Text
+Player trace、服务端 LLM PK、多路并发）和能力查询，绝不再提供第二套 UI。
+
+内置“实验”页通过公共 Realtime 提供基础 **LLM PK** 和并发请求；配置
+`DEMO_LAB_URL` 后，同一页面还会提供已迁移的实时 TRT/Text Player trace、服务端 LLM PK、
+多路并发以及 JSON/WAV 下载。结果仅代表当前浏览器到当前实例的本次请求，不展示硬编码
+性能数字，也不会用 fixture 或模拟音频替代 live backend。
+
+以下媒体是原独立 WebUI 的历史截图，仅用于说明实验形态；其中的布局和数字都不是当前 UI
+或 benchmark 声明。
 
 **LLM PK 历史演示素材**
 
@@ -370,6 +385,7 @@ bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 浏览器打开 `http://localhost:50052/demo/`。Triton 部署改用 `--gateway triton`，
 然后打开 `http://localhost:50053/demo/`。服务挂在 `/infer/<instance>` 等反向代理前缀下
 时，门户、SDK、WebSocket 和静态资源链接仍会保留该前缀。
+该运行时路径不需要启动 Vite 开发服务器或第二套 WebUI 进程。
 
 HTTP/WS 是默认本地协议；挂载证书不会自动启用 HTTPS。需要直接调试自签名 WSS 时，
 Python SDK 可用 `tls_verify="/path/to/cert.local.pem"` 严格信任指定证书，或仅在临时
@@ -385,9 +401,9 @@ Kubernetes 只允许一个公开端口时，engine 容器设置
 提供 HTTPS/WSS；具体证书挂载方式见
 [开发机直接启用 HTTPS/WSS](docs/user/deployment.zh-CN.md#开发机直接启用-httpswss)。
 
-内置“实验”页已通过同一个公共 Realtime 入口提供 **LLM PK** 和并发实验。详细
-decode trace 数据仍由可选的 `demo_api` 工程实验后端提供，并从同一个内置页面进入，
-不会伪装成普通产品体验：
+内置“实验”页已通过同一个公共 Realtime 入口提供基础 **LLM PK** 和并发实验。配置后，
+仅提供后端能力的可选 `demo_api` 服务会从同一页面增加已迁移的实时 TRT/Text Player、
+服务端 PK 与多路并发面板，不会伪装成普通产品体验：
 
 ```bash
 bash scripts/bash/compose.sh up --gateway triton --variant custom-1.7b
@@ -429,6 +445,8 @@ Qwen3TTS-Streaming/
 │   └── src/qwen3tts_protocol/  #   共享协议层（单一真相源）
 ├── demo_api/                   # 可选工程实验 API（依赖 client 包）
 ├── web/                        # Browser SDK 与唯一 React/Vite 产品门户
+│   ├── packages/browser-sdk/   # Browser SDK 包
+│   └── packages/demo/          # 统一 /demo/ 门户（体验/SDK/文档/实验）
 ├── proto/                      # 协议定义唯一源（tts.proto + 生成代码）
 ├── model_repository/           # Triton Python BLS 模型定义
 ├── infra/

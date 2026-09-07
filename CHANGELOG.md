@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Consolidated the former standalone `webui/` feature showcase into
+  `web/packages/demo`, the single version-matched portal served at `/demo/`.
+  Playback, SDK, documentation, and the Lab now share that portal;
+  `/demo/#/lab` is the only Lab entry, with deep-engineering panels gated by
+  the optional backend. `demo_api` remains backend-only and does not serve a
+  second frontend.
 - Python SDK `transport="auto"` now prefers native `/v1/ws` and retains
   `/v1/realtime` as the OpenAI Realtime compatibility endpoint. Explicit
   endpoints still honor the caller's wire-contract choice, and automatic
@@ -68,6 +74,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **WebUI Demo**: an aiohttp backend (`demo_api/`) + a Vite/React frontend (`webui/`).
 - **Protocol single source of truth** (`proto/tts.proto`): generated with `make proto`, synced with `make proto-sync`.
 - **Documentation**: user documentation (deployment, SDK, benchmark, limitations) and developer documentation (architecture, design, investigation, operations).
+
+> The v0.1 WebUI entry above records the historical standalone layout. Current
+> releases use the unified `web/packages/demo` portal; see the Unreleased entry
+> for the migration boundary.
 
 ### Notes
 

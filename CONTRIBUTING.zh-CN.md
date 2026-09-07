@@ -19,6 +19,11 @@ export PYTHONPATH=client/src
 
 > 完整引擎运行（导出/编译 TRT/起服务）需要 NVIDIA GPU + NGC 容器，见 [README 前置要求](README.zh-CN.md#前置要求) 与 [部署指南](docs/user/deployment.zh-CN.md)。纯逻辑开发与单元测试不需要 GPU。
 
+修改浏览器门户时请使用 `web/` npm workspace，并先阅读
+[`web/packages/demo` 开发说明](web/packages/demo/README.zh-CN.md)。原独立的 `webui/`
+前端已退出；真实 UI 检查应访问 runtime 的 `/demo/`，深度工程面板按需通过
+`DEMO_LAB_URL` 接入后端。
+
 ## 运行测试
 
 ```bash

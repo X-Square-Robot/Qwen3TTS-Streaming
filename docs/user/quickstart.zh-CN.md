@@ -22,6 +22,7 @@ https://tts.example.com
 | --- | --- |
 | 在线体验 | `https://tts.example.com/demo/` |
 | Python / Browser SDK | `https://tts.example.com/demo/#/sdk` |
+| 工程实验 | `https://tts.example.com/demo/#/lab`（基础 Realtime 实验；深度面板可选） |
 | 服务能力 | `https://tts.example.com/v1/capabilities` |
 | Python SDK 原生 WebSocket | `wss://tts.example.com/v1/ws` |
 | OpenAI Realtime 兼容入口 | `wss://tts.example.com/v1/realtime` |

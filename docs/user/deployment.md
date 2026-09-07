@@ -623,8 +623,12 @@ if logs must survive container replacement.
 The release image already contains the version-matched product Demo, Browser
 SDK, Python wheel index, and selected Markdown documentation. It is enabled by
 default on the same public endpoint as Realtime; no separate Demo API or Node
-process is used. The shared endpoint is HTTP/WS by default; the presence of
+process is required for the normal product path. The shared endpoint is
+HTTP/WS by default; the presence of
 mounted local certificate files does not switch protocols automatically.
+The former standalone `webui/` feature showcase has been consolidated into
+`web/packages/demo`; this is the only browser frontend shipped by the runtime.
+Use `/demo/#/lab` as the single browser entry for the engineering Lab.
 CI/CD builds the Browser SDK npm tarball once and embeds the
 same bytes under `/demo/downloads/`; the SDK page generates an `npm install
 "https://...tgz"` command for the current instance, without requiring a source
@@ -696,10 +700,13 @@ below `/infer/<instance>` keeps that prefix for Demo assets, `/sdk/`,
 `/v1/capabilities`, `/v1/ws`, and `/v1/realtime`. Set `DEMO_ENABLED=false` when the portal
 must not be public; `/demo/` then returns 404.
 
-`demo_api` remains an optional engineering backend for detailed traces; the
-repository no longer carries a second WebUI. LLM PK, concurrency, and traces
-are entered through the single `/demo/#/lab` portal. Enable Compose profile
-`demo` and publish its URL through `DEMO_LAB_URL` only when those tools are needed.
+`demo_api` is backend-only and remains optional for detailed decode traces and
+capability inspection; the repository no longer carries a second WebUI. Basic
+LLM PK and concurrency experiments run from the same `/demo/#/lab` page through
+the runtime's public Realtime endpoint. When enabled, the backend adds the
+migrated live TRT/Text Player, server-side PK, and lane-concurrency panels.
+Enable Compose profile `demo` and publish its browser-reachable URL through
+`DEMO_LAB_URL` only when those deep-engineering panels are needed.
 
 ### Public gateway security boundary
 
@@ -748,9 +755,12 @@ If Triton reports errors like `TYPE_FP32` / `TYPE_BF16`, make sure:
 
 The TensorRT plan is tightly bound to the runtime version. After switching the TensorRT/NGC image, you need to rebuild the engine.
 
-### The built-in portal does not show the Lab entry
+### The built-in portal does not show the optional engineering panel
 
-The portal shows Lab only when `lab_available=true` and `demo_api /healthz` is reachable. Check:
+The runtime-backed portal always shows the basic Lab entry. `lab.available=true`
+and a reachable configured `demo_api /healthz` enable its detailed engineering
+panel; if that backend is unavailable, only that panel is hidden. The docs-only
+portal is the exception because it has no live Lab. Check:
 
 - Whether the Triton gRPC port is `localhost:8001`.
 - Whether the demo API's `QWEN_DEMO_TRITON_GRPC` is correct.

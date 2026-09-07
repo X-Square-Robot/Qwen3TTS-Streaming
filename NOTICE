@@ -33,7 +33,7 @@ Third-party components
      gRPC / grpcio (Apache-2.0), protobuf (BSD-3-Clause),
      aiohttp (Apache-2.0), requests (Apache-2.0),
      tritonclient (BSD-3-Clause, NVIDIA), soundfile (BSD-3-Clause).
-   WebUI (Node / TypeScript):
+   Built-in Demo and Browser SDK (Node / TypeScript):
    - React / React-DOM (MIT), Vite / @vitejs/plugin-react (MIT),
      lucide-react (ISC), TypeScript (Apache-2.0).
    - See each project for full license texts. Test-only tooling (pytest,

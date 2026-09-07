@@ -21,6 +21,10 @@
 | `scripts/compose/` | container entrypoints | deployment maintainers |
 | `scripts/demo/` | demo launchers | demo users |
 
+The legacy-named `scripts/demo/start_webui_demo.sh` is a compatibility
+launcher. It can start Triton and the optional `demo_api`, then prints the
+runtime's unified `/demo/#/lab` URL; it never starts a second frontend.
+
 ## scripts/python/ Inventory
 
 | Script | Purpose |

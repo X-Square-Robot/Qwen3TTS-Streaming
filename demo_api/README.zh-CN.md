@@ -14,6 +14,23 @@ demo_api 为内置 `/demo/#/lab` 提供可选的深度工程实验接口；普�
 | **LLM PK** | 流式 vs 离线双路对比，量化首包延迟与总耗时差异 |
 | **Concurrency** | 并发压测，支持真实 Triton 请求或模拟模式，实时回传进度 |
 
+## 前端与运行时边界
+
+`demo_api` 只有后端职责。唯一的浏览器前端是
+`web/packages/demo` 中的 React/Vite 门户，运行时从 `/demo/` 提供；不再有需要
+启动的第二个 `webui/` 应用。工程实验统一从浏览器的
+`/demo/#/lab` 进入。
+
+门户的普通试听以及基础 LLM PK/并发实验使用当前实例的公共
+`/v1/realtime`；runtime 配置 `DEMO_LAB_URL` 后，已迁移的深度工程面板（实时 TRT/Text
+Player trace、服务端 LLM PK、多路并发）及后端 capabilities 才会请求 `demo_api`。它不
+提供静态前端资源，也不替代产品门户。
+
+在 runtime gateway 上将 `DEMO_LAB_URL` 设置为浏览器可访问的 API 根地址（例如
+`http://localhost:7860`）。门户会探测该地址的 `/healthz`；可选后端不可达时，普通的
+“体验”“SDK”“文档”和基础“实验”页面仍可使用；只有已迁移的深度工程面板会隐藏。例外是
+docs-only 门户：它没有 live runtime，也不提供可交互实验。
+
 ## 依赖
 
 ```
@@ -37,6 +54,10 @@ python -m demo_api
 
 可选参数：`--host`、`--port`。
 
+该命令只启动 API。要将它接入内置门户，请在启动 runtime 时设置
+`DEMO_LAB_URL=http://localhost:7860`，再打开 runtime 的 `/demo/#/lab` 地址（例如
+Triton gateway 使用 `http://localhost:50053/demo/#/lab`）。
+
 **方式二：一键启动（推荐）**
 
 ```bash
@@ -58,11 +79,14 @@ bash scripts/demo/start_webui_demo.sh
 | `QWEN_DEMO_HOST` | `0.0.0.0` | API 监听地址 |
 | `QWEN_DEMO_PORT` | `7860` | API 监听端口 |
 | `QWEN_DEMO_CORS_ORIGIN` | `*` | CORS 允许来源 |
-| `QWEN_DEMO_ENABLE_LIVE_CONCURRENCY` | `1` | 是否启用真实并发请求（`0` 则为模拟模式） |
+| `QWEN_DEMO_ENABLE_LIVE_CONCURRENCY` | 直接运行时为 `1`；Compose 默认 `0` | 是否启用真实并发请求（`0` 则为模拟模式） |
 | `TRITON_MAX_BATCH_SLOTS` | `128` | Triton 最大批次槽位数 |
 | `TRITON_MAX_SESSIONS` | `128` | Triton 最大会话数 |
 
 ## API 端点
+
+以下是可选后端的 API 合同。内置门户的普通试听和基于 Realtime 的实验使用 runtime
+公共 `/v1/*` 端点；只需要基本试听时不应依赖或公开此 API。
 
 ### HTTP
 
@@ -85,4 +109,6 @@ bash scripts/demo/start_webui_demo.sh
 
 demo_api 依赖 `qwen3tts_protocol` 包中的 `schemas`（如 `TraceEvent`）和 `triton_types`（如 `TtsRequest`），
 用于请求/响应的结构化定义。实际的 Triton gRPC 通信由 `triton_client` 模块封装，
-demo_api 不再内嵌客户端逻辑，保持职责单一。
+demo_api 不再内嵌客户端逻辑，保持职责单一。浏览器侧协议与 UI 位于
+`web/packages/demo` 和 `web/packages/browser-sdk`；已退出的顶层 `webui/` 路径不再是受支持
+的开发或部署目标。

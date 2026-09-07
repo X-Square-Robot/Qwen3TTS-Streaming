@@ -14,6 +14,28 @@ demo_api provides optional deep-engineering endpoints for `/demo/#/lab`; normal 
 | **LLM PK** | Streaming vs. offline side-by-side comparison, quantifying the difference in first-packet latency and total time |
 | **Concurrency** | Concurrency stress test, supporting real Triton requests or simulated mode, with real-time progress reporting |
 
+## Frontend and runtime boundary
+
+`demo_api` is backend-only. The sole browser frontend is the React/Vite portal in
+`web/packages/demo`, which the runtime serves at `/demo/`; there is no second
+`webui/` application to start. Use `/demo/#/lab` as the single browser entry for
+engineering experiments.
+
+The portal's normal playback and its basic LLM PK/concurrency experiments use
+the current instance's public `/v1/realtime` endpoint. When the runtime is
+configured with `DEMO_LAB_URL`, `demo_api` powers the migrated deep-engineering
+panels (live TRT/Text Player trace, server-side LLM PK, and lane-level
+concurrency) plus backend capability information. It does not serve static
+frontend assets or replace the product portal.
+
+Set `DEMO_LAB_URL` on the runtime gateway to a browser-reachable base URL (for
+example `http://localhost:7860`). The portal probes that URL's `/healthz`; when
+the optional backend is unavailable, the normal Experience, SDK, Docs, and
+basic Lab pages remain usable; only the migrated deep-engineering panels are
+hidden.
+The docs-only portal is the exception: it has no live runtime or interactive
+Lab.
+
 ## Dependencies
 
 ```
@@ -37,6 +59,11 @@ python -m demo_api
 
 Optional arguments: `--host`, `--port`.
 
+This starts the API only. To link it to the built-in portal, start the runtime
+with `DEMO_LAB_URL=http://localhost:7860`, then open the runtime's
+`/demo/#/lab` URL (for example `http://localhost:50053/demo/#/lab` for a
+Triton gateway).
+
 **Option 2: One-click launch (recommended)**
 
 ```bash
@@ -58,11 +85,16 @@ It supports options such as `--variant`, `--triton-slots`, `--no-triton`, and `-
 | `QWEN_DEMO_HOST` | `0.0.0.0` | API listen address |
 | `QWEN_DEMO_PORT` | `7860` | API listen port |
 | `QWEN_DEMO_CORS_ORIGIN` | `*` | Allowed CORS origin |
-| `QWEN_DEMO_ENABLE_LIVE_CONCURRENCY` | `1` | Whether to enable real concurrent requests (`0` for simulated mode) |
+| `QWEN_DEMO_ENABLE_LIVE_CONCURRENCY` | `1` when run directly; Compose defaults to `0` | Whether to enable real concurrent requests (`0` for simulated mode) |
 | `TRITON_MAX_BATCH_SLOTS` | `128` | Maximum Triton batch slots |
 | `TRITON_MAX_SESSIONS` | `128` | Maximum Triton sessions |
 
 ## API Endpoints
+
+These endpoints are the optional backend contract. The built-in portal's normal
+playback and Realtime-backed experiments use the runtime's public `/v1/*`
+endpoints; do not expose or depend on this API when only basic playback is
+needed.
 
 ### HTTP
 
@@ -86,3 +118,6 @@ It supports options such as `--variant`, `--triton-slots`, `--no-triton`, and `-
 demo_api depends on `schemas` (e.g. `TraceEvent`) and `triton_types` (e.g. `TtsRequest`) from the `qwen3tts_protocol` package
 for the structured definitions of requests/responses. The actual Triton gRPC communication is wrapped by the `triton_client` module,
 so demo_api no longer embeds client logic and keeps a single responsibility.
+The browser-side contract and UI remain in `web/packages/demo` and
+`web/packages/browser-sdk`; the retired top-level `webui/` path is not a supported
+development or deployment target.

@@ -4,6 +4,13 @@
 
 This document defines the benchmark conventions used by the product Demo, README, and release traces. All published performance numbers must carry these conditions.
 
+The unified `/demo/#/lab` page is an exploratory browser client: its basic LLM
+PK and concurrency runs use the instance's public `/v1/realtime` endpoint and
+report browser-side timings. The optional `demo_api` service exposes separate
+server-side Triton/trace routes. Record which source produced a result and do
+not compare browser-Lab or `demo_api` measurements directly with the published
+engine benchmark table.
+
 ## Metric Definitions
 
 | Metric | Meaning |
@@ -35,6 +42,8 @@ Public benchmarks must record:
 - Warmup strategy: whether warmup is excluded.
 - Concurrency, request count, failure count.
 - Measurement location: server, adapter, client.
+- Experiment source: built-in `/demo/#/lab` over public Realtime, optional
+  `demo_api`, or a direct engine/Triton client.
 - Whether a fixture trace is used.
 
 ## The Single-Stream TTFT Convention
@@ -71,7 +80,11 @@ Concurrency benchmarks must report at least:
 - throughput audio sec/sec.
 - whether live concurrency is enabled.
 
-The optional `demo_api` live concurrency path is disabled by default:
+The built-in Lab's browser-side concurrency is not the 128-stream benchmark;
+it is intended for an interactive, instance-local comparison. For an optional
+server-side concurrency job, start `demo_api` and record that source explicitly.
+The Compose `demo` profile defaults live concurrency to `0`; direct module
+execution defaults to `1`, so set the variable deliberately:
 
 ```bash
 QWEN_DEMO_ENABLE_LIVE_CONCURRENCY=1 python -m demo_api --port 7860

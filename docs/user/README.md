@@ -4,6 +4,11 @@
 
 The built-in Demo and repository use the same Markdown sources, organized by integration depth:
 
+The runtime serves one browser portal at `/demo/` (source:
+`web/packages/demo`). Its `/demo/#/lab` route contains the public-Realtime
+experiments; the optional `demo_api` backend only adds the migrated deep-
+engineering panels and never serves a second frontend.
+
 ## 01 Get started
 
 - [5-minute setup](quickstart.md) — identify endpoints, install the matching SDK, and synthesize once.

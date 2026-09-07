@@ -12,6 +12,7 @@ Browser SDK、已有 OpenAI Realtime 客户端、其他语言兼容接入或协�
 | `GET` | `/v1/capabilities` | 查询当前实例支持的任务、音频格式和扩展 |
 | WebSocket | `/v1/realtime` | OpenAI Realtime 兼容入口 |
 | `GET` | `/demo/` | 在线体验、SDK 下载和同版本文档 |
+| Hash 路由 | `/demo/#/lab` | 统一实验页：公共 Realtime 实验与可选深度工程面板 |
 
 HTTP 站点使用 HTTPS 时，WebSocket 必须使用 WSS。反向代理存在路径前缀时，不要手工拼接
 根路径；从 Demo 配置或 capabilities 提供的相对地址解析。

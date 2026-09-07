@@ -60,7 +60,8 @@
 6. 在真实输出上调节 energy/tenvad 参数，核对发送的 output policy 与服务端裁剪诊断；
    对长文本观察 buffer lead、underrun、播放 cursor 和恢复事件。
 7. 确认产品体验的网络流量只经过公共 `/v1/realtime`，不经过 `demo_api` 或浏览器直连
-   Triton gRPC；`demo_api` 不可达时基本体验仍可用且实验入口隐藏。
+   Triton gRPC；`demo_api` 不可达时基本体验和基础实验仍可用，仅详细工程面板隐藏
+   （docs-only 门户无 live 实验）。
 
 执行时应保存：实例 URL（可脱敏）、release tag、浏览器/系统/设备版本、能力 JSON、
 下载制品 SHA256、每项通过/失败、失败 trace 与音频问题的人工描述。真实 GitLab Pages

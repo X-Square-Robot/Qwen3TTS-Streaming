@@ -22,6 +22,7 @@ The portal and APIs share that origin:
 | --- | --- |
 | Try it | `https://tts.example.com/demo/` |
 | Python / Browser SDK | `https://tts.example.com/demo/#/sdk` |
+| Engineering Lab | `https://tts.example.com/demo/#/lab` (basic Realtime experiments; optional deep panels) |
 | Capabilities | `https://tts.example.com/v1/capabilities` |
 | Python SDK native WebSocket | `wss://tts.example.com/v1/ws` |
 | OpenAI Realtime compatibility endpoint | `wss://tts.example.com/v1/realtime` |

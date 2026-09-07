@@ -598,8 +598,10 @@ tar -C "${QWEN_LOG_DIR:-/var/log/qwen3tts}" \
 ## 内置 Demo 与统一文档
 
 正式镜像已经包含同版本的产品 Demo、Browser SDK、Python wheel 索引和精选 Markdown
-文档，并默认启用在 Realtime 的同一个公共入口，不需要独立 Demo API 或 Node 进程。
+文档，并默认启用在 Realtime 的同一个公共入口；普通产品路径不需要独立 Demo API 或 Node 进程。
 这个入口默认是 HTTP/WS；即使挂载目录中已有本地证书，也不会自动切换协议。
+原独立的 `webui/` 特性展示前端已并入 `web/packages/demo`；runtime 现在只发布这一套
+浏览器前端。工程实验统一从 `/demo/#/lab` 进入。
 CI/CD 只构建一次 Browser SDK npm tarball，并将同一份产物内置到
 `/demo/downloads/`；SDK 页面会生成指向当前实例的 `npm install "https://...tgz"`
 命令，调用方不需要拉取源码仓库。GitLab tag 流水线还会把同一 tarball 发布到项目 npm
@@ -663,9 +665,11 @@ Triton 部署把 `--gateway engine` 改成 `--gateway triton`，然后打开
 `/v1/realtime` 都会保留该前缀。不应公开门户时设置 `DEMO_ENABLED=false`，
 此时 `/demo/` 返回 404。
 
-`demo_api` 仅作为详细 trace 的可选工程实验后端；仓库不再保留第二套 WebUI。LLM PK、
-并发和 trace 均从同一个 `/demo/#/lab` 门户进入，仅在确有需要时显式启用 Compose 的
-`demo` profile，并通过 `DEMO_LAB_URL` 公布后端地址。
+`demo_api` 仅作为详细 decode trace 和能力查询的可选后端；仓库不再保留第二套 WebUI。
+基础 LLM PK 与并发实验仍从同一个 `/demo/#/lab` 页面进入，并通过 runtime 公共
+Realtime 执行。启用后，后端会在该页面增加已迁移的实时 TRT/Text Player、服务端 PK 与
+多路并发面板。只有需要这些深度工程面板时才显式启用 Compose 的 `demo` profile，并通过
+`DEMO_LAB_URL` 公布浏览器可访问的地址。
 
 ### 公网网关安全边界
 
@@ -710,9 +714,11 @@ runtime max_seq_len=1024 exceeds engine profile max_seq_len=512
 
 TensorRT plan 与 runtime 版本强绑定。更换 TensorRT/NGC image 后需要重新构建 engine。
 
-### 内置门户不显示“实验”入口
+### 内置门户不显示可选“工程实验”面板
 
-门户只在 `lab_available=true` 且 `demo_api /healthz` 可达时显示入口。检查：
+有 runtime 的门户始终显示基础“实验”入口；`lab.available=true` 且已配置的
+`demo_api /healthz` 可达时才启用详细工程面板，后端不可达时只隐藏该面板。例外是
+docs-only 门户，因为它没有 live 实验。检查：
 
 - Triton gRPC 端口是否是 `localhost:8001`。
 - demo API 的 `QWEN_DEMO_TRITON_GRPC` 是否正确。

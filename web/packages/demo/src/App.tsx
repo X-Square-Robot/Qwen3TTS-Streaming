@@ -45,6 +45,8 @@ export function App() {
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const [route, setRoute] = useState<Route>(routeFromHash());
   const [docsOnly, setDocsOnly] = useState(false);
+  // The public Realtime experiment is part of this portal. This flag only
+  // describes the optional deep-engineering API used by the former showcase.
   const [labReachable, setLabReachable] = useState(false);
   const [exampleSettings, setExampleSettings] = useState<DemoSynthesisSettings>(DEFAULT_DEMO_SETTINGS);
 
@@ -56,13 +58,18 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    setLabReachable(false);
     if (!loaded?.config.lab.available || !loaded.config.lab.url) {
-      setLabReachable(false);
       return;
     }
     const controller = new AbortController();
-    const base = new URL(loaded.config.lab.url, loaded.responseUrl);
-    if (!base.pathname.endsWith("/")) base.pathname += "/";
+    let base: URL;
+    try {
+      base = new URL(loaded.config.lab.url, loaded.responseUrl);
+      if (!base.pathname.endsWith("/")) base.pathname += "/";
+    } catch {
+      return () => controller.abort();
+    }
     const timer = window.setTimeout(() => controller.abort(), 2_000);
     fetch(new URL("healthz", base), {signal: controller.signal, cache: "no-store"})
       .then((response) => setLabReachable(response.ok))
@@ -86,7 +93,7 @@ export function App() {
           {nav("experience", "体验", <Headphones size={16} />)}
           {nav("sdk", "SDK", <Package size={16} />)}
           {nav("docs", "文档", <BookOpen size={16} />)}
-          {labReachable && nav("lab", "实验", <FlaskConical size={16} />)}
+          {loaded && !docsOnly && nav("lab", "实验", <FlaskConical size={16} />)}
         </nav>
         <span className="release"><i/>{loaded?.config.engine_version || "DEV"}</span>
       </div>
@@ -96,8 +103,10 @@ export function App() {
       {route === "experience" && <Experience loaded={loaded} onCapabilities={setCapabilities} onSettings={setExampleSettings} />}
       {route === "sdk" && <SdkPage loaded={loaded} capabilities={capabilities} settings={exampleSettings} docsOnly={docsOnly} />}
       {route === "docs" && <DocsPage />}
-      {route === "lab" && labReachable && <ExperimentLab loaded={loaded} />}
-      {route === "lab" && !labReachable && <p className="alert">工程实验后端未启用或当前不可达。</p>}
+      {route === "lab" && loaded && !docsOnly && <ExperimentLab loaded={loaded} labReachable={labReachable} />}
+      {route === "lab" && (!loaded || docsOnly) && <p className="alert">
+        {docsOnly ? "文档只读模式没有连接 TTS 实例，无法运行实验。" : "正在加载实例配置…"}
+      </p>}
     </main>
   </>;
 }

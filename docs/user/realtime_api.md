@@ -14,6 +14,7 @@ compatibility integration, or protocol debugging.
 | `GET` | `/v1/capabilities` | Discover tasks, audio formats, and extensions on this deployment |
 | WebSocket | `/v1/realtime` | OpenAI Realtime compatibility endpoint |
 | `GET` | `/demo/` | Playground, SDK downloads, and same-release documentation |
+| Hash route | `/demo/#/lab` | Unified Lab: public-Realtime experiments and optional deep-engineering panels |
 
 Use WSS when the HTTP origin uses HTTPS. When a reverse proxy adds a path prefix, resolve relative
 URLs from Demo configuration or capabilities instead of rebuilding paths from the origin.

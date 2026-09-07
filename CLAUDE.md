@@ -6,7 +6,7 @@
 
 ## 项目概述
 
-Qwen3TTS-Streaming 将官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运行时，围绕 Triton Inference Server / standalone engine 实现流式 TTS 推理，包含 prefix cache、连续批处理、前端分词和 WebUI 演示。
+Qwen3TTS-Streaming 将官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运行时，围绕 Triton Inference Server / standalone engine 实现流式 TTS 推理，包含 prefix cache、连续批处理、前端分词和统一内置 Demo 门户。
 
 ## 目录结构
 
@@ -16,8 +16,10 @@ Qwen3TTS-Streaming/
 ├── client/              # 独立 Python SDK 包（qwen3-tts-client，以 wheel 发布）
 │   ├── src/qwen3tts/     # 客户端实现与传输适配器
 │   └── src/qwen3tts_protocol/   # 共享协议层（单一真相源）
-├── demo_api/            # WebUI Demo API 后端（aiohttp）
-├── webui/               # Vite/React 前端
+├── demo_api/            # 可选工程实验 API 后端（aiohttp；详细 trace）
+├── web/                 # Browser SDK 与统一 React/Vite 门户
+│   ├── packages/browser-sdk/ # 浏览器 SDK（npm workspace 包）
+│   └── packages/demo/   # /demo/ 门户：体验、SDK、文档、实验
 ├── model_repository/    # Triton Python BLS 模型定义
 ├── scripts/
 │   ├── bash/            # 生命周期脚本（autorun/setup/build/deploy）
@@ -50,6 +52,11 @@ Qwen3TTS-Streaming/
 ├── third_party/         # git 子模块（Qwen3-TTS 上游）
 └── workspace/           # 运行时产物（gitignored）
 ```
+
+> 当前只维护一套浏览器前端：旧顶层 `webui/` 已并入 `web/packages/demo`，浏览器门户唯一
+> 入口为 `/demo/`，其中 `/demo/#/lab` 是统一的工程实验入口。`demo_api/` 只提供可选的
+> aiohttp API（例如详细 decode trace），不托管第二套静态前端；基本试听和 Browser SDK
+> 不依赖它。
 
 ## 关键入口命令
 
@@ -117,7 +124,7 @@ python -m engine.server --config engine.yaml
 | 运行单元测试 | `pytest tests/unit -q` |
 | 运行集成测试 | `pytest tests/integration -q` |
 | Serving 验收 | `python tools/validation/serving_endpoints.py --targets engine-grpc` |
-| 启动 WebUI Demo | `bash scripts/demo/start_webui_demo.sh --variant custom-1.7b` |
+| 启动内置 Demo/Lab（兼容 launcher） | `bash scripts/demo/start_webui_demo.sh --variant custom-1.7b` |
 | Docker Compose | `bash scripts/bash/compose.sh up --gateway triton --variant custom-1.7b` |
 | 导出 ONNX | `bash scripts/bash/autorun.sh setup -m custom-1.7b` |
 | 编译 TRT | `bash scripts/bash/build_engines.sh --variant custom-1.7b` |

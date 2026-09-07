@@ -25,6 +25,10 @@
 
 ### Changed
 
+- 将原独立的 `webui/` 特性展示前端并入 `web/packages/demo`，由运行时统一从
+  `/demo/` 提供版本匹配的门户。试听、SDK、文档和实验页共用该门户，
+  `/demo/#/lab` 是唯一实验入口，深度工程面板按可选后端能力门控；`demo_api` 只提供
+  后端 API，不再提供第二套前端。
 - Python SDK 的 `transport="auto"` 改为优先选择原生 `/v1/ws`；
   `/v1/realtime` 保留为 OpenAI Realtime 兼容入口。显式 endpoint 继续严格遵循调用方
   选择，只有原生入口不可用时才自动回退 Realtime。
@@ -61,6 +65,9 @@
 - **WebUI Demo**：aiohttp 后端（`demo_api/`）+ Vite/React 前端（`webui/`）。
 - **协议单一真相源**（`proto/tts.proto`）：`make proto` 生成、`make proto-sync` 同步。
 - **文档**：用户文档（部署、SDK、Benchmark、限制）、开发者文档（架构、设计、调查、运维）。
+
+> 上面的 v0.1 WebUI 条目记录的是历史上的独立前端布局。当前版本使用统一的
+> `web/packages/demo` 门户；迁移边界见上方 Unreleased 条目。
 
 ### Notes
 

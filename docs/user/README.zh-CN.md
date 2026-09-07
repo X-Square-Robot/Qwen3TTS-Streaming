@@ -4,6 +4,10 @@
 
 这组文档与内置 Demo 使用同一份 Markdown 源码，按接入深度分为三层：
 
+runtime 只从 `/demo/` 提供一个浏览器门户（源码在 `web/packages/demo`）。其中
+`/demo/#/lab` 承载公共 Realtime 实验；可选的 `demo_api` 只增加已迁移的深度工程面板，
+不会再提供第二套前端。
+
 ## 01 快速接入
 
 - [5 分钟接入](quickstart.zh-CN.md)——确认端点、安装匹配 SDK、完成第一次合成。

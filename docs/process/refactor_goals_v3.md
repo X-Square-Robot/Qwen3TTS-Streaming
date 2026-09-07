@@ -5,6 +5,9 @@
 > 前置：第二轮重构已完成（tests/tools 精简、scripts/bash 精简、pyproject.toml 建立、Python CLI 原型）
 > 状态：已实施（Phase 1-5 完成，G1 src/ 迁移标记为 deferred，详见 G1 说明）
 
+> 历史记录说明：本文按 2026-06 的目录快照编写；其中的 `webui/` 表述不代表当前布局。
+> 现行浏览器前端已迁移至 `web/packages/demo`，统一入口为 `/demo/`。
+
 ---
 
 ## 0. 问题诊断：为什么这个项目仍然感觉像「散装代码」
