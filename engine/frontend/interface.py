@@ -188,21 +188,28 @@ def _metric_bool(value: Any) -> bool:
 def _resolve_tn_language(tn_language: Any, session_language: Any) -> str:
     """Resolve the language mode used by the causal TN controller.
 
-    ``SessionConfig.language`` is also consumed by the acoustic model and may
-    be ``auto``.  Only an explicit Chinese/English value is copied into TN;
-    otherwise the controller remains in mixed mode and can wait for local
-    script evidence around numeric/symbol spans.
+    ``SessionConfig.language`` is also consumed by the acoustic model and must
+    not force the TN backend to treat every span as that language.  Chinese
+    sessions commonly contain URLs, email addresses, identifiers, and English
+    words; those spans need the mixed-language resolver so their local spoken
+    forms are selected correctly.  A caller can still opt into a uniform TN
+    language through ``TextNormalizationConfig.language`` or the
+    ``tn_language`` output-policy override.
+
+    ``session_language`` remains an argument for compatibility with embedders
+    that call this helper directly.  It is intentionally not consulted for TN
+    routing: acoustic language and TN language are separate contracts.
     """
 
     raw_tn = str(tn_language or "mixed_zh_en").strip().lower().replace("_", "-")
+    if raw_tn in {"", "auto", "unknown", "mixed", "mixed-zh-en", "zh-en"}:
+        return "mixed_zh_en"
     if raw_tn in {"zh", "zh-cn", "zh-hans", "chinese"}:
+        # ``zh`` is an explicit TN override only when it is supplied through
+        # the TN config.  The dataclass default is mixed_zh_en and is handled
+        # above, so this branch preserves the opt-in uniform route.
         return "zh"
     if raw_tn in {"en", "en-us", "en-gb", "english"}:
-        return "en"
-    raw_session = str(session_language or "").strip().lower().replace("_", "-")
-    if raw_session in {"zh", "zh-cn", "zh-hans", "chinese"}:
-        return "zh"
-    if raw_session in {"en", "en-us", "en-gb", "english"}:
         return "en"
     return "mixed_zh_en"
 

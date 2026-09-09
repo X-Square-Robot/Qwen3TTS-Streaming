@@ -1,0 +1,10 @@
+FROM qwen3-engine:25.10 AS deps
+FROM nvcr.io/nvidia/tritonserver:25.10-py3
+COPY --from=deps /usr/local/lib/python3.12/dist-packages/ /usr/local/lib/python3.12/dist-packages/
+COPY --from=deps /usr/local/lib/ /usr/local/lib/
+# Keep local validation identical to the production frontend dependency.
+RUN python3 -m pip install --no-cache-dir wetext==0.1.7
+COPY engine/ /opt/qwen3-tts/engine/
+COPY client/src/qwen3tts_protocol/ /opt/qwen3-tts/qwen3tts_protocol/
+ENV PYTHONPATH=/opt/qwen3-tts
+CMD ["tritonserver", "--model-repository=/models", "--strict-model-config=false", "--log-verbose=0"]

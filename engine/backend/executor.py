@@ -1240,14 +1240,12 @@ class Executor:
                 result["reason"] = "malformed_native_cursor_capability"
             result["progress_available"] = False
             return result
-        release_gate = getattr(self, "_release_gate", None)
-        if (
-            release_gate is not None
-            and not release_gate.verified(ReleaseCapability.NATIVE_CURSOR)
-        ):
-            result["progress_available"] = False
-            result["reason"] = release_gate.reason(ReleaseCapability.NATIVE_CURSOR)
-            result["supported_progress_modes"] = ["ema", "disabled"]
+        # Release evidence qualifies a published artifact; it must not hide a
+        # cursor route that has passed runtime graph/head/labelizer admission.
+        # Offline ASR and performance evidence remain release-pipeline gates.
+        result["progress_available"] = True
+        result.pop("reason", None)
+        result["supported_progress_modes"] = ["native", "ema", "disabled"]
         return result
 
     @property

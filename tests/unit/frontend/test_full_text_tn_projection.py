@@ -161,6 +161,51 @@ def test_streaming_tn_keeps_raw_source_while_committing_spoken_expansion():
     asyncio.run(run())
 
 
+def test_chinese_acoustic_language_keeps_mixed_tn_for_structured_spans():
+    """Full and token paths must verbalize Latin spans in Chinese sessions."""
+
+    async def run(mode: InputMode):
+        inbox = asyncio.Queue(maxsize=256)
+        interface = FrontendInterface(
+            engine_inbox=inbox,
+            tokenizer=_CharTokenizer(),
+            max_sessions=2,
+            engine_max_decode_len=512,
+        )
+        session = await interface.create_session(
+            f"mixed-tn-{mode.value}",
+            config=SessionConfig(
+                language="zh",
+                input_mode=mode,
+                group_policy=GroupPolicy.NONE,
+            ),
+        )
+        raw = "访问http://example.com/&#x20;发邮件到test@example.com"
+        expected = "访问HTTP colon slash slash example dot com slash发邮件到test at example dot com"
+
+        if mode is InputMode.FULL_TEXT:
+            await interface.push_text_input(session.session_id, raw)
+        else:
+            await interface.push_text_input(session.session_id, "访问http://example.com/")
+            await interface.push_text_input(session.session_id, "&#x20;发邮件到test@example.com")
+        await interface.mark_input_complete(session.session_id)
+
+        requests = await _drain(inbox)
+        token_text = "".join(
+            chr(token_id)
+            for request in requests
+            if request.type in (RequestType.START_TOKENS, RequestType.APPEND_TOKENS)
+            for token_id in (request.token_ids or [])
+        )
+        assert token_text == expected
+        assert "http://example.com/" not in token_text
+        assert "test@example.com" not in token_text
+        await _stop_consumer(session)
+
+    asyncio.run(run(InputMode.FULL_TEXT))
+    asyncio.run(run(InputMode.TOKEN))
+
+
 def test_frozen_committer_config_accepts_session_override_without_mutation():
     async def run():
         inbox = asyncio.Queue(maxsize=256)

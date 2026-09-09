@@ -187,7 +187,7 @@ def test_executor_reports_loaded_bundle_failure_before_default_adapter_reason():
     assert executor.speech_state_capability_reason == "missing_speech_state"
 
 
-def test_executor_release_evidence_gate_closes_native_and_state_advertising():
+def test_executor_release_evidence_does_not_hide_runtime_native_cursor():
     executor = _supported_executor(
         {
             "native_cursor": {"enabled": True, "progress_available": True},
@@ -204,8 +204,10 @@ def test_executor_release_evidence_gate_closes_native_and_state_advertising():
         True, "verified", "model-v1", "runtime-v1"
     )
 
-    assert executor.native_cursor_capability["progress_available"] is False
-    assert executor.native_cursor_capability["reason"] == "release_evidence_missing"
+    assert executor.native_cursor_capability["progress_available"] is True
+    assert executor.native_cursor_capability["supported_progress_modes"] == [
+        "native", "ema", "disabled"
+    ]
     assert executor.speech_state_capability == SpeechStateCapability.disabled()
     assert executor.speech_state_capability_reason == "release_evidence_missing"
 

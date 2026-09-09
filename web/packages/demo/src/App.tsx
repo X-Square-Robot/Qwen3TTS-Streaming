@@ -600,7 +600,13 @@ function EngineStatus({capabilities, events, busy}: {
 }) {
   const native = capabilities?.native_cursor;
   const speechState = capabilities?.speech_state;
-  const progress = [...events].reverse().find((event) => event.type === "progress");
+  const progressEvents = events.filter((event) => event.type === "progress");
+  // Native is the session route once admitted. A conservative EMA sample can
+  // appear before lookahead is valid or during final flush; it must not make
+  // the UI misreport an otherwise native session as EMA.
+  const progress = [...progressEvents].reverse().find(
+    (event) => String(event.meta?.progress_basis ?? "") === "native_cursor_v1",
+  ) ?? progressEvents.at(-1);
   const basis = progress?.type === "progress" ? String(progress.meta?.progress_basis ?? "") : "";
   const sessionMode = basis === "native_cursor_v1" ? "native" : basis === "ema_frame_ratio_v1" ? "ema" : "unknown";
   const modeLabel = sessionMode === "native" ? "原生游标" : sessionMode === "ema" ? "EMA" : busy ? "等待进度" : "未开始";

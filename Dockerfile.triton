@@ -1,0 +1,43 @@
+# ===========================================================================
+#  Dockerfile.triton — Self-contained Qwen3TTS-Streaming deployment image
+#
+#  Base: NVIDIA Triton full py3 image (onnxruntime + tensorrt + python).
+#  Build: bash scripts/bash/build_triton.sh build --tag qwen3tts-streaming:latest
+#  Run:   docker run --gpus all -p 8000:8000 -p 8001:8001 -p 8002:8002 <tag>
+# ===========================================================================
+
+ARG BASE_IMAGE=nvcr.io/nvidia/tritonserver:25.05-py3
+FROM ${BASE_IMAGE}
+
+LABEL maintainer="Qwen3TTS-Streaming"
+LABEL description="Qwen3-TTS streaming TTS inference with Triton"
+
+ENV QWEN_LOG_DIR=/var/log/qwen3tts \
+    QWEN_LOG_MAX_BYTES=52428800 \
+    QWEN_LOG_BACKUP_COUNT=10 \
+    QWEN_LOG_STDOUT=1
+
+# The streaming frontend enables TN by default.  Keep the runtime image
+# self-contained so it cannot silently fall back merely because wetext was not
+# present in the selected Triton base image.
+RUN python3 -m pip install --no-cache-dir \
+    --index-url "${PIP_INDEX_URL:-https://mirrors.bfsu.edu.cn/pypi/web/simple}" \
+    wetext==0.1.7 \
+    && python3 -c "import wetext; print('wetext runtime ready')"
+
+RUN install -d /opt/qwen3tts/bin /var/log/qwen3tts
+
+# In-container bounded log capture (stdout remains enabled by default).
+COPY scripts/compose/rotating_log_runner.py /opt/qwen3tts/bin/rotating_log_runner.py
+
+# Model repository
+COPY workspace/model_repository /models
+
+# Health check
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=6 \
+    CMD curl -f http://localhost:8000/v2/health/ready || exit 1
+
+EXPOSE 8000 8001 8002
+
+# Preserve the NVIDIA base image's initialization entrypoint.
+CMD ["python3", "/opt/qwen3tts/bin/rotating_log_runner.py", "--service", "triton", "--", "tritonserver", "--model-repository=/models", "--strict-model-config=false", "--log-verbose=1"]

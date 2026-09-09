@@ -206,7 +206,10 @@ def test_x2_commitment_observes_same_main_tn_projection_across_input_modes(
                     segment_text.get(request.segment_idx, "")
                     + "".join(chr(token_id) for token_id in request.token_ids)
                 )
-        assert segment_text == {0: "温度是", 1: "二十五度。"}
+        # A TN span is a stable mapping unit, not a clause boundary.  The
+        # spoken expansion stays adjacent to its surrounding clause in every
+        # input mode.
+        assert segment_text == {0: "温度是二十五度。"}
         await interface.cancel_session(session.session_id)
 
     asyncio.run(run())

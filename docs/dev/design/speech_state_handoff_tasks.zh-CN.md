@@ -755,7 +755,10 @@ standalone Executor 和 Triton 兼容层都复用同一判定，manifest 单独�
 `scripts/python/validate_capability_evidence.py` 在发布流水线中检查，并用
 `--require-native-cursor` 或 `--require-speech-state` 将缺证据变成发布失败。当前已有真实
 X2 checkpoint、cursor-enabled TRT graph、recurrent restore 和 successor E2E，但仍缺完整
-GPU 逐帧轨迹、不中断/继承对照和性能报告，因此 gate 尚未打开任何生产能力。H5 gate 还对
+GPU 逐帧轨迹、不中断/继承对照和性能报告，因此发布报告仍不能声称完整生产验收。需要
+区分两类状态：release evidence 继续决定发布报告是否通过；而已完成 graph/head/labelizer
+runtime admission 的 native cursor 可以向在线 Gateway 公开，不能因为离线 ASR/性能报告
+未完成而把已运行的 progress route 隐藏成不可用。H5 gate 还对
 `schema_version` 做严格整数校验，`true`、`1.0` 等 Python 中与 `1` 宽松相等的值会保持
 fail-closed，避免 malformed evidence 绕过发布闸门。
 

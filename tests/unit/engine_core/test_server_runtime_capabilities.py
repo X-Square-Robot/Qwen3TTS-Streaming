@@ -47,10 +47,7 @@ def test_server_reads_executor_capability_properties(surface, evidence_verified)
 
     assert capability["native_cursor"]["enabled"] is True
     assert capability["native_cursor"]["progress_available"] is False
-    if evidence_verified:
-        assert capability["native_cursor"]["reason"] == "cursor_labelizer_not_loaded"
-    else:
-        assert capability["native_cursor"]["reason"] == "release_evidence_missing"
+    assert capability["native_cursor"]["reason"] == "cursor_labelizer_not_loaded"
     assert capability["speech_state"]["supported"] is False
     assert capability["speech_state"]["reason"] == "missing_speech_state"
 
@@ -88,8 +85,7 @@ def test_server_capability_reader_observes_runtime_gate_changes():
     engine._executor._release_gate = ReleaseGate.disabled("runtime_evidence_rejected")
 
     capability = engine.describe_capabilities()
-    assert capability["native_cursor"]["progress_available"] is False
-    assert capability["native_cursor"]["reason"] == "runtime_evidence_rejected"
+    assert capability["native_cursor"]["progress_available"] is True
 
 
 def test_server_builds_cursor_plan_factory_only_after_labelizer_load(
