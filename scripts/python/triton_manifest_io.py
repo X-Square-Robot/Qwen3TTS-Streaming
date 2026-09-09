@@ -277,6 +277,13 @@ def build_manifest_for_export(
     }
     native_cursor = code2wav_layout.get("native_cursor")
     if native_cursor:
+        native_cursor = dict(native_cursor)
+        if native_cursor.get("enabled") is True:
+            # Cursor graph exports include the model-owned labelizer and the
+            # bindings required by the runtime bridge.  Emit the admission bit
+            # explicitly so packages cannot silently downgrade due to a
+            # missing legacy field.
+            native_cursor.setdefault("progress_available", True)
         # Keep this capability at the top level as well as beside the fused
         # layout so admission/routing can inspect it without understanding
         # every Code2Wav detail.

@@ -10,6 +10,42 @@ from engine.frontend.interface import FrontendInterface
 import json
 
 
+def test_closed_span_reuses_spoken_result_mapping_without_another_backend_pass():
+    from engine.frontend.text_commitment.normalizer_backend import (
+        MappedNormalization,
+        NormalizationMapping,
+    )
+    from engine.frontend.text_commitment.wetext_backend import WetextAdapter
+
+    class Backend:
+        closed_calls = 0
+
+        def normalize_closed(self, text, *, language, domain):
+            self.closed_calls += 1
+            return MappedNormalization(
+                input_text=text,
+                output_text="ABC",
+                mappings=(
+                    NormalizationMapping("replace", "word", 0, 1, 0, 1, "a", "A"),
+                    NormalizationMapping("replace", "word", 1, 3, 1, 3, "bc", "BC"),
+                ),
+            )
+
+        def normalize_with_mapping(self, *args, **kwargs):
+            raise AssertionError("closed result already contains the mapping")
+
+    backend = Backend()
+    c = IncrementalTextCommitter(adapter=WetextAdapter(backend=backend))
+    c.feed("甲a")
+    c.feed("bc")
+    assert backend.closed_calls == 0
+    result = c.feed("", final=True)
+    assert backend.closed_calls == 1
+    word = next(commit for commit in result.commits if commit.raw_text == "abc")
+    assert word.tts_text == "ABC"
+    assert word.mapping == ((1, 2), (2, 4))
+
+
 def test_percent_waits_for_suffix_and_commits_append_only():
     c = IncrementalTextCommitter()
     assert [x.tts_text for x in c.feed("是").commits] == ["是"]
@@ -308,6 +344,48 @@ def test_url_projection_decodes_embedded_html_space_entities():
         assert "and hash x twenty" not in output
         assert "HTTP colon slash slash example dot com slash" in output
         assert output.endswith("然后继续")
+
+
+def test_badcase_long_mixed_text_is_packet_cadence_invariant():
+    """The shipped TN badcase must not timeout spans between slow packets.
+
+    LLM-PK sends short deltas; at the 90 ms preset a URL, phone number, or
+    date can legitimately span several packets.  Compare the complete input
+    with 4-character packets and explicit idle polls at all supported cadences
+    so deadline handling cannot turn a suffix into literal ``#x20`` markup.
+    """
+
+    from pathlib import Path
+
+    raw = (Path(__file__).parents[3] / "resources/dataset/badcase/tn_streaming_cases.txt").read_text().splitlines()[-1]
+
+    def render(chunks, delay):
+        committer = IncrementalTextCommitter()
+        rendered: list[str] = []
+        decisions = []
+        now = 0.0
+        for chunk in chunks:
+            decision = committer.feed(chunk, now=now)
+            decisions.append(decision)
+            rendered.extend(item.tts_text for item in decision.commits)
+            now += delay
+            decision = committer.poll(now=now)
+            decisions.append(decision)
+            rendered.extend(item.tts_text for item in decision.commits)
+        decision = committer.feed("", final=True, now=now)
+        decisions.append(decision)
+        rendered.extend(item.tts_text for item in decision.commits)
+        return "".join(rendered), decisions
+
+    expected, full_decisions = render([raw], 0.0)
+    assert not any(decision.fallback for decision in full_decisions)
+    for delay in (0.025, 0.045, 0.09):
+        actual, decisions = render([raw[i : i + 4] for i in range(0, len(raw), 4)], delay)
+        assert actual == expected
+        assert not any(decision.fallback for decision in decisions)
+        assert not any("text.span.late_extension" in decision.events for decision in decisions)
+        assert "http://example.com/" not in actual
+        assert "&#x20" not in actual
 
 
 def test_id_card_numbers_are_spoken_digit_by_digit():

@@ -828,7 +828,7 @@ class WetextNormalizerBackend:
                 # public normalizer directly and synthesize a result with no
                 # detailed mappings when it is unavailable.  Calling
                 # ``normalize_closed`` here would recurse because that method
-                # opportunistically enriches its result with mappings.
+                # delegates to this API when mapping support is available.
                 ordinary = self._method(resolved, "normalize")
                 if ordinary is None:
                     candidates = self.candidates(
@@ -922,6 +922,36 @@ class WetextNormalizerBackend:
                 language=resolved,
                 backend=self.backend_name,
             )
+
+        # Prefer the public mapping API when available.  It already returns
+        # the spoken form and alignment in one pass; running ``normalize``
+        # first and requesting mappings afterwards doubles the graph work on
+        # every closed span.
+        mapping_method = self._method(resolved, "normalize_with_mapping")
+        if mapping_method is not None:
+            try:
+                mapped = self.normalize_with_mapping(
+                    text,
+                    language=resolved,
+                    domain=domain,
+                    nbest=1,
+                )
+                if mapped and mapped[0].output_text:
+                    first = mapped[0]
+                    return MappedNormalization(
+                        input_text=text,
+                        output_text=first.output_text,
+                        mappings=first.mappings,
+                        language=resolved,
+                        backend=self.backend_name,
+                        rank=first.rank,
+                        cost=first.cost,
+                    )
+            except NormalizerBackendError:
+                logger.info(
+                    "text.normalizer.mapping_unavailable",
+                    extra={"language": resolved.value, "domain": _span_name(domain)},
+                )
         try:
             method = self._method(resolved, "normalize")
             if method is None:
@@ -959,33 +989,9 @@ class WetextNormalizerBackend:
                 cause=exc,
             ) from exc
 
-        mappings: tuple[NormalizationMapping, ...] = ()
-        # Mapping is diagnostic enrichment.  A graph that can verbalize but
-        # cannot expose alignment must still be usable by the commit path.
-        try:
-            # Avoid invoking the enrichment path when the runtime has no
-            # public mapping method; this also keeps the fallback path
-            # recursion-free for minimal test doubles.
-            mapping_method = self._method(resolved, "normalize_with_mapping")
-            if mapping_method is not None:
-                mapped = self.normalize_with_mapping(
-                    text,
-                    language=resolved,
-                    domain=domain,
-                    nbest=1,
-                    include_identity=True,
-                )
-                if mapped and mapped[0].output_text == output:
-                    mappings = mapped[0].mappings
-        except NormalizerBackendError:
-            logger.info(
-                "text.normalizer.mapping_unavailable",
-                extra={"language": resolved.value, "domain": _span_name(domain)},
-            )
         return MappedNormalization(
             input_text=text,
             output_text=output,
-            mappings=mappings,
             language=resolved,
             backend=self.backend_name,
             rank=0,

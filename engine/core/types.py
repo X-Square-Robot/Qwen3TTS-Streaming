@@ -85,8 +85,10 @@ class OutputPolicyConfig:
 class TextNormalizationConfig:
     enabled: bool = True
     language: str = "mixed_zh_en"
-    semantic_max_wait_ms: float = 200.0
-    semantic_idle_wait_ms: float = 80.0
+    # Allow multi-packet semantic spans (URLs, phone numbers, dates) to reach
+    # their lexical closing boundary under normal streaming packet cadence.
+    semantic_max_wait_ms: float = 1000.0
+    semantic_idle_wait_ms: float = 120.0
     fallback: str = "cardinal_or_literal"
     projection: str = "readable_values"
     max_pending_chars: int = 512

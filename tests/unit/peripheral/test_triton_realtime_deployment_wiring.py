@@ -206,5 +206,15 @@ def test_tn_runtime_dependency_is_baked_into_standalone_and_generated_images():
     assert "'wetext==0.1.7'" in engine
     assert "import torch, tokenizers, yaml, grpc, numpy, soxr, wetext" in engine
     assert "wetext==0.1.7" in generated
-    assert "import wetext; print('wetext runtime ready')" in generated
+    assert "import wetext, pypinyin" in generated
     assert "wetext==0.1.7" in setup
+    for path in (
+        "infra/docker/Dockerfile.engine",
+        "infra/docker/Dockerfile.triton",
+        "infra/docker/Dockerfile.triton.local-validation",
+        "Dockerfile.triton",
+        "scripts/bash/build_triton.sh",
+        "scripts/bash/lib/triton.sh",
+        "scripts/bash/setup_env.sh",
+    ):
+        assert "'pypinyin>=0.55,<1'" in _read(path), path

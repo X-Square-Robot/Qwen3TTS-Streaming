@@ -196,8 +196,15 @@ class CommitmentUpdate:
 class TextNormalizationConfig:
     enabled: bool = True
     language: str = "mixed_zh_en"
-    semantic_max_wait_ms: float = 200.0
-    semantic_idle_wait_ms: float = 80.0
+    # A semantic span often arrives over several transport packets.  The
+    # previous 200 ms cap split ordinary URLs/phone numbers when clients sent
+    # 4-character packets every ~45 ms, forcing a literal fallback before the
+    # span's closing boundary arrived.  Keep the idle deadline as the
+    # low-latency guard while allowing a normal burst to complete.
+    semantic_max_wait_ms: float = 1000.0
+    # Leave enough idle grace for the documented 90 ms slow preset; otherwise
+    # a URL/phone span is committed literally just before its next packet.
+    semantic_idle_wait_ms: float = 120.0
     fallback: FallbackPolicy = FallbackPolicy.CARDINAL_OR_LITERAL
     projection: str = "readable_values"
     max_pending_chars: int = 512

@@ -691,6 +691,11 @@ def _export_talker_code2wav_fused_onnx(
             "history_width": int(cursor_meta["left_context"] + cursor_meta["right_context"]),
             "num_codebooks": int(cp_num_stages + 1),
             **cursor_meta,
+            # The fused graph exports the cursor bindings and the model-owned
+            # labelizer is packaged with the same weights.  Keep this explicit
+            # runtime-admission bit in the manifest so older consumers do not
+            # silently fail closed just because the field is absent.
+            "progress_available": True,
             "cursor_head_sha256": str(cursor_meta.get("head_sha256", "")),
             "cursor_vocab_sha256": str(cursor_meta.get("vocab_sha256", "")),
             "cursor_rules_sha256": str(cursor_meta.get("rules_sha256", "")),

@@ -809,3 +809,10 @@ button:disabled { opacity: 0.42; cursor: not-allowed; }
   .lab-lane-player p { grid-column: auto; }
   .lab-timeline-marker { width: 70px; }
 }
+
+.experience-lab-dock { margin-top: 76px; padding-top: 42px; border-top: 2px solid var(--ink); }
+.experience-lab-intro { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; margin-bottom: 18px; }
+.experience-lab-intro h2 { margin: 0; font: 800 clamp(28px, 4vw, 44px)/1 var(--display); letter-spacing: -0.05em; }
+.experience-lab-intro p:last-child { margin: 0; color: var(--slate); }
+.embedded-lab { padding: 0; }
+.embedded-lab > .eyebrow, .embedded-lab > h1, .embedded-lab > p:first-of-type { display: none; }

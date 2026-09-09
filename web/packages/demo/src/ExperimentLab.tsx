@@ -1,166 +1,70 @@
-import {useRef, useState} from "react";
-import {
-  AudioEncoding, discoverCapabilities, InputMode, RealtimeTTSClient, resolveRelativeUrl,
-  SynthesisTask, VadStrategy, type IncrementalSynthesisRun, type SynthesisRun,
-} from "@xmultimodalinteraction/qwen3tts-browser";
-
+import {useEffect, useMemo, useRef, useState} from "react";
+import {type Capabilities} from "@xmultimodalinteraction/qwen3tts-browser";
+import {DEFAULT_DEMO_SETTINGS, type DemoSynthesisSettings} from "./demo-settings";
 import type {LoadedDemoConfig} from "./config";
+import {concurrencyStats, MAX_CONCURRENCY, safeConcurrency, type LaneSnapshot} from "./lab/experiment-model";
+import {discoverExperimentCapabilities, startExperiment, startPkExperiment, type ActiveExperiment, type RunOutput} from "./lab/experiments";
+import "./lab/experiments.css";
 
-interface ExperimentResult {
-  readonly name: string;
-  readonly firstResponseMs: number;
-  readonly firstAudioMs: number;
-  readonly totalMs: number;
-  readonly audioSeconds: number;
-  readonly trace: ReadonlyArray<Record<string, unknown>>;
-}
+export interface ExperimentLabProps { loaded: LoadedDemoConfig | null; embedded?: boolean; capabilities?: Capabilities | null; settings?: DemoSynthesisSettings; }
 
-export function ExperimentLab({loaded}: {
-  loaded: LoadedDemoConfig | null;
-}) {
+export function ExperimentLab({loaded, embedded = false, capabilities: providedCapabilities, settings = DEFAULT_DEMO_SETTINGS}: ExperimentLabProps) {
   const [text, setText] = useState("你好，这是从上游大模型逐步到达的流式文本。");
-  const [concurrency, setConcurrency] = useState(4);
-  const [running, setRunning] = useState(false);
-  const [results, setResults] = useState<ExperimentResult[]>([]);
-  const [error, setError] = useState("");
-  const activeRuns = useRef<SynthesisRun[]>([]);
-  const activeClients = useRef<RealtimeTTSClient[]>([]);
-
-  async function run(mode: "full" | "incremental", name: string): Promise<ExperimentResult> {
-    if (!loaded) throw new Error("当前页面未连接 TTS 实例");
-    const capabilitiesUrl = resolveRelativeUrl(loaded.config.endpoints.capabilities_url, loaded.responseUrl);
-    const realtimeUrl = toWebSocketUrl(resolveRelativeUrl(loaded.config.endpoints.openai_realtime_url, loaded.responseUrl));
-    const capabilities = await discoverCapabilities(capabilitiesUrl);
-    const task = capabilities.tasks.find(isSynthesisTask);
-    const audio = capabilities.audio_formats.find((entry) => entry.encoding === AudioEncoding.PcmS16Le);
-    if (!task || !audio) throw new Error("实例没有 Browser SDK 支持的 task 或 PCM16 格式");
-
-    const client = new RealtimeTTSClient({capabilitiesUrl, websocketUrl: realtimeUrl});
-    activeClients.current.push(client);
-    let firstResponseMs = 0;
-    let firstAudioMs = 0;
-    let receivedSamples = 0;
-    let startedAt = 0;
-    const trace: Array<Record<string, unknown>> = [];
-    client.onRawEvent((event) => {
-      if (trace.length >= 200) trace.shift();
-      trace.push({
-        at_ms: startedAt > 0 ? Number((performance.now() - startedAt).toFixed(3)) : 0,
-        type: event.type,
-        response_id: event.response_id ?? (event.response as Record<string, unknown> | undefined)?.id,
-        delivery_seq: event.qwen_delivery_seq,
-        output_sample_start: event.qwen_output_sample_start,
-        output_sample_end: event.qwen_output_sample_end,
-        segment_id: event.segment_id,
-        text: event.type === "qwen.text_progress" ? event.text : undefined,
-      });
-    });
-    client.onEvent((event) => {
-      if (event.type === "response_started" && firstResponseMs === 0) firstResponseMs = performance.now() - startedAt;
-      if (event.type === "audio") {
-        if (firstAudioMs === 0) firstAudioMs = performance.now() - startedAt;
-        receivedSamples += event.pcm.length;
-      }
-    });
-    try {
-      await client.connect();
-      startedAt = performance.now();
-      const options = {
-        task,
-        speaker: capabilities.speakers?.[0] ?? "Serena",
-        inputMode: mode === "full" ? InputMode.FullText : InputMode.Token,
-        audio,
-        vad: {enabled: false, strategy: VadStrategy.Disabled},
-      };
-      const synthesis = mode === "full" ? await client.synthesize(text, options) : await client.startIncremental(options);
-      activeRuns.current.push(synthesis);
-      if (mode === "incremental") await sendIncrementally(synthesis as IncrementalSynthesisRun, text);
-      await synthesis.done;
-      return {name, firstResponseMs, firstAudioMs, totalMs: performance.now() - startedAt, audioSeconds: receivedSamples / audio.sample_rate, trace};
-    } finally {
-      client.close();
-    }
+  const [chunkDelayMs, setChunkDelayMs] = useState(45); const [chunkSize, setChunkSize] = useState(4);
+  const [concurrency, setConcurrency] = useState(4); const [running, setRunning] = useState(false);
+  const [pk, setPk] = useState<{streaming?: RunOutput; offline?: RunOutput}>({});
+  const [lanes, setLanes] = useState<LaneSnapshot[]>([]); const [error, setError] = useState("");
+  const [selectedAudio, setSelectedAudio] = useState<string | null>(null);
+  const streamingAudioRef = useRef<HTMLAudioElement | null>(null);
+  const offlineAudioRef = useRef<HTMLAudioElement | null>(null);
+  const alignedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const active = useRef<ActiveExperiment[]>([]); const objectUrls = useRef<string[]>([]);
+  const [capabilities, setCapabilities] = useState<Capabilities | null>(providedCapabilities ?? null);
+  useEffect(() => { if (providedCapabilities) setCapabilities(providedCapabilities); else if (loaded) void discoverExperimentCapabilities(loaded).then(setCapabilities).catch((e) => setError(String(e))); }, [loaded, providedCapabilities]);
+  useEffect(() => () => { active.current.forEach((run) => run.cancel()); if (alignedTimer.current) clearTimeout(alignedTimer.current); objectUrls.current.forEach(URL.revokeObjectURL); }, []);
+  const task = useMemo(() => capabilities?.tasks.includes(settings.task) ? settings.task : capabilities?.tasks[0], [capabilities, settings.task]);
+  const canRun = Boolean(loaded && text.trim() && task);
+  const opts = loaded && task ? {loaded, text, chunkSize, chunkDelayMs, task, speaker: settings.speaker, language: settings.language} : null;
+  function remember(output: RunOutput) { if (output.audioUrl) objectUrls.current.push(output.audioUrl); }
+  async function runPk() { if (!opts) return; setRunning(true); setError(""); setPk({}); const pair = startPkExperiment(opts); const stream = pair.streaming; const offline = pair.offline; active.current = [stream, offline]; const [a, b] = await Promise.all([stream.done, offline.done]); remember(a); remember(b); setPk({streaming: a, offline: b}); setRunning(false); }
+  async function runConcurrency() { if (!opts) return; setRunning(true); setError(""); setSelectedAudio(null); const count = safeConcurrency(concurrency); const initial = Array.from({length: count}, (_, id) => ({id, status: "connecting" as const})); setLanes(initial); const runs = initial.map((lane) => { const run = startExperiment(opts, "streaming", performance.now(), (update) => { setLanes((current) => current.map((item) => item.id === lane.id ? {...item, status: update.phase === "streaming" ? "streaming" : update.phase === "failed" ? "failed" : item.status, ...(update.firstAudioMs === undefined ? {} : {firstAudioMs: update.firstAudioMs}), ...(update.error ? {error: update.error} : {})} : item)); }); active.current.push(run); void run.done.then((out) => { remember(out); setLanes((current) => current.map((item) => { if (item.id !== lane.id) return item; return {...item, status: out.error ? "failed" : "done", firstAudioMs: out.firstAudioMs, totalMs: out.totalMs, ...(out.error ? {error: out.error} : {}), ...(out.audioUrl ? {audioUrl: out.audioUrl} : {})}; })); }); return run; }); await Promise.all(runs.map((run) => run.done)); setRunning(false); }
+  function cancel() { active.current.forEach((run) => run.cancel()); active.current = []; setRunning(false); }
+  function playAligned() {
+    const stream = streamingAudioRef.current; const offline = offlineAudioRef.current; const streamOutput = pk.streaming; const offlineOutput = pk.offline;
+    if (!stream || !offline || !streamOutput?.audioUrl || !offlineOutput?.audioUrl) return;
+    if (alignedTimer.current) clearTimeout(alignedTimer.current);
+    stream.currentTime = 0; offline.currentTime = 0;
+    void stream.play();
+    const wait = Math.max(0, (offlineOutput.firstAudioMs || 0) - (streamOutput.firstAudioMs || 0));
+    alignedTimer.current = setTimeout(() => { void offline.play(); alignedTimer.current = null; }, wait);
   }
-
-  async function execute(work: () => Promise<ExperimentResult[]>) {
-    setRunning(true); setError(""); setResults([]);
-    activeRuns.current = []; activeClients.current = [];
-    try { setResults(await work()); }
-    catch (cause) { setError(String(cause)); }
-    finally { activeRuns.current = []; activeClients.current = []; setRunning(false); }
-  }
-
-  function cancel() {
-    for (const synthesis of activeRuns.current) synthesis.cancel();
-    for (const client of activeClients.current) client.close();
-    setRunning(false);
-  }
-
-  return <section className="page">
-    <p className="eyebrow">ENGINEERING LAB · ONE PORTAL</p><h1>同一入口，观察不同负载。</h1>
-    <p>所有实验直接使用当前实例的 Browser SDK 与公共 Realtime。事件 trace、LLM PK
-      和多路并发都来自同一 Gateway 会话，不依赖独立实验后端。</p>
-    <div className="panel"><div className="panel-heading"><div><p className="panel-kicker">PUBLIC REALTIME</p><h2>基础实验输入</h2></div><p>浏览器直连当前实例；结果只代表本次请求。</p></div>
-      <textarea value={text} onChange={(event) => setText(event.target.value)} />
-      <div className="grid controls"><label>并发数<input type="number" min="1" max="16" value={concurrency}
-        onChange={(event) => setConcurrency(clamp(Number(event.target.value), 1, 16))}/></label></div>
-      <div className="actions">
-        <button className="primary" disabled={running || !loaded || !text.trim()} onClick={() => void execute(() => Promise.all([
-          run("incremental", "增量文本"), run("full", "完整文本"),
-        ]))}>运行 LLM PK</button>
-        <button disabled={running || !loaded || !text.trim()} onClick={() => void execute(() => Promise.all(
-          Array.from({length: concurrency}, (_, index) => run("full", `并发 ${index + 1}`)),
-        ))}>运行并发测试</button>
-        <button disabled={!running} onClick={cancel}>取消全部</button>
-      </div>{error && <p className="alert">{error}</p>}
+  function stopAligned() { if (alignedTimer.current) clearTimeout(alignedTimer.current); alignedTimer.current = null; streamingAudioRef.current?.pause(); offlineAudioRef.current?.pause(); }
+  const stats = concurrencyStats(lanes);
+  const pkScaleMs = Math.max(1, pk.streaming?.totalMs ?? 0, pk.offline?.totalMs ?? 0);
+  return <section className={embedded ? "embedded-lab experiment-lab" : "page experiment-lab"}>
+    <p className="eyebrow">ENGINEERING LAB · REALTIME FIELD TEST</p><h1>{embedded ? "让上游文本，和声音一起到达。" : "同一入口，观察不同负载。"}</h1><p className="lab-intro">同一个 Browser SDK、同一个计时起点。流式路按字块到达；完整文本路等上游结束后再发送，时间轴因此能看出等待成本。</p>
+    <div className="lab-grid">
+      <section className="panel lab-card"><div className="panel-heading"><div><p className="panel-kicker">01 · LLM PK</p><h2>流式输入 vs 完整输入</h2></div><span className="capability-chip">{task ? `task · ${task}` : "未发现可用 task"}</span></div>
+        <label className="field-label">模拟上游文本<textarea value={text} onChange={(e) => setText(e.target.value)} /></label>
+        <div className="control-row"><label>每块字数<input type="number" min="1" max="32" value={chunkSize} onChange={(e) => setChunkSize(Math.min(32, Math.max(1, Number(e.target.value) || 1)))}/></label><label>块间隔（毫秒）<input type="number" min="0" max="10000" value={chunkDelayMs} onChange={(e) => setChunkDelayMs(Math.min(10000, Math.max(0, Number(e.target.value) || 0)))}/></label></div>
+        <div className="preset-row"><span>速度预设</span>{[[25,"快"],[45,"标准"],[90,"慢"]].map(([value, label]) => <button key={value} className={chunkDelayMs === value ? "selected" : ""} onClick={() => setChunkDelayMs(Number(value))}>{label} · {value}ms</button>)}</div>
+        <div className="actions"><button className="primary" disabled={!canRun || running} onClick={() => void runPk()}>{embedded ? "开始 LLM PK" : "运行 LLM PK"}</button><button disabled={!running} onClick={cancel}>取消当前实验</button></div>
+        <div className="pk-results">{(["streaming", "offline"] as const).map((key) => <LaneCard key={key} name={embedded ? (key === "streaming" ? "Streaming" : "Offline") : (key === "streaming" ? "增量文本" : "完整文本")} audioRef={key === "streaming" ? streamingAudioRef : offlineAudioRef} scaleMs={pkScaleMs} {...(pk[key] ? {output: pk[key]} : {})} tone={key} />)}</div>
+        {pk.streaming?.audioUrl && pk.offline?.audioUrl && <div className="pk-transport"><button className="primary" onClick={playAligned}>▶ 对齐播放两路</button><button onClick={stopAligned}>暂停对比</button><span>按两路首音频时间差错开播放，直接听出 TTFT 差异。</span></div>}
+      </section>
+      <section className="panel lab-card"><div className="panel-heading"><div><p className="panel-kicker">02 · CONCURRENCY</p><h2>并发压力面板</h2></div><span className="capability-chip">{capabilities?.native_cursor?.graph_enabled ? "native cursor" : "Browser SDK"}</span></div>
+        <label className="field-label">并发路数<input type="number" min="1" max={MAX_CONCURRENCY} value={concurrency} onChange={(e) => setConcurrency(safeConcurrency(Number(e.target.value)))}/></label>
+        <div className="preset-row concurrency-presets"><span>常用基准</span>{[16, 32, 64, 128, 256, 512].map((value) => <button key={value} className={concurrency === value ? "selected" : ""} onClick={() => setConcurrency(value)}>{value} 路</button>)}</div>
+        <p className="hint">可测试 1–{MAX_CONCURRENCY} 路；128 路是常用基准，实际容量仍由实例和浏览器资源决定。</p>
+        <div className="actions"><button className="primary" disabled={!canRun || running} onClick={() => void runConcurrency()}>开始并发测试</button></div>
+        <div className="concurrency-stats"><strong>{stats.averageFirstAudioMs ? `${stats.averageFirstAudioMs.toFixed(0)}ms` : "—"}</strong><span>平均首音频</span><strong>{stats.p90FirstAudioMs ? `${stats.p90FirstAudioMs.toFixed(0)}ms` : "—"}</strong><span>p90 首音频</span><strong>{stats.completed} / {stats.failed}</strong><span>完成 / 失败</span></div>
+        <div className="lane-grid">{lanes.map((lane) => <button className={`lane lane-${lane.status} ${selectedAudio === lane.audioUrl ? "selected" : ""}`} key={lane.id} title={lane.error ?? `并发 ${lane.id + 1}`} onClick={() => lane.audioUrl && setSelectedAudio(lane.audioUrl)}><span>{lane.id + 1}</span><small>{lane.status === "done" ? "试听" : lane.status}</small></button>)}</div>
+        {selectedAudio && <audio className="selected-audio" controls autoPlay src={selectedAudio}>当前浏览器不支持音频控件。</audio>}
+      </section>
     </div>
-    <div className="panel"><div className="panel-heading"><div><p className="panel-kicker">LIVE RESULT</p><h2>本次实时结果</h2></div></div>
-      <div className="metrics">{results.map((result) => <div key={result.name}><small>{result.name}</small>
-        <strong>{formatMs(result.firstAudioMs)}</strong><small>response {formatMs(result.firstResponseMs)}</small>
-        <small>total {formatMs(result.totalMs)} · {result.audioSeconds.toFixed(2)}s audio</small></div>)}</div>
-      {results.length === 0 && <p className="hint">结果只代表当前浏览器到当前实例的本次请求，不是预置 benchmark。</p>}
-      {results.length > 0 && <div className="actions"><button onClick={() => downloadTrace({
-        schema_version: "qwen.tts.demo-trace.v1",
-        generated_at: new Date().toISOString(),
-        engine_version: loaded?.config.engine_version,
-        text,
-        results,
-      })}>下载 JSON trace</button></div>}
-      {results.length > 0 && <div className="event-log">{results.flatMap((result) => result.trace.slice(-4).map((event, index) =>
-        <code key={`${result.name}-${index}`}>{result.name} · {String(event.type)} · {String(event.at_ms)}ms</code>))}</div>}
-    </div>
+    {(pk.streaming || pk.offline) && <button className="trace-button" onClick={() => downloadTrace({text, chunkDelayMs, chunkSize, pk})}>下载 JSON trace</button>}
+    {error && <p className="alert">{error}</p>}
   </section>;
 }
-
-async function sendIncrementally(run: IncrementalSynthesisRun, text: string): Promise<void> {
-  for (const chunk of text.match(/.{1,4}/gu) ?? [text]) {
-    run.append(chunk);
-    await new Promise((resolve) => setTimeout(resolve, 35));
-  }
-  run.commit();
-}
-
-function isSynthesisTask(value: string): value is SynthesisTask {
-  return Object.values(SynthesisTask).includes(value as SynthesisTask);
-}
-
-function toWebSocketUrl(url: URL): URL {
-  const result = new URL(url);
-  result.protocol = result.protocol === "https:" ? "wss:" : "ws:";
-  return result;
-}
-
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, Math.round(value))) : minimum;
-}
-
-function formatMs(value: number): string { return value > 0 ? `${value.toFixed(1)} ms` : "—"; }
-
-function downloadTrace(value: Record<string, unknown>): void {
-  const url = URL.createObjectURL(new Blob([`${JSON.stringify(value, null, 2)}\n`], {type: "application/json"}));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = "qwen3tts-demo-trace.json";
-  anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
-}
+function LaneCard({name, output, tone, audioRef, scaleMs}: {name: string; output?: RunOutput; tone: string; audioRef: React.MutableRefObject<HTMLAudioElement | null>; scaleMs: number}) { return <article className={`pk-lane ${tone}`}><div><strong>{name}</strong><small>{output?.error ?? "等待结果"}</small></div><div className="timeline"><i style={{width: output ? `${Math.min(100, output.totalMs / scaleMs * 100)}%` : "0%"}}/><b style={{left: output ? `${Math.min(100, output.firstAudioMs / scaleMs * 100)}%` : "0%"}}/><span>首音频 {output?.firstAudioMs ? `${output.firstAudioMs.toFixed(0)}ms` : "—"} · 完成 {output?.totalMs ? `${output.totalMs.toFixed(0)}ms` : "—"}</span></div>{output?.audioUrl && <audio ref={audioRef} controls src={output.audioUrl}>当前浏览器不支持音频控件。</audio>}</article>; }
+function downloadTrace(value: unknown) { const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], {type: "application/json"})); const anchor = document.createElement("a"); anchor.href = url; anchor.download = "qwen3tts-experiment-trace.json"; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 0); }

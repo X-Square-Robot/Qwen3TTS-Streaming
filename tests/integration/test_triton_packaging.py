@@ -263,6 +263,30 @@ def test_build_manifest_for_export_roundtrip():
     assert m["code2wav_fused"]["c2w_kv_heads"] == 16
     assert m["code2wav_fused"]["c2w_head_dim"] == 64
     assert m["code2wav_fused"]["c2w_state_input_names"][0] == "c2w_conv_state_0"
+    assert m["native_cursor"]["enabled"] is True
+    assert m["native_cursor"]["progress_available"] is True
+
+
+def test_build_manifest_marks_cursor_progress_as_runtime_available():
+    manifest = build_manifest_for_export(
+        "custom-1.7b",
+        {
+            "talker_hidden_size": 2048,
+            "talker_num_kv_heads": 8,
+            "talker_head_dim": 128,
+            "talker_num_layers": 28,
+            "talker_vocab_size": 3072,
+        },
+        {
+            "num_code2wav_hidden_layers": 8,
+            "c2w_state_input_names": [],
+            "c2w_state_output_names": [],
+            "initial_state_shapes": [],
+            "native_cursor": {"enabled": True, "input_names": ["cursor_label_ids"]},
+        },
+    )
+    assert manifest["native_cursor"]["progress_available"] is True
+    assert manifest["architecture"]["native_cursor"]["progress_available"] is True
 
 
 def test_triton_io_float_dtype_from_manifest_defaults_fp32():

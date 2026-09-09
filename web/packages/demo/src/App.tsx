@@ -79,7 +79,7 @@ export function App() {
     </header>
     <main className="app-main">
       {docsOnly && <div className="alert">文档只读模式：此 Pages 站点未连接具体 TTS 实例。请在部署实例的 /demo/ 页面进行合成、试听和 SDK 下载。</div>}
-      {route === "experience" && <Experience loaded={loaded} onCapabilities={setCapabilities} onSettings={setExampleSettings} />}
+      {route === "experience" && <Experience loaded={loaded} onCapabilities={setCapabilities} onSettings={setExampleSettings} settings={exampleSettings} />}
       {route === "sdk" && <SdkPage loaded={loaded} capabilities={capabilities} settings={exampleSettings} docsOnly={docsOnly} />}
       {route === "docs" && <DocsPage />}
       {route === "lab" && loaded && !docsOnly && <ExperimentLab loaded={loaded} />}
@@ -90,12 +90,17 @@ export function App() {
   </>;
 }
 
-function Experience({loaded, onCapabilities, onSettings}: {
+function Experience({loaded, onCapabilities, onSettings, settings}: {
   loaded: LoadedDemoConfig | null;
   onCapabilities: (value: Capabilities) => void;
   onSettings: (value: DemoSynthesisSettings) => void;
+  settings: DemoSynthesisSettings;
 }) {
   const [text, setText] = useState("你好，欢迎体验 Qwen3 TTS 流式语音合成服务。");
+  const [synthesisText, setSynthesisText] = useState("");
+  const [synthesisSampleRate, setSynthesisSampleRate] = useState(24_000);
+  const synthesisRateRef = useRef(24_000);
+  const [receivedSamples, setReceivedSamples] = useState(0);
   const [speaker, setSpeaker] = useState("Serena");
   const [language, setLanguage] = useState("auto");
   const [task, setTask] = useState(SynthesisTask.CustomVoice);
@@ -122,6 +127,8 @@ function Experience({loaded, onCapabilities, onSettings}: {
   const [xVectorOnly, setXVectorOnly] = useState(false);
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [events, setEvents] = useState<TTSEvent[]>([]);
+  // Keep progress history separate from the bounded diagnostic event log.
+  const [progressHistory, setProgressHistory] = useState<TTSEvent[]>([]);
   const [busy, setBusy] = useState(false);
   const [paused, setPaused] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState("");
@@ -184,6 +191,12 @@ function Experience({loaded, onCapabilities, onSettings}: {
   async function connectAndPlay() {
     if (!loaded) return;
     setEvents([]);
+    setProgressHistory([]);
+    setSynthesisText(text);
+    setSynthesisSampleRate(sampleRate);
+    synthesisRateRef.current = sampleRate;
+    setReceivedSamples(0);
+    setPlayback({played: 0n, buffered: 0n, queuedFrames: 0, underruns: 0});
     setUsage({});
     wavLimitWarned.current = false;
     playbackFailed.current = false;
@@ -280,8 +293,10 @@ function Experience({loaded, onCapabilities, onSettings}: {
   }
 
   function handleEvent(event: TTSEvent) {
+    if (event.type === "progress") setProgressHistory((current) => [...current.slice(-4_999), event]);
     setEvents((current) => [...current.slice(-199), event]);
     if (event.type === "audio") {
+      setReceivedSamples(Number(event.endSample));
       setTiming((current) => current.firstAudio ? current : {...current, firstAudio: performance.now() - startedAt.current});
       const collector = collectorRef.current;
       collector?.append(event.pcm);
@@ -294,7 +309,7 @@ function Experience({loaded, onCapabilities, onSettings}: {
       }
       if (!playbackFailed.current) {
         try {
-          playerRef.current?.enqueue(event.pcm, sampleRate, event.startSample, event.endSample);
+          playerRef.current?.enqueue(event.pcm, synthesisRateRef.current, event.startSample, event.endSample);
         } catch (cause) {
           playbackFailed.current = true;
           const message = `浏览器实时播放缓冲失败：${String(cause)}；完整音频仍会保留为 WAV。`;
@@ -375,8 +390,7 @@ function Experience({loaded, onCapabilities, onSettings}: {
     && vadStrategies.includes(vad)
     && (inputMode === "full" ? fullTextAvailable : inputMode === "long" ? longTextAvailable : incrementalAvailable),
   );
-  const receivedSamples = useMemo(() => events.reduce((sum, event) => event.type === "audio" ? sum + event.pcm.length : sum, 0), [events]);
-  const audioDuration = receivedSamples / sampleRate;
+  const audioDuration = receivedSamples / synthesisSampleRate;
   const textProgress = [...events].reverse().find((event) => event.type === "progress");
   const selectedTaskStatus = caps?.task_status.find((status) => status.task === task);
 
@@ -460,6 +474,8 @@ function Experience({loaded, onCapabilities, onSettings}: {
 
     <EngineStatus capabilities={caps} events={events} busy={busy} />
 
+    <CursorProgressPanel text={synthesisText || text} events={[...progressHistory, ...events.filter((event) => event.type !== "progress")]} capabilities={caps} busy={busy} playback={playback} />
+
     <div className="experience-workbench">
       <div className="control-stack">
         <section className="panel input-panel">
@@ -519,10 +535,10 @@ function Experience({loaded, onCapabilities, onSettings}: {
       <aside className="playback-stack">
         <section className={`panel action-panel${busy ? " is-live" : ""}`}>
           <div className="panel-heading stage-heading"><div><p className="panel-kicker">LISTENING STAGE</p><h2>监听台</h2></div><span className={`monitor-status${outputIssue ? " has-warning" : ""}`}><i/>{busy ? paused ? "已暂停" : "正在合成" : downloadUrl ? "可重放" : outputIssue ? "无有效音频" : "等待输入"}</span></div>
-          <div className="monitor-display"><div className="monitor-head"><span>OUTPUT MONITOR</span><span>{sampleRate / 1000} kHz</span></div><Waveform events={events}/>
+          <div className="monitor-display"><div className="monitor-head"><span>OUTPUT MONITOR · FRAME / TEXT ALIGNMENT</span><span>{(receivedSamples ? synthesisSampleRate : sampleRate) / 1000} kHz</span></div><Waveform events={events} playedSample={playback.played}/><AudioTextCursor text={synthesisText || text} events={[...progressHistory, ...events.filter((event) => event.type !== "progress")]} playback={playback} sampleRate={synthesisSampleRate}/>
             {outputIssue
               ? <p className="monitor-empty monitor-warning" role="status">{outputIssue}</p>
-              : textProgress?.type === "progress" ? <p className="text-progress">{textProgress.text}<small>sample {textProgress.sample.toString()}</small></p> : <p className="monitor-empty">合成后，音频波形与文本进度会出现在这里。</p>}</div>
+              : textProgress?.type === "progress" ? <p className="text-progress">{textProgress.text || "游标已对齐文本与音频"}<small>sample {textProgress.sample.toString()} · {String(textProgress.meta?.progress_basis ?? "progress")}</small></p> : <p className="monitor-empty">合成后，音频波形与文本进度会出现在这里。</p>}</div>
           <div className="actions stage-actions">
             <button className="primary" disabled={!canSynthesize || busy || !text.trim()} onClick={() => void connectAndPlay()}><Play size={17}/>合成并播放</button>
             <button disabled={!busy} onClick={() => void togglePause()}><Pause size={17}/>{paused ? "继续" : "暂停"}</button>
@@ -536,7 +552,10 @@ function Experience({loaded, onCapabilities, onSettings}: {
               setOutputDevice(event.target.value); void playerRef.current?.setOutputDevice(event.target.value);
             }}><option value="">系统默认扬声器</option>{outputDevices.map((device) => <option value={device.deviceId} key={device.deviceId}>{device.label || `扬声器 ${device.deviceId.slice(0, 6)}`}</option>)}</select></label>}
           </div>
-          {downloadUrl && <div className="recording-result"><audio className="replay" controls src={downloadUrl}/><a className="button download-action" href={downloadUrl} download="qwen3tts.wav"><Download size={17}/>下载 WAV</a></div>}
+          {downloadUrl && <div className="recording-result"><audio className="replay" controls src={downloadUrl} onPlay={() => void playerRef.current?.pause()} onTimeUpdate={(event) => {
+            const sample = BigInt(Math.max(0, Math.floor(event.currentTarget.currentTime * synthesisSampleRate)));
+            setPlayback((current) => ({...current, played: sample}));
+          }}/><a className="button download-action" href={downloadUrl} download="qwen3tts.wav"><Download size={17}/>下载 WAV</a></div>}
         </section>
       </aside>
     </div>
@@ -552,7 +571,7 @@ function Experience({loaded, onCapabilities, onSettings}: {
         <Metric label="音频时长" value={`${audioDuration.toFixed(2)} s`} />
         <Metric label="客户端 RTF" value={audioDuration > 0 && timing.total > 0 ? (timing.total / 1000 / audioDuration).toFixed(3) : "—"} />
         <Metric label="播放 sample" value={playback.played.toString()} />
-        <Metric label="Buffer lead" value={`${Number(playback.buffered - playback.played) / sampleRate * 1000 | 0} ms`} />
+        <Metric label="Buffer lead" value={`${Number(playback.buffered - playback.played) / (receivedSamples ? synthesisSampleRate : sampleRate) * 1000 | 0} ms`} />
         <Metric label="播放队列" value={playback.queuedFrames} />
         <Metric label="Underrun" value={playback.underruns} />
         <Metric label="Usage" value={Object.keys(usage).length > 0
@@ -566,6 +585,10 @@ function Experience({loaded, onCapabilities, onSettings}: {
         ? <p>尚无事件。点击“合成并播放”后，这里会记录连接、音频、恢复与告警。</p>
         : events.slice(-12).map((event, index) => <code key={index}>{event.type}{event.type === "warning" || event.type === "error" ? ` · ${event.message}` : ""}</code>)}</div>
     </section>
+    {loaded && <section className="experience-lab-dock" aria-label="实验室">
+      <div className="experience-lab-intro"><p className="eyebrow">ENGINEERING LAB · 02 / 03</p><h2>把实时体验继续拆开看</h2><p>文本进度、LLM 模拟 PK 与并发压测都使用上方同一个实例。</p></div>
+      <ExperimentLab loaded={loaded} embedded capabilities={caps} settings={settings} />
+    </section>}
   </>;
 }
 
@@ -591,12 +614,82 @@ function EngineStatus({capabilities, events, busy}: {
   return <section className="engine-status" aria-label="引擎能力状态" data-testid="engine-status">
     <div className="engine-status-heading"><span className="panel-kicker">ENGINE ROUTE</span><span>{capabilities?.engine_version || "能力等待中"}</span></div>
     <div className="engine-status-grid">
-      <StatusItem icon={<Cpu size={15}/>} label="游标图" value={native?.graph_enabled ? "已加载" : "标准图"} detail={native?.graph_enabled && !native.progress_available ? "进度桥未准入" : native?.progress_available ? "native 可用" : "EMA / disabled"} />
+      <StatusItem icon={<Cpu size={15}/>} label="游标图" value={native?.graph_enabled ? "已加载" : "标准图"} detail={cursorCapabilityDetail(native)} />
       <StatusItem icon={<Activity size={15}/>} label="本次进度" value={modeLabel} detail={progress?.type === "progress" ? String(progress.meta?.progress_quality ?? "已收到事件") : "以事件为准"} className={modeClass} />
       <StatusItem icon={<BadgeCheck size={15}/>} label="状态继承" value={speechState?.supported ? "可用" : "未启用"} detail={speechState?.supported ? "runtime admitted" : speechState?.reason || "未配置"} className={speechState?.supported ? "is-good" : "is-muted"} />
     </div>
   </section>;
 }
+
+function cursorCapabilityDetail(native: Capabilities["native_cursor"]): string {
+  if (!native?.graph_enabled) return "未加载，使用 EMA / disabled";
+  if (native.progress_available) return "native 可用";
+  const reason = native.reason;
+  const labels: Record<string, string> = {
+    cursor_graph_disabled: "游标图未启用",
+    cursor_head_missing: "游标 head 缺失",
+    cursor_labelizer_unavailable: "TN / Label Plan 不可用",
+    malformed_native_cursor_capability: "能力声明格式错误",
+    native_cursor_release_evidence_incomplete: "发布验收证据未完成",
+  };
+  return `未准入 · ${labels[reason ?? ""] ?? reason ?? "TN / Label Plan 桥接未连接"}`;
+}
+
+function CursorProgressPanel({text, events, capabilities, busy, playback}: {
+  text: string;
+  events: TTSEvent[];
+  capabilities: Capabilities | null;
+  busy: boolean;
+  playback: {played: bigint};
+}) {
+  const progressEvents = events.filter((event): event is Extract<TTSEvent, {type: "progress"}> => event.type === "progress");
+  const textLength = Array.from(text).length;
+  const native = progressEvents.filter((event) => String(event.meta?.progress_basis ?? "") === "native_cursor_v1");
+  const ema = progressEvents.filter((event) => String(event.meta?.progress_basis ?? "") === "ema_frame_ratio_v1");
+  const generated = progressEvents.at(-1);
+  const heard = [...progressEvents].reverse().find((event) => event.sample <= playback.played);
+  const latest = playback.played > 0n ? heard : undefined;
+  const rawEnd = latest ? progressRawEnd(latest, textLength) : 0;
+  const progress = latest ? progressFraction(latest, textLength) : 0;
+  const nativeReady = Boolean(capabilities?.native_cursor?.progress_available);
+  return <section className="cursor-panel" aria-label="文本游标进度">
+    <div className="cursor-panel-head"><div><p className="panel-kicker">TEXT CURSOR · 01 / 03</p><h2>看见每个字何时被说出来</h2></div>
+      <span className={`cursor-route ${nativeReady ? "is-native" : ""}`}><i/>{nativeReady ? "NATIVE CURSOR READY" : "EMA FALLBACK"}</span></div>
+    <p className="cursor-panel-copy">进度坐标来自当前会话事件。高亮是展示插值，协议边界仍按稳定 owner 单调推进。</p>
+    <div className="cursor-text-stage"><div className="cursor-text-meta"><span>RAW TEXT</span><span>{rawEnd.toFixed(1)}/{textLength} codepoints</span></div>
+      <div className="cursor-text" aria-live="polite">{Array.from(text).map((character, index) => <span key={`${index}-${character}`} className={index < Math.floor(rawEnd) ? "is-read" : index === Math.floor(rawEnd) ? "is-current" : ""}>{character === " " ? " " : character}</span>)}</div>
+      <div className="cursor-progress-track"><i style={{width: `${progress * 100}%`}}/></div>
+    </div>
+    <div className="cursor-trajectory"><div className="cursor-trajectory-head"><span>TRAJECTORY</span><span>{busy ? "LIVE" : progressEvents.length ? "CAPTURED" : "WAITING FOR AUDIO"}</span></div>
+      <CursorChart native={native} ema={ema} textLength={textLength}/>
+      <div className="cursor-legend"><span className="native-key"><i/>原生游标 {native.length ? `${native.length} points` : "等待"}</span><span className="ema-key"><i/>EMA {ema.length ? `${ema.length} points` : "降级时显示"}</span><span>已听 {latest ? `${progressRawEnd(latest, textLength).toFixed(1)}/${textLength}` : "—"} · 生成 {generated ? `${progressRawEnd(generated, textLength).toFixed(1)}/${textLength}` : "—"}</span></div>
+    </div>
+  </section>;
+}
+
+function CursorChart({native, ema, textLength}: {native: Extract<TTSEvent, {type: "progress"}>[]; ema: Extract<TTSEvent, {type: "progress"}>[]; textLength: number}) {
+  const points = [...native, ...ema];
+  const maxSample = Math.max(1, ...points.map((event) => progressSample(event)));
+  const path = (series: Extract<TTSEvent, {type: "progress"}>[]) => series.map((event, index) => {
+    const x = 8 + progressSample(event) / maxSample * 484;
+    const y = 72 - progressRawEnd(event, textLength) / Math.max(1, textLength) * 58;
+    return `${index ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  return <svg className="cursor-chart" viewBox="0 0 500 84" role="img" aria-label="原生游标和 EMA 文本进度轨迹"><path className="chart-grid" d="M8 14H492M8 43H492M8 72H492"/>{native.length > 0 && <path className="chart-native" d={path(native)}/>} {ema.length > 0 && <path className="chart-ema" d={path(ema)}/>}<text x="8" y="82">0</text><text x="476" y="82">audio samples</text></svg>;
+}
+
+function progressSample(event: Extract<TTSEvent, {type: "progress"}>): number { return Number(event.sample > 0n ? event.sample : event.meta?.output_sample_end ?? 0) || 0; }
+function progressRawEnd(event: Extract<TTSEvent, {type: "progress"}>, length: number): number {
+  const meta = event.meta ?? {};
+  const display = Number(meta.display_raw_position);
+  const committed = Number(meta.raw_codepoint_end);
+  // EMA's frame ratio is intentionally not converted into a raw character
+  // offset. Only the server's owner-span coordinate (or its display-only
+  // interpolation) may move the text highlight.
+  const value = Number.isFinite(display) ? display : Number.isFinite(committed) ? committed : 0;
+  return Math.max(0, Math.min(length, Number.isFinite(value) ? value : 0));
+}
+function progressFraction(event: Extract<TTSEvent, {type: "progress"}>, length: number): number { return length ? progressRawEnd(event, length) / length : 0; }
 
 function StatusItem({icon, label, value, detail, className = ""}: {
   icon: React.ReactNode;
@@ -628,7 +721,7 @@ function NumberInput({label, value, min, max, step = 1, disabled = false, onChan
     onChange={(event) => onChange(Number(event.target.value))}/></label>;
 }
 
-function Waveform({events}: {events: TTSEvent[]}) {
+function Waveform({events, playedSample}: {events: TTSEvent[]; playedSample: bigint}) {
   const bars = useMemo(() => {
     const audio = events.filter((event): event is Extract<TTSEvent, {type: "audio"}> => event.type === "audio").slice(-24);
     return audio.map((event) => {
@@ -636,10 +729,30 @@ function Waveform({events}: {events: TTSEvent[]}) {
       for (let index = 0; index < event.pcm.length; index += Math.max(1, Math.floor(event.pcm.length / 128))) {
         peak = Math.max(peak, Math.abs(event.pcm[index] ?? 0));
       }
-      return Math.max(4, Math.round(peak / 32768 * 64));
+      return {height: Math.max(4, Math.round(peak / 32768 * 64)), played: event.endSample <= playedSample};
     });
-  }, [events]);
-  return <div className="waveform" aria-label="实时音频波形">{(bars.length ? bars : [4, 4, 4, 4]).map((height, index) => <i key={index} style={{height}}/>)}</div>;
+  }, [events, playedSample]);
+  const fallback = [4, 4, 4, 4].map((height) => ({height, played: false}));
+  return <div className="waveform" aria-label="实时音频波形">{(bars.length ? bars : fallback).map((bar, index) => <i key={index} className={bar.played ? "is-played" : ""} style={{height: bar.height}}/>)}</div>;
+}
+
+function AudioTextCursor({text, events, playback, sampleRate}: {text: string; events: TTSEvent[]; playback: {played: bigint; buffered: bigint}; sampleRate: number}) {
+  const textLength = Array.from(text).length;
+  const anchors = events.filter((event): event is Extract<TTSEvent, {type: "progress"}> => event.type === "progress");
+  const latest = anchors.at(-1);
+  const progress = [...anchors].reverse().find((event) => event.sample <= playback.played);
+  const audio = events.filter((event): event is Extract<TTSEvent, {type: "audio"}> => event.type === "audio");
+  const generatedEnd = audio.at(-1)?.endSample ?? 0n;
+  const sourceSample = playback.played;
+  const generatedRatio = Number(generatedEnd > 0n ? (latest?.sample ?? 0n) * 100n / generatedEnd : 0n) / 100;
+  const playedRatio = Number(generatedEnd > 0n ? playback.played * 100n / generatedEnd : 0n) / 100;
+  const rawEnd = progress ? progressRawEnd(progress, textLength) : 0;
+  const route = progress ? String(progress.meta?.progress_basis ?? "").replace("_v1", "") : "waiting";
+  return <div className="audio-text-cursor"><div className="audio-cursor-labels"><span>TEXT POSITION <b>{rawEnd.toFixed(1)}/{textLength}</b></span><span>PCM SAMPLE <b>{sourceSample.toString()}</b></span></div>
+    <div className="audio-text-line"><i className="audio-generated" style={{width: `${Math.max(0, Math.min(1, generatedRatio)) * 100}%`}}/><i className="audio-played" style={{left: `${Math.max(0, Math.min(1, playedRatio)) * 100}%`}}/></div>
+    <div className="audio-text-preview">{Array.from(text).map((character, index) => <span key={`${index}-${character}`} className={index < Math.floor(rawEnd) ? "is-read" : index === Math.floor(rawEnd) ? "is-current" : ""}>{character === " " ? " " : character}</span>)}</div>
+    <div className="audio-cursor-foot"><span>{route} · codec frame {String(progress?.meta?.source_frame_end ?? "—")}</span><span>{sampleRate ? `${(Number(sourceSample) / sampleRate).toFixed(2)}s` : "—"} played</span></div>
+  </div>;
 }
 
 function formatMs(value: number): string { return value > 0 ? `${Math.round(value)} ms` : "—"; }

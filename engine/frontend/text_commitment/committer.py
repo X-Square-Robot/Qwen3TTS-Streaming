@@ -407,7 +407,23 @@ class IncrementalTextCommitter:
                 events=("text.input.after_final",) if text else (),
                 committed_raw_end=self.committed_raw_end,
             )
-        poll_decision = self.poll(now=now)
+        # A non-empty transport delta is evidence that the open span is still
+        # making progress.  Do not evaluate its deadline before appending that
+        # delta: with 4-character packets every 45–90 ms, the old ordering
+        # timed out URLs and phone numbers at the semantic max/idle boundary
+        # one packet before their lexical terminator arrived.  Callers can
+        # still use ``poll`` (or an empty feed) to enforce a deadline while the
+        # stream is idle.
+        poll_decision = (
+            self.poll(now=now)
+            if not text
+            else CommitDecision(
+                pending_raw=self.pending_raw,
+                pending_kind=self.pending_kind,
+                state=CommitmentState.OPEN if self.pending_raw else CommitmentState.SCAN,
+                committed_raw_end=self.committed_raw_end,
+            )
+        )
         commits = list(poll_decision.commits)
         events = list(poll_decision.events)
         fallback = poll_decision.fallback
@@ -1466,6 +1482,7 @@ class IncrementalTextCommitter:
         if p.kind is SpanKind.URL:
             backend_raw = _sanitize_url_for_tn(backend_raw)
         mapping: tuple[tuple[int, int], ...] | None = None
+        closed_result = None
         candidate_count = 0
         best_cost = None
         cost_margin = None
@@ -1535,7 +1552,7 @@ class IncrementalTextCommitter:
                 else route_lang or "zh"
             )
             value = self._domain_resolver.identifier(backend_raw, language=id_lang).text
-            if not value:
+            if not value or value == backend_raw:
                 value = self._safe_fallback(
                     backend_raw,
                     lang=id_lang,
@@ -1555,7 +1572,7 @@ class IncrementalTextCommitter:
             value = self._domain_resolver.identifier(
                 backend_raw, language=route_lang or "zh", order_id=True
             ).text
-            if not value:
+            if not value or value == backend_raw:
                 value = self._safe_fallback(
                     backend_raw,
                     lang=route_lang or "zh",
@@ -1569,7 +1586,7 @@ class IncrementalTextCommitter:
             value = self._domain_resolver.phone(
                 backend_raw, language=route_lang or "zh"
             ).text
-            if not value:
+            if not value or value == backend_raw:
                 value = self._safe_fallback(
                     backend_raw,
                     lang=route_lang or "zh",
@@ -1652,27 +1669,47 @@ class IncrementalTextCommitter:
                 )
             kind = CommitKind.NORMALIZED if value != p.raw else CommitKind.FALLBACK
         else:
-            value = (
-                self.adapter.normalize_closed_stream(
-                    backend_raw,
-                    lang=route_lang,
-                    kind=p.kind,
-                )
-                if route_lang
-                else p.raw
-            )
+            if route_lang:
+                # Keep the spoken result and its optional alignment together.
+                # Calling the mapping API again here used to repeat the whole
+                # normalizer pass for every semantic span.
+                result_method = getattr(self.adapter, "normalize_closed_result", None)
+                if callable(result_method):
+                    closed_result = result_method(
+                        backend_raw,
+                        lang=route_lang,
+                        kind=p.kind,
+                    )
+                    value = getattr(closed_result, "output_text", None)
+                    if value is None:
+                        value = getattr(closed_result, "text", closed_result)
+                    if not isinstance(value, str) or not value:
+                        value = None
+                else:  # compatibility with older adapter doubles
+                    value = self.adapter.normalize_closed_stream(
+                        backend_raw,
+                        lang=route_lang,
+                        kind=p.kind,
+                    )
+            else:
+                value = p.raw
             unchanged = value == backend_raw
             if (value is None or unchanged) and p.kind in (
                 SpanKind.NUMBER,
                 SpanKind.ORDINAL,
             ) and route_lang:
                 # Compatibility path for an image with an older stream graph;
-                # this still uses wetext's one-shot public API before falling
-                # back to deterministic cardinal spelling.
-                candidate = self.adapter.normalize(
-                    backend_raw,
-                    lang=route_lang,
-                    kind=p.kind,
+                # retry only when the combined closed result was unavailable.
+                # An unchanged result is already authoritative and retrying
+                # it would repeat the same normalization work.
+                candidate = (
+                    None
+                    if unchanged and closed_result is not None
+                    else self.adapter.normalize(
+                        backend_raw,
+                        lang=route_lang,
+                        kind=p.kind,
+                    )
                 )
                 value = candidate if candidate and candidate != backend_raw else None
             if value is None and p.kind in (SpanKind.NUMBER, SpanKind.ORDINAL):
@@ -1682,6 +1719,18 @@ class IncrementalTextCommitter:
                     kind=p.kind,
                 )
                 kind = CommitKind.FALLBACK
+            elif (value is None or unchanged) and p.kind in (SpanKind.URL, SpanKind.EMAIL):
+                # Contact spans have a deterministic symbol spelling when the
+                # optional WeText graph is unavailable.  Returning the raw
+                # URL/email here leaks transport markup (for example
+                # ``&#x20``) into streamed speech and makes full and split
+                # input disagree with the normalizer contract.
+                value = self._safe_fallback(
+                    backend_raw,
+                    lang=route_lang or "en",
+                    kind=p.kind,
+                )
+                kind = CommitKind.FALLBACK if value != p.raw else CommitKind.LITERAL
             elif unchanged or value is None:
                 # Words, punctuation and URLs that need no verbalization are
                 # ordinary literal commits, not semantic fallback events.
@@ -1697,6 +1746,7 @@ class IncrementalTextCommitter:
                     lang=route_lang,
                     kind=p.kind,
                     raw_end=p.end,
+                    result=closed_result,
                 )
         if value is None:
             value = (
@@ -1837,6 +1887,7 @@ class IncrementalTextCommitter:
         lang: str,
         kind: SpanKind,
         raw_end: int | None = None,
+        result: object | None = None,
     ) -> tuple[tuple[int, int], ...]:
         """Convert optional public WeText mappings to session coordinates.
 
@@ -1857,10 +1908,11 @@ class IncrementalTextCommitter:
         # Keep the owner span conservative in the original raw domain.
         if raw_end is not None and source_end - start != len(raw):
             return coarse
-        try:
-            result = self.adapter.normalize_with_mapping(raw, lang=lang, kind=kind)
-        except Exception:
-            return coarse
+        if result is None:
+            try:
+                result = self.adapter.normalize_with_mapping(raw, lang=lang, kind=kind)
+            except Exception:
+                return coarse
         if isinstance(result, (list, tuple)):
             result = result[0] if result else None
         output = getattr(result, "output_text", None)

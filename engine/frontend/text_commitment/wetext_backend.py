@@ -3,9 +3,11 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+import html
 from typing import Optional
 
 from .normalizer_backend import (
+    MappedNormalization,
     NormalizerBackend,
     WetextNormalizerBackend,
 )
@@ -115,18 +117,38 @@ class WetextAdapter:
         so the committer can apply its configured, observable fallback policy.
         """
 
+        result = self.normalize_closed_result(text, lang=lang, kind=kind)
+        if result is None:
+            return "" if not text else None
+        value = getattr(result, "output_text", None)
+        if value is None:
+            value = getattr(result, "text", result)
+        return value if isinstance(value, str) and value else None
+
+    def normalize_closed_result(
+        self,
+        text: str,
+        *,
+        lang: str,
+        kind: SpanKind,
+    ) -> MappedNormalization | None:
+        """Return one closed normalization, including optional mappings.
+
+        Callers that need both spoken text and source alignment should use
+        this method so the backend result is computed once.  The historical
+        ``normalize_closed_stream`` string API remains as a compatibility
+        wrapper for domain helpers and external callers.
+        """
+
         if not text:
-            return ""
+            return None
         text = _compatibility_spelling(text)
         try:
-            result = self.backend.normalize_closed(
+            return self.backend.normalize_closed(
                 text,
                 language=lang,
                 domain=kind,
             )
-            value = getattr(result, "output_text", None)
-            if value is None:
-                value = getattr(result, "text", result)
         except Exception as exc:  # third-party normalizers may raise arbitrary errors
             logger.warning(
                 "text.normalizer.stream_failed",
@@ -137,7 +159,6 @@ class WetextAdapter:
                 },
             )
             return None
-        return value if isinstance(value, str) and value else None
 
     def normalize_phone(self, text: str, *, lang: str) -> Optional[str]:
         """Normalize phone digits without exposing ``+``/``-`` as math.
@@ -264,6 +285,12 @@ class WetextAdapter:
             return _phone_fallback(text, lang=lang)
         if kind == SpanKind.ID_CARD:
             return _id_card_fallback(text, lang=lang)
+        if kind in (SpanKind.URL, SpanKind.EMAIL):
+            # Contact spans must never fall through as raw markup when the
+            # optional WeText graph is unavailable.  In particular, model
+            # output frequently embeds HTML space entities (sometimes without
+            # a semicolon) inside URLs; decode those before spelling symbols.
+            return _contact_fallback(text)
         if lang == "zh" and kind == SpanKind.ENGLISH_WORD:
             particulate = re.fullmatch(r"PM(\d+(?:\.\d+)?)", text, re.I)
             if particulate:
@@ -333,6 +360,55 @@ def _identifier_fallback(text: str, *, lang: str) -> str:
         else:
             parts.append(separators.get(token, token))
     return " ".join(part for part in parts if part)
+
+
+def _contact_fallback(text: str) -> str:
+    """Spell an URL/email using stable, dependency-free contact vocabulary.
+
+    WeText normally owns this verbalization.  The fallback is intentionally
+    language-neutral because URL/email tokens are routed to the English graph
+    even in a Chinese sentence.  Keeping punctuation as words prevents raw
+    ``http://`` or HTML entity syntax from leaking into streamed TTS text.
+    """
+
+    value = html.unescape(str(text or ""))
+    # ``html.unescape`` handles the common semicolonless form, but retain an
+    # explicit pass for numeric references that some Python versions leave
+    # untouched when followed by URL payload characters.
+    value = re.sub(
+        r"&#x([0-9A-Fa-f]+);?",
+        lambda m: chr(int(m.group(1), 16)) if int(m.group(1), 16) <= 0x10FFFF else m.group(0),
+        value,
+    )
+    value = re.sub(
+        r"&#([0-9]+);?",
+        lambda m: chr(int(m.group(1), 10)) if int(m.group(1), 10) <= 0x10FFFF else m.group(0),
+        value,
+    )
+    symbols = {
+        ":": "colon",
+        "/": "slash",
+        ".": "dot",
+        "@": "at",
+        "-": "hyphen",
+        "_": "underscore",
+        "?": "question mark",
+        "=": "equals",
+        "&": "and",
+        "#": "hash",
+        "%": "percent",
+    }
+    words: list[str] = []
+    for token in re.findall(r"[A-Za-z]+|\d+|[^A-Za-z0-9\s]", value):
+        if token.isalpha() and token.lower() in ("http", "https", "www"):
+            words.append(token.upper())
+        elif token.isdigit():
+            words.extend(_EN_DIGITS[int(d)] for d in token)
+        elif token in symbols:
+            words.extend(symbols[token].split())
+        elif token.strip():
+            words.append(token)
+    return " ".join(words)
 
 
 def _phone_fallback(text: str, *, lang: str) -> str:

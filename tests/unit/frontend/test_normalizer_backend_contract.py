@@ -162,7 +162,14 @@ def test_candidates_are_typed_ordered_deduplicated_and_nbest_bounded():
 
 
 def test_closed_normalization_and_mapping_are_dependency_free_values():
-    backend = WetextNormalizerBackend(normalizer_factory=_factory)
+    created: list[_Normalizer] = []
+
+    def factory(*, lang: str, operator: str):
+        normalizer = _Normalizer(lang, operator)
+        created.append(normalizer)
+        return normalizer
+
+    backend = WetextNormalizerBackend(normalizer_factory=factory)
     result = backend.normalize_closed("21st", language="en", domain=SpanKind.ORDINAL)
     assert isinstance(result, MappedNormalization)
     assert result.output_text == "twenty first"
@@ -183,6 +190,11 @@ def test_closed_normalization_and_mapping_are_dependency_free_values():
     committed = result.to_commitment_result()
     assert committed.text == "twenty first"
     assert committed.mapping == ((0, 4),)
+    # The closed result carries both text and mapping from one public graph
+    # call; normalize() must not run before mapping() for the same span.
+    calls = [name for normalizer in created for name, _ in normalizer.calls]
+    assert calls.count("normalize") == 0
+    assert calls.count("mapping") == 1
 
 
 def test_prefix_oracle_never_promotes_mutable_snapshot_to_commit():
@@ -242,6 +254,32 @@ def test_mapping_is_optional_for_minimal_normalizer_and_does_not_recurse():
     assert mapped[0].mappings == ()
     closed = backend.normalize_closed("abc", language="en")
     assert closed.output_text == "spoken:abc"
+
+
+@pytest.mark.parametrize("mapping_failure", ["empty", "invalid", "exception"])
+def test_closed_normalization_uses_ordinary_api_when_mapping_is_unavailable(mapping_failure):
+    calls = []
+
+    class OptionalMapping:
+        def normalize(self, text: str):
+            calls.append("normalize")
+            return "spoken:" + text
+
+        def normalize_with_mapping(self, text: str):
+            calls.append("mapping")
+            if mapping_failure == "exception":
+                raise RuntimeError("alignment unavailable")
+            if mapping_failure == "invalid":
+                return [_Result(text, "")]
+            return []
+
+    backend = WetextNormalizerBackend(
+        normalizer_factory=lambda lang, operator: OptionalMapping()
+    )
+    result = backend.normalize_closed("abc", language="en")
+    assert result.output_text == "spoken:abc"
+    assert result.mappings == ()
+    assert calls == ["mapping", "normalize"]
 
 
 def test_candidate_generator_exception_is_typed_and_preserves_cause():

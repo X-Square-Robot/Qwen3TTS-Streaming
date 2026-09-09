@@ -346,7 +346,7 @@ build-engine-image:
         exit 1
       fi
       docker run --rm --entrypoint python3 "$TRITON_RUNTIME_BASE_IMAGE" -c \
-        "import aiohttp, attr, packaging; print(f'aiohttp={aiohttp.__version__} attrs={attr.__version__} packaging={packaging.__version__}')"
+        "import aiohttp, attr, packaging, pypinyin; print(f'aiohttp={aiohttp.__version__} attrs={attr.__version__} packaging={packaging.__version__} pypinyin={pypinyin.__version__}')"
       TRITON_RUNTIME_BASE_DIGEST="$(docker image inspect --format '{{ index .RepoDigests 0 }}' "$TRITON_RUNTIME_BASE_IMAGE")"
       case "$TRITON_RUNTIME_BASE_DIGEST" in
         *@sha256:*) ;;

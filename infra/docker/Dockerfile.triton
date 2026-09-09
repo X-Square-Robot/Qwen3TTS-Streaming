@@ -68,7 +68,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     --trusted-host mirrors.bfsu.edu.cn \
     attrs \
     packaging \
-    && python3 -c "import aiohttp, attr, packaging; print(f'aiohttp {aiohttp.__version__}, attrs {attr.__version__}, packaging {packaging.__version__}')"
+    'pypinyin>=0.55,<1' \
+    && python3 -c "import aiohttp, attr, packaging, pypinyin; print(f'aiohttp {aiohttp.__version__}, attrs {attr.__version__}, packaging {packaging.__version__}, pypinyin {pypinyin.__version__}')"
 
 # Local Compose builds use the triton-deps stage by default. Release CI passes
 # an immutable Registry image here; BuildKit then prunes triton-deps completely,
@@ -100,7 +101,7 @@ LABEL org.opencontainers.image.version=${ENGINE_VERSION} \
 
 # Fail at image construction rather than much later in the container smoke if
 # a release build ever selects a stale or incomplete dependency base.
-RUN python3 -c "import aiohttp, attr, packaging, wetext; print(f'aiohttp {aiohttp.__version__}, attrs {attr.__version__}, packaging {packaging.__version__}, wetext runtime ready')"
+RUN python3 -c "import aiohttp, attr, packaging, wetext, pypinyin; print(f'aiohttp {aiohttp.__version__}, attrs {attr.__version__}, packaging {packaging.__version__}, wetext runtime ready, pypinyin {pypinyin.__version__}')"
 
 RUN install -d /opt/qwen3tts/bin /var/log/qwen3tts
 
