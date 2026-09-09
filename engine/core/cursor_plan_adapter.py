@@ -74,6 +74,9 @@ def _check_committed_prefix(
         raise ValueError("cursor plan rewrites committed labels")
     if plan.label_ids[:committed_label_count] != previous.label_ids[:committed_label_count]:
         raise ValueError("cursor plan rewrites committed labels")
+    if (plan.label_normalized_spans[:committed_label_count]
+            != previous.label_normalized_spans[:committed_label_count]):
+        raise ValueError("cursor plan rewrites committed label provenance")
 
     previous_owners = tuple(
         owner for owner in previous.owner_spans if owner.label_start < committed_label_count
@@ -124,6 +127,8 @@ class CursorLabelPlanAdapter:
             raise ValueError("spoken_texts must align one-to-one with commits")
 
         label_ids: list[int] = []
+        label_spans: list[tuple[int, int]] = []
+        encode_with_spans = getattr(self._labelize, "encode_with_spans", None)
         owners: list[CursorOwnerSpan] = []
         seen_owner_ids: set[int] = set()
         normalized_cursor = base
@@ -144,7 +149,20 @@ class CursorLabelPlanAdapter:
             seen_owner_ids.add(owner_id)
             raw_start, raw_end = _raw_span(commit)
             try:
-                labels = tuple(self._labelize(spoken))
+                if callable(encode_with_spans):
+                    labels, spans = encode_with_spans(spoken)
+                    labels = tuple(labels)
+                    spans = tuple(spans)
+                    if len(spans) != len(labels):
+                        raise ValueError("labelizer offset count mismatch")
+                    for left, right in spans:
+                        left = _integer(left, name="label span start")
+                        right = _integer(right, name="label span end")
+                        if not 0 <= left < right <= len(spoken):
+                            raise ValueError("labelizer offset outside spoken text")
+                        label_spans.append((normalized_cursor + left, normalized_cursor + right))
+                else:
+                    labels = tuple(self._labelize(spoken))
             except Exception as exc:
                 raise ValueError("cursor labelizer failed") from exc
             for label in labels:
@@ -176,6 +194,7 @@ class CursorLabelPlanAdapter:
             owner_spans=tuple(owners),
             revision=revision_value,
             final=bool(final),
+            label_normalized_spans=tuple(label_spans),
         )
         _check_committed_prefix(plan, previous, committed_label_count)
         self._last_revision = revision_value

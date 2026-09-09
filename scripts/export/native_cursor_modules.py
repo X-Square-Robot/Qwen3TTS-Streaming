@@ -302,7 +302,12 @@ class CursorStreamingStep(nn.Module):
         delta = torch.where(valid, delta_candidate, torch.zeros_like(delta_candidate))
         candidate_mu = (base_mu + delta).clamp(min=0.0)
         candidate_mu = torch.minimum(candidate_mu, safe_count)
+        # ``cursor_active`` is a lifecycle gate, not merely a visibility gate.
+        # Prefill and other non-decoder calls still traverse the fused graph,
+        # but must not consume a codec frame or mutate recurrent cursor state.
+        active = cursor_active.bool()
         new_mu = torch.where(valid, candidate_mu, base_mu)
+        new_mu = torch.where(active, new_mu, mu)
 
         crossed = torch.floor(new_mu) > torch.floor(base_mu)
         fs_candidate = torch.where(
@@ -311,6 +316,7 @@ class CursorStreamingStep(nn.Module):
             frames_since_advance + 1.0,
         )
         new_frames_since = torch.where(valid, fs_candidate, frames_since_advance)
+        new_frames_since = torch.where(active, new_frames_since, frames_since_advance)
         shifted_delta = torch.cat(
             [delta_history[:, 1:], delta.unsqueeze(1)], dim=1
         )
@@ -328,7 +334,11 @@ class CursorStreamingStep(nn.Module):
         # integer state tensors, while the CPU adapter can still treat zero/
         # non-zero as a boolean.
         valid_out = valid.to(dtype=torch.int64)
-        new_seen_frames = seen_frames + 1
+        next_conv_history = torch.where(
+            active.view(b, 1, 1), next_conv_history, conv_history
+        )
+        next_last_trunk_input = torch.where(active.view(b, 1), x_t, last_trunk_input)
+        new_seen_frames = torch.where(active, seen_frames + 1, seen_frames)
 
         return (
             valid_out,
@@ -339,7 +349,7 @@ class CursorStreamingStep(nn.Module):
             new_frames_since,
             new_delta_history,
             next_conv_history,
-            x_t,
+            next_last_trunk_input,
             new_seen_frames,
         )
 

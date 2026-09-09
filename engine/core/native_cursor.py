@@ -91,6 +91,9 @@ class CursorLabelPlan:
     owner_spans: tuple[CursorOwnerSpan, ...] = ()
     revision: int = 0
     final: bool = False
+    # Exact source provenance for each cursor label, in global spoken
+    # codepoints. Empty denotes a legacy labelizer without offset support.
+    label_normalized_spans: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.revision, bool) or int(self.revision) != self.revision:
@@ -115,6 +118,22 @@ class CursorLabelPlan:
             previous_end = owner.label_end
         if previous_end != len(self.label_ids):
             raise ValueError("owner spans must cover the complete label plan")
+        if self.label_normalized_spans:
+            if len(self.label_normalized_spans) != len(self.label_ids):
+                raise ValueError("label spans must align one-to-one with labels")
+            last_start = last_end = 0
+            for start, end in self.label_normalized_spans:
+                if any(isinstance(v, bool) or int(v) != v for v in (start, end)):
+                    raise ValueError("label spans must use integer codepoints")
+                if start < last_start or end < last_end or end <= start:
+                    raise ValueError("label spans must be nonempty and ordered")
+                last_start, last_end = start, end
+            for owner in self.owner_spans:
+                if any(start < owner.normalized_start or end > owner.normalized_end
+                       for start, end in self.label_normalized_spans[
+                           owner.label_start:owner.label_end
+                       ]):
+                    raise ValueError("label provenance must stay inside its owner")
 
     @property
     def label_count(self) -> int:
@@ -154,6 +173,22 @@ def reanchor_cursor_mu(
     position = max(0.0, min(float(previous.label_count), position))
     if not current.active:
         return 0.0
+
+    # Pure appends preserve a label coordinate only when both numerical ids
+    # and exact source provenance through the live position are unchanged.
+    prefix = math.ceil(position)
+    if (previous.label_normalized_spans and current.label_normalized_spans
+            and prefix <= current.label_count
+            and previous.label_ids[:prefix] == current.label_ids[:prefix]
+            and previous.label_normalized_spans[:prefix]
+            == current.label_normalized_spans[:prefix]
+            and all(
+                any(new.owner_id == old.owner_id
+                    and (new.raw_start, new.raw_end) == (old.raw_start, old.raw_end)
+                    for new in current.owner_spans)
+                for old in previous.owner_spans if old.label_start < prefix
+            )):
+        return position
 
     completed_ids = {
         owner.owner_id
@@ -196,12 +231,11 @@ def slice_cursor_label_plan(
     normalized_start: int,
     normalized_end: int,
 ) -> CursorLabelPlan | None:
-    """Return a segment-local view only when owner boundaries are intact.
+    """Slice exact label provenance into a segment's global spoken window.
 
-    A TN owner is atomic for native progress.  If a splitter boundary lands
-    inside an owner, returning a guessed label slice would fabricate alignment
-    semantics, so callers must disable native progress for that segment and
-    keep EMA.  Coordinates remain session-global for protocol projection.
+    Owners may straddle segments when exact label offsets are available. Raw
+    owner spans are retained, not interpolated; the shared journal performs
+    raw confirmation. Legacy plans lacking offsets only allow whole owners.
     """
 
     start = int(normalized_start)
@@ -211,6 +245,39 @@ def slice_cursor_label_plan(
     owners = plan.owner_spans
     if not owners:
         return CursorLabelPlan(revision=plan.revision, final=plan.final)
+
+    if plan.label_normalized_spans:
+        indices = [
+            i for i, (left, right) in enumerate(plan.label_normalized_spans)
+            if left < end and right > start
+        ]
+        if not indices:
+            return CursorLabelPlan(revision=plan.revision, final=plan.final)
+        first, last = indices[0], indices[-1] + 1
+        # A label itself cannot be split without more precise provenance.
+        if any(left < start or right > end
+               for left, right in plan.label_normalized_spans[first:last]):
+            return None
+        sliced_owners = tuple(
+            CursorOwnerSpan(
+                owner.owner_id,
+                max(owner.label_start, first) - first,
+                min(owner.label_end, last) - first,
+                max(owner.normalized_start, start),
+                min(owner.normalized_end, end),
+                owner.raw_start,
+                owner.raw_end,
+            )
+            for owner in owners
+            if owner.label_start < last and owner.label_end > first
+        )
+        return CursorLabelPlan(
+            label_ids=plan.label_ids[first:last],
+            owner_spans=sliced_owners,
+            revision=plan.revision,
+            final=plan.final,
+            label_normalized_spans=plan.label_normalized_spans[first:last],
+        )
 
     selected = []
     for owner in owners:

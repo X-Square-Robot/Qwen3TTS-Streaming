@@ -276,11 +276,11 @@ spoken-form 语义，也不得把外部规则归一化器接入在线主路径�
 诊断，不作为 BF16 默认 plan 的产品质量硬门槛。
 
 **2026-09-09 进展：** 新增 `tests/integration/test_real_native_cursor_cuda_graph_parity.py`。
-在真实 cursor-enabled plan 上，profile 0 已通过 batch 1 和 batch 2、各四步的 graph/eager
-对照，包含 token、
-`codec_sum`、hidden、C2W KV、cursor 输出和 PCM；profile 1 虽可构图但首步递归输出已
-分叉，故 Executor 对 cursor plan 固定选择 profile 0，standard plan 的 decode-only
-profile 选择保持不变。BF16 正式 plan 已是此前验证过的默认基线；T4 仍缺固定语料的
+在真实 cursor-enabled plan 上，profile 1 的 graph/eager 同 profile 对照已通过 batch 1 和
+batch 2、各四步，包含 token、`codec_sum`、hidden、C2W KV、cursor 输出和 PCM。此前
+profile 1 graph 与 profile 0 eager 的跨 profile 比较产生了正常 BF16 分叉，不能作为 profile 1
+失效证据。Executor 对 standard 和 cursor plan 均默认选择 decode-only profile 1，prefill
+仍使用共享 context 的 profile 0。BF16 正式 plan 已是此前验证过的默认基线；T4 仍缺固定语料的
 音频/ASR 质量报告、batch slot/事件时序、异常 flush 和正式服务性能报告。全 FP32 仅
 作为数值定位对照，不是默认部署建议。
 

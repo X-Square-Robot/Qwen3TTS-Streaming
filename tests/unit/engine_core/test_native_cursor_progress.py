@@ -141,7 +141,9 @@ def test_frontend_publishes_native_event_and_falls_back_on_lookahead() -> None:
     )
     assert native is not None
     assert native["meta"]["progress_basis"] == NATIVE_CURSOR_PROGRESS_BASIS
-    assert native["meta"]["normalized_codepoint_end"] == "2"
+    # The shared contract confirms complete tokenizer spans, not a legacy
+    # native-owner boundary inside this single five-character BPE token.
+    assert native["meta"]["normalized_codepoint_end"] == "0"
 
     fallback = FrontendInterface._make_text_progress_event(
         None,

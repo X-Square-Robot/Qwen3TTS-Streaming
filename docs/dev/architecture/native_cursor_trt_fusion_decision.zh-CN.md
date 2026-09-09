@@ -395,6 +395,43 @@ tail rewrite 时优先通过 `owner_id` 或稳定 raw span 重锚定，不能直
 
 ## 6. 被否决的方案
 
+### 2026-09-09 补充：与估计器无关的公共文本坐标合同
+
+raw -> TN spoken -> segment-local text token 的 provenance 由文本前端拥有。
+音频侧合同为 segment-local codec frame interval -> token frontier；EMA/Native
+只估计这一步。不同 segment 的 codec 起点可都为 0，不等于同一个会话帧号。
+公共投影生成的事件与 `AttributedAudioChunk` 绑定，经 `AudioReorder` 进入交付顺序，
+再由既有输出层赋予实际 PCM/sample 坐标，禁止按估计进度反推 PCM 长度。
+EMA 与 native 都先产生同一 segment 的 token frontier，再经公共投影器返回
+session-global normalized/raw 整数边界。Native 的 label mu 不等于 Talker BPE
+index；labelizer 必须提供精确 label -> spoken codepoint span，由适配器查表转换
+为已完成 token 数。不得用 label 数与 BPE 数的比例换算。
+
+正常 Splitter 分段不要求 TN owner 完整落在同一 segment。带精确 label spans 的
+plan 可以按 normalized window 切片，保留 owner 身份及完整 raw provenance；raw
+确认边界仍由主 TN journal 决定，字段内部可保持不动。旧的无 label spans plan
+保留保守切片行为，作为兼容路径，不再作为生产分段的默认合同。不得为此强制每个
+TextCommit 单独合成、变更 Splitter 容量规则或引入第二套 TN。
+
+本变更仅扩展 CPU provenance，不改变 TRT binding/权重/神经状态 ABI。测试必须覆盖
+相同 token frontier 下 EMA/native 相同坐标、扩展字段中途不提前确认 raw、跨 segment
+全局基址、revision/high-water、重试及交错输出。验证结果在实现测试通过后记录，当前
+不以此说明音频质量或发布证据已完成。
+
+实现入口：`engine/core/text_coordinates.py` 定义 `CodecTokenProgress`、
+`SegmentTextCoordinates` 和 `TextProgressProjection`；`NativeCursorLabelizer`
+提供精确 label offsets，`CursorLabelPlanAdapter` 把它们平移到全局 spoken 坐标。
+普通分段允许 owner 跨界，raw 确认仍共用 `CanonicalTextJournal`。旧无 offsets
+plan 保持保守兼容，不会用字符长度推断 label 个数。活动 segment 窗口增长会在
+token 入队前更新 plan revision；未改变的 label+provenance 前缀可保留神经 mu。
+
+本轮验证（2026-09-09）：完整 pytest `1333 passed, 68 skipped`；真实 X2/TRT
+successor E2E `2 passed`。`test_shared_progress_coordinates.py` 覆盖相同 codec/token
+frontier 的两种估计器同坐标、lookahead 保持、异常回退不后退、无神经观察不宣称
+native、事件与 PCM 重排绑定；`test_streaming_tn_cursor_plan_contract.py` 覆盖
+full/long/逐字符 token 输入同结果、TN expansion、活动窗口先于 token 更新，以及
+真实 Splitter 切入 owner 后保留 native。旧“切入 owner 必须全段降级”的断言已替换。
+
 | 方案 | 否决原因 |
 |---|---|
 | 把官方 PyTorch TTS 作为 backend | 偏离项目 TRT 主路径，且没有解决游标头缺失的能力兼容问题 |

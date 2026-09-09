@@ -87,10 +87,22 @@ class NativeCursorLabelizer:
         return vocab_fingerprint(self.vocab)
 
     def __call__(self, spoken_text: str) -> tuple[int, ...]:
+        labels, _ = self.encode_with_spans(spoken_text)
+        return labels
+
+    def encode_with_spans(
+        self, spoken_text: str
+    ) -> tuple[tuple[int, ...], tuple[tuple[int, int], ...]]:
+        """Encode spoken text and return the source span for every label.
+
+        Spans use Python string indices, which are Unicode codepoint offsets.
+        Non-spoken punctuation and whitespace are omitted and therefore leave
+        gaps between the returned spans.
+        """
         if not isinstance(spoken_text, str):
             raise NativeCursorLabelizerError("spoken_text must be a string")
         if not spoken_text:
-            return ()
+            return (), ()
 
         try:
             from pypinyin import Style, lazy_pinyin
@@ -100,14 +112,16 @@ class NativeCursorLabelizer:
             ) from exc
 
         labels: list[int] = []
+        spans: list[tuple[int, int]] = []
 
-        def append_label(spoken_label: str) -> None:
+        def append_label(spoken_label: str, span: tuple[int, int]) -> None:
             index = self.vocab.get(spoken_label)
             if index is None:
                 raise NativeCursorLabelizerError(
                     f"spoken label {spoken_label!r} is missing from cursor vocabulary"
                 )
             labels.append(index)
+            spans.append(span)
 
         index = 0
         while index < len(spoken_text):
@@ -115,23 +129,29 @@ class NativeCursorLabelizer:
                 start = index
                 while index < len(spoken_text) and _is_cjk(spoken_text[index]):
                     index += 1
-                for spoken_label in lazy_pinyin(
+                spoken_labels = lazy_pinyin(
                     spoken_text[start:index], style=Style.NORMAL
-                ):
-                    append_label(spoken_label)
+                )
+                if len(spoken_labels) != index - start:
+                    raise NativeCursorLabelizerError(
+                        "pypinyin returned an unexpected number of labels"
+                    )
+                for offset, spoken_label in enumerate(spoken_labels):
+                    append_label(spoken_label, (start + offset, start + offset + 1))
                 continue
 
             ch = spoken_text[index]
+            span = (index, index + 1)
             index += 1
             if ch.isascii() and ch.isalpha():
-                append_label(f"en:{ch.lower()}")
+                append_label(f"en:{ch.lower()}", span)
             elif ch.isspace() or unicodedata.category(ch).startswith("P"):
                 continue
             else:
                 raise NativeCursorLabelizerError(
                     f"unsupported spoken character for cursor labels: {ch!r}"
                 )
-        return tuple(labels)
+        return tuple(labels), tuple(spans)
 
 
 def _load_checkpoint(checkpoint_or_path: str | Path | Mapping[str, Any]) -> Mapping[str, Any]:

@@ -64,9 +64,9 @@ class Dispatcher:
     async def submit_cursor_plan(self, session: Session) -> None:
         """Publish an owner-safe segment plan to active segments.
 
-        A segment gets only complete TN owners.  If its bounds are unknown or
-        cut through an owner, the session returns an inactive plan for that
-        segment and it stays on EMA. Queue ordering gives the engine thread a
+        Exact label provenance allows owners to span several segments. Legacy
+        plans without that provenance require whole owners. Unknown bounds
+        yield an inactive plan. Queue ordering gives the engine thread a
         happens-before edge relative to later token requests from this event-
         loop turn.
         """

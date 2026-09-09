@@ -30,6 +30,25 @@ def test_labelizer_converts_chinese_and_english_with_model_ids() -> None:
     assert labelizer("百分之二十三 Ab") == (1, 2, 3, 4, 5, 6, 7, 8)
 
 
+def test_labelizer_encodes_spans_for_chinese_and_english() -> None:
+    labelizer = NativeCursorLabelizer(_vocab())
+
+    ids, spans = labelizer.encode_with_spans("百分之二十三 Ab")
+
+    assert ids == (1, 2, 3, 4, 5, 6, 7, 8)
+    assert spans == (
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (5, 6),
+        (7, 8),
+        (8, 9),
+    )
+    assert len(ids) == len(spans)
+
+
 def test_labelizer_ignores_whitespace_and_punctuation() -> None:
     labelizer = NativeCursorLabelizer({"ni": 1, "hao": 2})
 
@@ -41,6 +60,21 @@ def test_labelizer_uses_phrase_level_polyphone_conversion() -> None:
 
     assert labelizer("银行") == (1, 2)
 
+    assert labelizer.encode_with_spans("银行") == ((1, 2), ((0, 1), (1, 2)))
+
+
+def test_labelizer_encodes_empty_text_with_empty_spans() -> None:
+    assert NativeCursorLabelizer({"en:a": 1}).encode_with_spans("") == ((), ())
+
+
+def test_labelizer_spans_keep_punctuation_and_whitespace_gaps() -> None:
+    labelizer = NativeCursorLabelizer({"en:a": 1, "en:b": 2})
+
+    assert labelizer.encode_with_spans("a,  b!") == (
+        (1, 2),
+        ((0, 1), (4, 5)),
+    )
+
 
 @pytest.mark.parametrize("text", ["23", "🙂", "é"])
 def test_labelizer_rejects_unspoken_or_unmapped_characters(text: str) -> None:
@@ -48,6 +82,9 @@ def test_labelizer_rejects_unspoken_or_unmapped_characters(text: str) -> None:
 
     with pytest.raises(NativeCursorLabelizerError):
         labelizer(text)
+
+    with pytest.raises(NativeCursorLabelizerError):
+        labelizer.encode_with_spans(text)
 
 
 @pytest.mark.parametrize(

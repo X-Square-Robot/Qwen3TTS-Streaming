@@ -292,6 +292,13 @@ session 对象继续持有 predecessor tensor。
 `X2STREAMING_ROOT` 后会直接加载外部 `X2StreamingPolicy`，full/long/token 和不完整长文本
 case2 当前共 `4 passed`。
 
+2026-09-09 新增并通过 `tests/integration/test_streaming_tn_cursor_plan_contract.py` 的
+raw→TN→Label Plan→raw projection 合同：以 `99%` 为例，主 TN 产生
+`百分之九十九`，cursor owner 保留 raw `[0,3)` 与 normalized `[0,6)`，cursor projector
+在 owner 完成时发布相同的 raw/normalized high-water；同时验证 Label Plan revision 在
+token request 之前进入 engine queue。该测试证明了 TN 与 cursor 的坐标协议不依赖 raw 和
+spoken 文本等长，但仍是 CPU/队列合同，不替代真实 TRT 音频和离线 ASR 验收。
+
 因此 S2 已完成 standalone slot copy、pooled Talker/C2W、arena copy、slot-owned
 auxiliary state、executor capture/restore assembly、EngineLoop 同 segment boundary
 migration primitives，以及真实 cursor-enabled TRT plan 的 full-state 下一步输出对照；仍
@@ -522,6 +529,11 @@ disable 或 session removal 时清理，避免长文本会话按 segment 线性�
 `cursor_progress=native_continuation`。本次实际运行结果为 `1 passed`，三个 segment 的
 `eos_reason` 均为 `codec_eos`，没有重复首帧或 cursor labelization 失败。
 
+2026-09-09 使用相同真实模型、TRT artifact 和 tokenizer 重跑该 E2E，连续性路径与 hard
+boundary A/B 均通过，结果为 `2 passed in 16.87s`。该结果确认主 TN、Splitter、C2W bridge
+和 cursor continuation 的运行时路径仍稳定；最终产品质量仍需对服务输出音频执行离线 ASR
+对照，不把 token 级 codec 差异当作失败。
+
 同日新增的 `tests/integration/test_real_native_cursor_state_transfer.py` 又在同一真实
 TRT plan 上直接验证了 fused cursor recurrent state：两个 slot 先共同推进一帧，随后把
 源 slot 的六组 cursor recurrent tensor detached，清空目标 slot，再经
@@ -539,6 +551,12 @@ full-state round-trip；它仍
 是同 segment/同 checkpoint 的 PAUSE_RESUME 证据，不是 X2 跨 segment 的训练语义或 successor
 音频质量证据。
 
+2026-09-09 使用当前 `x2-exported/custom-1.7b` 和 `qwen3-tts` 虚拟环境重新执行该测试，
+结果仍为 `2 passed in 4.39s`；同日重新执行
+`tests/integration/test_real_native_cursor_cuda_graph_parity.py`，结果为 `2 passed in
+5.05s`。这次复验确认状态恢复和 graph/eager 路由没有因后续 package path、TN 或发布
+gate 改动回归，但仍不替代跨 segment successor 的 ASR/音频质量验收。
+
 随后新增的 `tests/integration/test_real_native_cursor_trt_trajectory.py` 固定真实 graph
 每步产生的 `codec0`，把同一 token、Label Plan 和 pre-step cursor state 喂给模型自带的
 PyTorch `CursorStreamingStep`，连续比较 32 帧。`cursor_valid`/`candidate_label`/帧计数
@@ -548,12 +566,13 @@ Talker/C2W 只验证 cursor 子图，尚未覆盖完整 PyTorch→ONNX→TRT fus
 和 successor 不中断对照。
 
 同日新增的 `tests/integration/test_real_native_cursor_cuda_graph_parity.py` 对同一真实
-cursor-enabled fused plan 做了 batch 1 和 batch 2、各四步的 graph/eager 对照。profile 0
-的 token、codec sum、Talker hidden、C2W KV、cursor 输出和 PCM 均通过；profile 1 虽能构图，但首步 `codec_sum` 已与
-eager 分叉，不能作为递归 cursor 路径的可用 profile。Executor 现在对 cursor plan 默认并
-强制选择已验证的 profile 0；standard plan 仍可使用 decode-only profile。该项补上了
-“能 replay”与“递归状态轨迹保持一致”之间的边界，但不等于完整 Talker/C2W/PyTorch
-数值验收，profile 0 的显存和吞吐报告仍属于 H5 待完成项。
+cursor-enabled fused plan 做了 batch 1 和 batch 2、各四步的 graph/eager 对照。此前把
+profile 1 graph 与 profile 0 eager 跨 profile 比较，首步 `codec_sum` 的 BF16 分叉被误判为
+profile 1 不可用；改为让 graph/eager 都使用 profile 1 后，token、codec sum、Talker hidden、
+C2W KV、cursor 输出和 PCM 均通过。Executor 现在对 standard 和 cursor plan 默认使用
+decode-only profile 1；prefill 仍由共享 context 使用 profile 0。该项补上了“同 profile 能
+replay”与“递归状态轨迹保持一致”之间的边界，但不等于完整 Talker/C2W/PyTorch
+数值验收，profile 1 的显存和吞吐报告仍属于 H5 待完成项。
 
 同日对真实 fused ONNX 做了一次冻结 decode 输入探针：当前 artifact 的 `codec0` 与
 cursor 离散有效输出和 TRT 一致，但 CPU ORT（float32）与 bf16 TRT 的 residual
@@ -794,6 +813,24 @@ graph、EngineLoop batching、Native/Triton transport 或 successor 音频质量
 发布前的离线验收，不得把 ASR client、网络请求或识别模型接入 EngineLoop、Gateway 或
 在线请求路径；只有报告人工/脚本确认通过后，才写入
 `quality.offline_asr_verified=true` 并参与 release gate。
+
+**本轮真实样本结果（2026-09-09）：** 已用真实 X2 successor 服务生成
+`workspace/validation/speech_state_current/x2-continuity.wav`，输入为三段跨 segment
+文本 `今天温度25`、`℃。明天降至18`、`℃，请注意保暖。`，服务侧最终 spoken form 为
+`今天温度二十五摄氏度。明天降至十八摄氏度，请注意保暖。`。使用固定 ASR 接口
+`wss://infer.x2robot.com/infer/inf-dddq5qn77jrws5eu/v1/ws` 离线识别得到
+`今天温度二十五摄氏度，明天降至十八摄氏度，请注意保暖。`，`stream_done.reason=client_stop`，
+音频时长 `6560ms`，结果与预期 spoken form 仅有中文标点差异。本次样本通过音频语义验收；
+它不等于 full/long/token 全语料、Native/Triton 双入口和正式发布 evidence 已经全部完成，
+后续仍需补齐这些维度后再打开 release gate。
+
+**历史验收实现参考：** `origin/feat/native-cursor` 的
+`tools/validation/native_cursor_demo.py` 已提供真实引擎 WebSocket 无头验收：按
+LLM 节奏分块发送文本，同时收集 WAV 和 `text_progress` 锚点，检查 progress basis、
+raw 游标单调性、末尾游标、音频终态，并支持并发压测。当前分支没有直接合入该脚本，
+原因是本分支已将 cursor 计算融合进主 TRT 图、协议字段和 TN owner 映射均已变化；后续
+Native/Triton 双入口验收应沿用它的“真实服务 + 音频 + 事件轨迹”方法，但改用当前
+`InputMode`/主 TN 合同，禁止退回 token parity 或旧的 CPU cursor 路径。
 
 ## 7. 当前完成标准
 

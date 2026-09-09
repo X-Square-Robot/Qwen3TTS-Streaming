@@ -169,6 +169,14 @@ def _run_route(
         )
         for row, slot in enumerate(slots):
             executor.prefill(slot, embeds[row : row + 1])
+        if not use_graph:
+            # Compare graph and eager decode under the same decode-only TRT
+            # profile.  Comparing cursor profile 1 against the shared
+            # prefill/profile-0 context confounds normal BF16 cross-profile
+            # sampling variation with a graph parity failure.
+            executor._fused_engine.select_optimization_profile(
+                1, executor._compute_stream
+            )
         if use_graph:
             assert executor._graph_decode is not None
         outputs: list[dict[str, object]] = []

@@ -24,9 +24,14 @@ from ..core.speech_state import (
     coerce_speech_state_capability,
 )
 from ..core.text_journal import CanonicalTextJournal
+from ..core.text_coordinates import (
+    CodecTokenProgress, SegmentTextCoordinates, TextProgressProjection,
+)
 from ..core.text_progress import (
     EmaTextProgressEstimator,
     NativeCursorProgressProjector,
+    NATIVE_CURSOR_PROGRESS_BASIS,
+    TEXT_PROGRESS_BASIS,
 )
 from ..core.types import (
     EngineResult,
@@ -1971,6 +1976,7 @@ class FrontendInterface:
                     session.text_progress_estimators.pop(result.segment_idx, None)
                     session.segment_progress_frames.pop(result.segment_idx, None)
                     session.native_cursor_projectors.pop(result.segment_idx, None)
+                    session.text_coordinate_projectors.pop(result.segment_idx, None)
                     # Retry reuses the logical segment and its owner-safe
                     # plan; only the projector high-water is reset.
                     rm = result.metrics or {}
@@ -2139,6 +2145,7 @@ class FrontendInterface:
                     session.text_progress_estimators.pop(seg_idx, None)
                     session.segment_progress_frames.pop(seg_idx, None)
                     session.native_cursor_projectors.pop(seg_idx, None)
+                    session.text_coordinate_projectors.pop(seg_idx, None)
                     session.cursor_segment_plans.pop(seg_idx, None)
                     session.cursor_segment_bounds.pop(seg_idx, None)
                     session.segment_token_spans.pop(seg_idx, None)
@@ -2407,6 +2414,19 @@ class FrontendInterface:
             return
         self._emit_split_decisions(session)
         self._record_segment_text(actions, session)
+        if session.cursor_label_plan is not None and any(
+            session.cursor_plan_for_segment(index) != previous
+            for index, previous in session.cursor_segment_plans.items()
+            if index in session.segment_order
+        ):
+            # Bounds grow when tokens are assigned to an already active
+            # segment. Publish its enlarged label window before these tokens,
+            # even when no new TN commit was created (queued splitter work).
+            session.cursor_plan_revision += 1
+            session.cursor_label_plan = replace(
+                session.cursor_label_plan, revision=session.cursor_plan_revision
+            )
+            await self._dispatcher.submit_cursor_plan(session)
         await self._dispatcher.dispatch_segment_actions(session, actions)
         await self._emit_text_token_events(session, actions)
         await self._emit_text_boundary_events(session, actions)
@@ -2494,7 +2514,7 @@ class FrontendInterface:
         *,
         final: bool = False,
     ) -> Optional[dict]:
-        """Build the transport-neutral EMA text progress event."""
+        """Estimate codec-to-token progress, then apply shared text coordinates."""
 
         if session.spliter is None:
             return None
@@ -2515,12 +2535,26 @@ class FrontendInterface:
         if text_token_count is None:
             text_token_count = session.segment_token_emitted_count.get(segment_idx, 0)
         text_token_count = max(0, text_token_count)
+        spans = session.segment_token_spans.get(segment_idx, [])
+        if not spans:
+            return None
+        coordinates = SegmentTextCoordinates(spans, session.text_journal)
+        coordinate_projectors = getattr(session, "text_coordinate_projectors", None)
+        if coordinate_projectors is None:
+            coordinate_projectors = session.text_coordinate_projectors = {}
+        projection = coordinate_projectors.setdefault(
+            segment_idx, TextProgressProjection(segment_idx)
+        )
 
-        # Native cursor output is optional evidence attached to an audio
-        # result.  Invalid/lookahead outputs deliberately fall through to the
-        # existing EMA estimate; they must never move audio or reset engine
-        # state.  Segment-local projector state also keeps a stale retry from
-        # changing the public high-water.
+        def project(token_end: int) -> dict[str, str]:
+            return projection.project(
+                CodecTokenProgress(segment_idx, frame_start, frame_end, token_end),
+                coordinates,
+            )
+
+        # Native observations arrive attached to source audio. Lookahead holds
+        # the precise route; unavailable/invalid estimates may fall back to
+        # EMA without resetting shared coordinate high-water or audio state.
         plan = getattr(session, "cursor_segment_plans", {}).get(segment_idx)
         if plan is None:
             plan = getattr(session, "cursor_label_plan", None)
@@ -2531,11 +2565,50 @@ class FrontendInterface:
             projectors = {}
         projector = projectors.get(segment_idx)
         native_revision_ready = cursor_revision == (plan.revision if plan else None)
+        if plan is not None and plan.active and plan.label_normalized_spans:
+            # The model estimates label progress. Only this adapter knows that
+            # vocabulary; all protocol coordinates below use tokenizer spans.
+            if (native_revision_ready and has_cursor_observation) or (
+                final and projection.basis == NATIVE_CURSOR_PROGRESS_BASIS
+            ):
+                try:
+                    valid = _metric_bool(metrics.get("cursor_valid"))
+                    if valid and not final and "cursor_mu" not in metrics:
+                        raise ValueError("valid native observation is missing mu")
+                    mu = float(metrics.get("cursor_mu", plan.label_count if final else 0.0))
+                    confidence = float(metrics.get("cursor_confidence", 0.0) or 0.0)
+                    if not math.isfinite(mu) or not math.isfinite(confidence):
+                        raise ValueError("nonfinite native cursor observation")
+                    token_end = len(spans) if final else (
+                        coordinates.token_end_from_labels(mu, plan.label_normalized_spans)
+                        if valid else projection.token_end
+                    )
+                    mapped = project(token_end)
+                    projection.basis = NATIVE_CURSOR_PROGRESS_BASIS
+                    return {
+                        "type": "text_progress", "segment_idx": segment_idx, "text": "",
+                        "meta": {
+                            "segment_id": str(segment_idx),
+                            "progress_basis": NATIVE_CURSOR_PROGRESS_BASIS,
+                            "progress_quality": "native",
+                            "cursor_mu": f"{mu:.6f}",
+                            "cursor_confidence": f"{max(0.0, min(1.0, confidence)):.6f}",
+                            "text_progress": f"{projection.token_end / len(spans):.6f}",
+                            "progress_final": "true" if final else "false",
+                            **mapped,
+                            "text_input_final": "true" if session.input_complete else "false",
+                            "alignment_final": "true" if final else "false",
+                        },
+                    }
+                except (TypeError, ValueError, OverflowError):
+                    logger.warning("Invalid native token estimate for %s/%d",
+                                   session.session_id, segment_idx)
         if final and projector is not None and plan is not None:
             native_revision_ready = projector.plan.revision == plan.revision
         if (
             plan is not None
             and plan.active
+            and not plan.label_normalized_spans
             and native_revision_ready
             and (has_cursor_observation or final)
         ):
@@ -2576,18 +2649,13 @@ class FrontendInterface:
                     projectors.pop(segment_idx, None)
                     native = None
                 if native is not None:
+                    projection.basis = NATIVE_CURSOR_PROGRESS_BASIS
                     native_meta = native.to_meta()
-                    if session.text_journal is not None:
-                        raw_start, _ = session.text_journal.raw_span(
-                            native.normalized_codepoint_start,
-                            native.normalized_codepoint_start,
+                    native_meta.update(project(
+                        len(spans) if final else coordinates.token_end_at(
+                            native.normalized_codepoint_end
                         )
-                        _, raw_end = session.text_journal.raw_span(
-                            native.normalized_codepoint_end,
-                            native.normalized_codepoint_end,
-                        )
-                        native_meta["raw_codepoint_start"] = str(raw_start)
-                        native_meta["raw_codepoint_end"] = str(raw_end)
+                    ))
                     return {
                         "type": "text_progress",
                         "segment_idx": segment_idx,
@@ -2629,50 +2697,7 @@ class FrontendInterface:
             text_token_count=text_token_count,
             final=final,
         )
-        spans = session.segment_token_spans.get(segment_idx, [])
-        if not spans:
-            # A segment without model-token provenance cannot produce a
-            # session-global text anchor. In particular, never fall back to
-            # [0, 0): that would move a later segment's cursor backwards.
-            return None
-
-        token_start = min(max(0, estimate.text_token_start), len(spans))
-        token_end = min(max(token_start, estimate.text_token_end), len(spans))
-        if token_end > token_start:
-            selected = spans[token_start:token_end]
-            normalized_start = selected[0]["normalized_start"]
-            normalized_end = selected[-1]["normalized_end"]
-            if session.text_journal is not None:
-                raw_start, _ = session.text_journal.raw_span(
-                    normalized_start, normalized_start
-                )
-                _, raw_end = session.text_journal.raw_span(
-                    normalized_end, normalized_end
-                )
-            else:
-                raw_start = selected[0]["raw_start"]
-                raw_end = selected[-1]["raw_end"]
-        else:
-            # A zero-token EMA step is still a valid boundary, but it must be
-            # anchored at this segment's first global token span rather than
-            # at session offset zero.  Once every token has been consumed,
-            # anchor trailing audio at the final token's end; using that
-            # token's start would move the public text cursor backwards.
-            at_segment_end = token_start >= len(spans)
-            boundary = spans[-1] if at_segment_end else spans[token_start]
-            normalized_boundary = boundary[
-                "normalized_end" if at_segment_end else "normalized_start"
-            ]
-            normalized_start = normalized_end = normalized_boundary
-            if session.text_journal is not None:
-                raw_start, raw_end = session.text_journal.raw_span(
-                    normalized_start, normalized_start
-                )
-            else:
-                raw_boundary = boundary[
-                    "raw_end" if at_segment_end else "raw_start"
-                ]
-                raw_start = raw_end = raw_boundary
+        projection.basis = TEXT_PROGRESS_BASIS
         return {
             "type": "text_progress",
             "segment_idx": segment_idx,
@@ -2680,10 +2705,8 @@ class FrontendInterface:
             "meta": {
                 "segment_id": str(segment_idx),
                 **estimate.to_meta(),
-                "raw_codepoint_start": str(raw_start),
-                "raw_codepoint_end": str(raw_end),
-                "normalized_codepoint_start": str(normalized_start),
-                "normalized_codepoint_end": str(normalized_end),
+                **project(min(estimate.text_token_end, len(spans))),
+                "text_progress": f"{projection.token_end / len(spans):.6f}",
                 "text_input_final": "true" if session.input_complete else "false",
                 "alignment_final": "true" if final else "false",
             },

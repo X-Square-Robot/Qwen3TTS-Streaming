@@ -92,10 +92,16 @@ def _select_cuda_graph_profile(
     cursor_enabled: bool,
     requested: str = "",
 ) -> int:
-    """Select a graph profile whose route has an explicit parity contract."""
+    """Select the decode-only profile for graph replay when available.
+
+    Prefill remains on the fused engine's shared context/profile 0.  Cursor is
+    a decoder-only observer, so its graph replay must use the same compact
+    decode profile as the standard route; graph/eager parity is meaningful only
+    when both executions use the same optimization profile.
+    """
     if num_profiles <= 1:
         return 0
-    default = 0 if cursor_enabled else 1
+    default = 1
     value = str(requested or "").strip()
     if not value:
         return default
@@ -105,8 +111,6 @@ def _select_cuda_graph_profile(
         return default
     if not 0 <= profile_idx < num_profiles:
         return default
-    if cursor_enabled and profile_idx != 0:
-        return 0
     return profile_idx
 
 
@@ -1409,9 +1413,9 @@ class Executor:
         # max_past × head_dim (7.5 GiB at 128×512 for the 1.7b) — try the
         # requested cap first and step down on OOM.  Steps beyond the cap
         # fall back to the eager path per step.
-        # Standard plans may use the smaller decode-only profile. Cursor plans
-        # stay on profile 0 until every profile has trajectory parity; a
-        # profile that merely builds is not sufficient for a recurrent graph.
+        # Profile 0 is shared by prefill on the base context. The dedicated
+        # graph context uses the compact decode-only profile 1 for both the
+        # standard and native-cursor routes.
         num_profiles = int(
             getattr(self._fused_engine._engine, "num_optimization_profiles", 1)
         )
@@ -1424,7 +1428,7 @@ class Executor:
             )
             if requested_profile and str(profile_idx) != requested_profile:
                 logger.warning(
-                    "Using CUDA Graph profile %d for cursor/parity safety; "
+                    "Using CUDA Graph profile %d for decode/parity safety; "
                     "requested profile was %r",
                     profile_idx,
                     requested_profile,
@@ -2608,10 +2612,10 @@ class Executor:
         slot.c2w_transconv_states = [
             raw[n].clone() for n in self._c2w_transconv_output_names
         ]
-        self.update_cursor_state(
-            slot,
-            {name: raw.get(name) for name in self._cursor_output_names},
-        )
+        # Cursor is a decoder-only recurrent observer.  The fused prefill
+        # call still carries the fixed cursor ABI, but its cursor outputs are
+        # intentionally scratch and must not advance or initialize the live
+        # per-slot cursor state.  The first active decode owns frame zero.
         slot.init_pingpong_buffers()
 
         slot.frame_idx = int(slot.frame_idx) + FUSED_CHUNK_T

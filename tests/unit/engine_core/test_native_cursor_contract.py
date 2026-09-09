@@ -94,6 +94,31 @@ def test_segment_plan_slices_only_complete_tn_owners():
     )
 
 
+def test_precise_label_provenance_slices_owner_without_guessing_raw():
+    plan = CursorLabelPlan(
+        label_ids=(1, 2, 3, 4),
+        owner_spans=(CursorOwnerSpan(7, 0, 4, 10, 14, 5, 8),),
+        label_normalized_spans=((10, 11), (11, 12), (12, 13), (13, 14)),
+        revision=2,
+    )
+    first = slice_cursor_label_plan(plan, normalized_start=10, normalized_end=12)
+    second = slice_cursor_label_plan(plan, normalized_start=12, normalized_end=14)
+    assert first.label_ids + second.label_ids == plan.label_ids
+    assert second.label_normalized_spans == ((12, 13), (13, 14))
+    assert second.owner_spans == (CursorOwnerSpan(7, 0, 2, 12, 14, 5, 8),)
+    # Extending the visible label window must not reset mu inside the owner.
+    from dataclasses import replace
+    assert reanchor_cursor_mu(first, replace(plan, revision=3), previous_mu=1.5) == 1.5
+
+
+@pytest.mark.parametrize("spans", [((0, 1),), ((0, 1), (1, 3)),
+                                   ((1, 2), (0, 1)), ((False, 1), (1, 2))])
+def test_malformed_label_provenance_is_rejected(spans):
+    with pytest.raises(ValueError):
+        CursorLabelPlan(label_ids=(1, 2), owner_spans=(_owner(0, 2),),
+                        label_normalized_spans=spans)
+
+
 def test_reanchor_uses_stable_owner_ids_when_tail_label_count_changes():
     previous = CursorLabelPlan(
         label_ids=(1, 2, 3, 4),

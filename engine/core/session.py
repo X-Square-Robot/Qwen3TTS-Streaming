@@ -20,6 +20,7 @@ from .speech_state import SpeechStateCapability
 from .types import EngineResult, SessionConfig, SessionState
 from .text_journal import CanonicalTextJournal
 from .native_cursor import CursorLabelPlan, slice_cursor_label_plan
+from .text_coordinates import TextProgressProjection
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +110,8 @@ class Session:
             normalized_end=bounds[1],
         )
         if sliced is None:
-            # Preserve the revision while explicitly disabling the native
-            # route for this segment; never guess a partial owner label range.
+            # Only a legacy plan without precise offsets, or an unsplittable
+            # individual label, needs this fallback. Never guess label offsets.
             return CursorLabelPlan(revision=plan.revision, final=plan.final)
         return sliced
 
@@ -135,6 +136,7 @@ class Session:
     # Per-segment CPU projection state.  The projector never owns neural
     # state; it only remembers the last published owner-level high-water.
     native_cursor_projectors: dict[int, Any] = field(default_factory=dict)
+    text_coordinate_projectors: dict[int, TextProgressProjection] = field(default_factory=dict)
     engine_tokens_done_sent: bool = False
 
     # Optional transport-layer callback hook (e.g. gRPC / Triton adapters)

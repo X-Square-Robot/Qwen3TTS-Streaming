@@ -68,9 +68,9 @@ def _runtime_contract_dict():
 @pytest.mark.parametrize(
     ("cursor_enabled", "requested", "expected"),
     [
-        (True, "", 0),
-        (True, "1", 0),
-        (True, "bad", 0),
+        (True, "", 1),
+        (True, "1", 1),
+        (True, "bad", 1),
         (False, "", 1),
         (False, "0", 0),
         (False, "99", 1),

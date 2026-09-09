@@ -415,6 +415,53 @@ def test_cursor_step_keeps_trunk_state_when_text_is_not_visible() -> None:
     torch.testing.assert_close(delta_history, torch.zeros_like(delta_history))
 
 
+def test_cursor_step_is_a_full_state_passthrough_when_inactive() -> None:
+    """Prefill must not consume a decoder cursor frame or mutate its state."""
+    torch.manual_seed(17)
+    head = CursorHead(n_labels_plus_blank=6, d=8).eval()
+    step = CursorStreamingStep(head).eval()
+    b = 2
+    labels = torch.ones(b, 3, dtype=torch.long)
+    label_count = torch.tensor([3, 2], dtype=torch.long)
+    active = torch.zeros(b, dtype=torch.int64)
+    mu = torch.tensor([1.25, 0.5])
+    frames_since = torch.tensor([2.0, 4.0])
+    delta_history = torch.randn(b, 8)
+    conv_history = torch.randn(b, head.history_width, head.d)
+    last_trunk_input = torch.randn(b, head.d)
+    seen_frames = torch.tensor([7, 11], dtype=torch.long)
+    text_start = torch.zeros(b, dtype=torch.long)
+    override_valid = torch.ones(b, dtype=torch.int64)
+    override_mu = torch.tensor([4.0, 3.0])
+
+    with torch.no_grad():
+        out = step(
+            torch.tensor([13, 29], dtype=torch.long),
+            labels,
+            label_count,
+            active,
+            mu,
+            frames_since,
+            delta_history,
+            conv_history,
+            last_trunk_input,
+            seen_frames,
+            text_start,
+            override_valid,
+            override_mu,
+        )
+
+    assert not bool(out[0].any())
+    torch.testing.assert_close(out[1], mu)
+    torch.testing.assert_close(out[2], torch.zeros_like(mu))
+    torch.testing.assert_close(out[3], torch.zeros_like(mu))
+    torch.testing.assert_close(out[5], frames_since)
+    torch.testing.assert_close(out[6], delta_history)
+    torch.testing.assert_close(out[7], conv_history)
+    torch.testing.assert_close(out[8], last_trunk_input)
+    torch.testing.assert_close(out[9], seen_frames)
+
+
 def _tiny_fused_inputs():
     sys.path.insert(0, str(REPO_ROOT / "scripts" / "export"))
     from export_09_talker_code2wav_fused import (  # noqa: E402
