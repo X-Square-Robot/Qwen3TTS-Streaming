@@ -4,6 +4,8 @@ import base64
 import json
 import queue
 import threading
+import uuid
+from dataclasses import replace
 from typing import Any
 
 from qwen3tts_protocol import (
@@ -163,6 +165,13 @@ class TritonGrpcAdapter:
         )
 
     def open_stream(self, start_request: SessionStartRequest):
+        # Triton receives follow-up append/complete actions as independent
+        # requests.  An empty id cannot identify the server-side session and
+        # leaves the stream allocated until the global session limit is hit.
+        if not start_request.session_id:
+            start_request = replace(
+                start_request, session_id=f"triton-{uuid.uuid4().hex}"
+            )
         return TritonGrpcStreamSession(self, start_request)
 
 

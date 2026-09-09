@@ -156,3 +156,15 @@ def test_capabilities_forwards_auth_to_health_and_stream(monkeypatch):
         ("model", expected, 0.75),
         ("stream", expected, None),
     ]
+
+
+def test_open_stream_allocates_session_id_when_oneshot_request_is_empty():
+    adapter = tg.TritonGrpcAdapter("localhost:8001", model_name="m", timeout=2.0)
+    session = adapter.open_stream(
+        SessionStartRequest(session_id="", config=SynthesisConfig(task_type="custom_voice"))
+    )
+    try:
+        assert session.session_id.startswith("triton-")
+        assert len(session.session_id) > len("triton-")
+    finally:
+        session.cancel("test cleanup")
