@@ -25,6 +25,8 @@ from .types import (
 )
 from .candidate_resolver import CandidateResolver, family_for_kind
 from .semantic_spans import SpanDetector
+from .commit_policy import CommitPolicy
+from .domain_resolver import DomainResolver
 from .wetext_backend import WetextAdapter
 from .projector import is_markdown_structured, project_readable
 
@@ -276,6 +278,8 @@ class IncrementalTextCommitter:
         self.config = config or TextNormalizationConfig()
         self.adapter = adapter or WetextAdapter()
         self._detector = SpanDetector(self._classify)
+        self._commit_policy = CommitPolicy()
+        self._domain_resolver = DomainResolver(self.adapter)
         self._candidate_resolver = CandidateResolver(
             self.adapter.backend,
             nbest=getattr(self.config, "candidate_nbest", 8),
@@ -744,7 +748,7 @@ class IncrementalTextCommitter:
                         or _compatibility_spelling(after_dot).isdigit()
                     ):
                         self._ordered_marker_candidate = False
-                        self._pending.kind = self._classify(raw)
+                        self._pending.kind = self._detector.classify(raw)
                         continue
                     if len(raw) > 2:
                         self._ordered_marker_candidate = False
@@ -901,7 +905,7 @@ class IncrementalTextCommitter:
                         raw[1].isdigit() or _compatibility_spelling(raw[1]).isdigit()
                     ):
                         self._markdown_line_marker = False
-                        self._pending.kind = self._classify(raw)
+                        self._pending.kind = self._detector.classify(raw)
                         continue
                     if len(raw) >= 2:
                         # ``>quote`` and malformed list markers still get a
@@ -1017,7 +1021,7 @@ class IncrementalTextCommitter:
                     self._pending.raw += ch
                     self._pending.end = source_pos + 1
                     self._pending.last_at = now
-                    self._pending.kind = self._classify(self._pending.raw)
+                    self._pending.kind = self._detector.classify(self._pending.raw)
                     continue
                 self._leading_paren_candidate = False
                 self._pending.raw = self._pending.raw[:1]
@@ -1104,7 +1108,7 @@ class IncrementalTextCommitter:
                         ch,
                         source_pos,
                         source_pos + 1,
-                        self._classify(ch),
+                        self._detector.classify(ch),
                         now,
                     )
                 elif ord(ch) > 127 and not ch.isascii():
@@ -1115,7 +1119,7 @@ class IncrementalTextCommitter:
                         ch,
                         source_pos,
                         source_pos + 1,
-                        self._classify(ch),
+                        self._detector.classify(ch),
                         now,
                     )
                 continue
@@ -1196,7 +1200,7 @@ class IncrementalTextCommitter:
                     # range from arithmetic.  Other operators are sufficient
                     # evidence to enter the formula state immediately.
                     if self._pending.kind == SpanKind.NUMBER:
-                        self._pending.kind = self._classify(self._pending.raw)
+                        self._pending.kind = self._detector.classify(self._pending.raw)
                     else:
                         self._pending.kind = SpanKind.MATH
                     continue
@@ -1251,7 +1255,7 @@ class IncrementalTextCommitter:
                     self._pending.raw += ch
                     self._pending.end = source_pos + 1
                     self._pending.last_at = now
-                    self._pending.kind = self._classify(self._pending.raw)
+                    self._pending.kind = self._detector.classify(self._pending.raw)
                     continue
                 self._close_pending()
                 self._emit_plain(ch, source_pos)
@@ -1280,7 +1284,7 @@ class IncrementalTextCommitter:
                     self._pending.raw += ch
                     self._pending.end = source_pos + 1
                     self._pending.last_at = now
-                    self._pending.kind = self._classify(self._pending.raw)
+                    self._pending.kind = self._detector.classify(self._pending.raw)
                     continue
                 if _is_han(ch):
                     # Let the pending span's own script win.  Passing a hard
@@ -1297,7 +1301,7 @@ class IncrementalTextCommitter:
                         self._pending.raw += ch
                         self._pending.end = source_pos + 1
                         self._pending.last_at = now
-                        self._pending.kind = self._classify(self._pending.raw)
+                        self._pending.kind = self._detector.classify(self._pending.raw)
                     else:
                         self._flush_plain()
                         self._pending = self._open_pending(
@@ -1312,7 +1316,7 @@ class IncrementalTextCommitter:
                     self._pending.raw += ch
                     self._pending.end = source_pos + 1
                     self._pending.last_at = now
-                    self._pending.kind = self._classify(self._pending.raw)
+                    self._pending.kind = self._detector.classify(self._pending.raw)
                     continue
                 self._close_pending()
                 self._emit_plain(ch, source_pos)
@@ -1326,7 +1330,7 @@ class IncrementalTextCommitter:
                 self._pending.raw += ch
                 self._pending.end = source_pos + 1
                 self._pending.last_at = now
-                self._pending.kind = self._classify(self._pending.raw)
+                self._pending.kind = self._detector.classify(self._pending.raw)
             elif (
                 ch == ";"
                 and self._pending.raw.startswith("&")
@@ -1388,7 +1392,7 @@ class IncrementalTextCommitter:
                 self._pending.raw += ch
                 self._pending.end = source_pos + 1
                 self._pending.last_at = now
-                self._pending.kind = self._classify(self._pending.raw)
+                self._pending.kind = self._detector.classify(self._pending.raw)
                 if len(self._pending.raw) >= self.config.max_pending_chars:
                     self._limit_fallback = True
                     self._close_pending(reason="max_pending")
@@ -1489,7 +1493,14 @@ class IncrementalTextCommitter:
                 candidate_count = candidates.candidate_count
                 best_cost = candidates.best_cost
                 cost_margin = candidates.cost_margin
-                decision_source = candidates.source
+                policy_decision = self._commit_policy.decide(
+                    family=semantic_family,
+                    closed=True,
+                    final=reason == "final",
+                    candidates=candidates,
+                    margin_threshold=self._margin_threshold(semantic_family),
+                )
+                decision_source = f"{candidates.source}:{policy_decision.reason}"
             except Exception:
                 decision_source = "resolver_error"
         order_id = (
@@ -1523,10 +1534,7 @@ class IncrementalTextCommitter:
                 if any(_is_han(ch) for ch in self._raw[: p.start])
                 else route_lang or "zh"
             )
-            value = self.adapter.normalize_id_card(
-                backend_raw,
-                lang=id_lang,
-            )
+            value = self._domain_resolver.identifier(backend_raw, language=id_lang).text
             if not value:
                 value = self._safe_fallback(
                     backend_raw,
@@ -1538,16 +1546,15 @@ class IncrementalTextCommitter:
             # Decode entities only after the raw span is closed.  The source
             # interval remains the original entity, while the spoken value is
             # its decoded character (``&#x20;`` -> a real space).
-            value = html.unescape(p.raw)
+            value = self._domain_resolver.entity(p.raw).text
             kind = CommitKind.LITERAL
         elif order_id:
             # An order number is an identifier, not a quantity.  Separate its
             # digits before calling WeText so ``188888`` is read as
             # ``一八八八八八`` rather than ``十八万八千八百八十八``.
-            value = self.adapter.normalize_digit_sequence(
-                backend_raw,
-                lang=route_lang or "zh",
-            )
+            value = self._domain_resolver.identifier(
+                backend_raw, language=route_lang or "zh", order_id=True
+            ).text
             if not value:
                 value = self._safe_fallback(
                     backend_raw,
@@ -1559,10 +1566,9 @@ class IncrementalTextCommitter:
             # WeText's generic grammar treats ``+``/``-`` as arithmetic.  The
             # phone adapter first canonicalizes each number into digit tokens,
             # then delegates their verbalization to WeText's language graph.
-            value = self.adapter.normalize_phone(
-                backend_raw,
-                lang=route_lang or "zh",
-            )
+            value = self._domain_resolver.phone(
+                backend_raw, language=route_lang or "zh"
+            ).text
             if not value:
                 value = self._safe_fallback(
                     backend_raw,
@@ -1588,35 +1594,15 @@ class IncrementalTextCommitter:
                     # enumeration punctuation before TN.  WeText then owns
                     # the numeric verbalization (``1、`` -> ``一、``), just as
                     # it does for the surrounding numeric spans.
-                    marker_input = f"{number}、"
-                    value = self.adapter.normalize_closed_stream(
-                        marker_input,
-                        lang=marker_lang,
-                        kind=SpanKind.NUMBER,
-                    )
-                    if not value or value == marker_input:
-                        spoken_number = self._safe_fallback(
-                            number,
-                            lang=marker_lang,
-                            kind=SpanKind.NUMBER,
-                        )
-                        value = f"{spoken_number}、"
+                    value = self._domain_resolver.ordered_marker(
+                        number, language=marker_lang
+                    ).text
                 else:
-                    marker_input = f"{number}, "
-                    value = self.adapter.normalize_closed_stream(
-                        marker_input,
-                        lang=marker_lang,
-                        kind=SpanKind.NUMBER,
-                    )
-                    if not value or value == marker_input:
-                        spoken_number = self._safe_fallback(
-                            number,
-                            lang=marker_lang,
-                            kind=SpanKind.NUMBER,
-                        )
-                        value = f"{spoken_number}, "
+                    value = self._domain_resolver.ordered_marker(
+                        number, language=marker_lang
+                    ).text
             else:
-                value = project_readable(p.raw)
+                value = self._domain_resolver.structured(p.raw).text
             # A late structured suffix is still projected so formatting and
             # transport syntax cannot leak into speech.  Mark it as fallback
             # when it arrived behind a prior fence, making the degradation
@@ -1655,13 +1641,15 @@ class IncrementalTextCommitter:
                 # the default policy.  Use the documented Chinese fallback
                 # rather than sending an unresolved expression to a random
                 # wetext graph; the record still carries UNKNOWN language.
-                value = self._safe_fallback(
-                    backend_raw,
-                    lang="zh",
-                    kind=p.kind,
-                )
+                value = self._domain_resolver.formula(backend_raw, language="zh").text
             else:
-                value = custom_value if route_lang else p.raw
+                value = (
+                    self._domain_resolver.formula(
+                        backend_raw, language=route_lang or "zh"
+                    ).text
+                    if p.kind is SpanKind.MATH
+                    else custom_value if route_lang else p.raw
+                )
             kind = CommitKind.NORMALIZED if value != p.raw else CommitKind.FALLBACK
         else:
             value = (
@@ -1808,6 +1796,13 @@ class IncrementalTextCommitter:
 
     def _fallback_pending(self, *, reason: str) -> TextCommit:
         return self._close_pending(reason=reason)
+
+    def _margin_threshold(self, family: SemanticFamily) -> float | None:
+        for name, value in getattr(self.config, "family_margin_thresholds", ()):
+            if str(name) == family.value:
+                return float(value)
+        value = getattr(self.config, "margin_threshold", None)
+        return None if value is None else float(value)
 
     def _safe_fallback(self, text: str, *, lang: str, kind: SpanKind) -> str:
         """Contain adapter failures at the commit boundary.

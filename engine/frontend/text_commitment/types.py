@@ -208,6 +208,8 @@ class TextNormalizationConfig:
     candidate_nbest: int = 8
     calibration_profile: str = ""
     ambiguity_policy: str = "wait"
+    margin_threshold: float | None = None
+    family_margin_thresholds: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True)

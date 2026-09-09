@@ -23,6 +23,7 @@ from .types import (
 from .candidate_resolver import CandidateResolver, CandidateSet, family_for_kind
 from .semantic_spans import SpanDetector
 from .commit_policy import CommitAction, CommitPolicy, CommitPolicyDecision
+from .domain_resolver import DomainResolver, DomainResult
 from .committer import IncrementalTextCommitter
 from .x2_adapter import CommitmentObservation, X2BoundaryLevel, X2CommitmentAdapter
 from .causal import (
@@ -80,6 +81,8 @@ __all__ = [
     "CommitAction",
     "CommitPolicy",
     "CommitPolicyDecision",
+    "DomainResolver",
+    "DomainResult",
     "TextCommit",
     "TextInputMetadata",
     "TextNormalizationConfig",

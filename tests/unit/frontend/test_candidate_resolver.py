@@ -11,6 +11,7 @@ from engine.frontend.text_commitment.types import (
 )
 from engine.frontend.text_commitment.commit_policy import CommitAction, CommitPolicy
 from engine.frontend.text_commitment.semantic_spans import SpanDetector
+from engine.frontend.text_commitment.domain_resolver import DomainResolver
 
 
 class _Backend:
@@ -58,7 +59,7 @@ def test_commits_carry_family_and_candidate_diagnostics():
     number = next(item for item in commits if item.raw_text == "99%")
     assert number.semantic_family is SemanticFamily.QUANTITY
     assert number.candidate_count >= 1
-    assert number.decision_source in {"wetext", "rule", "empty", "resolver_error"}
+    assert number.decision_source.startswith(("wetext", "rule", "empty", "resolver_error"))
 
 
 def test_policy_waits_for_open_or_ambiguous_spans():
@@ -76,3 +77,20 @@ def test_detector_keeps_legacy_classifier_behind_typed_boundary():
     detector = SpanDetector(lambda raw: SpanKind.NUMBER if raw.isdigit() else SpanKind.PLAIN)
     assert detector.classify("99") is SpanKind.NUMBER
     assert detector.family(SpanKind.NUMBER) is SemanticFamily.QUANTITY
+
+
+def test_policy_uses_category_margin_threshold():
+    span = SemioticSpan(1, 0, 3, "99%", SpanKind.NUMBER,
+                        family=SemanticFamily.QUANTITY, closed=True)
+    candidates = CandidateResolver(_Backend()).resolve(span, language=LanguageKind.ZH)
+    decision = CommitPolicy().decide(
+        family=span.family, closed=True, final=False,
+        candidates=candidates, margin_threshold=2.0,
+    )
+    assert decision.action is CommitAction.WAIT
+    assert decision.reason == "ambiguous_margin"
+
+
+def test_domain_resolver_routes_structured_and_entity_payloads():
+    assert DomainResolver.structured("**正文**").text == "正文"
+    assert DomainResolver.entity("&#x20;").text == " "

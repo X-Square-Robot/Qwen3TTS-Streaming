@@ -537,6 +537,14 @@ class FrontendInterface:
             tn_overrides["language"] = str(opts["tn_language"])
         if "tn_commit_mode" in opts:
             tn_overrides["commit_mode"] = str(opts["tn_commit_mode"])
+        if "tn_candidate_nbest" in opts:
+            tn_overrides["candidate_nbest"] = int(opts["tn_candidate_nbest"])
+        if "tn_margin_threshold" in opts:
+            tn_overrides["margin_threshold"] = float(opts["tn_margin_threshold"])
+        if "tn_calibration_profile" in opts:
+            tn_overrides["calibration_profile"] = str(opts["tn_calibration_profile"])
+        if "tn_ambiguity_policy" in opts:
+            tn_overrides["ambiguity_policy"] = str(opts["tn_ambiguity_policy"])
         if tn_overrides:
             tn_cfg = replace(tn_cfg, **tn_overrides)
             config = replace(config, text_normalization=tn_cfg)
@@ -587,6 +595,8 @@ class FrontendInterface:
                 candidate_nbest=getattr(tn_cfg, "candidate_nbest", 8),
                 calibration_profile=getattr(tn_cfg, "calibration_profile", ""),
                 ambiguity_policy=getattr(tn_cfg, "ambiguity_policy", "wait"),
+                margin_threshold=getattr(tn_cfg, "margin_threshold", None),
+                family_margin_thresholds=getattr(tn_cfg, "family_margin_thresholds", ()),
             )
         )
         session.audio_credit_estimator = AudioCreditEstimator(codec_frame_rate=12.5)
@@ -1066,6 +1076,14 @@ class FrontendInterface:
                 language=commit.language.value,
                 commit_fence=commit.fence,
                 normalization_changed=commit.raw_text != commit.tts_text,
+                semantic_family=commit.semantic_family.value,
+                decision_source=commit.decision_source,
+                candidate_count=commit.candidate_count,
+                best_cost=commit.best_cost,
+                cost_margin=commit.cost_margin,
+                calibrated_confidence=commit.calibrated_confidence,
+                closure_reason=commit.closure_reason,
+                fallback_reason=commit.fallback_reason,
             )
 
     def _log_tn_pending(self, session: "Session", decision) -> None:
