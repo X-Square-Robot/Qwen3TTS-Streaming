@@ -6,7 +6,6 @@ import os
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from .sdk import SdkDistribution
 
@@ -19,10 +18,6 @@ _FALSE_VALUES = {"0", "false", "no", "off"}
 
 def _security_headers() -> dict[str, str]:
     connect_sources = ["'self'", "ws:", "wss:"]
-    lab_url = os.environ.get("DEMO_LAB_URL", "").strip()
-    parsed = urlsplit(lab_url)
-    if parsed.scheme in {"http", "https"} and parsed.netloc:
-        connect_sources.append(f"{parsed.scheme}://{parsed.netloc}")
     return {
         "Content-Security-Policy": (
             "default-src 'self'; script-src 'self' data:; style-src 'self'; "
@@ -47,18 +42,6 @@ def demo_enabled(environ: Mapping[str, str] | None = None) -> bool:
     raise ValueError(
         "DEMO_ENABLED must be one of true/false, 1/0, yes/no, or on/off"
     )
-
-
-def _lab_url() -> str:
-    value = os.environ.get("DEMO_LAB_URL", "").strip()
-    if not value:
-        return ""
-    parsed = urlsplit(value)
-    if parsed.scheme in {"http", "https"} and parsed.netloc:
-        return value
-    if not parsed.scheme and not parsed.netloc and value.startswith(("/", "./", "../")):
-        return value
-    return ""
 
 
 def build_demo_config(
@@ -94,7 +77,6 @@ def build_demo_config(
             "version": os.environ.get("DOCS_VERSION", engine_version).strip(),
             "route": "./#/docs/",
         },
-        "lab": {"available": bool(_lab_url()), "url": _lab_url()},
     }
 
 

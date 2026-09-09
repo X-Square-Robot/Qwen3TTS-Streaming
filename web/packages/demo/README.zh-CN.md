@@ -16,10 +16,9 @@
 | `/demo/#/docs/` | 同版本 Markdown 文档 |
 | `/demo/#/lab` | 工程实验：公共 Realtime 的 LLM PK/并发，以及可选 trace 工具 |
 
-设置 `DEMO_ENABLED=false` 会关闭整个门户。基础实验使用当前实例公共的
-`/v1/realtime`；`DEMO_LAB_URL` 是 runtime 设置（不是 Vite 构建变量），用于指向仅提供
-后端能力的可选 `demo_api`。其 `/healthz` 可达时，实验页会显示已迁移的深度工程面板（实时
-TRT/Text Player trace、服务端 LLM PK、多路并发）；可选后端绝不提供第二套前端。docs-only
+设置 `DEMO_ENABLED=false` 会关闭整个门户。基础实验和 Lab 使用当前实例公共的
+`/v1/realtime`；trace、LLM PK 和多路并发均由统一 Gateway 提供，不依赖独立后端或 Triton
+直连。docs-only
 构建没有 live runtime，也没有可交互实验。
 
 ## 本地开发
@@ -54,5 +53,4 @@ npm run test:e2e -- --project=chromium
 
 `npm run build` 会运行文档构建器、检查类型，并生成供 engine 与 Triton runtime 镜像消费的
 静态产物。runtime 镜像不安装 Node/npm，也不会在镜像内重新构建本包。UI 代码放在
-`src/`，Browser SDK 依赖保持在独立 workspace 包中，可选 `demo_api` 合同通过
-`DEMO_LAB_URL` 接入。
+`src/`，Browser SDK 依赖保持在独立 workspace 包中。

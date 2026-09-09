@@ -45,7 +45,6 @@ services:
       TLS_AUTO_ENABLE: ${TLS_AUTO_ENABLE:-false}
       TLS_DIR: /app/tls
       DEMO_ENABLED: ${DEMO_ENABLED:-true}
-      DEMO_LAB_URL: ${DEMO_LAB_URL:-}
       ENGINE_MAX_BATCH_SIZE: ${ENGINE_MAX_BATCH_SIZE:-128}
       ENGINE_MAX_SESSIONS: ${ENGINE_MAX_SESSIONS:-128}
       ENGINE_MAX_SEQ_LEN: ${ENGINE_MAX_SEQ_LEN:-}
@@ -200,7 +199,6 @@ services:
       TRITON_REALTIME_PORT: 50052
       TRITON_REALTIME_USAGE_LOG: /var/lib/qwen3tts/realtime_usage.jsonl
       DEMO_ENABLED: ${DEMO_ENABLED:-true}
-      DEMO_LAB_URL: ${DEMO_LAB_URL:-}
       TRITON_GRPC_AUTH_TOKEN: ${TRITON_GRPC_AUTH_TOKEN:-}
       QWEN_LOG_DIR: ${QWEN_LOG_DIR:-/var/log/qwen3tts}
       QWEN_LOG_MAX_BYTES: ${QWEN_LOG_MAX_BYTES:-52428800}
@@ -238,23 +236,3 @@ services:
           ignore:
             - __pycache__/
             - "*.pyc"
-
-  demo-api:
-    profiles: ["demo"]
-    image: ${DEMO_API_IMAGE:-qwen3-tts-demo-api:latest}
-    build:
-      context: ../..
-      dockerfile: infra/docker/Dockerfile.demo-api
-    container_name: ${DEMO_API_CONTAINER_NAME:-qwen3-tts-demo-api}
-    working_dir: /app
-    environment:
-      QWEN_DEMO_TRITON_GRPC: ${QWEN_DEMO_TRITON_GRPC:-triton:8001}
-      QWEN_DEMO_TRITON_MODEL: ${QWEN_DEMO_TRITON_MODEL:-tts_orchestrator}
-      QWEN_DEMO_PORT: 7860
-      QWEN_DEMO_ENABLE_LIVE_CONCURRENCY: ${QWEN_DEMO_ENABLE_LIVE_CONCURRENCY:-0}
-      PYTHONUNBUFFERED: "1"
-    ports:
-      - "${DEMO_API_PORT:-7860}:7860"
-    volumes:
-      - ${DEMO_TRACES_DIR:-../../workspace/demo_traces}:/app/workspace/demo_traces
-    restart: unless-stopped

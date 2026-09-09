@@ -1,5 +1,5 @@
 # Qwen3TTS-Streaming — dependency grouping and tool configuration.
-# This file is NOT a installable Python package definition — engine/, demo_api/,
+# This file is NOT an installable Python package definition — engine/,
 # and client/ are separate sub-projects with their own packaging.
 # It exists solely to:
 #   1. Declare optional dependency groups for `pip install -e ".[group]"`
@@ -86,7 +86,7 @@ markers = [
 extend-exclude = ["third_party", "workspace"]
 
 [tool.ruff.lint.per-file-ignores]
-# 库代码（engine/ client/src/ demo_api/）保持严格；以下为辅助代码的合理放宽。
+# 库代码（engine/、client/src/）保持严格；以下为辅助代码的合理放宽。
 # tools/：手动验证 / benchmark / 冻结 repro 工具（非 pytest，见 CLAUDE.md），
 #   容许脚本式紧凑写法与调试中间量。
 "tools/**" = ["E402", "E701", "E702", "F841"]

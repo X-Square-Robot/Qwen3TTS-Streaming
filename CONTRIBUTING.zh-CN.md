@@ -22,7 +22,7 @@ export PYTHONPATH=client/src
 修改浏览器门户时请使用 `web/` npm workspace，并先阅读
 [`web/packages/demo` 开发说明](web/packages/demo/README.zh-CN.md)。原独立的 `webui/`
 前端已退出；真实 UI 检查应访问 runtime 的 `/demo/`，深度工程面板按需通过
-`DEMO_LAB_URL` 接入后端。
+公共 `/v1/realtime` 接口接入实例。
 
 ## 运行测试
 

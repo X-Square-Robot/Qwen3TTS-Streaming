@@ -16,7 +16,6 @@ Qwen3TTS-Streaming/
 ├── client/              # 独立 Python SDK 包（qwen3-tts-client，以 wheel 发布）
 │   ├── src/qwen3tts/     # 客户端实现与传输适配器
 │   └── src/qwen3tts_protocol/   # 共享协议层（单一真相源）
-├── demo_api/            # 可选工程实验 API 后端（aiohttp；详细 trace）
 ├── web/                 # Browser SDK 与统一 React/Vite 门户
 │   ├── packages/browser-sdk/ # 浏览器 SDK（npm workspace 包）
 │   └── packages/demo/   # /demo/ 门户：体验、SDK、文档、实验
@@ -54,7 +53,7 @@ Qwen3TTS-Streaming/
 ```
 
 > 当前只维护一套浏览器前端：旧顶层 `webui/` 已并入 `web/packages/demo`，浏览器门户唯一
-> 入口为 `/demo/`，其中 `/demo/#/lab` 是统一的工程实验入口。`demo_api/` 只提供可选的
+> 入口为 `/demo/`，其中 `/demo/#/lab` 是统一的工程实验入口。Lab 通过公共 Realtime 提供
 > aiohttp API（例如详细 decode trace），不托管第二套静态前端；基本试听和 Browser SDK
 > 不依赖它。
 

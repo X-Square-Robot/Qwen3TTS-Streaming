@@ -96,16 +96,6 @@ def test_demo_config_only_advertises_installable_browser_sdk(tmp_path, monkeypat
     }
 
 
-def test_demo_config_rejects_unsafe_lab_url(tmp_path, monkeypatch):
-    monkeypatch.setenv("DEMO_LAB_URL", "javascript:alert(1)")
-    payload = build_demo_config(
-        runtime_type="standalone",
-        capabilities={},
-        sdk_distribution=SdkDistribution.discover(tmp_path),
-    )
-    assert payload["lab"] == {"available": False, "url": ""}
-
-
 @pytest.mark.asyncio
 async def test_demo_routes_are_prefix_safe_cached_and_hardened(tmp_path, monkeypatch):
     pytest.importorskip("aiohttp")
@@ -119,7 +109,6 @@ async def test_demo_routes_are_prefix_safe_cached_and_hardened(tmp_path, monkeyp
     sdk = tmp_path / "sdk"
     sdk.mkdir()
     (sdk / WHEEL_NAME).write_bytes(b"wheel")
-    monkeypatch.setenv("DEMO_LAB_URL", "https://lab.example.test/tools")
     app = web.Application()
     mount_demo_config_route(
         app,

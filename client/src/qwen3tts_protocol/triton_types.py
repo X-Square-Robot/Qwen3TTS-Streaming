@@ -1,7 +1,7 @@
 """Triton-specific request types and payload builders.
 
 These are the wire-format types for talking to the Triton orchestrator
-backend.  They live in the protocol layer so that both the demo_api and
+backend.  They live in the protocol layer so that both the Gateway and
 tools/validation can share them without depending on each other.
 """
 

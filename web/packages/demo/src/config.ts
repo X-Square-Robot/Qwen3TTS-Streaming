@@ -27,7 +27,6 @@ export interface DemoConfig {
     tarball_url: string;
   };
   docs: {version: string; route: string};
-  lab: {available: boolean; url: string};
 }
 
 export interface LoadedDemoConfig {

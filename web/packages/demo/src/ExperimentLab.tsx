@@ -1,13 +1,10 @@
-import {useMemo, useRef, useState} from "react";
+import {useRef, useState} from "react";
 import {
   AudioEncoding, discoverCapabilities, InputMode, RealtimeTTSClient, resolveRelativeUrl,
   SynthesisTask, VadStrategy, type IncrementalSynthesisRun, type SynthesisRun,
 } from "@xmultimodalinteraction/qwen3tts-browser";
 
 import type {LoadedDemoConfig} from "./config";
-import {createLabApi} from "./lab/api";
-import {FeatureShowcase} from "./lab/FeatureShowcase";
-import type {LabRequest} from "./lab/types";
 
 interface ExperimentResult {
   readonly name: string;
@@ -18,10 +15,8 @@ interface ExperimentResult {
   readonly trace: ReadonlyArray<Record<string, unknown>>;
 }
 
-export function ExperimentLab({loaded, labReachable = false}: {
+export function ExperimentLab({loaded}: {
   loaded: LoadedDemoConfig | null;
-  /** Reachability of the optional demo_api backend, not public Realtime. */
-  labReachable?: boolean;
 }) {
   const [text, setText] = useState("你好，这是从上游大模型逐步到达的流式文本。");
   const [concurrency, setConcurrency] = useState(4);
@@ -101,21 +96,10 @@ export function ExperimentLab({loaded, labReachable = false}: {
     setRunning(false);
   }
 
-  const featureApi = useMemo(
-    () => labReachable ? createLabApi(loaded) : null,
-    [labReachable, loaded],
-  );
-  const featureRequest: LabRequest = {
-    text,
-    speaker: "Serena",
-    language: "auto",
-    ms_per_token: 30,
-  };
-
   return <section className="page">
     <p className="eyebrow">ENGINEERING LAB · ONE PORTAL</p><h1>同一入口，观察不同负载。</h1>
-    <p>基础实验直接使用当前实例的 Browser SDK 与公共 Realtime；配置可选工程后端后，
-      下方还会显示原特性展示 WebUI 的实时 trace、LLM PK 和并发面板。</p>
+    <p>所有实验直接使用当前实例的 Browser SDK 与公共 Realtime。事件 trace、LLM PK
+      和多路并发都来自同一 Gateway 会话，不依赖独立实验后端。</p>
     <div className="panel"><div className="panel-heading"><div><p className="panel-kicker">PUBLIC REALTIME</p><h2>基础实验输入</h2></div><p>浏览器直连当前实例；结果只代表本次请求。</p></div>
       <textarea value={text} onChange={(event) => setText(event.target.value)} />
       <div className="grid controls"><label>并发数<input type="number" min="1" max="16" value={concurrency}
@@ -145,7 +129,6 @@ export function ExperimentLab({loaded, labReachable = false}: {
       {results.length > 0 && <div className="event-log">{results.flatMap((result) => result.trace.slice(-4).map((event, index) =>
         <code key={`${result.name}-${index}`}>{result.name} · {String(event.type)} · {String(event.at_ms)}ms</code>))}</div>}
     </div>
-    {loaded && <FeatureShowcase api={featureApi} request={featureRequest} />}
   </section>;
 }
 

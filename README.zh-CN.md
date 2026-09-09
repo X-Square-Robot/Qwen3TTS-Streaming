@@ -350,18 +350,15 @@ capabilities 门控的 VAD/交付参数、WAV 下载和本仓库 Markdown 文档
 独立 Demo API 或 Node 进程。
 
 需要修改门户的贡献者请先阅读
-[`web/packages/demo` 开发说明](web/packages/demo/README.zh-CN.md)；需要启用可选后端的
-维护者请参阅 [`demo_api` 说明](demo_api/README.zh-CN.md)。
+[`web/packages/demo` 开发说明](web/packages/demo/README.zh-CN.md)。
 
 原独立的 `webui/` 特性展示前端已并入 `web/packages/demo`；现在只有这一套浏览器前端和
 一个门户入口。统一工程实验从 `/demo/#/lab` 进入：基础 LLM PK 与并发实验使用实例
-公共 `/v1/realtime`；可选的 `demo_api` 后端承载已迁移的深度工程面板（实时 TRT/Text
-Player trace、服务端 LLM PK、多路并发）和能力查询，绝不再提供第二套 UI。
+公共 `/v1/realtime`；trace、LLM PK、多路并发和能力查询都通过统一 Gateway 完成，
+不直接连接 Triton，也不需要独立实验后端。
 
-内置“实验”页通过公共 Realtime 提供基础 **LLM PK** 和并发请求；配置
-`DEMO_LAB_URL` 后，同一页面还会提供已迁移的实时 TRT/Text Player trace、服务端 LLM PK、
-多路并发以及 JSON/WAV 下载。结果仅代表当前浏览器到当前实例的本次请求，不展示硬编码
-性能数字，也不会用 fixture 或模拟音频替代 live backend。
+内置“实验”页通过公共 Realtime 提供 **LLM PK**、并发和事件 trace。结果仅代表当前浏览器
+到当前实例的本次请求，不展示硬编码性能数字，也不会用 fixture 或模拟音频替代 live backend。
 
 以下媒体是原独立 WebUI 的历史截图，仅用于说明实验形态；其中的布局和数字都不是当前 UI
 或 benchmark 声明。
@@ -401,14 +398,10 @@ Kubernetes 只允许一个公开端口时，engine 容器设置
 提供 HTTPS/WSS；具体证书挂载方式见
 [开发机直接启用 HTTPS/WSS](docs/user/deployment.zh-CN.md#开发机直接启用-httpswss)。
 
-内置“实验”页已通过同一个公共 Realtime 入口提供基础 **LLM PK** 和并发实验。配置后，
-仅提供后端能力的可选 `demo_api` 服务会从同一页面增加已迁移的实时 TRT/Text Player、
-服务端 PK 与多路并发面板，不会伪装成普通产品体验：
+内置“实验”页通过同一个公共 Realtime 入口提供 **LLM PK**、并发和事件 trace：
 
 ```bash
-bash scripts/bash/compose.sh up --gateway triton --variant custom-1.7b
-DEMO_ENABLED=true DEMO_LAB_URL=http://localhost:7860 \
-  docker compose --profile demo -f infra/docker/compose.yaml up --build demo-api
+bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 ```
 
 ## 流式协议
@@ -443,7 +436,6 @@ Qwen3TTS-Streaming/
 ├── client/                     # 独立 Python SDK 包（qwen3-tts-client，以 wheel 发布）
 │   ├── src/qwen3tts/           #   客户端实现与传输适配器
 │   └── src/qwen3tts_protocol/  #   共享协议层（单一真相源）
-├── demo_api/                   # 可选工程实验 API（依赖 client 包）
 ├── web/                        # Browser SDK 与唯一 React/Vite 产品门户
 │   ├── packages/browser-sdk/   # Browser SDK 包
 │   └── packages/demo/          # 统一 /demo/ 门户（体验/SDK/文档/实验）
@@ -492,7 +484,7 @@ Qwen3TTS-Streaming/
 
 ## 许可证
 
-- **本项目自有代码**（`engine/`、`client/`、`demo_api/`、`web/`、`scripts/` 等）按 [MIT](LICENSE) 许可证发布，版权归 XSquareRobot。
+- **本项目自有代码**（`engine/`、`client/`、`web/`、`scripts/` 等）按 [MIT](LICENSE) 许可证发布，版权归 XSquareRobot。
 - **上游 [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)**（`third_party/` 子模块）为 Apache 2.0，与 MIT 兼容。
 - **模型权重**由 Qwen/Alibaba 发布，许可证以其 [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [Hugging Face](https://huggingface.co/Qwen) 模型卡为准；本仓库不分发任何权重。
 - **TensorRT / Triton Inference Server**（NVIDIA NGC 镜像）为 NVIDIA 专有软件，本仓库不打包，使用即表示接受 NVIDIA EULA。

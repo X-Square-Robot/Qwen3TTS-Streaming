@@ -3,7 +3,7 @@
   "$id": "https://x2robot.com/qwen3tts/contracts/demo-config.v1.schema.json",
   "title": "Qwen3-TTS instance Demo config v1",
   "type": "object",
-  "required": ["schema_version", "engine_version", "runtime_type", "endpoints", "python_sdk", "browser_sdk", "docs", "lab"],
+  "required": ["schema_version", "engine_version", "runtime_type", "endpoints", "python_sdk", "browser_sdk", "docs"],
   "properties": {
     "schema_version": {"const": "qwen.tts.demo-config.v1"},
     "runtime_type": {"enum": ["standalone", "triton"]},
@@ -30,14 +30,6 @@
         "version": {"type": "string"},
         "registry_url": {"type": "string"},
         "tarball_url": {"type": "string"}
-      }
-    },
-    "lab": {
-      "type": "object",
-      "required": ["available", "url"],
-      "properties": {
-        "available": {"type": "boolean"},
-        "url": {"type": "string"}
       }
     }
   },

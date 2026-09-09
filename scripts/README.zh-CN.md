@@ -21,8 +21,8 @@
 | `scripts/compose/` | 容器入口点 | 部署维护者 |
 | `scripts/demo/` | 演示启动器 | 演示用户 |
 
-保留旧名称的 `scripts/demo/start_webui_demo.sh` 只是兼容启动器：它可以启动 Triton 和
-可选的 `demo_api`，然后输出 runtime 统一的 `/demo/#/lab` 地址；不会启动第二套前端。
+runtime 自带统一的 `/demo/#/lab` 入口，Lab 通过公共 Realtime 工作，不再启动独立的
+实验后端或第二套前端。
 
 ## scripts/python/ 清单
 

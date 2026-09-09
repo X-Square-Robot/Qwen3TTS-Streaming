@@ -48,9 +48,6 @@ export function App() {
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const [route, setRoute] = useState<Route>(routeFromHash());
   const [docsOnly, setDocsOnly] = useState(false);
-  // The public Realtime experiment is part of this portal. This flag only
-  // describes the optional deep-engineering API used by the former showcase.
-  const [labReachable, setLabReachable] = useState(false);
   const [exampleSettings, setExampleSettings] = useState<DemoSynthesisSettings>(DEFAULT_DEMO_SETTINGS);
 
   useEffect(() => {
@@ -59,27 +56,6 @@ export function App() {
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
-
-  useEffect(() => {
-    setLabReachable(false);
-    if (!loaded?.config.lab.available || !loaded.config.lab.url) {
-      return;
-    }
-    const controller = new AbortController();
-    let base: URL;
-    try {
-      base = new URL(loaded.config.lab.url, loaded.responseUrl);
-      if (!base.pathname.endsWith("/")) base.pathname += "/";
-    } catch {
-      return () => controller.abort();
-    }
-    const timer = window.setTimeout(() => controller.abort(), 2_000);
-    fetch(new URL("healthz", base), {signal: controller.signal, cache: "no-store"})
-      .then((response) => setLabReachable(response.ok))
-      .catch(() => setLabReachable(false))
-      .finally(() => window.clearTimeout(timer));
-    return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [loaded]);
 
   const nav = (target: Route, label: string, icon: React.ReactNode) => (
     <a className={route === target ? "active" : ""} href={`#/${target}`}>{icon}{label}</a>
@@ -106,7 +82,7 @@ export function App() {
       {route === "experience" && <Experience loaded={loaded} onCapabilities={setCapabilities} onSettings={setExampleSettings} />}
       {route === "sdk" && <SdkPage loaded={loaded} capabilities={capabilities} settings={exampleSettings} docsOnly={docsOnly} />}
       {route === "docs" && <DocsPage />}
-      {route === "lab" && loaded && !docsOnly && <ExperimentLab loaded={loaded} labReachable={labReachable} />}
+      {route === "lab" && loaded && !docsOnly && <ExperimentLab loaded={loaded} />}
       {route === "lab" && (!loaded || docsOnly) && <p className="alert">
         {docsOnly ? "文档只读模式没有连接 TTS 实例，无法运行实验。" : "正在加载实例配置…"}
       </p>}

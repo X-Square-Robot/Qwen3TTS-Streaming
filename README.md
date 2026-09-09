@@ -360,17 +360,14 @@ and delivery controls, downloads WAV, and renders this repository's Markdown.
 No separate Demo API or Node process is required for the normal experience.
 
 Contributors working on the portal should start with the
-[`web/packages/demo` development guide](web/packages/demo/README.md); runtime
-operators who need the optional backend can use the
-[`demo_api` guide](demo_api/README.md).
+[`web/packages/demo` development guide](web/packages/demo/README.md).
 
 The former standalone `webui/` feature showcase has been consolidated into
 `web/packages/demo`; this is now the only browser frontend and portal entry
 point. Use `/demo/#/lab` for the unified engineering Lab. Its basic LLM
 PK and concurrency experiments use the instance's public `/v1/realtime` path;
-the optional `demo_api` backend powers the migrated deep-engineering panels
-(live TRT/Text Player trace, server-side LLM PK, and lane-level concurrency)
-and capability inspection, and never serves a second UI.
+trace, LLM PK, concurrency, and capability inspection all use the same public
+Realtime and capabilities endpoints, and never connect to Triton directly.
 
 CI packages the Browser SDK once as an npm tarball and embeds those exact bytes
 under `/demo/downloads/`. The SDK page generates an `npm install
@@ -378,12 +375,9 @@ under `/demo/downloads/`. The SDK page generates an `npm install
 need a repository checkout. GitLab releases additionally publish the same
 archive to the project npm Registry.
 
-The built-in Lab provides LLM PK and concurrency requests over public Realtime.
-When an optional `demo_api` is configured through `DEMO_LAB_URL`, the same page
-also exposes the migrated live TRT/Text Player trace, server-side LLM PK, lane
-concurrency, and JSON/WAV downloads. Results describe only the current
-browser-to-instance run; the page never substitutes fixtures or hard-coded
-performance numbers for a live backend.
+The built-in Lab provides LLM PK, concurrency, and event trace over public
+Realtime. Results describe only the current browser-to-instance run; the page
+never substitutes fixtures or hard-coded performance numbers for a live backend.
 
 The following media are retained as historical captures from the former
 standalone WebUI. They illustrate the experiments, but their layout and any
@@ -429,16 +423,11 @@ as in FunASR Nano, to serve HTTPS/WSS directly from that same public port. See
 [direct HTTPS/WSS](docs/user/deployment.md#direct-httpswss-on-a-development-host)
 for the certificate mount contract.
 
-The built-in **Lab** tab runs basic LLM PK and concurrency experiments through
-the same public Realtime endpoint. When configured, the optional backend-only
-`demo_api` service adds the migrated live TRT/Text Player, server-side PK, and
-lane-concurrency panels from that same page; it is never presented as the
-normal product experience:
+The built-in **Lab** tab runs LLM PK, concurrency, and event trace experiments
+through the same public Realtime endpoint:
 
 ```bash
-bash scripts/bash/compose.sh up --gateway triton --variant custom-1.7b
-DEMO_ENABLED=true DEMO_LAB_URL=http://localhost:7860 \
-  docker compose --profile demo -f infra/docker/compose.yaml up --build demo-api
+bash scripts/bash/compose.sh up --build --gateway engine --variant custom-1.7b
 ```
 
 ## Streaming Protocol
@@ -475,7 +464,6 @@ Qwen3TTS-Streaming/
 ├── client/                     # Standalone Python SDK package (qwen3-tts-client, released as a wheel)
 │   ├── src/qwen3tts/           #   Client implementation and transport adapters
 │   └── src/qwen3tts_protocol/  #   Shared protocol layer (single source of truth)
-├── demo_api/                   # Optional engineering-lab API (depends on the client package)
 ├── web/                        # Browser SDK and the single React/Vite product portal
 │   ├── packages/browser-sdk/   # Browser SDK package
 │   └── packages/demo/          # Unified /demo/ portal (experience/SDK/docs/Lab)
@@ -524,7 +512,7 @@ This project is a **v0.1 engineering preview**, and streaming quality is still b
 
 ## License
 
-- **This project's own code** (`engine/`, `client/`, `demo_api/`, `web/`, `scripts/`, etc.) is released under the [MIT](LICENSE) license, copyright XSquareRobot.
+- **This project's own code** (`engine/`, `client/`, `web/`, `scripts/`, etc.) is released under the [MIT](LICENSE) license, copyright XSquareRobot.
 - **Upstream [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)** (the `third_party/` submodule) is Apache 2.0, which is compatible with MIT.
 - **Model weights** are released by Qwen/Alibaba; their license is governed by the respective [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [Hugging Face](https://huggingface.co/Qwen) model cards; this repository does not distribute any weights.
 - **TensorRT / Triton Inference Server** (NVIDIA NGC images) are NVIDIA proprietary software, not bundled in this repository; using them constitutes acceptance of the NVIDIA EULA.

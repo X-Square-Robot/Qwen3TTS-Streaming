@@ -22,7 +22,7 @@ export PYTHONPATH=client/src
 For browser portal work, use the `web/` npm workspace and read the
 [`web/packages/demo` development guide](web/packages/demo/README.md). The former
 standalone `webui/` frontend is retired; live UI checks use the runtime's
-`/demo/` entry and optional `DEMO_LAB_URL` backend.
+`/demo/` entry and the public `/v1/realtime` Lab contract.
 
 ## Running Tests
 

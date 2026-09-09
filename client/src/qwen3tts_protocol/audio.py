@@ -1,7 +1,7 @@
 """Shared audio utilities: WAV writing, PCM conversion, audio decoding.
 
 This module is the single source of truth for audio I/O helpers used
-across client, demo_api, scripts, and tests.
+across client, Gateway, scripts, and tests.
 """
 
 from __future__ import annotations

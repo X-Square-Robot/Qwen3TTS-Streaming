@@ -17,13 +17,11 @@ The portal keeps one browser entry point and uses hash routes for its surfaces:
 | `/demo/#/docs/` | Same-release Markdown documentation |
 | `/demo/#/lab` | Engineering Lab: public-Realtime LLM PK/concurrency and optional trace tools |
 
-`DEMO_ENABLED=false` disables the whole portal. The basic Lab experiments use
-the current instance's public `/v1/realtime` endpoint. `DEMO_LAB_URL` is a
-runtime setting (not a Vite build variable) that points to the optional
-backend-only `demo_api`; when its `/healthz` is reachable, the Lab page exposes
-the migrated deep-engineering panels (live TRT/Text Player trace, server-side
-LLM PK, and lane-level concurrency). The optional backend never serves a second
-frontend. A docs-only build has no live runtime or interactive Lab.
+`DEMO_ENABLED=false` disables the whole portal. The Lab uses the current
+instance's public `/v1/realtime` endpoint. Trace capture, LLM PK, and
+concurrency experiments all use the same Gateway; there is no separate backend
+or direct Triton connection. A docs-only build has no live runtime or
+interactive Lab.
 
 ## Local development
 
@@ -59,5 +57,4 @@ npm run test:e2e -- --project=chromium
 `npm run build` runs the documentation builder, type-checks the package, and
 produces the static artifact consumed by the engine and Triton runtime images.
 The runtime image does not install Node/npm or rebuild this package. Keep UI
-code in `src/`, the Browser SDK dependency in its own workspace package, and
-the optional `demo_api` contract behind `DEMO_LAB_URL`.
+code in `src/`, with the Browser SDK dependency in its own workspace package.
