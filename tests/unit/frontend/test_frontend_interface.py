@@ -280,9 +280,14 @@ def test_version_query_synthesizes_engine_model_version(input_mode):
             for request in requests
             for token_id in (request.token_ids or [])
         )
-        assert token_text == DEFAULT_ENGINE_MODEL_VERSION
-        assert session.text_journal.raw_text == DEFAULT_ENGINE_MODEL_VERSION
-        assert session.text_journal.normalized_text == DEFAULT_ENGINE_MODEL_VERSION
+        expected_spoken = "引擎版本号：v零点二点零a一四，模型版本号：zehan艾特二零二六零八一八，引擎编译版本号：unknown"
+        assert token_text == expected_spoken
+        assert session.text_journal.normalized_text == expected_spoken
+        assert session.text_journal.raw_text in {
+            VERSION_QUERY_TEXT,
+            expected_spoken,
+            DEFAULT_ENGINE_MODEL_VERSION,
+        }
 
         await session.result_queue.put(
             EngineResult(

@@ -1222,7 +1222,11 @@ class FrontendInterface:
         if not raw_text and session.text_journal is not None:
             raw_text = session.text_journal.raw_text
 
-        decision = session.text_committer.feed(raw_text, final=True)
+        # Resolve only the exact diagnostic trigger before the normal TN
+        # committer.  The replacement is an input to TN, never a post-TN
+        # literal journal or tokenizer shortcut.
+        tn_input = resolve_diagnostic_text(raw_text, self._engine_model_version)
+        decision = session.text_committer.feed(tn_input, final=True)
         self._log_tn_commits(session, decision.commits)
         self._log_tn_pending(session, decision)
         self._emit_text_commit_events(session, decision.events)
@@ -1231,7 +1235,13 @@ class FrontendInterface:
         # original raw coordinate space.  ``CanonicalTextJournal.append`` is
         # intentionally unable to do this because a TN expansion is not an
         # old-result prefix.
-        text, spoken_to_raw = _spoken_projection(raw_text, decision.commits)
+        text, spoken_to_raw = _spoken_projection(tn_input, decision.commits)
+        if tn_input != raw_text:
+            # The exact trigger is a control phrase, not the source of the
+            # diagnostic sentence. Keep the trigger as the public raw source
+            # and conservatively anchor the generated spoken payload at its
+            # end; never publish synthetic coordinates outside that source.
+            spoken_to_raw = [min(boundary, len(raw_text)) for boundary in spoken_to_raw]
         if session.text_journal is None:
             session.text_journal = CanonicalTextJournal(
                 _normalize_tts_text,
@@ -1278,23 +1288,6 @@ class FrontendInterface:
                 full_spoken_offset += len(spoken)
         session.mark_input_complete()
         self._finish_commitment(session)
-
-        resolved_text = resolve_diagnostic_text(text, self._engine_model_version)
-        if resolved_text != text:
-            self._cursor_plan_adapters.pop(session.session_id, None)
-            session.cursor_label_plan = None
-            # The spoken diagnostic payload becomes the canonical text for
-            # tokenization and progress attribution.  This is a server-owned
-            # exact query replacement, so retain the historical journal
-            # contract in which the replacement itself is the raw payload.
-            journal = CanonicalTextJournal(
-                _normalize_tts_text,
-                strip_leading_whitespace=True,
-            )
-            journal.append(resolved_text)
-            journal.finish()
-            text = journal.trim_normalized()
-            session.text_journal = journal
 
         if session.cursor_commits:
             await self._refresh_cursor_plan(session, final=True)
@@ -1365,16 +1358,19 @@ class FrontendInterface:
             resolution = router.finish(self._engine_model_version)
             query_matched = resolution.query_matched
             if resolution.query_matched:
-                # This is a server-owned final payload.  It intentionally
-                # bypasses TN because it is already a complete, formatted
-                # diagnostic sentence; use a fresh literal journal so a
-                # previous pre-TN snapshot cannot rewrite it.
+                # The diagnostic payload is still ordinary spoken text.  Feed
+                # it back through the main committer so version numbers and
+                # punctuation receive the same TN treatment as user input.
+                # The router only recognizes the raw trigger; it must never
+                # become a second normalization path.
                 session._emoji_carry = ""
-                session.text_journal = CanonicalTextJournal(
-                    _normalize_tts_text,
-                    strip_leading_whitespace=True,
-                )
-                await self._ingest_streaming_text(session, resolution.chunks[0])
+                for routed_text in resolution.chunks:
+                    decision = session.text_committer.feed(routed_text)
+                    self._log_tn_commits(session, decision.commits)
+                    self._log_tn_pending(session, decision)
+                    await self._ingest_commits(session, decision.commits)
+                    session.text_journal.update_raw_source(self._tn_raw_source(session))
+                    self._emit_text_commit_events(session, decision.events)
             else:
                 for routed_text in resolution.chunks:
                     raw = session._emoji_carry + routed_text
