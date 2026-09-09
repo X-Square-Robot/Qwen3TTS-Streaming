@@ -193,14 +193,13 @@ class X2CommitmentAdapter:
                 bool(getattr(decision, "close_after", False))
                 for decision in decisions
             )
-            span_kind = getattr(commit, "span_kind", "plain")
-            span_kind = getattr(span_kind, "value", span_kind)
-            commit_kind = getattr(commit, "commit_kind", "literal")
-            commit_kind = getattr(commit_kind, "value", commit_kind)
-            force_boundary_before = bool(self._last_commit_id) and (
-                str(span_kind) not in {"plain", "literal"}
-                or str(commit_kind) not in {"literal"}
-            )
+            # A committed TN span is only a stable mapping/normalization
+            # unit.  It is not a clause boundary: ``99%`` becoming
+            # ``百分之九十九`` must remain adjacent to surrounding text so
+            # the splitter can make the boundary decision from punctuation,
+            # capacity, and EOS.  In particular, do not split before every
+            # numeric/URL/identifier span.
+            force_boundary_before = False
 
             self._last_commit_id = max(self._last_commit_id, commit_id)
             self._last_fence = max(self._last_fence, fence)

@@ -66,7 +66,7 @@ def test_adapter_consumes_main_tn_commit_without_calling_feed_text():
     assert adapter.splitter_config() == {"ema_ratio": 4.0, "safety_margin": 6}
 
 
-def test_special_main_tn_span_requests_boundary_before_successor():
+def test_special_main_tn_span_does_not_request_clause_boundary():
     adapter = X2CommitmentAdapter(_Policy())
 
     first = adapter.consume_commit(
@@ -96,7 +96,7 @@ def test_special_main_tn_span_requests_boundary_before_successor():
 
     assert first.force_boundary_before is False
     assert second.accepted is True
-    assert second.force_boundary_before is True
+    assert second.force_boundary_before is False
 
 
 def test_adapter_rejects_commit_gaps_and_overlapping_spans_fail_closed():
