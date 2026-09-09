@@ -99,6 +99,26 @@ export interface RealtimeProtocolCapabilities {
   audio_formats: string[];
 }
 
+export interface NativeCursorCapabilities {
+  graph_enabled: boolean;
+  progress_available: boolean;
+  supported_progress_modes: string[];
+  reason?: string;
+  max_labels?: number;
+  vocab_size?: number;
+  cursor_head_sha256?: string;
+  cursor_vocab_sha256?: string;
+  cursor_rules_sha256?: string;
+  model_fingerprint?: string;
+}
+
+export interface SpeechStateCapabilities {
+  supported: boolean;
+  reason?: string;
+  model_fingerprint?: string;
+  runtime_fingerprint?: string;
+}
+
 export interface Capabilities {
   schema_version: "qwen.tts.capabilities.v1";
   engine_version?: string;
@@ -122,13 +142,15 @@ export interface Capabilities {
     icl_available?: boolean;
   };
   protocols: {openai_realtime: RealtimeProtocolCapabilities};
+  native_cursor?: NativeCursorCapabilities;
+  speech_state?: SpeechStateCapabilities;
 }
 
 export type TTSEvent =
   | {type: "connected"}
   | {type: "response_started"; responseId: string}
   | {type: "audio"; pcm: Int16Array; startSample: bigint; endSample: bigint}
-  | {type: "progress"; text: string; sample: bigint}
+  | {type: "progress"; text: string; sample: bigint; meta?: Record<string, unknown>}
   | {type: "warning"; message: string}
   | {type: "completed"; responseId: string; usage?: Record<string, number>; server?: ServerDiagnostics}
   | {type: "cancelled"; responseId: string}

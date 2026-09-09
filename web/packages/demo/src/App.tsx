@@ -1,5 +1,8 @@
 import {
+  Activity,
+  BadgeCheck,
   BookOpen,
+  Cpu,
   Download,
   FlaskConical,
   Headphones,
@@ -120,7 +123,7 @@ function Experience({loaded, onCapabilities, onSettings}: {
   const [speaker, setSpeaker] = useState("Serena");
   const [language, setLanguage] = useState("auto");
   const [task, setTask] = useState(SynthesisTask.CustomVoice);
-  const [inputMode, setInputMode] = useState<"full" | "incremental">("full");
+  const [inputMode, setInputMode] = useState<"full" | "long" | "incremental">("full");
   const [vad, setVad] = useState(VadStrategy.Disabled);
   const [delivery, setDelivery] = useState(DeliveryPolicy.Guarded);
   const [sampleRate, setSampleRate] = useState(24_000);
@@ -195,7 +198,9 @@ function Experience({loaded, onCapabilities, onSettings}: {
       if (firstFormat) setSampleRate(firstFormat.sample_rate);
       if (value.speakers?.length) setSpeaker((current) => value.speakers?.includes(current) ? current : value.speakers?.[0] ?? current);
       if (value.languages?.length) setLanguage((current) => value.languages?.includes(current) ? current : value.languages?.[0] ?? current);
-      if (!value.input_modes?.includes("full_text") && value.input_modes?.includes("token")) setInputMode("incremental");
+      if (value.input_modes?.includes("full_text")) setInputMode("full");
+      else if (value.input_modes?.includes("long_segment")) setInputMode("long");
+      else if (value.input_modes?.includes("token")) setInputMode("incremental");
       setXVectorOnly(!value.reference.icl_available && Boolean(value.reference.speaker_encoder_available));
     }).catch((cause) => setEvents((current) => [...current, {type: "error", code: "capabilities", message: String(cause)}]));
   }, [loaded, onCapabilities]);
@@ -272,7 +277,7 @@ function Experience({loaded, onCapabilities, onSettings}: {
         language,
         ...(instruct ? {instruct} : {}),
         ...(reference ? {reference: {audioBase64: reference.audioBase64, text: referenceText, xVectorOnly}} : {}),
-        inputMode: inputMode === "full" ? InputMode.FullText : InputMode.Token,
+        inputMode: inputMode === "full" ? InputMode.FullText : inputMode === "long" ? InputMode.LongSegment : InputMode.Token,
         audio: {encoding: AudioEncoding.PcmS16Le, sample_rate: sampleRate, channels: 1 as const},
         vad: {
           enabled: vad !== VadStrategy.Disabled,
@@ -286,7 +291,7 @@ function Experience({loaded, onCapabilities, onSettings}: {
         },
         outputPolicy: {delivery, delivery_window_ms: deliveryWindowMs, chunk_ms: outputChunkMs, emit_text_events: emitTextEvents},
       };
-      const run = inputMode === "full"
+      const run = inputMode !== "incremental"
         ? await client.synthesize(text, options)
         : await client.startIncremental(options);
       runRef.current = run;
@@ -384,6 +389,7 @@ function Experience({loaded, onCapabilities, onSettings}: {
   const pcmFormats = (caps?.audio_formats ?? [])
     .filter((format) => format.encoding === AudioEncoding.PcmS16Le);
   const fullTextAvailable = Boolean(caps?.input_modes?.includes("full_text"));
+  const longTextAvailable = Boolean(caps?.input_modes?.includes("long_segment"));
   const incrementalAvailable = Boolean(caps?.input_modes?.includes("token"));
   const canSynthesize = Boolean(
     loaded
@@ -391,7 +397,7 @@ function Experience({loaded, onCapabilities, onSettings}: {
     && availableTasks.includes(task)
     && pcmFormats.some((format) => format.sample_rate === sampleRate)
     && vadStrategies.includes(vad)
-    && (inputMode === "full" ? fullTextAvailable : incrementalAvailable),
+    && (inputMode === "full" ? fullTextAvailable : inputMode === "long" ? longTextAvailable : incrementalAvailable),
   );
   const receivedSamples = useMemo(() => events.reduce((sum, event) => event.type === "audio" ? sum + event.pcm.length : sum, 0), [events]);
   const audioDuration = receivedSamples / sampleRate;
@@ -476,6 +482,8 @@ function Experience({loaded, onCapabilities, onSettings}: {
       </div>
     </section>
 
+    <EngineStatus capabilities={caps} events={events} busy={busy} />
+
     <div className="experience-workbench">
       <div className="control-stack">
         <section className="panel input-panel">
@@ -490,8 +498,8 @@ function Experience({loaded, onCapabilities, onSettings}: {
             <label>语言{caps?.languages?.length
               ? <select value={language} onChange={(event) => setLanguage(event.target.value)}>{caps.languages.map((value) => <option key={value}>{value}</option>)}</select>
               : <input disabled value="" placeholder={caps ? "当前实例未公布语言" : "等待 capabilities"} />}</label>
-            <label>输入方式<select disabled={!fullTextAvailable && !incrementalAvailable} value={inputMode} onChange={(event) => setInputMode(event.target.value as "full" | "incremental")}>
-              {fullTextAvailable && <option value="full">完整文本</option>}{incrementalAvailable && <option value="incremental">模拟 LLM 增量</option>}</select></label>
+            <label>输入方式<select disabled={!fullTextAvailable && !longTextAvailable && !incrementalAvailable} value={inputMode} onChange={(event) => setInputMode(event.target.value as "full" | "long" | "incremental")}>
+              {fullTextAvailable && <option value="full">完整文本</option>}{longTextAvailable && <option value="long">长文本</option>}{incrementalAvailable && <option value="incremental">模拟 LLM 增量</option>}</select></label>
             <label>输出格式<select disabled={pcmFormats.length === 0} value={sampleRate} onChange={(event) => setSampleRate(Number(event.target.value))}>
               {pcmFormats.map((format) => <option key={format.sample_rate} value={format.sample_rate}>{format.sample_rate} Hz · PCM16</option>)}</select></label>
           </div>
@@ -583,6 +591,39 @@ function Experience({loaded, onCapabilities, onSettings}: {
         : events.slice(-12).map((event, index) => <code key={index}>{event.type}{event.type === "warning" || event.type === "error" ? ` · ${event.message}` : ""}</code>)}</div>
     </section>
   </>;
+}
+
+function EngineStatus({capabilities, events, busy}: {
+  capabilities: Capabilities | null;
+  events: TTSEvent[];
+  busy: boolean;
+}) {
+  const native = capabilities?.native_cursor;
+  const speechState = capabilities?.speech_state;
+  const progress = [...events].reverse().find((event) => event.type === "progress");
+  const basis = progress?.type === "progress" ? String(progress.meta?.progress_basis ?? "") : "";
+  const sessionMode = basis === "native_cursor_v1" ? "native" : basis === "ema_frame_ratio_v1" ? "ema" : "unknown";
+  const modeLabel = sessionMode === "native" ? "原生游标" : sessionMode === "ema" ? "EMA" : busy ? "等待进度" : "未开始";
+  const modeClass = sessionMode === "native" ? "is-good" : sessionMode === "ema" ? "is-warn" : "";
+
+  return <section className="engine-status" aria-label="引擎能力状态" data-testid="engine-status">
+    <div className="engine-status-heading"><span className="panel-kicker">ENGINE ROUTE</span><span>{capabilities?.engine_version || "能力等待中"}</span></div>
+    <div className="engine-status-grid">
+      <StatusItem icon={<Cpu size={15}/>} label="游标图" value={native?.graph_enabled ? "已加载" : "标准图"} detail={native?.graph_enabled && !native.progress_available ? "进度桥未准入" : native?.progress_available ? "native 可用" : "EMA / disabled"} />
+      <StatusItem icon={<Activity size={15}/>} label="本次进度" value={modeLabel} detail={progress?.type === "progress" ? String(progress.meta?.progress_quality ?? "已收到事件") : "以事件为准"} className={modeClass} />
+      <StatusItem icon={<BadgeCheck size={15}/>} label="状态继承" value={speechState?.supported ? "可用" : "未启用"} detail={speechState?.supported ? "runtime admitted" : speechState?.reason || "未配置"} className={speechState?.supported ? "is-good" : "is-muted"} />
+    </div>
+  </section>;
+}
+
+function StatusItem({icon, label, value, detail, className = ""}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  detail: string;
+  className?: string;
+}) {
+  return <div className={`engine-status-item ${className}`}><span className="engine-status-icon">{icon}</span><span><small>{label}</small><strong>{value}</strong><em>{detail}</em></span></div>;
 }
 
 const SIGNAL_PROFILE = [18, 30, 46, 26, 62, 84, 44, 34, 72, 96, 58, 38, 76, 52, 30, 68, 90, 48, 28, 58, 78, 40, 66, 88, 50, 32, 70, 54, 36, 62, 44];

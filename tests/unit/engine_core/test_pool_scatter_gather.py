@@ -192,3 +192,61 @@ class TestStepOutputFields:
         assert out.batch_talker_kv is not None
         assert out.batch_c2w_kv is not None
         assert out.original_past_lens == [3, 4]
+
+
+def test_pool_allocation_epoch_changes_on_row_reuse(pool):
+    first = pool.allocate("first")
+    assert first.allocation_epoch == 1
+    slot_id = first.slot_id
+    pool.release(slot_id)
+    second = pool.allocate("second")
+    assert second.slot_id == slot_id
+    assert second.allocation_epoch == 2
+
+
+def test_pool_release_rejects_stale_allocation_epoch(pool):
+    first = pool.allocate("first")
+    slot_id = first.slot_id
+    epoch = first.allocation_epoch
+    pool.release(slot_id, expected_allocation_epoch=epoch)
+    second = pool.allocate("second")
+    with pytest.raises(ValueError, match="allocation epoch mismatch"):
+        pool.release(slot_id, expected_allocation_epoch=epoch)
+    assert not second.is_free
+
+
+def test_pooled_c2w_snapshot_round_trip_is_right_aligned(pool):
+    slot = pool.allocate("snapshot")
+    slot.c2w_pooled = True
+    source = torch.arange(1, 1 + 4 * 2 * 3 * 4, dtype=DTYPE).reshape(1, 4, 2, 3, 4)
+    pool.write_c2w_right_aligned(slot.slot_id, source)
+    slot.c2w_len = 3
+    payload = pool.snapshot_pooled_c2w_kv(
+        slot.slot_id, expected_allocation_epoch=slot.allocation_epoch
+    )
+    torch.testing.assert_close(payload, source)
+    pool.restore_pooled_c2w_kv(
+        slot.slot_id, payload.flip(3), expected_allocation_epoch=slot.allocation_epoch
+    )
+    restored = pool.snapshot_pooled_c2w_kv(
+        slot.slot_id, expected_allocation_epoch=slot.allocation_epoch
+    )
+    torch.testing.assert_close(restored, source.flip(3))
+
+
+def test_pooled_talker_snapshot_round_trip_is_left_aligned(pool):
+    slot = pool.allocate("talker-snapshot")
+    source = torch.arange(1, 1 + 4 * 2 * 3 * 4, dtype=DTYPE).reshape(1, 4, 2, 3, 4)
+    pool.scatter_prefill_kv(slot.slot_id, source, 3)
+    slot.past_len = 3
+    payload = pool.snapshot_pooled_talker_kv(
+        slot.slot_id, expected_allocation_epoch=slot.allocation_epoch
+    )
+    torch.testing.assert_close(payload, source)
+    pool.restore_pooled_talker_kv(
+        slot.slot_id, payload.flip(3), expected_allocation_epoch=slot.allocation_epoch
+    )
+    restored = pool.snapshot_pooled_talker_kv(
+        slot.slot_id, expected_allocation_epoch=slot.allocation_epoch
+    )
+    torch.testing.assert_close(restored, source.flip(3))

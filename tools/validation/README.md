@@ -60,6 +60,30 @@ python tools/validation/prefill_compare.py --mode manual-rollout      # Manual d
 python tools/validation/prefill_compare.py --mode cp-parity           # CP sampled parity
 ```
 
+### `fused_onnx_trt_parity.py` — Frozen-input ORT/TRT comparison
+
+Captures prefill/decode inputs from a real fused Executor, then feeds the same tensors to ORT
+and one or more TRT plans. It reports per-step differences for `full_codec`, hidden/logits,
+C2W, PCM, and cursor outputs. Pass `--torch-model` to also run the exporter-owned PyTorch
+fused wrapper on the same inputs. This is a graph precision diagnostic, not full serving
+acceptance.
+
+```bash
+ENGINE_CUDA_GRAPH_DECODE=0 python tools/validation/fused_onnx_trt_parity.py \
+  --capture-artifact /path/to/cursor-artifact \
+  --onnx-artifact /path/to/cursor-artifact \
+  --torch-model /path/to/X2Streaming-TTS-1.7B \
+  --trt-artifact /path/to/bf16-artifact \
+  --trt-artifact /path/to/fp32-artifact \
+  --steps 4 --random-prefill --include-prefill \
+  --output /tmp/fused-parity.json
+```
+
+Cursor plans default to the validated TRT profile 0; use `--trt-profile N` to override it.
+The capture artifact dtype must match its manifest, and a cursor package must include the
+matching model-owned cursor head. Otherwise the tool should expose the package/engine contract
+failure rather than produce evidence.
+
 ## Standalone Tools
 
 | Tool | Purpose |

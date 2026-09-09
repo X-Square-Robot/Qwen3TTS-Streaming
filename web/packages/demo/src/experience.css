@@ -43,6 +43,31 @@
 
 .instance-facts small { color: var(--muted); font: 700 8px/1 var(--utility); letter-spacing: 0.15em; }
 
+.engine-status {
+  margin: -24px 0 34px;
+  padding: 13px 15px;
+  border: 1px solid var(--line);
+  background: #fbfcfe;
+}
+
+.engine-status-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font: 700 9px/1 var(--utility); }
+.engine-status-heading .panel-kicker { margin: 0; }
+.engine-status-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+.engine-status-item { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 8px; min-width: 0; padding: 9px 10px; border-left: 2px solid #c9d4e4; background: #fff; }
+.engine-status-item.is-good { border-left-color: var(--green); }
+.engine-status-item.is-warn { border-left-color: var(--copper); }
+.engine-status-item.is-muted { border-left-color: #aeb9c8; }
+.engine-status-icon { color: var(--blue); }
+.engine-status-item > span:last-child { display: grid; gap: 3px; min-width: 0; }
+.engine-status-item small { color: var(--muted); font: 700 8px/1 var(--utility); letter-spacing: 0.08em; text-transform: uppercase; }
+.engine-status-item strong { overflow: hidden; color: var(--ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.engine-status-item em { overflow: hidden; color: var(--slate); font: 9px/1.2 var(--utility); font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 700px) {
+  .engine-status { margin-top: -12px; }
+  .engine-status-grid { grid-template-columns: 1fr; }
+}
+
 .signal-stage {
   position: relative;
   min-height: 332px;

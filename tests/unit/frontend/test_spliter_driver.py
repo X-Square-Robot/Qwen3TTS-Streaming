@@ -410,6 +410,37 @@ def test_each_presplit_packet_keeps_its_own_capacity_plan() -> None:
     assert len(_segment_text(packet2_group2, 3)) == 4
 
 
+def test_replan_preserves_forced_commitment_boundaries() -> None:
+    spliter = Spliter(
+        engine_max_decode_len=120,
+        prefill_len=12,
+        safety_margin=8,
+        ema_ratio=2.0,
+        safety_ratio_initial=2.0,
+        ema_overflow_alpha=1.0,
+        safety_failure_multiplier=1.0,
+        max_concurrent=1,
+    )
+    spliter.push_group_tokens([(token, "a") for token in range(50)])
+    spliter.push_group_tokens(
+        [(token, "b") for token in range(94)],
+        force_boundary_before=True,
+        force_boundary=True,
+    )
+    assert spliter._pending[0].boundary_before is True
+    assert spliter._pending[-1].forced_boundary is True
+
+    spliter.observe_segment(
+        105,
+        50,
+        outcome=RatioOutcome.KV_OVERFLOW,
+        segment_idx=0,
+    )
+
+    assert spliter._pending[0].boundary_before is True
+    assert spliter._pending[-1].forced_boundary is True
+
+
 def test_reset_restores_ratio_state_and_clears_plan_snapshots() -> None:
     spliter = Spliter(
         engine_max_decode_len=120,

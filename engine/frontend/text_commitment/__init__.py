@@ -15,11 +15,16 @@ from .types import (
     PrefixResult,
     SemioticSpan,
     SpanKind,
+    SemanticFamily,
     TextCommit,
     TextInputMetadata,
     TextNormalizationConfig,
 )
+from .candidate_resolver import CandidateResolver, CandidateSet, family_for_kind
+from .semantic_spans import SpanDetector
+from .commit_policy import CommitAction, CommitPolicy, CommitPolicyDecision
 from .committer import IncrementalTextCommitter
+from .x2_adapter import CommitmentObservation, X2BoundaryLevel, X2CommitmentAdapter
 from .causal import (
     CausalFrontier,
     FrontierUpdate,
@@ -67,10 +72,21 @@ __all__ = [
     "PrefixResult",
     "SemioticSpan",
     "SpanKind",
+    "SemanticFamily",
+    "CandidateResolver",
+    "CandidateSet",
+    "family_for_kind",
+    "SpanDetector",
+    "CommitAction",
+    "CommitPolicy",
+    "CommitPolicyDecision",
     "TextCommit",
     "TextInputMetadata",
     "TextNormalizationConfig",
     "IncrementalTextCommitter",
+    "CommitmentObservation",
+    "X2BoundaryLevel",
+    "X2CommitmentAdapter",
     "CausalFrontier",
     "FrontierUpdate",
     "FrontierViolation",

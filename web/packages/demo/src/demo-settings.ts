@@ -5,7 +5,7 @@ export interface DemoSynthesisSettings {
   readonly speaker: string;
   readonly language: string;
   readonly sampleRate: number;
-  readonly inputMode: "full" | "incremental";
+  readonly inputMode: "full" | "long" | "incremental";
   readonly vad: VadStrategy;
   readonly vadChunkMs: number;
   readonly vadBeginThreshold: number;

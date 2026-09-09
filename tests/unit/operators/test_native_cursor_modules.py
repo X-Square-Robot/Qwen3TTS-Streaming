@@ -450,6 +450,42 @@ def _tiny_fused_inputs():
     return fused, base + cursor + (torch.zeros(b, 1, 1),)
 
 
+def test_fused_export_prefers_model_owned_speech_tokenizer(tmp_path) -> None:
+    from export_09_talker_code2wav_fused import resolve_fused_tokenizer_path
+
+    model_dir = tmp_path / "x2-model"
+    bundled = model_dir / "speech_tokenizer"
+    bundled.mkdir(parents=True)
+
+    assert resolve_fused_tokenizer_path(model_dir) == bundled
+
+
+def test_fused_export_keeps_split_tokenizer_fallback(tmp_path, monkeypatch) -> None:
+    from export_09_talker_code2wav_fused import resolve_fused_tokenizer_path
+
+    model_dir = tmp_path / "legacy-model"
+    models_dir = tmp_path / "models"
+    fallback = models_dir / "Qwen3-TTS-Tokenizer-12Hz"
+    fallback.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        "export_09_talker_code2wav_fused.resolve_tokenizer_path",
+        lambda value: fallback,
+    )
+
+    assert resolve_fused_tokenizer_path(model_dir, str(models_dir)) == fallback
+
+
+def test_export_cursor_vocab_fingerprint_is_order_independent() -> None:
+    from engine.core.native_cursor_labelizer import vocab_fingerprint
+    from export_09_talker_code2wav_fused import vocab_fingerprint as export_fingerprint
+
+    vocab = {"zhi": 3, "bai": 1, "fen": 2}
+
+    assert export_fingerprint(vocab) == vocab_fingerprint(vocab)
+    assert export_fingerprint(dict(reversed(list(vocab.items())))) == export_fingerprint(vocab)
+
+
 def test_cursor_fused_wrapper_connects_sampled_codec0_once() -> None:
     fused, inputs = _tiny_fused_inputs()
     out = fused(*inputs)

@@ -15,10 +15,21 @@ class SpanKind(str, Enum):
     EMAIL = "email"
     IDENTIFIER = "identifier"
     VERSION = "version"
+    PHONE = "phone"
+    ID_CARD = "id_card"
     MARKDOWN = "markdown"
     JSON = "json"
     EMOJI = "emoji"
     LITERAL = "literal"
+
+
+class SemanticFamily(str, Enum):
+    QUANTITY = "quantity"
+    IDENTIFIER = "identifier"
+    CONTACT = "contact"
+    FORMULA = "formula"
+    STRUCTURED = "structured"
+    PROSE = "prose"
 
 
 class ContentKind(str, Enum):
@@ -123,6 +134,9 @@ class SemioticSpan:
     language_hypotheses: tuple[LanguageHypothesis, ...] = ()
     closed: bool = False
     content_kind: ContentKind = ContentKind.PROSE
+    family: SemanticFamily = SemanticFamily.PROSE
+    closure_reason: str = ""
+    extendable: bool = True
 
 
 @dataclass(frozen=True)
@@ -191,6 +205,9 @@ class TextNormalizationConfig:
     # may be enabled only after the pinned wetext prefix contract passes its
     # compatibility tests; it never permits snapshot-diff commits.
     commit_mode: str = "closed_span"
+    candidate_nbest: int = 8
+    calibration_profile: str = ""
+    ambiguity_policy: str = "wait"
 
 
 @dataclass(frozen=True)
@@ -208,6 +225,14 @@ class TextCommit:
     # remain source-compatible.  They are assigned by the session controller.
     commit_id: int = 0
     span_id: int = 0
+    semantic_family: SemanticFamily = SemanticFamily.PROSE
+    decision_source: str = ""
+    candidate_count: int = 0
+    best_cost: float | None = None
+    cost_margin: float | None = None
+    calibrated_confidence: float | None = None
+    closure_reason: str = ""
+    fallback_reason: str = ""
 
 
 @dataclass(frozen=True)

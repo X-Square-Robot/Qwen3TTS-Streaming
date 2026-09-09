@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from dataclasses import replace
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
@@ -23,7 +24,10 @@ from ..core.speech_state import (
     coerce_speech_state_capability,
 )
 from ..core.text_journal import CanonicalTextJournal
-from ..core.text_progress import EmaTextProgressEstimator
+from ..core.text_progress import (
+    EmaTextProgressEstimator,
+    NativeCursorProgressProjector,
+)
 from ..core.types import (
     EngineResult,
     AttributedAudioChunk,
@@ -36,6 +40,7 @@ from ..core.types import (
     TokenizedText,
 )
 from .text_commitment import AudioCreditEstimator, IncrementalTextCommitter, SemanticStartGate
+from .text_commitment.x2_adapter import X2CommitmentAdapter
 from .text_commitment.types import (
     FallbackPolicy,
     TextInputMetadata,
@@ -197,6 +202,96 @@ def _resolve_tn_language(tn_language: Any, session_language: Any) -> str:
     return "mixed_zh_en"
 
 
+def _commitment_splitter_overrides(
+    adapter: Any,
+    *,
+    base_ratio: float = 4.5,
+    base_min_ratio: float = 1.0,
+    base_max_ratio: float = 10.0,
+) -> dict[str, Any]:
+    """Read optional X2 capacity knobs without accepting arbitrary config.
+
+    The policy can tune the existing Splitter FSM, but it cannot replace that
+    FSM or provide a second text boundary stream. Invalid optional values are
+    ignored as a group so the server's calibrated defaults remain active.
+    """
+
+    if adapter is None:
+        return {}
+    try:
+        values = adapter.splitter_config()
+    except Exception:
+        logger.exception("Optional commitment splitter config failed")
+        return {}
+    if not isinstance(values, dict):
+        return {}
+    accepted: dict[str, Any] = {}
+    float_fields = {
+        "ema_ratio": lambda value: value >= 1.0,
+        "ema_alpha": lambda value: 0.0 < value <= 1.0,
+        "ema_overflow_alpha": lambda value: 0.0 < value <= 1.0,
+        "ema_min_ratio": lambda value: value >= 1.0,
+        "ema_max_ratio": lambda value: value >= 1.0,
+        "l1_split_cap_ratio": lambda value: 0.0 < value <= 1.0,
+        "l2_split_cap_ratio": lambda value: 0.0 < value <= 1.0,
+        "l3_split_cap_ratio": lambda value: 0.0 < value <= 1.0,
+    }
+    try:
+        for key, predicate in float_fields.items():
+            if key not in values:
+                continue
+            if isinstance(values[key], bool):
+                raise ValueError(f"invalid commitment splitter value: {key}")
+            value = float(values[key])
+            if not math.isfinite(value) or not predicate(value):
+                raise ValueError(f"invalid commitment splitter value: {key}")
+            accepted[key] = value
+        if "safety_margin" in values:
+            raw_margin = values["safety_margin"]
+            if isinstance(raw_margin, bool) or (
+                isinstance(raw_margin, float) and not raw_margin.is_integer()
+            ):
+                raise ValueError("invalid commitment splitter value: safety_margin")
+            margin = int(raw_margin)
+            if margin < 0:
+                raise ValueError("invalid commitment splitter value: safety_margin")
+            accepted["safety_margin"] = margin
+        minimum = accepted.get("ema_min_ratio")
+        maximum = accepted.get("ema_max_ratio")
+        ratio = accepted.get("ema_ratio")
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError("commitment splitter EMA bounds are reversed")
+        if ratio is not None:
+            effective_minimum = (
+                minimum if minimum is not None else float(base_min_ratio)
+            )
+            effective_maximum = (
+                maximum if maximum is not None else float(base_max_ratio)
+            )
+            if ratio < effective_minimum:
+                raise ValueError("commitment splitter EMA ratio is below minimum")
+            if ratio > effective_maximum:
+                raise ValueError("commitment splitter EMA ratio is above maximum")
+        else:
+            effective_minimum = (
+                minimum if minimum is not None else float(base_min_ratio)
+            )
+            effective_maximum = (
+                maximum if maximum is not None else float(base_max_ratio)
+            )
+            if not effective_minimum <= float(base_ratio) <= effective_maximum:
+                raise ValueError("commitment splitter EMA bounds exclude baseline")
+        caps = [accepted.get(key) for key in (
+            "l1_split_cap_ratio", "l2_split_cap_ratio", "l3_split_cap_ratio"
+        ) if key in accepted]
+        if caps != sorted(caps):
+            raise ValueError("commitment splitter punctuation caps are unordered")
+    except (TypeError, ValueError, OverflowError):
+        logger.warning("Ignoring invalid optional commitment splitter config")
+        return {}
+    return accepted
+
+
 def _observe_spliter_ratio(
     session: Session,
     *,
@@ -211,6 +306,13 @@ def _observe_spliter_ratio(
         return None
     steps = _metric_int(audio_steps) or 0
     tokens = _metric_int(text_tokens) or 0
+    commitment = getattr(session, "commitment_adapter", None)
+    if commitment is not None:
+        commitment.observe_segment(
+            audio_steps=steps,
+            text_tokens=tokens,
+            overflow=outcome is RatioOutcome.KV_OVERFLOW,
+        )
     observer = getattr(spliter, "observe_segment", None)
     if callable(observer):
         observation = observer(
@@ -282,8 +384,12 @@ class FrontendInterface:
         l3_split_cap_ratio: float = 0.90,
         guarded_delivery_default: bool = True,
         guarded_delivery_window_ms: int = 100,
+        reorder_stall_timeout_ms: int = 10_000,
         engine_model_version: str = DEFAULT_ENGINE_MODEL_VERSION,
         speech_state_capability: Optional[SpeechStateCapability] = None,
+        cursor_plan_adapter_factory: Optional[Callable[[], Any]] = None,
+        commitment_factory: Optional[Callable[[str, Any], Any]] = None,
+        extensions: Any = None,
     ):
         self._dispatcher = Dispatcher(engine_inbox)
         self._tokenizer = tokenizer
@@ -315,6 +421,20 @@ class FrontendInterface:
         self._guarded_delivery_window_ms = min(
             max(float(guarded_delivery_window_ms), 100.0), 10_000.0
         )
+        try:
+            reorder_timeout_ms = float(reorder_stall_timeout_ms)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "reorder_stall_timeout_ms must be a finite nonnegative number"
+            ) from exc
+        if (
+            reorder_timeout_ms < 0
+            or not math.isfinite(reorder_timeout_ms)
+        ):
+            raise ValueError(
+                "reorder_stall_timeout_ms must be a finite nonnegative number"
+            )
+        self._reorder_stall_timeout_sec = reorder_timeout_ms / 1000.0
         self._engine_model_version = str(engine_model_version).strip()
         if not self._engine_model_version:
             raise ValueError("engine_model_version must not be empty")
@@ -323,12 +443,17 @@ class FrontendInterface:
         self._speech_state_capability = coerce_speech_state_capability(
             speech_state_capability
         )
+        self._cursor_plan_adapter_factory = cursor_plan_adapter_factory
+        self._commitment_factory = commitment_factory or getattr(
+            extensions, "commitment_factory", None
+        )
 
         self._sessions: Dict[str, Session] = {}
         self._consumer_tasks: Dict[str, asyncio.Task] = {}
         self._tn_tasks: Dict[str, asyncio.Task] = {}
         self._tn_locks: Dict[str, asyncio.Lock] = {}
         self._diagnostic_text_routers: Dict[str, DiagnosticTextRouter] = {}
+        self._cursor_plan_adapters: Dict[str, Any] = {}
 
     @property
     def active_count(self) -> int:
@@ -423,6 +548,21 @@ class FrontendInterface:
             config=config,
             speech_state_capability=self._speech_state_capability,
         )
+        if self._commitment_factory is not None:
+            try:
+                policy = self._commitment_factory(session_id, config)
+                if policy is not None:
+                    session.commitment_adapter = X2CommitmentAdapter(policy)
+                    session.commitment_adapter.bind_engine_budget(
+                        self._engine_max - self._prefill_len
+                    )
+            except Exception:
+                # Optional method-layer policy must never make the main TN or
+                # session lifecycle unavailable.
+                logger.exception(
+                    "Disabling optional commitment policy for session %s",
+                    session_id,
+                )
         # An explicit model/session language is useful evidence for TN too.
         # Keep ``auto``/unknown as mixed so a numeric-only island still waits
         # instead of inheriting an accidental default graph.
@@ -444,6 +584,9 @@ class FrontendInterface:
                 projection=tn_cfg.projection,
                 max_pending_chars=tn_cfg.max_pending_chars,
                 commit_mode=getattr(tn_cfg, "commit_mode", "closed_span"),
+                candidate_nbest=getattr(tn_cfg, "candidate_nbest", 8),
+                calibration_profile=getattr(tn_cfg, "calibration_profile", ""),
+                ambiguity_policy=getattr(tn_cfg, "ambiguity_policy", "wait"),
             )
         )
         session.audio_credit_estimator = AudioCreditEstimator(codec_frame_rate=12.5)
@@ -451,24 +594,74 @@ class FrontendInterface:
             _normalize_tts_text,
             strip_leading_whitespace=True,
         )
-        session.spliter = Spliter(
+        if self._cursor_plan_adapter_factory is not None:
+            adapter = self._cursor_plan_adapter_factory()
+            if adapter is None:
+                raise ValueError("cursor_plan_adapter_factory returned None")
+            self._cursor_plan_adapters[session_id] = adapter
+        commitment_overrides = _commitment_splitter_overrides(
+            session.commitment_adapter,
+            base_ratio=self._ema_ratio,
+            base_min_ratio=self._ema_min_ratio,
+            base_max_ratio=self._ema_max_ratio,
+        )
+        if "ema_ratio" in commitment_overrides:
+            # X2's capacity ratio is the same conservative planning quantity
+            # consumed by the existing Splitter. Keep duration and safety
+            # baselines aligned for an explicitly injected method policy.
+            ema_ratio = commitment_overrides["ema_ratio"]
+            safety_ratio_initial = ema_ratio
+        else:
+            ema_ratio = self._ema_ratio
+            safety_ratio_initial = self._safety_ratio_initial
+        splitter_kwargs = dict(
             engine_max_decode_len=self._engine_max,
             prefill_len=self._prefill_len,
-            ema_ratio=self._ema_ratio,
-            safety_ratio_initial=self._safety_ratio_initial,
+            ema_ratio=ema_ratio,
+            safety_ratio_initial=safety_ratio_initial,
             max_concurrent=self._max_concurrent,
-            ema_alpha=self._ema_alpha,
-            ema_overflow_alpha=self._ema_overflow_alpha,
-            ema_min_ratio=self._ema_min_ratio,
-            ema_max_ratio=self._ema_max_ratio,
+            ema_alpha=commitment_overrides.get("ema_alpha", self._ema_alpha),
+            ema_overflow_alpha=commitment_overrides.get(
+                "ema_overflow_alpha", self._ema_overflow_alpha
+            ),
+            ema_min_ratio=commitment_overrides.get(
+                "ema_min_ratio", self._ema_min_ratio
+            ),
+            ema_max_ratio=commitment_overrides.get(
+                "ema_max_ratio", self._ema_max_ratio
+            ),
             ema_min_observation_tokens=self._ema_min_observation_tokens,
             safety_failure_multiplier=self._safety_failure_multiplier,
-            safety_margin=self._safety_margin,
-            l1_split_cap_ratio=self._l1_split_cap_ratio,
-            l2_split_cap_ratio=self._l2_split_cap_ratio,
-            l3_split_cap_ratio=self._l3_split_cap_ratio,
+            safety_margin=commitment_overrides.get(
+                "safety_margin", self._safety_margin
+            ),
+            l1_split_cap_ratio=commitment_overrides.get(
+                "l1_split_cap_ratio", self._l1_split_cap_ratio
+            ),
+            l2_split_cap_ratio=commitment_overrides.get(
+                "l2_split_cap_ratio", self._l2_split_cap_ratio
+            ),
+            l3_split_cap_ratio=commitment_overrides.get(
+                "l3_split_cap_ratio", self._l3_split_cap_ratio
+            ),
         )
-        session.reorder = AudioReorder()
+        session.spliter = Spliter(
+            **splitter_kwargs,
+        )
+        reorder_timeout_sec = self._reorder_stall_timeout_sec
+        if "reorder_stall_timeout_ms" in opts:
+            try:
+                configured_timeout_ms = float(opts["reorder_stall_timeout_ms"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "reorder_stall_timeout_ms must be a finite nonnegative number"
+                ) from exc
+            if configured_timeout_ms < 0 or not math.isfinite(configured_timeout_ms):
+                raise ValueError(
+                    "reorder_stall_timeout_ms must be a finite nonnegative number"
+                )
+            reorder_timeout_sec = configured_timeout_ms / 1000.0
+        session.reorder = AudioReorder(stall_timeout_sec=reorder_timeout_sec)
         session.event_callback = on_event
         self._sessions[session_id] = session
         self._tn_locks[session_id] = asyncio.Lock()
@@ -704,6 +897,11 @@ class FrontendInterface:
             return
 
     async def _ingest_commits(self, session: "Session", commits) -> None:
+        # Build the cursor revision before dispatching any spoken tokens from
+        # this commit batch.  The engine queue is the happens-before boundary:
+        # UPDATE_CURSOR_PLAN must precede START/APPEND_TOKENS so the first
+        # decode step cannot observe a stale label buffer.
+        pending_spoken: list[tuple[str, int, Any]] = []
         for commit in commits:
             # Keep the journal's source coordinate space in the raw upstream
             # text.  Feeding ``commit.tts_text`` through the ordinary append
@@ -716,12 +914,118 @@ class FrontendInterface:
                 commit.tts_text,
                 mapping=commit.mapping,
             )
+            session.cursor_commits.append(commit)
+            session.cursor_spoken_texts.append(spoken)
+            observation = self._observe_commitment(session, commit, spoken)
+            pending_spoken.append((spoken, normalized_base, observation))
+
+        if commits:
+            await self._refresh_cursor_plan(session)
+
+        for spoken, normalized_base, observation in pending_spoken:
             await self._ingest_streaming_text(
                 session,
                 spoken,
                 journaled=True,
                 normalized_base=normalized_base,
+                force_boundary=bool(
+                    observation is not None
+                    and getattr(observation, "force_boundary", False)
+                ),
+                force_boundary_before=bool(
+                    observation is not None
+                    and getattr(observation, "force_boundary_before", False)
+                ),
             )
+
+    def _observe_commitment(
+        self,
+        session: "Session",
+        commit: Any,
+        spoken_text: str,
+    ) -> Any:
+        """Forward main-TN evidence to the optional X2 policy bridge."""
+
+        adapter = getattr(session, "commitment_adapter", None)
+        if adapter is None or adapter.disabled:
+            return None
+        try:
+            observation = adapter.consume_commit(
+                commit,
+                spoken_text=spoken_text,
+                token_count=len(self._encode_ids(spoken_text)),
+                boundary_level=Spliter.classify_punct_level(spoken_text),
+            )
+            if not observation.accepted:
+                LifecycleLogger.emit(
+                    session_id=session.session_id,
+                    phase="x2.commitment_disabled",
+                    reason=observation.reason,
+                    commit_fence=observation.fence,
+                )
+            return observation
+        except Exception:
+            # The adapter itself is fail-closed; this guard protects legacy
+            # custom adapters injected by embedders.
+            logger.exception(
+                "Optional commitment observation failed for session %s",
+                session.session_id,
+            )
+            return None
+
+    @staticmethod
+    def _finish_commitment(session: "Session") -> None:
+        adapter = getattr(session, "commitment_adapter", None)
+        if adapter is None:
+            return
+        try:
+            adapter.finish()
+        except Exception:
+            logger.exception(
+                "Optional commitment finish failed for session %s",
+                session.session_id,
+            )
+
+    async def _refresh_cursor_plan(
+        self,
+        session: "Session",
+        *,
+        final: bool = False,
+        spoken_texts: Optional[list[str]] = None,
+    ) -> None:
+        """Build and publish a TN-derived plan when a labelizer is injected."""
+        adapter = self._cursor_plan_adapters.get(session.session_id)
+        if adapter is None:
+            return
+        revision = session.cursor_plan_revision + 1
+        previous = session.cursor_label_plan
+        # TextCommit records are append-only once emitted by the primary TN.
+        # Protect the complete plan already published to the engine: a rebuilt
+        # plan may append labels, but must never rewrite its committed prefix.
+        committed_label_count = 0 if previous is None else previous.label_count
+        try:
+            plan = adapter.build(
+                session.cursor_commits,
+                spoken_texts=(
+                    session.cursor_spoken_texts
+                    if spoken_texts is None
+                    else spoken_texts
+                ),
+                revision=revision,
+                final=final,
+                previous=previous,
+                committed_label_count=committed_label_count,
+            )
+        except Exception:
+            logger.exception(
+                "Disabling native cursor plan after labelization failure for session %s",
+                session.session_id,
+            )
+            self._cursor_plan_adapters.pop(session.session_id, None)
+            return
+        session.cursor_plan_revision = revision
+        session.cursor_label_plan = plan
+        await self._dispatcher.submit_cursor_plan(session)
 
     def _emit_text_commit_events(self, session: "Session", events: tuple[str, ...]) -> None:
         callback = getattr(session, "event_callback", None)
@@ -786,6 +1090,8 @@ class FrontendInterface:
         *,
         journaled: bool = False,
         normalized_base: int | None = None,
+        force_boundary: bool = False,
+        force_boundary_before: bool = False,
     ) -> None:
         """Normalize a streaming text body, tokenize, route to the spliter per
         input mode, and dispatch. Shared by push_text_input and the end-of-input
@@ -825,14 +1131,26 @@ class FrontendInterface:
 
         spliter: Spliter = session.spliter
         if mode == InputMode.AUTO:
-            seg_actions = spliter.feed_auto(tokens)
+            seg_actions = spliter.feed_auto(
+                tokens,
+                force_boundary=force_boundary,
+                force_boundary_before=force_boundary_before,
+            )
         elif (
             mode == InputMode.LONG_SEGMENT
             and session.config.group_policy != GroupPolicy.NONE
         ):
-            seg_actions = spliter.push_group_tokens(tokens)
+            seg_actions = spliter.push_group_tokens(
+                tokens,
+                force_boundary=force_boundary,
+                force_boundary_before=force_boundary_before,
+            )
         else:
-            seg_actions = spliter.feed_tokens(tokens)
+            seg_actions = spliter.feed_tokens(
+                tokens,
+                force_boundary=force_boundary,
+                force_boundary_before=force_boundary_before,
+            )
         await self._dispatch_segment_actions(session, seg_actions)
 
     async def feed_full_text(self, session_id: str, text: str) -> None:
@@ -894,10 +1212,47 @@ class FrontendInterface:
             text,
             spoken_to_raw,
         )
+        full_commitment_tokens: list[SegmentToken] = []
+        full_spoken_parts: list[str] = []
+        full_spoken_offset = 0
+        full_boundary_indices: list[int] = []
+        full_boundary_before_indices: list[int] = []
+        if decision.commits:
+            session.cursor_commits.extend(decision.commits)
+            session.cursor_spoken_texts.extend(
+                _normalize_tts_text(commit.tts_text) for commit in decision.commits
+            )
+            for commit, spoken in zip(
+                decision.commits,
+                session.cursor_spoken_texts[-len(decision.commits):],
+            ):
+                observation = self._observe_commitment(session, commit, spoken)
+                if observation is None:
+                    continue
+                commit_tokens = self._tokenize_segment_text(
+                    spoken,
+                    normalized_offset=full_spoken_offset,
+                    journal=session.text_journal,
+                )
+                full_token_offset = len(full_commitment_tokens)
+                commit_token_count = len(commit_tokens)
+                if observation.accepted and commit_token_count:
+                    if observation.force_boundary_before:
+                        full_boundary_before_indices.append(full_token_offset)
+                    if observation.force_boundary:
+                        full_boundary_indices.append(
+                            full_token_offset + commit_token_count - 1
+                        )
+                full_commitment_tokens.extend(commit_tokens)
+                full_spoken_parts.append(spoken)
+                full_spoken_offset += len(spoken)
         session.mark_input_complete()
+        self._finish_commitment(session)
 
         resolved_text = resolve_diagnostic_text(text, self._engine_model_version)
         if resolved_text != text:
+            self._cursor_plan_adapters.pop(session.session_id, None)
+            session.cursor_label_plan = None
             # The spoken diagnostic payload becomes the canonical text for
             # tokenization and progress attribution.  This is a server-owned
             # exact query replacement, so retain the historical journal
@@ -910,20 +1265,39 @@ class FrontendInterface:
             journal.finish()
             text = journal.trim_normalized()
             session.text_journal = journal
+
+        if session.cursor_commits:
+            await self._refresh_cursor_plan(session, final=True)
         if not text:
             # Whitespace/format-only FULL_TEXT input still needs an explicit
             # session-level completion after the committer has flushed it.
             await self._dispatcher.maybe_send_session_tokens_done(session)
             return
 
-        tokens = self._tokenize_segment_text(
-            text, normalized_offset=0, journal=session.text_journal
-        )
+        adapter = session.commitment_adapter
+        if (
+            adapter is not None
+            and not adapter.disabled
+            and "".join(full_spoken_parts) == text
+        ):
+            # Preserve exact commit boundaries even when whole-text BPE would
+            # merge across them. Mapping offsets remain codepoint coordinates.
+            tokens = full_commitment_tokens
+        else:
+            tokens = self._tokenize_segment_text(
+                text, normalized_offset=0, journal=session.text_journal
+            )
+            full_boundary_indices = []
+            full_boundary_before_indices = []
         if not tokens:
             await self._dispatcher.maybe_send_session_tokens_done(session)
             return
 
-        seg_actions = session.spliter.set_full_text(tokens)
+        seg_actions = session.spliter.set_full_text(
+            tokens,
+            force_boundary_indices=full_boundary_indices,
+            force_boundary_before_indices=full_boundary_before_indices,
+        )
         await self._dispatch_segment_actions(session, seg_actions)
         await self._dispatcher.maybe_send_session_tokens_done(session)
 
@@ -1000,11 +1374,14 @@ class FrontendInterface:
         self._log_tn_commits(session, final_decision.commits)
         self._log_tn_pending(session, final_decision)
         await self._ingest_commits(session, final_decision.commits)
+        if session.cursor_label_plan is not None:
+            await self._refresh_cursor_plan(session, final=True)
         if not query_matched:
             session.text_journal.update_raw_source(self._tn_raw_source(session))
         self._emit_text_commit_events(session, final_decision.events)
 
         session.mark_input_complete()
+        self._finish_commitment(session)
         if session.text_journal is not None:
             # Streaming modes have already installed their raw→canonical
             # projection incrementally.  FULL_TEXT is handled below by the
@@ -1107,9 +1484,17 @@ class FrontendInterface:
         )
         semantic_gate_lock = asyncio.Lock() if semantic_gate is not None else None
         semantic_ticker: Optional[asyncio.Task] = None
+        reorder_watchdog: Optional[asyncio.Task] = None
         prefix_gate_guard_bypass = session.config.timing.extra.get(
             "_prefix_gate_guard_bypass"
         )
+        # Segment lifecycle/progress events use the same hierarchical order
+        # as AudioReorder. A decoder may finish a lookahead segment first, but
+        # its final marker must wait in this map until the predecessor's final
+        # marker has crossed the public high-water boundary.
+        pending_segment_end_events: dict[
+            tuple[int, int], tuple[dict, Optional[dict]]
+        ] = {}
         if not isinstance(prefix_gate_guard_bypass, PrefixGateGuardBypass):
             prefix_gate_guard_bypass = None
         # Guarded delivery bookkeeping: verdicts recorded at SEGMENT_END for
@@ -1286,6 +1671,97 @@ class FrontendInterface:
                 "seg_idx": seg_idx,
             }
 
+        def _build_segment_end_events(
+            seg_idx: int,
+            result: EngineResult,
+            rm: dict,
+        ) -> Optional[tuple[dict, Optional[dict]]]:
+            """Build a segment's lifecycle/final-progress events.
+
+            The prepared record is published only after this segment's own
+            held audio has been settled and before ``AudioReorder`` drains a
+            later segment. Otherwise a later segment's audio anchor can reach
+            the transport before this segment's final anchor and make the
+            global raw/text cursor appear to move backwards.
+            """
+            if on_event is None:
+                return None
+
+            metrics = {str(k): str(v) for k, v in rm.items()}
+            segment_text = session.segment_texts.pop(seg_idx, "")
+            metrics["segment_id"] = str(seg_idx)
+            if segment_text:
+                preview = (
+                    segment_text[:64] + "..."
+                    if len(segment_text) > 64
+                    else segment_text
+                )
+                metrics["segment_text_preview"] = preview
+            if "audio_steps" in rm:
+                metrics["segment_decode_steps"] = str(rm["audio_steps"])
+            if "text_tokens" in rm:
+                metrics["segment_text_tokens"] = str(rm["text_tokens"])
+            if "cache_hit" in rm:
+                metrics["segment_cache_hit"] = str(rm["cache_hit"])
+            if "prefill_duration_ms" in rm:
+                metrics["segment_prefill_ms"] = str(rm["prefill_duration_ms"])
+            if session.audio_credit_estimator is not None:
+                rate = session.audio_credit_estimator.snapshot()
+                metrics.update(
+                    {
+                        "lambda_raw": f"{rate.lambda_raw:.3f}",
+                        "lambda_norm": f"{rate.lambda_norm:.3f}",
+                        "audio_credit_ms": f"{rate.audio_credit_ms:.3f}",
+                        "safe_wait_ms": f"{rate.safe_wait_ms:.3f}",
+                    }
+                )
+
+            eos_reason = str(rm.get("eos_reason", ""))
+            progress = self._make_text_progress_event(
+                session,
+                seg_idx,
+                rm,
+                final=not eos_reason.endswith("_abort"),
+            )
+            if progress is not None:
+                # ``segment_end`` is a legacy diagnostic event.  The complete
+                # progress record is sent separately so transports cannot
+                # mistake a segment lifecycle notification for an output
+                # sample anchor.
+                metrics["text_progress"] = progress["meta"].get(
+                    "text_progress", "0"
+                )
+                metrics["progress_final"] = progress["meta"].get(
+                    "progress_final", "false"
+                )
+            session.segment_token_emitted_count.pop(seg_idx, None)
+            session.text_boundary_emitted.discard(seg_idx)
+            return (
+                {
+                    "type": "segment_end",
+                    "segment_idx": seg_idx,
+                    "text": segment_text,
+                    "meta": metrics,
+                },
+                progress,
+            )
+
+        async def _emit_segment_end_events(
+            prepared: Optional[tuple[dict, Optional[dict]]],
+        ) -> None:
+            if prepared is None or on_event is None:
+                return
+            segment_event, progress = prepared
+            await on_event(session.session_id, segment_event)
+            if progress is not None:
+                await on_event(session.session_id, progress)
+
+        async def _publish_segment_end_event(key: tuple[int, int]) -> None:
+            pending = pending_segment_end_events.pop(key, None)
+            if pending is None:
+                return
+            await _emit_segment_end_events(pending)
+
         if hold is not None:
 
             async def _hold_tick() -> None:
@@ -1304,6 +1780,65 @@ class FrontendInterface:
                     await _release_semantic_due()
 
             semantic_ticker = asyncio.create_task(_semantic_tick())
+
+        reorder_timeout = float(
+            getattr(session.reorder, "_stall_timeout_sec", 0.0) or 0.0
+        )
+        if reorder_timeout > 0:
+
+            async def _reorder_watch() -> None:
+                # A stalled predecessor must not be bypassed: doing so would
+                # corrupt audio and text-progress order.  Recovery is an
+                # internal cancel, which lets the engine publish its normal
+                # terminal result and release every slot.
+                interval = min(max(reorder_timeout / 4.0, 0.05), 0.5)
+                while True:
+                    await asyncio.sleep(interval)
+                    stall = session.reorder.check_stall()
+                    if stall is None:
+                        continue
+                    meta = {
+                        "blocked_segment": f"{stall.blocked_segment[0]}:{stall.blocked_segment[1]}",
+                        "stall_elapsed_ms": f"{stall.elapsed_sec * 1000.0:.1f}",
+                        "buffered_keys": str(stall.buffered_keys),
+                        "buffered_chunks": str(stall.buffered_chunks),
+                        "reason": "audio_reorder_stall_timeout",
+                    }
+                    LifecycleLogger.emit(
+                        session_id=session.session_id,
+                        phase="audio.reorder_stall_timeout",
+                        segment_idx=stall.blocked_segment[0],
+                        **meta,
+                    )
+                    if on_event is not None:
+                        try:
+                            await on_event(
+                                session.session_id,
+                                {
+                                    "type": "warning",
+                                    "segment_idx": stall.blocked_segment[0],
+                                    "message": "audio reorder stalled; cancelling session",
+                                    "meta": meta,
+                                },
+                            )
+                        except Exception:
+                            # A diagnostic consumer must not prevent the
+                            # terminal recovery request from reaching Engine.
+                            logger.exception(
+                                "Reorder-stall warning delivery failed for %s",
+                                session.session_id,
+                            )
+                    # Stop accepting new text while the engine processes the
+                    # cancellation request; the terminal result still owns
+                    # final cleanup and on_done delivery.
+                    session.state = SessionState.DONE
+                    await self._dispatcher.submit_cancel(
+                        session.session_id,
+                        reason="audio_reorder_stall_timeout",
+                    )
+                    return
+
+            reorder_watchdog = asyncio.create_task(_reorder_watch())
 
         try:
             while True:
@@ -1417,6 +1952,9 @@ class FrontendInterface:
                     dropped = session.reorder.discard(meta.group_idx, meta.local_idx)
                     session.text_progress_estimators.pop(result.segment_idx, None)
                     session.segment_progress_frames.pop(result.segment_idx, None)
+                    session.native_cursor_projectors.pop(result.segment_idx, None)
+                    # Retry reuses the logical segment and its owner-safe
+                    # plan; only the projector high-water is reset.
                     rm = result.metrics or {}
                     _observe_spliter_ratio(
                         session,
@@ -1496,45 +2034,6 @@ class FrontendInterface:
                                     discard_all=verdict["discard_all"],
                                     discard_bytes=verdict["discard_bytes"],
                                 )
-                        await _deliver(
-                            reorder.mark_done(
-                                meta.group_idx,
-                                meta.local_idx,
-                                group_final=meta.group_final,
-                            )
-                        )
-                    else:
-                        # Segment-attributed drain: push each drained
-                        # segment's chunks and settle it as soon as it has
-                        # fully passed (its verdict is already recorded — a
-                        # segment can only be fully drained after its own
-                        # SEGMENT_END marked it done). The trailing partially
-                        # drained segment is the new playhead: its audio just
-                        # enters the window and waits for its own verdict.
-                        for key, chunks, fully_passed in reorder.mark_done_ex(
-                            meta.group_idx,
-                            meta.local_idx,
-                            group_final=meta.group_final,
-                        ):
-                            if chunks:
-                                await _deliver(chunks)
-                            if fully_passed and key in hold_verdicts:
-                                await _settle_hold(hold_verdicts.pop(key))
-
-                    # L2 reorder_state: buffered audio waiting on an earlier
-                    # segment at this boundary = reorder stall risk.
-                    rstate = reorder.pending_state()
-                    if rstate["buffered_chunks"] > 0 and obs.is_enabled(
-                        obs.ObsLevel.DEBUG, session.config.observability_level
-                    ):
-                        LifecycleLogger.emit(
-                            session_id=session.session_id,
-                            phase="reorder_state",
-                            segment_idx=seg_idx,
-                            min_level=obs.ObsLevel.DEBUG,
-                            session_level=session.config.observability_level,
-                            **rstate,
-                        )
 
                     if result.metrics:
                         audio_steps = result.metrics.get("audio_steps", 0)
@@ -1556,83 +2055,74 @@ class FrontendInterface:
                         if session.audio_credit_estimator is not None:
                             session.audio_credit_estimator.observe_normalized_tokens(int(text_tokens or 0))
 
-                    if on_event:
-                        metrics = {
-                            str(k): str(v) for k, v in (result.metrics or {}).items()
-                        }
-                        segment_text = session.segment_texts.pop(seg_idx, "")
-                        # Add segment-level timing observability
-                        metrics["segment_id"] = str(seg_idx)
-                        if segment_text:
-                            preview = (
-                                segment_text[:64] + "..."
-                                if len(segment_text) > 64
-                                else segment_text
-                            )
-                            metrics["segment_text_preview"] = preview
-                        if "audio_steps" in (result.metrics or {}):
-                            metrics["segment_decode_steps"] = str(
-                                result.metrics["audio_steps"]
-                            )
-                        if "text_tokens" in (result.metrics or {}):
-                            metrics["segment_text_tokens"] = str(
-                                result.metrics["text_tokens"]
-                            )
-                        if "cache_hit" in (result.metrics or {}):
-                            metrics["segment_cache_hit"] = str(
-                                result.metrics["cache_hit"]
-                            )
-                        if "prefill_duration_ms" in (result.metrics or {}):
-                            metrics["segment_prefill_ms"] = str(
-                                result.metrics["prefill_duration_ms"]
-                            )
-                        if session.audio_credit_estimator is not None:
-                            rate = session.audio_credit_estimator.snapshot()
-                            metrics.update(
-                                {
-                                    "lambda_raw": f"{rate.lambda_raw:.3f}",
-                                    "lambda_norm": f"{rate.lambda_norm:.3f}",
-                                    "audio_credit_ms": f"{rate.audio_credit_ms:.3f}",
-                                    "safe_wait_ms": f"{rate.safe_wait_ms:.3f}",
-                                }
-                            )
-                        eos_reason = str(
-                            (result.metrics or {}).get("eos_reason", "")
+                    # Queue the lifecycle/final marker using the same
+                    # hierarchical key as AudioReorder. It is published now
+                    # only when this segment is the current playhead; a
+                    # lookahead segment waits until its predecessor has
+                    # crossed the public text high-water boundary.
+                    segment_key = (meta.group_idx, meta.local_idx)
+                    prepared_end_events = _build_segment_end_events(
+                        seg_idx, result, rm
+                    )
+                    if prepared_end_events is not None:
+                        pending_segment_end_events[segment_key] = prepared_end_events
+                    if (
+                        prepared_end_events is not None
+                        and reorder.next_emit_segment == segment_key
+                    ):
+                        await _publish_segment_end_event(segment_key)
+
+                    if hold is None:
+                        for key, chunks, _fully_passed in reorder.mark_done_ex(
+                            meta.group_idx,
+                            meta.local_idx,
+                            group_final=meta.group_final,
+                        ):
+                            if key in pending_segment_end_events:
+                                await _publish_segment_end_event(key)
+                            if chunks:
+                                await _deliver(chunks)
+                    else:
+                        # Segment-attributed drain: push each drained
+                        # segment's chunks and settle it as soon as it has
+                        # fully passed (its verdict is already recorded — a
+                        # segment can only be fully drained after its own
+                        # SEGMENT_END marked it done). The trailing partially
+                        # drained segment is the new playhead: its audio just
+                        # enters the window and waits for its own verdict.
+                        for key, chunks, fully_passed in reorder.mark_done_ex(
+                            meta.group_idx,
+                            meta.local_idx,
+                            group_final=meta.group_final,
+                        ):
+                            if key in pending_segment_end_events:
+                                await _publish_segment_end_event(key)
+                            if chunks:
+                                await _deliver(chunks)
+                            if fully_passed and key in hold_verdicts:
+                                await _settle_hold(hold_verdicts.pop(key))
+
+                    # L2 reorder_state: buffered audio waiting on an earlier
+                    # segment at this boundary = reorder stall risk.
+                    rstate = reorder.pending_state()
+                    if rstate["buffered_chunks"] > 0 and obs.is_enabled(
+                        obs.ObsLevel.DEBUG, session.config.observability_level
+                    ):
+                        LifecycleLogger.emit(
+                            session_id=session.session_id,
+                            phase="reorder_state",
+                            segment_idx=seg_idx,
+                            min_level=obs.ObsLevel.DEBUG,
+                            session_level=session.config.observability_level,
+                            **rstate,
                         )
-                        progress = self._make_text_progress_event(
-                            session,
-                            seg_idx,
-                            result.metrics or {},
-                            final=not eos_reason.endswith("_abort"),
-                        )
-                        if progress is not None:
-                            # ``segment_end`` is a legacy diagnostic event.
-                            # The complete progress record is sent separately
-                            # so transports cannot mistake a segment lifecycle
-                            # notification for an output-sample anchor.
-                            metrics["text_progress"] = progress["meta"].get(
-                                "text_progress", "0"
-                            )
-                            metrics["progress_final"] = progress["meta"].get(
-                                "progress_final", "false"
-                            )
-                        session.segment_token_emitted_count.pop(seg_idx, None)
-                        session.text_boundary_emitted.discard(seg_idx)
-                        await on_event(
-                            session.session_id,
-                            {
-                                "type": "segment_end",
-                                "segment_idx": seg_idx,
-                                "text": segment_text,
-                                "meta": metrics,
-                            },
-                        )
-                        if progress is not None:
-                            await on_event(session.session_id, progress)
 
                     new_actions = session.spliter.on_segment_done(seg_idx)
                     session.text_progress_estimators.pop(seg_idx, None)
                     session.segment_progress_frames.pop(seg_idx, None)
+                    session.native_cursor_projectors.pop(seg_idx, None)
+                    session.cursor_segment_plans.pop(seg_idx, None)
+                    session.cursor_segment_bounds.pop(seg_idx, None)
                     session.segment_token_spans.pop(seg_idx, None)
                     session.segment_token_keys.pop(seg_idx, None)
                     if new_actions:
@@ -1753,6 +2243,8 @@ class FrontendInterface:
                 hold_ticker.cancel()
             if semantic_ticker is not None:
                 semantic_ticker.cancel()
+            if reorder_watchdog is not None:
+                reorder_watchdog.cancel()
             self._cleanup_session(session.session_id, expected=session)
 
     def _emit_session_summary(
@@ -1825,7 +2317,19 @@ class FrontendInterface:
         diagnostic_routers = getattr(self, "_diagnostic_text_routers", None)
         if diagnostic_routers is not None:
             diagnostic_routers.pop(session_id, None)
+        cursor_adapters = getattr(self, "_cursor_plan_adapters", None)
+        if cursor_adapters is not None:
+            cursor_adapters.pop(session_id, None)
         if session:
+            commitment = getattr(session, "commitment_adapter", None)
+            if commitment is not None:
+                try:
+                    commitment.reset()
+                except Exception:
+                    logger.exception(
+                        "Optional commitment reset failed for session %s",
+                        session_id,
+                    )
             # Compute structured summary metrics
             summary: dict[str, Any] = {
                 "session_id": session_id,
@@ -1952,6 +2456,17 @@ class FrontendInterface:
                         "raw_end": raw_end,
                     }
                 )
+                bounds = session.cursor_segment_bounds.get(sa.segment_idx)
+                if bounds is None:
+                    session.cursor_segment_bounds[sa.segment_idx] = (
+                        normalized_start,
+                        normalized_end,
+                    )
+                else:
+                    session.cursor_segment_bounds[sa.segment_idx] = (
+                        min(bounds[0], normalized_start),
+                        max(bounds[1], normalized_end),
+                    )
 
     def _make_text_progress_event(
         self,
@@ -1982,6 +2497,92 @@ class FrontendInterface:
         if text_token_count is None:
             text_token_count = session.segment_token_emitted_count.get(segment_idx, 0)
         text_token_count = max(0, text_token_count)
+
+        # Native cursor output is optional evidence attached to an audio
+        # result.  Invalid/lookahead outputs deliberately fall through to the
+        # existing EMA estimate; they must never move audio or reset engine
+        # state.  Segment-local projector state also keeps a stale retry from
+        # changing the public high-water.
+        plan = getattr(session, "cursor_segment_plans", {}).get(segment_idx)
+        if plan is None:
+            plan = getattr(session, "cursor_label_plan", None)
+        cursor_revision = _metric_int(metrics.get("cursor_plan_revision"))
+        has_cursor_observation = "cursor_valid" in metrics
+        projectors = getattr(session, "native_cursor_projectors", None)
+        if projectors is None:
+            projectors = {}
+        projector = projectors.get(segment_idx)
+        native_revision_ready = cursor_revision == (plan.revision if plan else None)
+        if final and projector is not None and plan is not None:
+            native_revision_ready = projector.plan.revision == plan.revision
+        if (
+            plan is not None
+            and plan.active
+            and native_revision_ready
+            and (has_cursor_observation or final)
+        ):
+            if projector is None:
+                projector = NativeCursorProgressProjector(
+                    segment_idx=segment_idx,
+                    plan=plan,
+                )
+                projectors[segment_idx] = projector
+            else:
+                try:
+                    projector.update_plan(plan)
+                except ValueError:
+                    projectors.pop(segment_idx, None)
+                    projector = None
+            if projector is not None:
+                try:
+                    native = projector.update(
+                        mu=metrics.get("cursor_mu") if has_cursor_observation else None,
+                        valid=(
+                            _metric_bool(metrics.get("cursor_valid"))
+                            if has_cursor_observation
+                            else True
+                        ),
+                        confidence=float(metrics.get("cursor_confidence", 0.0) or 0.0),
+                        source_frame_start=frame_start,
+                        source_frame_end=frame_end,
+                        final=final,
+                    )
+                except (TypeError, ValueError, OverflowError) as exc:
+                    logger.warning(
+                        "Native cursor output rejected; falling back to EMA: "
+                        "session=%s segment=%d error=%s",
+                        session.session_id,
+                        segment_idx,
+                        exc,
+                    )
+                    projectors.pop(segment_idx, None)
+                    native = None
+                if native is not None:
+                    native_meta = native.to_meta()
+                    if session.text_journal is not None:
+                        raw_start, _ = session.text_journal.raw_span(
+                            native.normalized_codepoint_start,
+                            native.normalized_codepoint_start,
+                        )
+                        _, raw_end = session.text_journal.raw_span(
+                            native.normalized_codepoint_end,
+                            native.normalized_codepoint_end,
+                        )
+                        native_meta["raw_codepoint_start"] = str(raw_start)
+                        native_meta["raw_codepoint_end"] = str(raw_end)
+                    return {
+                        "type": "text_progress",
+                        "segment_idx": segment_idx,
+                        "text": "",
+                        "meta": {
+                            "segment_id": str(segment_idx),
+                            **native_meta,
+                            "text_input_final": "true"
+                            if session.input_complete
+                            else "false",
+                            "alignment_final": "true" if final else "false",
+                        },
+                    }
 
         estimator = session.text_progress_estimators.get(segment_idx)
         if estimator is None:

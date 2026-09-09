@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -13,6 +14,25 @@ logger = logging.getLogger(__name__)
 # Version of the ONNX/export graph contract encoded by export_09.  This is
 # deliberately distinct from the Triton manifest schema version.
 EXPORT_PROTOCOL_VERSION = "v1"
+_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _valid_artifact_text(value: Any, *, path: bool = False) -> bool:
+    """Validate manifest-owned artifact fields before writing a manifest."""
+
+    if not isinstance(value, str) or not value.strip():
+        return False
+    if not path:
+        return bool(_SHA256.fullmatch(value.strip()))
+    candidate = Path(value)
+    return not candidate.is_absolute() and ".." not in candidate.parts
+
+
+def _declared_binding_names(value: Any) -> set[str]:
+    """Normalize malformed cursor binding declarations for fail-closed checks."""
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return set()
+    return {name for name in value if isinstance(name, str)}
 
 
 def load_weights_config(path: Path) -> Dict[str, Any]:
@@ -207,6 +227,7 @@ def build_manifest_for_export(
     backbone_precision: str = "",
     cp_precision: str = "",
     code2wav_precision: str = "",
+    speech_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build a full manifest dict after export (e.g. export_09).
 
@@ -266,7 +287,65 @@ def build_manifest_for_export(
     resolved_cp_precision = cp_precision or engine_dtype
     resolved_code2wav_precision = code2wav_precision or engine_dtype
 
-    return {
+    declared_speech_state = speech_state
+    if declared_speech_state is None:
+        declared_speech_state = code2wav_layout.get("speech_state")
+    if declared_speech_state is not None:
+        if not isinstance(declared_speech_state, dict):
+            raise ValueError("speech_state manifest section must be an object")
+        raw_model_fingerprint = declared_speech_state.get("model_fingerprint", "")
+        raw_runtime_fingerprint = declared_speech_state.get("runtime_fingerprint", "")
+        model_fingerprint = (
+            raw_model_fingerprint.strip()
+            if isinstance(raw_model_fingerprint, str)
+            else ""
+        )
+        runtime_fingerprint = (
+            raw_runtime_fingerprint.strip()
+            if isinstance(raw_runtime_fingerprint, str)
+            else ""
+        )
+        if not model_fingerprint or not runtime_fingerprint:
+            raise ValueError(
+                "speech_state requires model_fingerprint and runtime_fingerprint"
+            )
+        speech_state_section = {
+            "model_fingerprint": model_fingerprint,
+            "runtime_fingerprint": runtime_fingerprint,
+        }
+        model_contract = declared_speech_state.get("model_contract")
+        if model_contract is not None:
+            try:
+                # Keep the copied standalone config generator independent of
+                # the engine package for legacy manifests.  Contract-bearing
+                # exports are validated only when this optional field exists.
+                from engine.core.speech_state_model import SpeechStateModelContract
+
+                parsed_contract = SpeechStateModelContract.from_mapping(
+                    model_contract
+                )
+            except (ImportError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "speech_state.model_contract is invalid"
+                ) from exc
+            if parsed_contract.model_fingerprint != model_fingerprint:
+                raise ValueError(
+                    "speech_state.model_contract model_fingerprint does not match "
+                    "speech_state.model_fingerprint"
+                )
+            speech_state_section["model_contract"] = parsed_contract.to_dict()
+        bundle = declared_speech_state.get("bundle")
+        if bundle is not None:
+            if not isinstance(bundle, dict):
+                raise ValueError("speech_state.bundle must be an object")
+            # The runtime verifier owns file existence and hash checks.  The
+            # export manifest must still preserve the complete bundle
+            # descriptor instead of silently dropping it.
+            speech_state_section["bundle"] = dict(bundle)
+    else:
+        speech_state_section = None
+
+    manifest = {
         "schema_version": 2,
         "variant": variant,
         "export_protocol_version": EXPORT_PROTOCOL_VERSION,
@@ -321,3 +400,79 @@ def build_manifest_for_export(
         else {"enabled": False},
         "orchestrator": orch,
     }
+    if speech_state_section is not None:
+        bundle = speech_state_section.get("bundle")
+        if bundle is not None:
+            if type(bundle.get("schema_version")) is not int or bundle.get("schema_version") != 1:
+                raise ValueError("speech_state.bundle schema_version must be 1")
+            declared_layout_hash = str(
+                bundle.get("code2wav_layout_sha256", "") or ""
+            ).strip().lower()
+            try:
+                from engine.core.speech_state_bundle import code2wav_layout_fingerprint
+            except ImportError as exc:
+                raise ValueError("speech_state bundle verifier is unavailable") from exc
+            expected_layout_hash = code2wav_layout_fingerprint(manifest["code2wav_fused"])
+            if not declared_layout_hash:
+                bundle["code2wav_layout_sha256"] = expected_layout_hash
+            elif declared_layout_hash != expected_layout_hash:
+                raise ValueError(
+                    "speech_state.bundle code2wav layout hash does not match export layout"
+                )
+            artifacts = bundle.get("artifacts")
+            if not isinstance(artifacts, dict):
+                raise ValueError("speech_state.bundle.artifacts must be an object")
+            for name in ("model_weights", "runtime_plan"):
+                descriptor = artifacts.get(name)
+                if (
+                    not isinstance(descriptor, dict)
+                    or not _valid_artifact_text(descriptor.get("path"), path=True)
+                    or not _valid_artifact_text(descriptor.get("sha256"))
+                ):
+                    raise ValueError(f"speech_state.bundle.{name} artifact is incomplete")
+                if name == "model_weights" and (
+                    not _valid_artifact_text(descriptor.get("source_path"), path=True)
+                    or not _valid_artifact_text(descriptor.get("source_sha256"))
+                ):
+                    raise ValueError(
+                        "speech_state.bundle.model_weights source artifact is incomplete"
+                    )
+            contract = speech_state_section.get("model_contract") or {}
+            if contract.get("cursor_policy") == "migrate":
+                try:
+                    from engine.core.native_cursor import (
+                        CURSOR_RECURRENT_INPUT_BINDINGS,
+                        CURSOR_RECURRENT_OUTPUT_BINDINGS,
+                    )
+                except ImportError as exc:
+                    raise ValueError(
+                        "native cursor recurrent ABI contract is unavailable"
+                    ) from exc
+                declared_cursor = native_cursor if isinstance(native_cursor, dict) else {}
+                declared_inputs = _declared_binding_names(
+                    declared_cursor.get("input_names")
+                )
+                declared_outputs = _declared_binding_names(
+                    declared_cursor.get("output_names")
+                )
+                if (
+                    declared_cursor.get("enabled") is not True
+                    or not CURSOR_RECURRENT_INPUT_BINDINGS.issubset(declared_inputs)
+                    or not CURSOR_RECURRENT_OUTPUT_BINDINGS.issubset(declared_outputs)
+                ):
+                    raise ValueError(
+                        "speech_state.model_contract migrate requires complete "
+                        "native cursor recurrent ABI"
+                    )
+            if contract.get("cursor_policy") != "disable":
+                cursor = artifacts.get("cursor_head")
+                if (
+                    not isinstance(cursor, dict)
+                    or not _valid_artifact_text(cursor.get("path"), path=True)
+                    or not _valid_artifact_text(cursor.get("sha256"))
+                    or not _valid_artifact_text(cursor.get("source_path"), path=True)
+                    or not _valid_artifact_text(cursor.get("source_sha256"))
+                ):
+                    raise ValueError("speech_state.bundle.cursor_head artifact is incomplete")
+        manifest["speech_state"] = speech_state_section
+    return manifest

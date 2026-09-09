@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -78,6 +78,9 @@ class SlotKVState:
     """
 
     slot_id: int
+    # Monotonic ownership generation for this physical row.  It changes on
+    # every allocation and is the ABA guard for future state handles.
+    allocation_epoch: int = 0
     session_id: Optional[str] = None
     segment_idx: int = -1
     # Segment rerun attempt (0 = first attempt). >0 salts the sampling seed
@@ -140,6 +143,10 @@ class SlotKVState:
 
     # Appended text token IDs for streaming APPEND_TOKENS
     token_queue: list = field(default_factory=list)
+
+    # Opaque state owned by an optional method-layer extension. It is local to
+    # this physical allocation and is cleared on every allocate/release.
+    extension_state: dict[str, Any] = field(default_factory=dict)
 
     # Pad phase tracking (aligned with old engine's Phase B controls)
     pad_start_frame: int = -1
@@ -318,6 +325,7 @@ class KVCachePool:
             return None
         slot_id = self._free_slots.pop()
         slot = self._slots[slot_id]
+        slot.allocation_epoch += 1
         slot.session_id = session_id
         slot.segment_idx = -1
         slot.retry_idx = 0
@@ -328,6 +336,7 @@ class KVCachePool:
         slot.text_idx = 0
         slot.trailing = []
         slot.token_queue = []
+        slot.extension_state = {}
         slot.pad_start_frame = -1
         slot.pad_consecutive_silence = 0
         slot.sampling_identity = None
@@ -365,9 +374,30 @@ class KVCachePool:
         logger.debug("Allocated slot %d for session %s", slot_id, session_id)
         return slot
 
-    def release(self, slot_id: int) -> None:
-        """Return a slot to the pool."""
+    def release(
+        self,
+        slot_id: int,
+        *,
+        expected_allocation_epoch: int | None = None,
+    ) -> None:
+        """Return a slot to the pool, optionally guarding ownership.
+
+        State-transfer and asynchronous completion paths must provide the
+        epoch they observed.  A stale owner then fails closed instead of
+        releasing a row that has already been assigned to another session.
+        Legacy engine-thread callers may omit it while the migration is
+        staged.
+        """
         slot = self._slots[slot_id]
+        if (
+            expected_allocation_epoch is not None
+            and expected_allocation_epoch != slot.allocation_epoch
+        ):
+            raise ValueError(
+                f"slot {slot_id} allocation epoch mismatch: "
+                f"expected {expected_allocation_epoch}, "
+                f"actual {slot.allocation_epoch}"
+            )
         if slot.is_free:
             logger.debug("Ignoring duplicate release for free slot %d", slot_id)
             return
@@ -381,6 +411,7 @@ class KVCachePool:
         slot.text_idx = 0
         slot.trailing = []
         slot.token_queue = []
+        slot.extension_state = {}
         slot.pad_start_frame = -1
         slot.pad_consecutive_silence = 0
         slot.sampling_identity = None
@@ -513,6 +544,26 @@ class KVCachePool:
             row[:, :, width - s_len :, :] = kv[0, :, :, -s_len:, :]
         return s_len
 
+    def read_c2w_right_aligned(self, slot_id: int, length: int) -> torch.Tensor:
+        """Clone the valid right-aligned C2W history for a policy snapshot."""
+
+        if self._c2w_kv_pool is None:
+            raise RuntimeError("Pool not pre-allocated")
+        if isinstance(slot_id, bool) or not isinstance(slot_id, int):
+            raise ValueError("slot_id must be an integer")
+        if slot_id < 0 or slot_id >= self._max_slots:
+            raise ValueError("slot_id is outside the pool")
+        if isinstance(length, bool) or not isinstance(length, int):
+            raise ValueError("length must be an integer")
+        width = int(self._c2w_kv_pool.shape[3])
+        valid = min(max(0, length), max(0, width - 1))
+        if valid == 0:
+            return self._c2w_kv_pool[slot_id : slot_id + 1, :, :, :0, :].clone()
+        return self._c2w_kv_pool[
+            slot_id : slot_id + 1,
+            :, :, width - valid :, :,
+        ].clone()
+
     def append_c2w_frames(
         self,
         slot_ids: list[int],
@@ -630,6 +681,181 @@ class KVCachePool:
         ids = torch.tensor(slot_ids, device=self._device, dtype=torch.long)
         return self._c2w_kv_pool[ids, :, :, :max_c2w_len, :].contiguous()
 
+    def _validate_pooled_state_contract(
+        self,
+        slot_id: int,
+        expected_allocation_epoch: int,
+        pool: Optional[torch.Tensor],
+        kind: str,
+        *,
+        require_pool: bool,
+    ) -> SlotKVState:
+        """Validate ownership and the storage contract before touching state."""
+        if type(slot_id) is not int or not 0 <= slot_id < self._max_slots:
+            raise ValueError(f"pooled {kind} slot_id must be an in-range integer")
+        if (
+            type(expected_allocation_epoch) is not int
+            or expected_allocation_epoch < 0
+        ):
+            raise ValueError(f"pooled {kind} allocation epoch must be a non-negative integer")
+        slot = self._slots[slot_id]
+        if slot.is_free or slot.allocation_epoch != expected_allocation_epoch:
+            raise ValueError(f"pooled {kind} owner mismatch")
+        if require_pool and pool is None:
+            raise ValueError(f"pooled {kind} storage is unavailable")
+        return slot
+
+    @staticmethod
+    def _validate_pooled_length(
+        length: int, capacity: int, kind: str
+    ) -> int:
+        if type(length) is not int or not 0 <= length <= capacity:
+            raise ValueError(f"pooled {kind} history length is out of range")
+        return length
+
+    def _validate_pooled_payload(
+        self,
+        kv: torch.Tensor,
+        pool: torch.Tensor,
+        kind: str,
+    ) -> int:
+        if not isinstance(kv, torch.Tensor):
+            raise ValueError(f"pooled {kind} payload must be a tensor")
+        if kv.ndim != 5 or kv.shape[0] != 1:
+            raise ValueError(f"pooled {kind} payload must have shape [1,L,H,T,D]")
+        expected_shape = (1, *pool.shape[1:3], kv.shape[3], pool.shape[4])
+        if tuple(kv.shape) != expected_shape:
+            raise ValueError(f"pooled {kind} payload shape is incompatible")
+        if kv.shape[3] > pool.shape[3]:
+            raise ValueError(f"pooled {kind} payload exceeds capacity")
+        if (
+            kv.dtype != pool.dtype
+            or kv.device != pool.device
+            or kv.layout != pool.layout
+        ):
+            raise ValueError(f"pooled {kind} payload representation is incompatible")
+        return int(kv.shape[3])
+
+    @staticmethod
+    def _validate_snapshot_budget(
+        max_tensor_bytes: int | None,
+        pool: Optional[torch.Tensor],
+        valid: int,
+        kind: str,
+    ) -> None:
+        if max_tensor_bytes is None:
+            return
+        if type(max_tensor_bytes) is not int or max_tensor_bytes < 0:
+            raise ValueError(f"pooled {kind} snapshot byte budget must be a non-negative integer")
+        if pool is not None:
+            window_numel = pool.shape[0] * pool.shape[1] * pool.shape[2] * valid * pool.shape[4]
+            required = window_numel * pool.element_size()
+            if required > max_tensor_bytes:
+                raise ValueError(f"pooled {kind} snapshot exceeds byte budget")
+
+    def snapshot_pooled_c2w_kv(
+        self,
+        slot_id: int,
+        *,
+        expected_allocation_epoch: int,
+        max_tensor_bytes: int | None = None,
+    ) -> Optional[torch.Tensor]:
+        """Copy one pooled C2W row's valid history into detached storage.
+
+        The pool stores history right-aligned, while the detached payload is
+        returned in canonical left-aligned ``[1, L, H, valid, D]`` form.
+        This primitive intentionally excludes conv arenas and runtime
+        metadata; callers must capture those under the same engine fence.
+        """
+        slot = self._validate_pooled_state_contract(
+            slot_id,
+            expected_allocation_epoch,
+            self._c2w_kv_pool,
+            "C2W",
+            require_pool=False,
+        )
+        if not slot.c2w_pooled:
+            self._validate_snapshot_budget(max_tensor_bytes, self._c2w_kv_pool, 0, "C2W")
+            return None
+        pool = self._c2w_kv_pool
+        if pool is None:
+            raise ValueError("pooled C2W storage is unavailable")
+        valid = self._validate_pooled_length(slot.c2w_len, pool.shape[3], "C2W")
+        self._validate_snapshot_budget(max_tensor_bytes, pool, valid, "C2W")
+        if valid == 0:
+            return pool[slot_id : slot_id + 1, :, :, :0, :].clone()
+        width = pool.shape[3]
+        return pool[slot_id : slot_id + 1, :, :, width - valid : width, :].clone()
+
+    def snapshot_pooled_talker_kv(
+        self,
+        slot_id: int,
+        *,
+        expected_allocation_epoch: int,
+        max_tensor_bytes: int | None = None,
+    ) -> Optional[torch.Tensor]:
+        """Copy a pooled Talker KV prefix into detached canonical storage."""
+        slot = self._validate_pooled_state_contract(
+            slot_id, expected_allocation_epoch, self._talker_kv_pool, "Talker", require_pool=False
+        )
+        if self._talker_kv_pool is None:
+            self._validate_snapshot_budget(max_tensor_bytes, None, 0, "Talker")
+            return None
+        valid = self._validate_pooled_length(
+            slot.past_len, self._talker_kv_pool.shape[3], "Talker"
+        )
+        self._validate_snapshot_budget(
+            max_tensor_bytes, self._talker_kv_pool, valid, "Talker"
+        )
+        return self._talker_kv_pool[slot_id : slot_id + 1, :, :, :valid, :].clone()
+
+    def restore_pooled_talker_kv(
+        self,
+        slot_id: int,
+        kv: torch.Tensor,
+        *,
+        expected_allocation_epoch: int,
+    ) -> int:
+        """Restore detached Talker KV into a live pooled target row."""
+        pool = self._talker_kv_pool
+        slot = self._validate_pooled_state_contract(
+            slot_id, expected_allocation_epoch, pool, "Talker", require_pool=True
+        )
+        assert pool is not None
+        valid = self._validate_pooled_payload(kv, pool, "Talker")
+        row = pool[slot_id]
+        staged = torch.zeros_like(row)
+        if valid:
+            staged[:, :, :valid, :].copy_(kv[0])
+        row.copy_(staged)
+        slot.past_len = valid
+        slot.talker_kv = None
+        return valid
+
+    def restore_pooled_c2w_kv(
+        self,
+        slot_id: int,
+        kv: torch.Tensor,
+        *,
+        expected_allocation_epoch: int,
+    ) -> int:
+        """Restore detached canonical C2W history into a live pooled row."""
+        pool = self._c2w_kv_pool
+        slot = self._validate_pooled_state_contract(
+            slot_id, expected_allocation_epoch, pool, "C2W", require_pool=True
+        )
+        assert pool is not None
+        valid = self._validate_pooled_payload(kv, pool, "C2W")
+        capacity = pool.shape[3]
+        staged = torch.zeros_like(pool[slot_id])
+        if valid:
+            staged[:, :, capacity - valid : capacity, :].copy_(kv[0])
+        pool[slot_id].copy_(staged)
+        slot.c2w_len = valid
+        slot.c2w_pooled = True
+        slot.c2w_kv = None
+        return valid
+
     def scatter_c2w_kv(
         self,
         slot_ids: list[int],
@@ -734,7 +960,10 @@ class KVCachePool:
             slot.idle_seconds,
             slot.past_len,
         )
-        self.release(slot_id)
+        self.release(
+            slot_id,
+            expected_allocation_epoch=slot.allocation_epoch,
+        )
         return evicted_session
 
     @property

@@ -179,6 +179,18 @@ cursor_right_context
 voice/training scope
 ```
 
+### D9. FP32 fused plan 必须关闭 TF32
+
+TensorRT 的 FP32 builder 默认可能选择 TF32 matmul。它虽然保持 FP32 I/O 和 manifest
+精度字段，却会在 Code Predictor 的近 tie 采样处改变 CP codebook。2026-09-09 在同一
+`custom-1.7B`、同一 profile 和同一冻结输入上复测：普通全 FP32 plan 第 3 个递归点有
+10 个 CP codebook 分叉；加入 `--noTF32` 后 PyTorch→ONNX→TRT 的 5 步 `full_codec`
+全部精确，codec0、cursor 输出和 hidden 轨迹也回到约 `1e-5~6e-5` RMS 范围。
+
+因此 fused build 的默认规则是：`engine_dtype` 或任一显式子模块精度为 FP32 时自动传入
+`--noTF32`；`TRT_NO_TF32=0` 只允许用于明确的性能实验，不能把结果作为数值验收或发布
+evidence。该规则只约束 TRT builder，不改变 Triton 兼容层或 runtime backend 架构。
+
 不匹配时必须禁用 native cursor 并走标准 TRT + EMA，不能静默加载一个“不报错但坐标不可信”
 的游标头。官方 0.6B、Base、VoiceDesign 等组合在各自完成训练和验收前不承诺 native cursor。
 
@@ -442,7 +454,9 @@ tail rewrite 时优先通过 `owner_id` 或稳定 raw span 重锚定，不能直
   时仍按原 standard profile 构建。
 
 本轮已经补上 executor 的 per-slot 状态转发和 `set_cursor_text_plan`/
-`set_cursor_reanchor` 合同，但尚未把 CPU `CursorTextPlanAdapter` 接入主 streaming TN，
-也尚未在真实部署环境执行 TRT 逐帧数值验收。因此 cursor-enabled plan 在生产启用前仍
-必须完成：主 TN label plan 输入、reanchor/high-water 后处理，以及标准 plan 的能力路由。
-这是一项明确的下一步，不允许用 Qwen BPE `input_embeds` 冒充 cursor label embedding。
+`set_cursor_reanchor` 合同；CPU `CursorTextPlanAdapter` 已由主 streaming TN 的
+`TextCommit`/journal 接入，plan revision 更新还会通过稳定 owner/span 做重锚定，
+并由 high-water projector 负责对外坐标。尚未在真实部署环境执行 TRT 逐帧数值验收，
+因此 cursor-enabled plan 在生产启用前仍必须完成：真实 cursor state ABI、TRT
+逐帧对照、successor handoff 和标准 plan 的能力路由。这是一项明确的下一步，不允许
+用 Qwen BPE `input_embeds` 冒充 cursor label embedding。

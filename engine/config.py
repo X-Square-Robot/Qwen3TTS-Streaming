@@ -85,6 +85,7 @@ class ModelArchConfig:
     dtype: str = "bf16"
     tts_model_type: str = "unknown"
     supported_task_types: tuple[str, ...] = ()
+    native_cursor: dict = field(default_factory=dict)
     engine_profile: EngineProfileConfig = field(default_factory=EngineProfileConfig)
 
 

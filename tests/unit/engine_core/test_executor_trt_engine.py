@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -29,6 +32,11 @@ class _FakeContext:
         self.infer_shapes_calls = 0
         self.execute_calls = 0
         self._after_infer_shapes = False
+        self.profile_calls: list[tuple[int, int]] = []
+
+    def set_optimization_profile_async(self, profile_idx: int, stream: int) -> bool:
+        self.profile_calls.append((profile_idx, stream))
+        return True
 
     def set_input_shape(self, name: str, shape: tuple[int, ...]) -> None:
         self.set_input_shape_calls.append(name)
@@ -58,6 +66,7 @@ class _FakeStream:
 class _FakeComputeStream:
     def __init__(self):
         self.synchronize_calls = 0
+        self.cuda_stream = 456
 
     def synchronize(self):
         self.synchronize_calls += 1
@@ -79,6 +88,70 @@ def _make_engine(
     engine._prev_input_shapes = {}
     engine._output_buffers = {}
     return engine
+
+
+def _cursor_discovery_executor(tmp_path, expected_hash: str) -> Executor:
+    executor = Executor.__new__(Executor)
+    executor._manifest = {
+        "variant": "custom-1.7b",
+        "native_cursor": {
+            "enabled": True,
+            "cursor_head_sha256": expected_hash,
+        },
+    }
+    executor._weights_dir = tmp_path
+    executor._fused_engine = object()
+    executor._config = ModelConfig()
+    executor._cursor_head_path = None
+    executor._cursor_enabled = False
+    return executor
+
+
+def test_native_cursor_discovery_rejects_stale_head_hash(tmp_path):
+    head = tmp_path / "qwen3_tts_12hz_la1_seed0.pt"
+    head.write_bytes(b"exported-head")
+    executor = _cursor_discovery_executor(tmp_path, "0" * 64)
+
+    executor._discover_cursor_io_names()
+
+    assert executor._cursor_enabled is False
+    assert executor._cursor_head_path is None
+
+
+def test_native_cursor_discovery_accepts_manifest_head_hash_before_abi_checks(tmp_path):
+    head = tmp_path / "qwen3_tts_12hz_la1_seed0.pt"
+    head.write_bytes(b"exported-head")
+    digest = hashlib.sha256(head.read_bytes()).hexdigest()
+    executor = _cursor_discovery_executor(tmp_path, digest)
+
+    with pytest.raises(AttributeError, match="get_io_names"):
+        executor._discover_cursor_io_names()
+
+    # The fake engine has no TRT bindings, so discovery stops at the later ABI
+    # stage; the hash gate must still have accepted and recorded the artifact.
+    assert executor._cursor_head_path == head
+
+
+@pytest.mark.parametrize("enabled", ["false", "true", 1, 0, [], {}])
+def test_native_cursor_discovery_requires_strict_boolean_enabled(tmp_path, enabled):
+    class _UnexpectedEngine:
+        def get_io_names(self):
+            raise AssertionError("malformed capability must stop before ABI discovery")
+
+    executor = Executor.__new__(Executor)
+    executor._manifest = {
+        "variant": "custom-1.7b",
+        "native_cursor": {"enabled": enabled},
+    }
+    executor._weights_dir = tmp_path
+    executor._fused_engine = _UnexpectedEngine()
+    executor._cursor_enabled = False
+    executor._cursor_head_path = None
+
+    executor._discover_cursor_io_names()
+
+    assert executor._cursor_enabled is False
+    assert executor._cursor_head_path is None
 
 
 def _make_sampling_executor(*, seed: int = 1234) -> Executor:
@@ -122,6 +195,31 @@ def test_infer_skips_unknown_inputs_and_resolves_dynamic_outputs():
     assert ctx.infer_shapes_calls == 1
     assert ctx.execute_calls == 1
     assert tuple(outputs["wav"].shape) == (1, 1920)
+
+
+def test_select_optimization_profile_resets_shape_and_output_caches():
+    ctx = _FakeContext(output_shapes_before={"wav": (1, 1920)})
+    engine = _make_engine(ctx)
+    engine._engine = SimpleNamespace(num_optimization_profiles=2)
+    engine._prev_input_shapes["input_embeds"] = (1, 4)
+    engine._output_buffers["wav"] = torch.empty(1, 1920)
+    stream = _FakeComputeStream()
+
+    engine.select_optimization_profile(0, stream)
+
+    assert ctx.profile_calls == [(0, 456)]
+    assert stream.synchronize_calls == 1
+    assert engine._prev_input_shapes == {}
+    assert engine._output_buffers == {}
+
+
+def test_select_optimization_profile_rejects_unknown_profile():
+    ctx = _FakeContext(output_shapes_before={"wav": (1, 1920)})
+    engine = _make_engine(ctx)
+    engine._engine = SimpleNamespace(num_optimization_profiles=2)
+
+    with pytest.raises(ValueError, match="outside"):
+        engine.select_optimization_profile(2, _FakeComputeStream())
 
 
 def test_stable_sampling_seed_is_repeatable_and_lane_specific():

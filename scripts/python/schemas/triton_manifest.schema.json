@@ -3,6 +3,36 @@
   "$id": "https://qwen3tts-streaming.local/schemas/triton_manifest.schema.json",
   "title": "Triton deployment manifest",
   "type": "object",
+  "$defs": {
+    "speechStateArtifact": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+        },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "source_path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "speechStateSourceArtifact": {
+      "allOf": [
+        { "$ref": "#/$defs/speechStateArtifact" },
+        { "required": ["source_path", "source_sha256"] }
+      ]
+    }
+  },
   "required": ["schema_version", "variant"],
   "properties": {
     "schema_version": {
@@ -48,6 +78,130 @@
       "type": "string",
       "enum": ["fp32", "bf16", "fp16", "fp8"],
       "description": "Code2Wav decoder compute precision; defaults to engine_dtype if unspecified"
+    },
+    "speech_state": {
+      "type": "object",
+      "description": "Verified identity required before exact backend state migration",
+      "required": ["model_fingerprint", "runtime_fingerprint"],
+      "properties": {
+        "model_fingerprint": { "type": "string", "minLength": 1 },
+        "runtime_fingerprint": { "type": "string", "minLength": 1 },
+        "model_contract": {
+          "type": "object",
+          "required": [
+            "model_fingerprint",
+            "checkpoint_id",
+            "boundaries",
+            "boundary_phase",
+            "boundary_token_policy",
+            "boundary_token_id",
+            "successor_start",
+            "successor_text_entry",
+            "cursor_policy",
+            "transfer",
+            "retain_talker_kv",
+            "retain_code_predictor_state",
+            "retain_c2w_kv",
+            "retain_c2w_history",
+            "training_scope",
+            "talker_carry",
+            "talker_hidden_tail"
+          ],
+          "properties": {
+            "model_fingerprint": { "type": "string", "minLength": 1 },
+            "checkpoint_id": { "type": "string", "minLength": 1 },
+            "boundaries": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "explicit_pause",
+                  "pre_codec_eos",
+                  "post_codec_eos",
+                  "segment_end"
+                ]
+              },
+              "minItems": 1,
+              "uniqueItems": true
+            },
+            "boundary_phase": {
+              "enum": [
+                "text_commit",
+                "decode_frame",
+                "codec_eos",
+                "soft_drain"
+              ]
+            },
+            "boundary_token_policy": {
+              "enum": ["exact_model_token", "text_eos", "no_eos"]
+            },
+            "boundary_token_id": { "type": ["integer", "null"], "minimum": 0 },
+            "successor_start": {
+              "enum": [
+                "ready_to_decode",
+                "model_prefill",
+                "hard_boundary_prefill"
+              ]
+            },
+            "successor_text_entry": {
+              "enum": [
+                "append_tokens",
+                "prefill_successor_text",
+                "no_text_replay"
+              ]
+            },
+            "cursor_policy": { "enum": ["migrate", "reanchor", "disable"] },
+            "transfer": {
+              "enum": [
+                "none",
+                "exact",
+                "trained_approximate",
+                "reconstruction_approximate"
+              ]
+            },
+            "retain_talker_kv": { "type": "boolean" },
+            "retain_code_predictor_state": { "type": "boolean" },
+            "retain_c2w_kv": { "type": "boolean" },
+            "retain_c2w_history": { "type": "boolean" },
+            "training_scope": { "type": "string", "minLength": 1 },
+            "talker_carry": {
+              "enum": ["none", "direct_kv", "hidden_tail_bridge"]
+            },
+            "talker_hidden_tail": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "bundle": {
+          "type": "object",
+          "description": "On-disk artifact and bridge descriptor verified before state handoff",
+          "required": ["schema_version", "code2wav_layout_sha256", "artifacts"],
+          "properties": {
+            "schema_version": { "const": 1 },
+            "code2wav_layout_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "hidden_tail_bridge": {
+              "type": "object",
+              "required": ["source", "tail_tokens", "hidden_size"],
+              "properties": {
+                "source": { "const": "talker_hidden_tail" },
+                "tail_tokens": { "type": "integer", "minimum": 1 },
+                "hidden_size": { "type": "integer", "minimum": 1 },
+                "bridge_id": { "type": "string", "minLength": 1 }
+              },
+              "additionalProperties": false
+            },
+            "artifacts": {
+              "type": "object",
+              "properties": {
+                "model_weights": { "$ref": "#/$defs/speechStateSourceArtifact" },
+                "runtime_plan": { "$ref": "#/$defs/speechStateArtifact" },
+                "cursor_head": { "$ref": "#/$defs/speechStateSourceArtifact" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     },
     "rope_precision": {
       "type": "string",

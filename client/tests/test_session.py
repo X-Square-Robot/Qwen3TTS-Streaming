@@ -40,6 +40,64 @@ class TestBaseStreamSession:
         assert len(messages) == 1
         assert session._closed is True
 
+    def test_invalid_text_progress_does_not_terminate_audio_stream(self):
+        session = BaseStreamSession(session_id="s-progress", transport="test")
+        session._put_message(
+            AudioChunk(
+                pcm_bytes=b"\x00" * 8,
+                audio=AudioFormat(sample_rate=24000),
+                output_sample_start=0,
+                output_sample_end=20,
+            )
+        )
+        session._put_message(
+            StreamEvent(
+                type="text_progress",
+                session_id="s-progress",
+                meta={
+                    "anchor_seq": "1",
+                    "output_sample_start": "0",
+                    "output_sample_end": "10",
+                    "output_sample_rate": "24000",
+                    "raw_codepoint_start": "0",
+                    "raw_codepoint_end": "2",
+                    "normalized_codepoint_start": "0",
+                    "normalized_codepoint_end": "2",
+                },
+            )
+        )
+
+        # The second anchor regresses its raw end, matching the production
+        # mixed-segment failure. It is retained as a diagnostic message, but
+        # must not turn the stream into a terminal error.
+        session._put_message(
+            StreamEvent(
+                type="text_progress",
+                session_id="s-progress",
+                meta={
+                    "anchor_seq": "2",
+                    "output_sample_start": "10",
+                    "output_sample_end": "20",
+                    "output_sample_rate": "24000",
+                    "raw_codepoint_start": "1",
+                    "raw_codepoint_end": "1",
+                    "normalized_codepoint_start": "1",
+                    "normalized_codepoint_end": "1",
+                },
+            )
+        )
+        session._put_message(StreamEvent(type="done", session_id="s-progress"))
+
+        messages = list(session.iter_messages())
+        assert [type(message).__name__ for message in messages] == [
+            "AudioChunk",
+            "StreamEvent",
+            "StreamEvent",
+            "StreamEvent",
+        ]
+        assert messages[-1].type == "done"
+        assert session.progress_tracking_degraded is True
+
     def test_check_send_open_raises_after_close(self):
         session = BaseStreamSession(session_id="s4", transport="test")
         session._mark_send_closed()

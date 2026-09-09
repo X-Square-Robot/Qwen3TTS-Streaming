@@ -71,6 +71,10 @@ def test_runtime_capabilities_use_actual_package_voice_metadata(tmp_path, monkey
                 "tts_model_type": "custom_voice",
                 "supported_task_types": ("custom_voice",),
                 "variant": "custom-1.7b",
+                "native_cursor": {
+                    "enabled": True,
+                    "progress_available": True,
+                },
                 "engine_profile": type(
                     "Profile",
                     (),
@@ -90,6 +94,75 @@ def test_runtime_capabilities_use_actual_package_voice_metadata(tmp_path, monkey
 
     assert capabilities["supported_speakers"] == ["serena", "vivian"]
     assert capabilities["supported_languages"] == ["auto", "chinese", "english"]
+    assert capabilities["native_cursor"]["progress_available"] is False
+    assert capabilities["native_cursor"]["reason"] == "release_evidence_missing"
+    assert capabilities["speech_state"] == {
+        "supported": False,
+        "reason": "missing_speech_state",
+    }
+
+
+def test_runtime_capabilities_reject_malformed_cursor_progress_flag(
+    tmp_path, monkeypatch
+):
+    package_paths = ModelPackagePaths(
+        package_dir=str(tmp_path),
+        engine_dir=str(tmp_path / "runtime"),
+        weights_dir=str(tmp_path / "weights"),
+        tokenizer_dir=str(tmp_path / "tokenizer"),
+        manifest_path=str(tmp_path / "triton_manifest.json"),
+        runtime_artifact_path=str(tmp_path / "runtime/model.plan"),
+    )
+    monkeypatch.setattr(
+        "engine.gateway.triton_realtime_server.load_model_manifest",
+        lambda *_args, **_kwargs: type(
+            "Arch",
+            (),
+            {
+                "tts_model_type": "custom_voice",
+                "supported_task_types": ("custom_voice",),
+                "variant": "custom-1.7b",
+                "native_cursor": {
+                    "enabled": True,
+                    "progress_available": "true",
+                },
+                "engine_profile": type(
+                    "Profile",
+                    (),
+                    {
+                        "max_batch_size": 8,
+                        "max_input_len": 128,
+                        "max_seq_len": 512,
+                        "engine_dtype": "bf16",
+                        "triton_io_float_dtype": "fp32",
+                    },
+                )(),
+            },
+        )(),
+    )
+
+    capabilities = _runtime_capabilities_from_package(package_paths, "")
+
+    assert capabilities["native_cursor"]["progress_available"] is False
+    assert capabilities["native_cursor"]["reason"] == (
+        "malformed_native_cursor_capability"
+    )
+
+
+def test_runtime_capabilities_always_expose_fail_closed_speech_state(tmp_path):
+    package_paths = ModelPackagePaths(
+        package_dir=str(tmp_path),
+        engine_dir=str(tmp_path / "runtime"),
+        weights_dir=str(tmp_path / "weights"),
+        tokenizer_dir=str(tmp_path / "tokenizer"),
+        manifest_path=str(tmp_path / "triton_manifest.json"),
+        runtime_artifact_path=str(tmp_path / "runtime/model.plan"),
+    )
+
+    capabilities = _runtime_capabilities_from_package(package_paths, "")
+
+    assert capabilities["speech_state"]["supported"] is False
+    assert capabilities["speech_state"]["reason"] == "missing_speech_state"
 
 
 @pytest.mark.asyncio

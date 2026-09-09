@@ -719,6 +719,72 @@ class TestReorderMarkDoneEx:
 class TestConsumeResultsOutOfOrder:
     """Segments complete out of order; verdicts must hit their own audio."""
 
+    def test_segment_final_progress_is_published_before_next_segment_audio(self):
+        """Merge local segment cursors only at the ordered audio boundary.
+
+        Segment 1 can finish decoding while segment 0 is still the reorder
+        playhead.  Its final marker must stay pending until segment 0's final
+        marker has been published; otherwise a client that validates the
+        session-global raw coordinate high-water sees a false backwards move.
+        """
+        session = _two_segment_session()
+        session.config.output_policy.config = {"delivery": "firehose"}
+        session.segment_token_spans[0] = [
+            {
+                "normalized_start": 0,
+                "normalized_end": 1,
+                "raw_start": 0,
+                "raw_end": 1,
+            }
+        ]
+        session.segment_token_spans[1] = [
+            {
+                "normalized_start": 1,
+                "normalized_end": 2,
+                "raw_start": 1,
+                "raw_end": 2,
+            }
+        ]
+        order = []
+
+        def observe_audio(_sid, chunk, _delivered):
+            if getattr(chunk, "segment_idx", -1) == 1:
+                order.append("segment_1_audio")
+
+        def observe_event(_sid, event, _delivered):
+            if (
+                event.get("type") == "text_progress"
+                and event.get("segment_idx") == 0
+                and event.get("meta", {}).get("alignment_final") == "true"
+            ):
+                order.append("segment_0_final")
+            elif (
+                event.get("type") == "text_progress"
+                and event.get("segment_idx") == 1
+                and event.get("meta", {}).get("alignment_final") == "true"
+            ):
+                order.append("segment_1_final")
+
+        _run_consume(
+            session,
+            [
+                _chunk(0, b"\x01", frames=1),
+                _chunk(1, b"\x02", frames=1),
+                _seg_end(1, "codec_eos", 1),
+                _seg_end(0, "codec_eos", 1),
+                EngineResult(type=ResultType.SESSION_DONE, session_id="s1"),
+            ],
+            events=[],
+            audio_observer=observe_audio,
+            event_observer=observe_event,
+        )
+
+        assert order == [
+            "segment_0_final",
+            "segment_1_final",
+            "segment_1_audio",
+        ]
+
     def test_lookahead_eos_does_not_flush_playhead_held_tail(self):
         # seg1 (lookahead) reaches codec EOS while seg0 (playhead) is still
         # streaming; seg0 then loop-aborts. Its condemned held tail must be

@@ -63,12 +63,20 @@ import logging
 import queue
 import threading
 import time
-from typing import Dict, Optional
+from concurrent.futures import Future
+from typing import Callable, Dict, Optional, TypeVar
 
 import numpy as np
 import torch
 
 from ..core.mlfq import MLFQConfig, MLFQMeta, MLFQScheduler
+from ..core.extensions import (
+    CursorContinuationState,
+    EngineExtensions,
+    capture_c2w_state,
+    invoke_policy,
+    overlay_cursor_state,
+)
 from ..core.speech_state import (
     SpeechStateCapability,
     SpeechStateHandle,
@@ -83,12 +91,20 @@ from ..core.types import (
 )
 from ..core.lifecycle import LifecycleLogger
 from ..core import observability as obs
+from ..core.native_cursor import CursorLabelPlan, reanchor_cursor_mu
 from .executor import Executor, StepOutput
+from .speech_state import SpeechStateSnapshotBundle
+from .speech_state import SpeechStateContractError
+from .speech_state import capture_segment_runtime_metadata
+from .speech_state import SpeechStateContext, SpeechStateHandleStore, SpeechStatePhase
+from ..core.speech_state import SpeechStateOperation
+from .state_transfer import MigrationRequest, SpeechStateMigrationQueue
 from .kv_cache_pool import SlotKVState
 from .prefix_cache import PrefixKVCache
 from .prefill import PrefillBuilder, PrefillPlan, TaskType, parse_task_type
 
 logger = logging.getLogger(__name__)
+_RestoreResult = TypeVar("_RestoreResult")
 
 
 # ---------------------------------------------------------------------------
@@ -131,9 +147,13 @@ class EngineSegment:
         "prefix_probe_key",
         "prefix_probe_task_type",
         "prefix_probe_done",
+        "cursor_label_plan",
+        "cursor_plan_revision",
+        "cursor_progress_disabled",
         # Reserved for a future backend-owned acoustic state checkpoint.  The
         # loop never serializes or mutates the handle in the Phase-0 path.
         "speech_state_handle",
+        "speech_state_bundle",
     )
 
     def __init__(
@@ -185,7 +205,11 @@ class EngineSegment:
         self.prefix_probe_key: Optional[str] = None
         self.prefix_probe_task_type: Optional[TaskType] = None
         self.prefix_probe_done: bool = False
+        self.cursor_label_plan = None
+        self.cursor_plan_revision: int = -1
+        self.cursor_progress_disabled: bool = False
         self.speech_state_handle: Optional[SpeechStateHandle] = None
+        self.speech_state_bundle: Optional[SpeechStateSnapshotBundle] = None
 
 
 class EngineSessionGroup:
@@ -201,6 +225,10 @@ class EngineSessionGroup:
         "overflow_token_ids",
         "first_text_dequeued_at",
         "speech_state_capability",
+        "extension_continuity",
+        "extension_continuity_disabled",
+        "extension_continuity_disabled_reason",
+        "extension_cursor_states",
     )
 
     def __init__(
@@ -208,7 +236,14 @@ class EngineSessionGroup:
         session_id: str,
         request: EngineRequest,
         speech_state_capability: Optional[SpeechStateCapability] = None,
+        extensions: Optional[EngineExtensions] = None,
     ):
+        # Compatibility with the original extension-hook patch, whose third
+        # positional argument was ``extensions``. Keep the typed capability
+        # parameter for current callers while accepting that older shape.
+        if extensions is None and isinstance(speech_state_capability, EngineExtensions):
+            extensions = speech_state_capability
+            speech_state_capability = None
         self.session_id = session_id
         self.request = request
         self.result_queue: Optional[asyncio.Queue] = request.result_queue
@@ -220,6 +255,30 @@ class EngineSessionGroup:
         self.speech_state_capability = coerce_speech_state_capability(
             speech_state_capability
         )
+        extension_set = extensions or EngineExtensions()
+        self.extension_continuity = None
+        self.extension_continuity_disabled = False
+        self.extension_continuity_disabled_reason = ""
+        # Cursor recurrent state belongs to the fused engine graph, not to the
+        # external X2 policy's C2W snapshot type. Keep it keyed by the
+        # finalized predecessor segment until its successor is terminal (or
+        # retry/cleanup explicitly releases it).
+        self.extension_cursor_states: dict[int, CursorContinuationState] = {}
+        if extension_set.continuity_factory is not None:
+            try:
+                self.extension_continuity = extension_set.continuity_factory(
+                    session_id, request.session_config
+                )
+            except Exception:
+                # Method policies are optional. A bad per-session factory must
+                # not terminate the engine thread or alter the default route.
+                logger.exception(
+                    "Optional continuity factory failed for session %s; "
+                    "continuing without continuity policy",
+                    session_id,
+                )
+                self.extension_continuity_disabled = True
+                self.extension_continuity_disabled_reason = "continuity_factory_failed"
 
     @property
     def active_slot_count(self) -> int:
@@ -283,10 +342,12 @@ class EngineLoop:
         token_loop_max_retries: int = 1,
         length_runaway_ratio: float = 10.0,
         max_slots_per_session: int = 2,
+        extensions: Optional[EngineExtensions] = None,
     ):
         self._inbox = engine_inbox
         self._async_loop = async_loop
         self._executor = executor
+        self._extensions = extensions or EngineExtensions()
         # Capability discovery is deliberately metadata-only.  Legacy executor
         # test doubles do not expose these properties, so they safely resolve
         # to the disabled descriptor and follow the exact old code path.
@@ -327,6 +388,11 @@ class EngineLoop:
         # result; the whole step's results are flushed with a single
         # call_soon_threadsafe (1 wakeup instead of one per slot per step).
         self._result_batch: Optional[list] = None
+        self._speech_state_migrations = SpeechStateMigrationQueue(
+            max_pending=max(1, int(max_queue_size)),
+        )
+        self._speech_state_handles = SpeechStateHandleStore()
+        self._speech_state_generation = 0
 
         self._mlfq = MLFQScheduler(mlfq_config or MLFQConfig())
         self._prefix_cache = PrefixKVCache(
@@ -390,6 +456,7 @@ class EngineLoop:
         self._running = False
         if self._thread:
             self._thread.join(timeout=5)
+        self._close_pending_speech_state_requests("engine loop stopped")
         logger.info("Engine loop stopped")
 
     def thread_alive(self) -> bool:
@@ -407,6 +474,132 @@ class EngineLoop:
 
         return self._speech_state_capability
 
+    def request_speech_state_migration(
+        self,
+        session_id: str,
+        segment_idx: int,
+        *,
+        expected_attempt_id: int,
+        expected_allocation_epoch: int,
+        max_tensor_bytes: int,
+    ) -> Future:
+        """Queue atomic same-segment migration; no GPU payload leaves the loop."""
+        future: Future = Future()
+        try:
+            if not self._speech_state_capability.supports_pause_resume:
+                raise SpeechStateContractError("pause/resume capability is disabled")
+            if not self._running:
+                raise SpeechStateContractError("engine loop is not running")
+            request = MigrationRequest(
+                session_id, segment_idx, expected_attempt_id,
+                expected_allocation_epoch, max_tensor_bytes,
+            )
+            limit = self._speech_state_capability.max_handle_bytes
+            if limit and max_tensor_bytes > limit:
+                raise SpeechStateContractError("migration exceeds runtime byte budget")
+        except (TypeError, ValueError) as exc:
+            future.set_exception(exc)
+            return future
+        return self._speech_state_migrations.submit(request)
+
+    def _migrate_speech_state(self, request: MigrationRequest) -> None:
+        """Capture and restore at one boundary, keeping the source on failure."""
+        if not self._speech_state_capability.supports_pause_resume:
+            raise SpeechStateContractError("pause/resume capability is disabled")
+        group = self._groups.get(request.session_id)
+        seg = group.segments.get(request.segment_idx) if group is not None else None
+        if seg is None or seg.slot is None or seg.state != "active":
+            raise SpeechStateContractError("migration segment is not active")
+        source = seg.slot
+        pool = self._executor.kv_pool
+        if (
+            pool is None or source.is_free
+            or self._seg_by_slot.get(source.slot_id) is not seg
+            or source.session_id != _seg_key(seg.session_id, seg.segment_idx)
+            or source.allocation_epoch != request.expected_allocation_epoch
+            or seg.retry_idx != request.expected_attempt_id
+            or source.retry_idx != request.expected_attempt_id
+        ):
+            raise SpeechStateContractError("migration source allocation/attempt mismatch")
+        if pool.free_count == 0:
+            raise SpeechStateContractError("migration requires a clean spare slot")
+
+        # Deferred state writes run on the current stream, after GPUFuture.wait
+        # settled the compute stream. Fence them before capturing any payload.
+        self._executor.synchronize_state_transfer()
+        metadata = capture_segment_runtime_metadata(seg)
+        model_fingerprint, runtime_fingerprint = getattr(
+            self._executor, "speech_state_fingerprints", ("", "")
+        )
+        if not model_fingerprint.strip() or not runtime_fingerprint.strip():
+            raise SpeechStateContractError(
+                "speech-state runtime fingerprints are not configured"
+            )
+        bundle = self._executor.capture_speech_state_bundle(
+            source, metadata,
+            expected_slot_session_id=_seg_key(seg.session_id, seg.segment_idx),
+            max_tensor_bytes=request.max_tensor_bytes,
+        )
+        target = pool.allocate(source.session_id)
+        if target is None:
+            raise SpeechStateContractError("migration target allocation failed")
+        target.segment_idx = seg.segment_idx
+        target.retry_idx = seg.retry_idx
+        target_epoch = target.allocation_epoch
+        self._speech_state_generation += 1
+        handle = None
+        try:
+            handle = self._speech_state_handles.create(
+                generation=self._speech_state_generation,
+                attempt_id=request.expected_attempt_id,
+                slot_allocation_epoch=request.expected_allocation_epoch,
+                owner_session_id=seg.session_id,
+                source_segment_idx=seg.segment_idx,
+                transfer=self._speech_state_capability.transfer,
+                model_fingerprint=model_fingerprint,
+                runtime_fingerprint=runtime_fingerprint,
+                payload=bundle,
+            )
+            context = SpeechStateContext(
+                operation=SpeechStateOperation.PAUSE_RESUME,
+                phase=SpeechStatePhase.RESTORE,
+                session_id=seg.session_id,
+                segment_idx=seg.segment_idx,
+                attempt_id=request.expected_attempt_id,
+                slot_allocation_epoch=target_epoch,
+                source_segment_idx=seg.segment_idx,
+                source_attempt_id=request.expected_attempt_id,
+                source_slot_allocation_epoch=request.expected_allocation_epoch,
+                model_fingerprint=model_fingerprint,
+                runtime_fingerprint=runtime_fingerprint,
+                source_generation=self._speech_state_generation,
+            )
+            payload = self._speech_state_handles.consume(handle, context)
+            self._executor.restore_speech_state_bundle(
+                target, payload, expected_allocation_epoch=target_epoch,
+            )
+            self._executor.synchronize_state_transfer()
+            pool.release(
+                source.slot_id,
+                expected_allocation_epoch=request.expected_allocation_epoch,
+            )
+        except Exception:
+            # No scheduler entry points at the target yet. Failure discards
+            # only that allocation; source metadata/audio position stay live.
+            pool.release(target.slot_id, expected_allocation_epoch=target_epoch)
+            if handle is not None:
+                try:
+                    self._speech_state_handles.release(handle)
+                except SpeechStateContractError:
+                    # A consumed handle is intentionally not reusable after a
+                    # failed restore; source state remains live for hard-boundary
+                    # recovery without resurrecting stale payload.
+                    pass
+            raise
+        self._seg_by_slot.pop(source.slot_id, None)
+        self._seg_by_slot[target.slot_id] = seg
+        seg.slot = target
+
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
@@ -421,6 +614,13 @@ class EngineLoop:
             # Health checks read this; without it a dead engine thread keeps
             # reporting running=True forever.
             self._running = False
+            self._close_pending_speech_state_requests("engine loop terminated")
+
+    def _close_pending_speech_state_requests(self, reason: str) -> None:
+        """Complete queued lifecycle requests when the owner thread exits."""
+        migrations = getattr(self, "_speech_state_migrations", None)
+        if migrations is not None:
+            migrations.close(reason)
 
     def _run_inner(self) -> None:
         prev_output: Optional[StepOutput] = None
@@ -432,6 +632,9 @@ class EngineLoop:
             if prev_output is not None:
                 self._process_step_output(prev_output)
                 prev_output = None
+            # The previous output path has completed GPU wait, pooled KV
+            # scatter, arena scatter and parity flips before this point.
+            self._speech_state_migrations.drain(self._migrate_speech_state)
 
             # --- Phase 1.5: Drain inbox EARLY so newly arrived requests
             # are immediately available for prefill/decode in this
@@ -654,6 +857,7 @@ class EngineLoop:
                 req.session_id,
                 req,
                 speech_state_capability=self._speech_state_capability,
+                extensions=self._extensions,
             )
             self._groups[req.session_id] = group
             self._total_sessions += 1
@@ -694,6 +898,7 @@ class EngineLoop:
             if req.token_ids:
                 seg.pending_token_ids.extend(req.token_ids)
                 seg.text_tokens_consumed += len(req.token_ids)
+            seg.cursor_label_plan = req.cursor_label_plan
             old_seg = group.segments.get(req.segment_idx)
             if old_seg is not None:
                 logger.warning(
@@ -702,6 +907,11 @@ class EngineLoop:
                     req.segment_idx,
                     old_seg.state,
                 )
+                # A replacement changes the logical text owner.  Any cursor
+                # payload published by the old attempt must not be reused by
+                # the next segment, even though the predecessor segment is
+                # still present in the session.
+                group.extension_cursor_states.pop(req.segment_idx, None)
                 self._release_segment_slot(old_seg)
             group.segments[req.segment_idx] = seg
             if req.result_queue is not None:
@@ -712,6 +922,21 @@ class EngineLoop:
                 req.segment_idx,
                 req.priority.name,
             )
+
+        elif req.type == RequestType.UPDATE_CURSOR_PLAN:
+            group = self._groups.get(req.session_id)
+            if group is None or req.cursor_label_plan is None:
+                return
+            seg = group.segments.get(req.segment_idx)
+            if seg is None or seg.state == "done":
+                return
+            if (
+                seg.cursor_label_plan is None
+                or req.cursor_label_plan.revision >= seg.cursor_label_plan.revision
+            ):
+                previous_plan = seg.cursor_label_plan
+                seg.cursor_label_plan = req.cursor_label_plan
+                self._apply_cursor_plan(seg, previous_plan=previous_plan)
 
         elif req.type == RequestType.APPEND_TOKENS:
             group = self._groups.get(req.session_id)
@@ -785,14 +1010,375 @@ class EngineLoop:
                     EngineResult(
                         type=ResultType.SESSION_DONE,
                         session_id=req.session_id,
-                        metrics={"cancelled": True},
+                        metrics={
+                            "cancelled": True,
+                            **(
+                                {"cancel_reason": req.cancel_reason}
+                                if req.cancel_reason
+                                else {}
+                            ),
+                        },
                     ),
                 )
             self._remove_session(req.session_id)
 
+    def _apply_cursor_plan(
+        self,
+        seg: EngineSegment,
+        *,
+        previous_plan: CursorLabelPlan | None = None,
+    ) -> None:
+        """Apply the newest CPU plan to a slot before its next decode step."""
+        plan = seg.cursor_label_plan
+        slot = seg.slot
+        if plan is None or slot is None or plan.revision <= seg.cursor_plan_revision:
+            return
+        if seg.cursor_progress_disabled:
+            # A successor carrying method-layer acoustic state must not expose
+            # a freshly reset native cursor state as if it continued the
+            # predecessor.  Until cursor state has its own handoff contract,
+            # the frontend's EMA route is the only honest progress signal.
+            seg.cursor_plan_revision = plan.revision
+            return
+        enabled = getattr(self._executor, "native_cursor_enabled", False)
+        enabled = enabled() if callable(enabled) else bool(enabled)
+        if not enabled:
+            seg.cursor_plan_revision = plan.revision
+            return
+        setter = getattr(self._executor, "set_cursor_text_plan", None)
+        if not callable(setter):
+            logger.warning(
+                "Native cursor plan ignored because executor has no plan setter: %s seg=%d",
+                seg.session_id,
+                seg.segment_idx,
+            )
+            seg.cursor_plan_revision = plan.revision
+            return
+        try:
+            setter(
+                slot,
+                plan.label_ids,
+                label_count=plan.label_count,
+                active=plan.active,
+                text_start_frame=0,
+            )
+            if previous_plan is not None and previous_plan.revision < plan.revision:
+                current_mu = getattr(slot, "cursor_mu", None)
+                reanchor_setter = getattr(self._executor, "set_cursor_reanchor", None)
+                if (
+                    current_mu is not None
+                    and callable(reanchor_setter)
+                    and isinstance(current_mu, torch.Tensor)
+                    and current_mu.numel() == 1
+                ):
+                    reanchor_mu = reanchor_cursor_mu(
+                        previous_plan,
+                        plan,
+                        previous_mu=float(current_mu.detach().item()),
+                    )
+                    reanchor_setter(slot, reanchor_mu)
+        except Exception:
+            # Cursor progress is an optional route.  A malformed or stale plan
+            # must not terminate the audio segment or reset acoustic state.
+            logger.exception(
+                "Native cursor plan rejected for %s seg=%d revision=%d",
+                seg.session_id,
+                seg.segment_idx,
+                plan.revision,
+            )
+        seg.cursor_plan_revision = plan.revision
+
     # ------------------------------------------------------------------
     # Priority-based prefill
     # ------------------------------------------------------------------
+
+    def _extension_context_for(
+        self,
+        group: EngineSessionGroup,
+        seg: EngineSegment,
+    ):
+        policy = group.extension_continuity
+        if (
+            policy is None
+            or group.extension_continuity_disabled
+            or seg.segment_idx <= 0
+        ):
+            return None
+        # A continuity context is valid only after the immediately preceding
+        # segment has reached terminal handling. Policies may expose a context
+        # early while their own async bookkeeping catches up; never let that
+        # bypass the engine-owned predecessor lifecycle. Returning None keeps
+        # the existing independent hard-boundary admission path available.
+        predecessor = group.segments.get(seg.segment_idx - 1)
+        if predecessor is None or predecessor.state != "done":
+            return None
+        context = invoke_policy(
+            policy,
+            "context_for",
+            seg.segment_idx,
+            cur_text_len=len(seg.pending_token_ids),
+            input_complete=seg.input_complete,
+            default=None,
+            on_failure=lambda _exc: self._disable_extension(
+                group, "context_for_failed"
+            ),
+        )
+        cursor_state = group.extension_cursor_states.get(seg.segment_idx - 1)
+        return overlay_cursor_state(context, cursor_state)
+
+    def _extension_holds_admission(
+        self,
+        group: EngineSessionGroup,
+        seg: EngineSegment,
+    ) -> bool:
+        policy = group.extension_continuity
+        if policy is None or group.extension_continuity_disabled:
+            return False
+        ready = invoke_policy(
+            policy,
+            "ready_to_admit",
+            seg.segment_idx,
+            default=True,
+            on_failure=lambda _exc: self._disable_extension(
+                group, "ready_to_admit_failed"
+            ),
+        )
+        if group.extension_continuity_disabled:
+            return False
+        if not bool(ready):
+            return True
+        wait = invoke_policy(
+            policy,
+            "should_wait_for_text",
+            seg.segment_idx,
+            len(seg.pending_token_ids),
+            seg.input_complete,
+            default=False,
+            on_failure=lambda _exc: self._disable_extension(
+                group, "should_wait_for_text_failed"
+            ),
+        )
+        return False if group.extension_continuity_disabled else bool(wait)
+
+    def _disable_extension(self, group: EngineSessionGroup, reason: str) -> None:
+        """Disable one faulty method policy and continue at a hard boundary."""
+
+        cursor_states = getattr(group, "extension_cursor_states", None)
+        if cursor_states is not None:
+            cursor_states.clear()
+        if group.extension_continuity_disabled:
+            return
+        group.extension_continuity_disabled = True
+        group.extension_continuity_disabled_reason = str(
+            reason or "continuity_policy_failed"
+        )
+        logger.warning(
+            "Disabling optional continuity policy for %s: %s",
+            group.session_id,
+            reason,
+        )
+
+    def _extension_restore_context(
+        self,
+        group: EngineSessionGroup,
+        seg: EngineSegment,
+        context,
+    ) -> bool:
+        if context is None or seg.slot is None:
+            return context is None
+        cursor_state = getattr(context, "cursor_state", None)
+        restore_cursor = None
+        if cursor_state is not None:
+            validate_cursor = getattr(self._executor, "validate_cursor_state", None)
+            if callable(validate_cursor):
+                try:
+                    validate_cursor(seg.slot, cursor_state)
+                except Exception:
+                    logger.exception(
+                        "Optional cursor continuation preflight failed for %s seg=%d",
+                        seg.session_id,
+                        seg.segment_idx,
+                    )
+                    self._disable_extension(group, "cursor_state_validation_failed")
+                    invoke_policy(
+                        group.extension_continuity,
+                        "invalidate",
+                        "cursor_state_validation_failed",
+                    )
+                    seg.cursor_progress_disabled = True
+                    return False
+            enabled = getattr(self._executor, "native_cursor_enabled", False)
+            enabled = enabled() if callable(enabled) else bool(enabled)
+            restore_cursor = getattr(self._executor, "restore_cursor_state", None)
+            if not enabled or not callable(restore_cursor):
+                self._disable_extension(group, "cursor_state_restore_unavailable")
+                invoke_policy(
+                    group.extension_continuity,
+                    "invalidate",
+                    "cursor_state_restore_unavailable",
+                )
+                seg.cursor_progress_disabled = True
+                return False
+        try:
+            restored = self._executor.apply_c2w_warm_state(
+                seg.slot,
+                context.c2w_kv,
+                context.c2w_conv,
+                context.c2w_transconv,
+                context.c2w_frame_idx,
+            )
+        except Exception:
+            logger.exception(
+                "Optional continuation restore failed for %s seg=%d",
+                seg.session_id,
+                seg.segment_idx,
+            )
+            restored = False
+        if not restored:
+            seg.cursor_progress_disabled = True
+            self._disable_cursor_plan(seg)
+            self._disable_extension(group, "c2w_restore_failed")
+            invoke_policy(
+                group.extension_continuity,
+                "invalidate",
+                "c2w_restore_failed",
+            )
+            return False
+
+        if cursor_state is not None:
+            try:
+                restore_cursor(seg.slot, cursor_state)
+            except Exception:
+                logger.exception(
+                    "Optional cursor continuation restore failed for %s seg=%d",
+                    seg.session_id,
+                    seg.segment_idx,
+                )
+                self._disable_extension(group, "cursor_state_restore_failed")
+                self._disable_cursor_plan(seg)
+                invoke_policy(
+                    group.extension_continuity,
+                    "invalidate",
+                    "cursor_state_restore_failed",
+                )
+                seg.cursor_progress_disabled = True
+                return False
+        return True
+
+    def _disable_cursor_plan(self, seg: EngineSegment) -> None:
+        """Disarm a plan already copied to a slot after handoff failure."""
+
+        slot = seg.slot
+        if (
+            slot is None
+            or seg.cursor_label_plan is None
+            or seg.cursor_plan_revision < 0
+        ):
+            return
+        setter = getattr(self._executor, "set_cursor_text_plan", None)
+        if not callable(setter):
+            return
+        try:
+            setter(
+                slot,
+                torch.empty(0, dtype=torch.int64),
+                label_count=0,
+                active=False,
+                text_start_frame=0,
+            )
+        except Exception:
+            logger.exception(
+                "Could not disarm native cursor plan for %s seg=%d",
+                seg.session_id,
+                seg.segment_idx,
+            )
+
+    def _extension_prepare_bridge(
+        self,
+        group: EngineSessionGroup,
+        seg: EngineSegment,
+        slot: SlotKVState,
+    ) -> bool:
+        policy = group.extension_continuity
+        builder = self._prefill_builder
+        if (
+            policy is None
+            or group.extension_continuity_disabled
+            or builder is None
+            or not seg.pending_token_ids
+        ):
+            return False
+        prepare = getattr(policy, "prepare_bridge", None)
+        text_embed = getattr(getattr(builder, "w", None), "text_embed", None)
+        if not callable(prepare) or not callable(text_embed):
+            return False
+        try:
+            device = getattr(builder.w, "device", self._embed_device)
+            ids = torch.tensor(
+                [list(seg.pending_token_ids)], device=device, dtype=torch.int64
+            )
+            with torch.no_grad():
+                memory = text_embed(ids)[0]
+        except Exception:
+            logger.exception(
+                "Optional continuation text memory failed for %s seg=%d",
+                seg.session_id,
+                seg.segment_idx,
+            )
+            invoke_policy(policy, "invalidate", "bridge_text_memory_failed")
+            self._disable_extension(group, "bridge_text_memory_failed")
+            return False
+        state = invoke_policy(
+            policy,
+            "prepare_bridge",
+            seg.segment_idx,
+            memory,
+            default=None,
+            on_failure=lambda _exc: self._disable_extension(
+                group, "prepare_bridge_failed"
+            ),
+        )
+        if state is None:
+            return False
+        slot.extension_state["continuity_bridge"] = state
+        return True
+
+    def _extension_apply_bridge(
+        self,
+        group: Optional[EngineSessionGroup],
+        slot: SlotKVState,
+        *,
+        query: Optional[torch.Tensor],
+        base: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        if base is None:
+            return None
+        policy = (
+            group.extension_continuity
+            if group is not None and not group.extension_continuity_disabled
+            else None
+        )
+        state = slot.extension_state.get("continuity_bridge")
+        if policy is None or state is None:
+            return base.to(torch.float32)
+        updated = invoke_policy(
+            policy,
+            "apply_bridge",
+            state,
+            query=query,
+            base=base,
+            current_text_index=int(slot.text_idx),
+            default=base.to(torch.float32),
+            on_failure=(
+                (lambda _exc: self._disable_extension(group, "apply_bridge_failed"))
+                if group is not None
+                else None
+            ),
+        )
+        slot.extension_state["continuity_bridge_apply_count"] = int(
+            slot.extension_state.get("continuity_bridge_apply_count", 0)
+        ) + 1
+        return updated
 
     def _try_prefill_pending(self) -> None:
         """Admit ALL pending segments at the step boundary, not just one.
@@ -832,6 +1418,10 @@ class EngineLoop:
         through to the serial prefill pass, which owns error reporting.
         """
         if self._prefill_builder is None:
+            return False
+        # A successor with a published continuation must use the serial
+        # restore path; prefix-cache admission would overwrite its C2W state.
+        if self._extension_context_for(group, seg) is not None:
             return False
         if not seg.prefix_probe_done:
             seg.prefix_probe_done = True
@@ -921,6 +1511,9 @@ class EngineLoop:
             in_batch = picked_per_group.get(group.session_id, 0)
             if group.active_slot_count + in_batch >= self._max_slots_per_session:
                 continue
+            if self._extension_holds_admission(group, seg):
+                budget -= 1
+                continue
             if not self._prefix_cache_admittable(group, seg):
                 budget -= 1
                 continue
@@ -951,6 +1544,7 @@ class EngineLoop:
             slot.sampling_identity = _group_sampling_identity(group)
             slot.retry_idx = seg.retry_idx
             self._seg_by_slot[slot.slot_id] = seg
+            self._apply_cursor_plan(seg)
             self._mlfq.on_segment_created(seg.mlfq_meta)
             seg.prefill_started_at = batch_start
             admitted.append((seg, group))
@@ -993,9 +1587,7 @@ class EngineLoop:
             if entry is None:
                 # Should not happen (no puts since the probe); fall back to
                 # the serial pass for this segment.
-                self._seg_by_slot.pop(seg.slot.slot_id, None)
-                kv_pool.release(seg.slot.slot_id)
-                seg.slot = None
+                self._release_segment_slot(seg)
                 continue
             entries[seg.prefix_probe_key] = entry
             by_entry.setdefault(seg.prefix_probe_key, []).append(i)
@@ -1090,6 +1682,8 @@ class EngineLoop:
                     continue
                 if not seg.pending_token_ids:
                     continue
+                if self._extension_holds_admission(group, seg):
+                    continue
                 if best is None or seg.priority.value < best.priority.value:
                     best = seg
                     best_group = group
@@ -1106,6 +1700,19 @@ class EngineLoop:
         slot.retry_idx = best.retry_idx
         self._seg_by_slot[slot.slot_id] = best
         self._mlfq.on_segment_created(best.mlfq_meta)
+        extension_context = self._extension_context_for(best_group, best)
+        if extension_context is not None:
+            # C2W-only X2 contexts remain EMA. Native progress is allowed here
+            # only when the model adapter explicitly supplies cursor recurrent
+            # state for the fused graph to restore and the primary streaming TN
+            # has already supplied this segment's label plan.  The recurrent
+            # payload alone is not enough: a fresh slot's label buffer is not a
+            # spoken-form source of truth.
+            best.cursor_progress_disabled = (
+                getattr(extension_context, "cursor_state", None) is None
+                or best.cursor_label_plan is None
+            )
+        self._apply_cursor_plan(best)
 
         if self._prefill_builder is not None:
             req_cfg = best_group.request.session_config
@@ -1125,7 +1732,10 @@ class EngineLoop:
                 logger.error("Invalid task_type for %s: %s", best.session_id, exc)
                 best.state = "error"
                 self._seg_by_slot.pop(slot.slot_id, None)
-                kv_pool.release(slot.slot_id)
+                kv_pool.release(
+                    slot.slot_id,
+                    expected_allocation_epoch=slot.allocation_epoch,
+                )
                 best.slot = None
                 self._send_result(
                     best_group,
@@ -1146,7 +1756,7 @@ class EngineLoop:
             # codec frames plus target text.
             cache_key = None
             cached = None
-            if task_type != TaskType.VOICE_CLONE_ICL:
+            if task_type != TaskType.VOICE_CLONE_ICL and extension_context is None:
                 cache_key = self._prefill_builder.compute_cache_key(
                     task_type,
                     req_cfg.language if req_cfg is not None else "auto",
@@ -1167,6 +1777,7 @@ class EngineLoop:
 
             if (
                 task_type != TaskType.VOICE_CLONE_ICL
+                and extension_context is None
                 and cached is not None
                 and best.pending_token_ids
             ):
@@ -1318,6 +1929,24 @@ class EngineLoop:
                     device=self._embed_device,
                     dtype=self._embed_dtype,
                 ),
+            )
+
+        if extension_context is not None:
+            if self._extension_restore_context(best_group, best, extension_context):
+                prefill_metrics["extension_continuity"] = "restored"
+                if not best.cursor_progress_disabled:
+                    prefill_metrics["cursor_progress"] = "native_continuation"
+            else:
+                prefill_metrics["extension_continuity"] = "fallback"
+        if self._extension_prepare_bridge(best_group, best, slot):
+            prefill_metrics["extension_bridge"] = "prepared"
+        if best.cursor_progress_disabled:
+            prefill_metrics["cursor_progress"] = "ema_fallback"
+        if best_group.extension_continuity_disabled:
+            prefill_metrics["extension_continuity"] = "fallback"
+            prefill_metrics["extension_continuity_reason"] = (
+                best_group.extension_continuity_disabled_reason
+                or "continuity_policy_disabled"
             )
 
         # Serial admissions (cold TRT prefill, ICL, serial cache hit) produce
@@ -1661,7 +2290,13 @@ class EngineLoop:
             return
         text_add = slot.trailing[slot.text_idx].to(slot.last_codec_sum.dtype)
         slot.text_idx += 1
-        slot.next_embed = (slot.last_codec_sum + text_add).to(torch.float32)
+        group = self._groups.get(seg.session_id)
+        slot.next_embed = self._extension_apply_bridge(
+            group,
+            slot,
+            query=slot.extension_state.pop("continuity_last_query", None),
+            base=slot.last_codec_sum + text_add,
+        )
         slot.last_codec_sum = None
         slot.pad_start_frame = -1
         slot.pad_consecutive_silence = 0
@@ -1911,6 +2546,9 @@ class EngineLoop:
             group = self._groups.get(seg.session_id)
             if group is None:
                 continue
+            is_codec_eos = bool(
+                output.eos_flags[i] if i < len(output.eos_flags) else False
+            )
 
             # The fused cursor branch returns only neural state here.  TN
             # labels/reanchor/public coordinates remain CPU-owned and are
@@ -1920,7 +2558,10 @@ class EngineLoop:
             if update_cursor_state is not None:
                 update_cursor_state(slot, output.cursor_outputs, row=i)
 
-            if output.batch_c2w_kv is not None:
+            # EOS decode produces a codec token and may be needed by the
+            # fused cursor lookahead, but its C2W/PCM state is not a spoken
+            # frame. Do not append EOS state to a successor continuation.
+            if not is_codec_eos and output.batch_c2w_kv is not None:
                 if slot.c2w_pooled:
                     # Deferred: one batched sliding-window append for all
                     # pooled slots after this loop.
@@ -1948,22 +2589,23 @@ class EngineLoop:
                             [slot.talker_kv, kv], dim=3
                         ).contiguous()
 
-            if output.used_pingpong and slot.pingpong_ready:
+            if not is_codec_eos and output.used_pingpong and slot.pingpong_ready:
                 # batch=1 zero-copy: TRT wrote directly to write bufs
                 slot.flip_c2w_buffers()
             elif (
-                slot.pingpong_ready
+                not is_codec_eos
+                and slot.pingpong_ready
                 and slot.c2w_arena_backed
                 and output.batch_c2w_conv is not None
             ):
                 # batch>1 arena-backed: deferred to one indexed copy per
                 # state for the whole batch (see flush after this loop).
                 arena_scatter.append((slot, i))
-            elif slot.pingpong_ready:
+            elif not is_codec_eos and slot.pingpong_ready:
                 # batch>1 legacy per-slot copy into write bufs
                 conv_rows, transconv_rows = self._c2w_output_rows(output, i)
                 slot.copy_c2w_and_flip(conv_rows, transconv_rows)
-            else:
+            elif not is_codec_eos:
                 # Fallback: clone (first step or non-pingpong slot)
                 conv_rows, transconv_rows = self._c2w_output_rows(output, i)
                 if conv_rows:
@@ -1977,27 +2619,60 @@ class EngineLoop:
             if updated_tc_rows is not None:
                 slot.token_counts = updated_tc_rows[i]
             slot.past_len += 1
-            slot.frame_idx += 1
+            if not is_codec_eos:
+                slot.frame_idx += 1
             slot.touch()
             self._mlfq.on_step_done(seg.mlfq_meta)
 
             # --- Determine text_add and track pad phase ---
             in_pad = False
-            if output.codec_sum is not None:
+            acoustic_query = (
+                output.hidden[i : i + 1]
+                if output.hidden is not None and not is_codec_eos
+                else None
+            )
+            current_text_index = int(slot.text_idx)
+            if (
+                acoustic_query is not None
+                and current_text_index < len(seg.pending_token_ids)
+            ):
+                invoke_policy(
+                    group.extension_continuity,
+                    "observe_hidden",
+                    seg.segment_idx,
+                    current_text_index,
+                    acoustic_query,
+                    on_failure=lambda _exc: self._disable_extension(
+                        group, "observe_hidden_failed"
+                    ),
+                )
+            if is_codec_eos:
+                slot.next_embed = None
+                slot.last_codec_sum = None
+                slot.extension_state.pop("continuity_last_query", None)
+            elif output.codec_sum is not None:
                 if slot.trailing and slot.text_idx < len(slot.trailing):
                     text_add = slot.trailing[slot.text_idx].to(output.codec_sum.dtype)
                     slot.text_idx += 1
                     slot.pad_start_frame = -1
                     slot.pad_consecutive_silence = 0
                     slot.last_codec_sum = None
-                    slot.next_embed = (output.codec_sum[i : i + 1] + text_add).to(
-                        torch.float32
+                    slot.extension_state.pop("continuity_last_query", None)
+                    slot.next_embed = self._extension_apply_bridge(
+                        group,
+                        slot,
+                        query=acoustic_query,
+                        base=output.codec_sum[i : i + 1] + text_add,
                     )
                 elif not seg.input_complete:
                     # True streaming pause: preserve the latest codec_sum and
                     # wait for more text instead of injecting pad tokens, which
                     # creates artificial silences and prosody discontinuities.
                     slot.last_codec_sum = output.codec_sum[i : i + 1].clone()
+                    if acoustic_query is not None:
+                        slot.extension_state["continuity_last_query"] = (
+                            acoustic_query.detach().clone()
+                        )
                     slot.next_embed = None
                     slot.pad_start_frame = -1
                     slot.pad_consecutive_silence = 0
@@ -2014,8 +2689,12 @@ class EngineLoop:
                     slot.last_codec_sum = None
                     if slot.pad_start_frame < 0:
                         slot.pad_start_frame = slot.frame_idx
-                    slot.next_embed = (output.codec_sum[i : i + 1] + text_add).to(
-                        torch.float32
+                    slot.extension_state.pop("continuity_last_query", None)
+                    slot.next_embed = self._extension_apply_bridge(
+                        group,
+                        slot,
+                        query=acoustic_query,
+                        base=output.codec_sum[i : i + 1] + text_add,
                     )
             else:
                 slot.next_embed = None
@@ -2250,6 +2929,10 @@ class EngineLoop:
                                     ),
                                 )
                             if audio is not None and len(audio) > 0:
+                                audio_metrics = self._audio_progress_metrics(seg)
+                                audio_metrics.update(
+                                    self._cursor_progress_metrics(output, i, seg)
+                                )
                                 self._send_result(
                                     group,
                                     EngineResult(
@@ -2257,7 +2940,7 @@ class EngineLoop:
                                         session_id=seg.session_id,
                                         segment_idx=seg.segment_idx,
                                         audio_bytes=self._fade_out_chunk(audio),
-                                        metrics=self._audio_progress_metrics(seg),
+                                        metrics=audio_metrics,
                                     ),
                                 )
                             self._handle_segment_eos(
@@ -2342,6 +3025,9 @@ class EngineLoop:
                 if audio is not None and len(audio) > 0:
                     # -- First raw audio observability --
                     audio_metrics: dict = self._audio_progress_metrics(seg)
+                    audio_metrics.update(
+                        self._cursor_progress_metrics(output, i, seg)
+                    )
                     if not seg.first_raw_audio_sent:
                         seg.first_raw_audio_sent = True
                         now_mono = time.monotonic()
@@ -2484,6 +3170,54 @@ class EngineLoop:
         return health
 
     @staticmethod
+    def _cursor_progress_metrics(
+        output: StepOutput, row: int, seg: EngineSegment
+    ) -> dict[str, int | float]:
+        """Copy scalar fused-cursor outputs into the async result metadata.
+
+        This is the only host handoff for cursor observations.  Recurrent
+        tensors remain on the slot; the frontend receives scalar evidence for
+        CPU owner-span projection and can fall back to EMA on invalid output.
+        """
+
+        if seg.cursor_progress_disabled or not seg.cursor_plan_revision:
+            return {}
+        enabled = output.cursor_outputs
+        required = ("cursor_valid", "cursor_mu", "cursor_confidence")
+        if any(enabled.get(name) is None for name in required):
+            return {}
+
+        def scalar(name: str):
+            value = enabled[name]
+            if value is None:
+                return None
+            return value[row].reshape(-1)[0].detach().cpu().item()
+
+        try:
+            result = {
+                "cursor_plan_revision": int(seg.cursor_plan_revision),
+                "cursor_valid": int(scalar("cursor_valid") or 0),
+                "cursor_mu": float(scalar("cursor_mu")),
+                "cursor_confidence": float(scalar("cursor_confidence")),
+            }
+            if enabled.get("cursor_candidate_label") is not None:
+                result["cursor_candidate_label"] = int(
+                    scalar("cursor_candidate_label")
+                )
+            return result
+        except (
+            AttributeError,
+            IndexError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            OverflowError,
+        ):
+            # A malformed optional cursor output must not abort audio delivery;
+            # the frontend will continue with the EMA progress route.
+            return {}
+
+    @staticmethod
     def _audio_progress_metrics(seg: EngineSegment) -> dict[str, int]:
         """Describe the emitted source-frame interval for one audio chunk.
 
@@ -2499,6 +3233,27 @@ class EngineLoop:
             "source_frame_end": frame_end,
             "text_tokens": max(0, int(seg.text_tokens_consumed)),
         }
+
+    @staticmethod
+    def _continuity_consumed_text_tokens(seg: EngineSegment) -> int:
+        """Return only text consumption that the slot can prove.
+
+        ``text_tokens_consumed`` is transport/admission accounting: it also
+        includes tokens appended after decode started.  X2's health gate needs
+        the number actually consumed by the Talker path, so never substitute
+        the former for the latter.  ``text_idx`` is the engine's conservative
+        trailing-text frontier; an incomplete frontier intentionally reports
+        zero and forces a hard boundary.
+        """
+
+        slot = seg.slot
+        total = max(0, len(seg.pending_token_ids))
+        if slot is None or total <= 0:
+            return 0
+        consumed = max(0, int(getattr(slot, "text_idx", 0)))
+        if consumed < total:
+            return 0
+        return total
 
     def _handle_natural_eos(
         self, group: EngineSessionGroup, seg: EngineSegment
@@ -2582,6 +3337,15 @@ class EngineLoop:
         retry_text_tokens = max(0, int(seg.text_tokens_consumed))
 
         seg.retry_idx += 1
+        invoke_policy(
+            group.extension_continuity,
+            "reset_segment_capture",
+            seg.segment_idx,
+            on_failure=lambda _exc: self._disable_extension(
+                group, "reset_segment_capture_failed"
+            ),
+        )
+        group.extension_cursor_states.pop(seg.segment_idx, None)
         self._release_segment_slot(seg)
         seg.state = "pending_prefill"
         seg.prefill_plan = None
@@ -2718,6 +3482,69 @@ class EngineLoop:
             metrics["discard_all_audio"] = True
         if guard_mode:
             metrics["guard_mode"] = guard_mode
+
+        # A terminal successor can no longer retry from its predecessor. Keep
+        # only still-needed cursor sources instead of retaining one tensor
+        # payload per clause for the whole long-text session.
+        group.extension_cursor_states.pop(seg.segment_idx - 1, None)
+        group.extension_cursor_states.pop(seg.segment_idx, None)
+
+        # Method-layer continuity is finalized before slot release. At this
+        # point the previous decode output has been processed and all deferred
+        # C2W writes for earlier spoken frames are visible; EOS itself is not
+        # appended to the continuation state above.
+        if (
+            group.extension_continuity is not None
+            and not group.extension_continuity_disabled
+        ):
+            c2w_state = capture_c2w_state(
+                seg.slot,
+                self._executor.kv_pool,
+            )
+            consumed_text_tokens = self._continuity_consumed_text_tokens(seg)
+            carried = invoke_policy(
+                group.extension_continuity,
+                "finalize_segment",
+                seg.segment_idx,
+                list(seg.pending_token_ids),
+                eos_reason=eos_reason,
+                audio_steps=audio_steps,
+                state=c2w_state,
+                input_complete=seg.input_complete,
+                consumed_text_tokens=consumed_text_tokens,
+                default=False,
+                on_failure=lambda _exc: self._disable_extension(
+                    group, "finalize_segment_failed"
+                ),
+            )
+            metrics["extension_continuity_carried"] = bool(carried)
+            if carried and c2w_state is not None and not group.extension_continuity_disabled:
+                cursor_state = getattr(c2w_state, "cursor_state", None)
+                if cursor_state is not None:
+                    group.extension_cursor_states[seg.segment_idx] = cursor_state
+            metrics["extension_text_tokens_consumed"] = consumed_text_tokens
+            metrics["extension_continuity_policy_disabled"] = bool(
+                group.extension_continuity_disabled
+            )
+            if group.extension_continuity_disabled:
+                metrics["extension_continuity_reason"] = (
+                    group.extension_continuity_disabled_reason
+                    or "continuity_policy_disabled"
+                )
+            if seg.slot is not None:
+                metrics["extension_bridge_apply_count"] = int(
+                    seg.slot.extension_state.get(
+                        "continuity_bridge_apply_count", 0
+                    )
+                )
+        elif group.extension_continuity_disabled:
+            # A factory failure has no policy to finalize and must not trigger
+            # an unnecessary C2W snapshot just to report the fallback reason.
+            metrics["extension_continuity_policy_disabled"] = True
+            metrics["extension_continuity_reason"] = (
+                group.extension_continuity_disabled_reason
+                or "continuity_policy_disabled"
+            )
 
         seg.state = "done"
         self._release_segment_slot(seg)
@@ -2864,19 +3691,112 @@ class EngineLoop:
         group = self._groups.pop(session_id, None)
         if group is None:
             return
+        invoke_policy(group.extension_continuity, "invalidate", "session_removed")
+        group.extension_cursor_states.clear()
         for seg in group.segments.values():
             self._release_segment_slot(seg)
 
     def _release_segment_slot(self, seg: EngineSegment) -> None:
+        # Applied revisions belong to an allocation, not the logical segment.
+        # A retry must install the retained CPU plan on its fresh slot again.
+        seg.cursor_plan_revision = -1
+        seg.cursor_progress_disabled = False
+        # A bundle is allocation-owned. Never let a released/retried segment
+        # retain source payload metadata that could be mistaken for a live
+        # target during later admission.
+        seg.speech_state_bundle = None
+        seg.speech_state_handle = None
         slot = seg.slot
         if slot is None:
             return
         slot_id = slot.slot_id
         kv_pool = self._executor.kv_pool
         if kv_pool is not None:
-            kv_pool.release(slot_id)
+            kv_pool.release(
+                slot_id,
+                expected_allocation_epoch=slot.allocation_epoch,
+            )
         self._seg_by_slot.pop(slot_id, None)
         seg.slot = None
+
+    def attach_speech_state_bundle(
+        self,
+        seg: EngineSegment,
+        bundle: SpeechStateSnapshotBundle,
+    ) -> None:
+        """Attach a validated source bundle to its logical segment owner.
+
+        This is only an ownership/admission operation. It does not restore
+        tensors or change scheduling; those actions remain an explicit S4
+        step after a model/runtime capability check.
+        """
+        if not isinstance(bundle, SpeechStateSnapshotBundle):
+            raise SpeechStateContractError("invalid speech state bundle")
+        if seg.speech_state_bundle is not None:
+            raise SpeechStateContractError("segment already owns a speech state bundle")
+        if (
+            seg.session_id != bundle.source_session_id
+            or seg.segment_idx != bundle.source_segment_idx
+        ):
+            raise SpeechStateContractError("speech state bundle segment owner mismatch")
+        if not self._speech_state_capability.supports_segment_handoff:
+            raise SpeechStateContractError("segment handoff capability is disabled")
+        seg.speech_state_bundle = bundle
+
+    def consume_speech_state_bundle(
+        self,
+        seg: EngineSegment,
+    ) -> SpeechStateSnapshotBundle:
+        """Take the segment-owned bundle exactly once after restore succeeds."""
+        bundle = seg.speech_state_bundle
+        if bundle is None:
+            raise SpeechStateContractError("segment has no speech state bundle")
+        if (
+            bundle.source_session_id != seg.session_id
+            or bundle.source_segment_idx != seg.segment_idx
+        ):
+            raise SpeechStateContractError("speech state bundle owner mismatch")
+        if not self._speech_state_capability.supports_segment_handoff:
+            raise SpeechStateContractError("segment handoff capability is disabled")
+        seg.speech_state_bundle = None
+        return bundle
+
+    def restore_speech_state_bundle(
+        self,
+        seg: EngineSegment,
+        restore: Callable[[SpeechStateSnapshotBundle], _RestoreResult],
+    ) -> _RestoreResult:
+        """Run restore transactionally; consume only after callback succeeds."""
+        if not callable(restore):
+            raise SpeechStateContractError("speech state restore callback is invalid")
+        bundle = seg.speech_state_bundle
+        if bundle is None:
+            raise SpeechStateContractError("segment has no speech state bundle")
+        if not self._speech_state_capability.supports_segment_handoff:
+            raise SpeechStateContractError("segment handoff capability is disabled")
+        if (
+            bundle.source_session_id != seg.session_id
+            or bundle.source_segment_idx != seg.segment_idx
+        ):
+            raise SpeechStateContractError("speech state bundle owner mismatch")
+        result = restore(bundle)
+        if result is False:
+            # A backend may use a boolean result instead of raising for a
+            # rejected restore. Treat that as failure too, so the source
+            # bundle remains available for explicit cleanup or fallback.
+            raise SpeechStateContractError("speech state restore callback rejected bundle")
+        # The callback is the commit point. Exceptions leave the bundle
+        # attached for explicit recovery or cleanup by the caller.
+        seg.speech_state_bundle = None
+        return result
+
+    def discard_speech_state_bundle(self, seg: EngineSegment, *, reason: str) -> None:
+        """Explicitly abandon a failed handoff before hard-boundary recovery."""
+        if not str(reason or "").strip():
+            raise SpeechStateContractError("speech state discard requires a reason")
+        if seg.speech_state_bundle is None:
+            raise SpeechStateContractError("segment has no speech state bundle")
+        seg.speech_state_bundle = None
 
     def _cleanup_failed_prefills(self) -> None:
         failed_sessions: list[str] = []

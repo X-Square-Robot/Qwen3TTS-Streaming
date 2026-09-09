@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import re
 import time
 import unicodedata
@@ -17,10 +18,13 @@ from .types import (
     CommitKind,
     LanguageKind,
     SpanKind,
+    SemanticFamily,
     TextInputMetadata,
     TextCommit,
     TextNormalizationConfig,
 )
+from .candidate_resolver import CandidateResolver, family_for_kind
+from .semantic_spans import SpanDetector
 from .wetext_backend import WetextAdapter
 from .projector import is_markdown_structured, project_readable
 
@@ -34,6 +38,19 @@ _ORDINAL = re.compile(r"^\d{1,6}(?:st|nd|rd|th)$", re.I)
 _VERSION = re.compile(r"^(?:v)?\d+(?:[._-]\d+)+(?:[A-Za-z]+\d*)?$", re.I)
 _IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9._-]*@[0-9][A-Za-z0-9._-]*$")
 _MODEL_CODE = re.compile(r"^[A-Za-z]+-\d+$")
+# Phone numbers are recognized before the generic math/version rules.  Keep
+# the grammar deliberately conservative: require a country-code marker or
+# conventional grouped domestic digits, so dates such as 2029/02/02 remain
+# NUMBER spans.
+_PHONE_SEGMENT = (
+    r"(?:\+\d{1,3}[-\s]?\d{6,}|"
+    r"\(\+\d{1,3}\)\s*\d{6,}|"
+    r"0\d{2,3}[-\s]\d{3,4}[-\s]\d{4}|"
+    r"0\d{9,})"
+)
+_PHONE = re.compile(rf"^{_PHONE_SEGMENT}(?:\s*/\s*{_PHONE_SEGMENT})?$")
+_HTML_ENTITY = re.compile(r"^&(?:#\d+|#x[0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]+);$")
+_ID_CARD = re.compile(r"^\d{17}[0-9Xx]$")
 # A percent suffix is a strong semantic boundary even when an upstream
 # tokenizer glues it to an English word (``English20%``).  Keep this narrow:
 # arbitrary alphanumeric product names remain one identifier/word span.
@@ -80,6 +97,22 @@ def _at_line_start(text: str, position: int) -> bool:
 
     line = text[:position].rsplit("\n", 1)[-1].rsplit("\r", 1)[-1]
     return not line.strip(" \t")
+
+
+def _at_inline_ordered_list_start(text: str, position: int) -> bool:
+    """Return whether a numbered marker starts an inline enumeration.
+
+    Markdown's block-list grammar requires a line start, but model prose often
+    emits compact enumerations such as ``以下几类：1. ...。2. ...`` without
+    newlines.  Treat only strong sentence/list separators as an inline list
+    boundary; a generic space is intentionally excluded so prose like
+    ``version 2. item`` remains literal.
+    """
+
+    if _at_line_start(text, position):
+        return True
+    prefix = text[:position].rstrip(" \t")
+    return bool(prefix and prefix[-1] in "：:。！？!?；;")
 
 
 def _compatibility_spelling(text: str) -> str:
@@ -184,10 +217,39 @@ def _tn_input(raw: str, kind: SpanKind) -> str:
         SpanKind.VERSION,
         SpanKind.EMAIL,
         SpanKind.URL,
+        SpanKind.PHONE,
+        SpanKind.ID_CARD,
         SpanKind.ENGLISH_WORD,
     }:
         return _compatibility_spelling(raw)
     return raw
+
+
+def _sanitize_url_for_tn(raw: str) -> str:
+    """Decode HTML character references embedded in a URL span.
+
+    URL punctuation remains intact, but formatting entities such as
+    ``&#x20;`` must not be exposed to WeText as literal ``#x20`` digits.  A
+    missing semicolon is accepted for compatibility with common HTML output.
+    """
+
+    value = html.unescape(raw)
+
+    def decode_hex(match: re.Match[str]) -> str:
+        try:
+            return chr(int(match.group(1), 16))
+        except (ValueError, OverflowError):
+            return match.group(0)
+
+    def decode_dec(match: re.Match[str]) -> str:
+        try:
+            return chr(int(match.group(1), 10))
+        except (ValueError, OverflowError):
+            return match.group(0)
+
+    value = re.sub(r"&#x([0-9A-Fa-f]+);?", decode_hex, value)
+    value = re.sub(r"&#([0-9]+);?", decode_dec, value)
+    return value.rstrip()
 
 
 @dataclass
@@ -213,6 +275,11 @@ class IncrementalTextCommitter:
     def __init__(self, config: TextNormalizationConfig | None = None, *, adapter: WetextAdapter | None = None):
         self.config = config or TextNormalizationConfig()
         self.adapter = adapter or WetextAdapter()
+        self._detector = SpanDetector(self._classify)
+        self._candidate_resolver = CandidateResolver(
+            self.adapter.backend,
+            nbest=getattr(self.config, "candidate_nbest", 8),
+        )
         self.raw_cursor = 0
         self.committed_raw_end = 0
         self.committed_spoken_text = ""
@@ -293,10 +360,27 @@ class IncrementalTextCommitter:
     def next_deadline(self) -> float | None:
         if not self._pending.raw:
             return None
+        # A transport packet may hold the last digit temporarily while it
+        # checks whether a keycap marker follows (``2`` plus U+20E3).  Do not let
+        # the semantic deadline commit that digit before the next packet can
+        # extend an ordinary number (``25``); the explicit final flush still
+        # closes it normally.  This keeps emoji filtering from changing TN
+        # semantics and prevents a split number from reaching the cursor
+        # labelizer as two unrelated spans.
+        if self._is_provisional_single_digit():
+            return None
         return min(
             self._pending.first_at + self.config.semantic_max_wait_ms / 1000.0,
             self._pending.last_at + self.config.semantic_idle_wait_ms / 1000.0,
         )
+
+    def _is_provisional_single_digit(self) -> bool:
+        """Whether the open numeric span needs one more input boundary."""
+
+        if self._pending.kind not in (SpanKind.NUMBER, SpanKind.ORDINAL):
+            return False
+        raw = _compatibility_spelling(self._pending.raw).strip()
+        return len(raw) == 1 and raw.isdigit()
 
     def feed(
         self,
@@ -901,12 +985,39 @@ class IncrementalTextCommitter:
                     self._pending.end = source_pos + 1
                     self._pending.last_at = now
                     continue
+                # Keep a country-code prefix provisional until its closing
+                # parenthesis; otherwise ``(+86)191...`` is split before the
+                # PHONE classifier sees the complete spelling.
+                if ch == "+" and self._pending.raw == "(":
+                    self._pending.raw += ch
+                    self._pending.end = source_pos + 1
+                    self._pending.last_at = now
+                    continue
+                if (
+                    (ch.isdigit() or lex_ch.isdigit())
+                    and self._pending.raw.startswith("(+")
+                    and ")" not in self._pending.raw
+                ):
+                    self._pending.raw += ch
+                    self._pending.end = source_pos + 1
+                    self._pending.last_at = now
+                    continue
                 if ch.isdigit() or lex_ch.isdigit() or ch in "+-(":
                     self._leading_paren_candidate = False
                     self._pending.raw += ch
                     self._pending.end = source_pos + 1
                     self._pending.last_at = now
                     self._pending.kind = SpanKind.MATH
+                    continue
+                if (
+                    ch == ")"
+                    and self._pending.raw.startswith("(+")
+                    and self._pending.raw[2:].isdigit()
+                ):
+                    self._pending.raw += ch
+                    self._pending.end = source_pos + 1
+                    self._pending.last_at = now
+                    self._pending.kind = self._classify(self._pending.raw)
                     continue
                 self._leading_paren_candidate = False
                 self._pending.raw = self._pending.raw[:1]
@@ -964,6 +1075,14 @@ class IncrementalTextCommitter:
                     self._flush_plain()
                     self._pending = self._open_pending(
                         ch, source_pos, source_pos + 1, SpanKind.NUMBER, now
+                    )
+                elif ch == "&":
+                    # Keep an HTML character reference together until its
+                    # semicolon so ``&#x20;`` can be decoded as a space rather
+                    # than sending the embedded digits through TN.
+                    self._flush_plain()
+                    self._pending = self._open_pending(
+                        ch, source_pos, source_pos + 1, SpanKind.ENGLISH_WORD, now
                     )
                 elif lex_ch.isspace() or unicodedata.category(lex_ch).startswith("P") and lex_ch not in "%$@#":
                     self._emit_plain(ch, source_pos)
@@ -1028,6 +1147,19 @@ class IncrementalTextCommitter:
                 SpanKind.ORDINAL,
                 SpanKind.MATH,
             ):
+                # A sentence separator is not enough language evidence for a
+                # numeric span at the stream head (``99%，我...``).  Retain
+                # it as a deferred boundary so the following Chinese/Latin
+                # context can select the correct TN graph instead of forcing
+                # an irreversible literal fallback at the comma.
+                if (
+                    self._pending.kind in (SpanKind.NUMBER, SpanKind.ORDINAL)
+                    and ch in "，,。！？!?；;：:"
+                    and self._resolve_language(self._pending, None) == "unknown"
+                ):
+                    self._pending_gap.append((ch, source_pos))
+                    self._pending.last_at = now
+                    continue
                 can_extend_math = (
                     self._pending.kind == SpanKind.NUMBER
                     and (
@@ -1086,7 +1218,7 @@ class IncrementalTextCommitter:
             if (
                 lex_ch in _RIGHT_BOUNDARY_CHARS
                 and self._pending.kind
-                not in (SpanKind.JSON, SpanKind.MARKDOWN, SpanKind.URL)
+                not in (SpanKind.JSON, SpanKind.MARKDOWN, SpanKind.URL, SpanKind.PHONE)
             ):
                 # A link/image may be embedded directly after a word.  Keep
                 # its closing parenthesis in the same unresolved run so the
@@ -1195,6 +1327,25 @@ class IncrementalTextCommitter:
                 self._pending.end = source_pos + 1
                 self._pending.last_at = now
                 self._pending.kind = self._classify(self._pending.raw)
+            elif (
+                ch == ";"
+                and self._pending.raw.startswith("&")
+            ):
+                self._pending.raw += ch
+                self._pending.end = source_pos + 1
+                self._pending.last_at = now
+                self._close_pending()
+            elif (
+                lex_ch in "，,。！？!?；;：:"
+                and self._pending.kind in (SpanKind.NUMBER, SpanKind.ORDINAL)
+                and self._resolve_language(self._pending, None) == "unknown"
+            ):
+                # Do not close a language-ambiguous number merely because a
+                # separator arrived.  The next packet may provide the script
+                # evidence needed to normalize it (or the deadline will
+                # perform the documented fallback).
+                self._pending_gap.append((ch, source_pos))
+                self._pending.last_at = now
             elif lex_ch in "。！？；,，.!?;:" and self._pending.kind != SpanKind.URL:
                 if lex_ch == "!" and self._pending.kind is SpanKind.ENGLISH_WORD:
                     # Defer the punctuation long enough to distinguish an
@@ -1207,12 +1358,14 @@ class IncrementalTextCommitter:
                 if (
                     lex_ch == "."
                     and self._pending.kind is SpanKind.NUMBER
-                    and _at_line_start(self._raw, self._pending.start)
+                    and _at_inline_ordered_list_start(self._raw, self._pending.start)
                     and _compatibility_spelling(self._pending.raw).isdigit()
                 ):
-                    # Provisional ordered-list marker (``1.``).  A following
-                    # digit turns it back into a decimal/date; whitespace
-                    # confirms Markdown and strips the marker.
+                    # Provisional ordered-list marker (``1.``).  This also
+                    # covers compact inline enumerations after strong
+                    # separators (``：1. ...。2. ...``).  A following digit
+                    # turns it back into a decimal/date; whitespace confirms
+                    # Markdown and strips the marker.
                     self._pending.raw += ch
                     self._pending.end = source_pos + 1
                     self._pending.last_at = now
@@ -1306,7 +1459,43 @@ class IncrementalTextCommitter:
         lang = self._resolve_language(p, lang_hint)
         route_lang = lang if lang in ("zh", "en") else ""
         backend_raw = _tn_input(p.raw, p.kind)
+        if p.kind is SpanKind.URL:
+            backend_raw = _sanitize_url_for_tn(backend_raw)
         mapping: tuple[tuple[int, int], ...] | None = None
+        candidate_count = 0
+        best_cost = None
+        cost_margin = None
+        decision_source = "rule"
+        semantic_family = self._detector.family(p.kind)
+        if route_lang and p.kind in (SpanKind.NUMBER, SpanKind.ORDINAL):
+            try:
+                from .types import SemioticSpan
+                candidates = self._candidate_resolver.resolve(
+                    SemioticSpan(
+                        span_id=p.span_id,
+                        raw_start=p.start,
+                        raw_end=p.end,
+                        raw_text=p.raw,
+                        kind=p.kind,
+                        closed=True,
+                        family=semantic_family,
+                        closure_reason=reason,
+                        extendable=False,
+                    ),
+                    language=LanguageKind(route_lang),
+                    backend_text=backend_raw,
+                    domain=p.kind,
+                )
+                candidate_count = candidates.candidate_count
+                best_cost = candidates.best_cost
+                cost_margin = candidates.cost_margin
+                decision_source = candidates.source
+            except Exception:
+                decision_source = "resolver_error"
+        order_id = (
+            p.kind in (SpanKind.NUMBER, SpanKind.IDENTIFIER)
+            and bool(re.search(r"订单号(?:为|是)?\s*$", self._raw[: p.start]))
+        )
 
         # The committer decides only whether a span is safe to close.  The
         # actual TN grammar is delegated to wetext's official stream API.
@@ -1328,8 +1517,106 @@ class IncrementalTextCommitter:
             and bool(re.fullmatch(r"[-+>]\s*|\d{1,4}[.)]\s*", p.raw))
         )
         output_span_kind = SpanKind.MARKDOWN if projected_markdown else p.kind
-        if p.kind is SpanKind.JSON or projected_markdown:
-            value = project_readable(p.raw)
+        if p.kind is SpanKind.ID_CARD:
+            id_lang = (
+                "zh"
+                if any(_is_han(ch) for ch in self._raw[: p.start])
+                else route_lang or "zh"
+            )
+            value = self.adapter.normalize_id_card(
+                backend_raw,
+                lang=id_lang,
+            )
+            if not value:
+                value = self._safe_fallback(
+                    backend_raw,
+                    lang=id_lang,
+                    kind=SpanKind.ID_CARD,
+                )
+            kind = CommitKind.NORMALIZED if value != p.raw else CommitKind.FALLBACK
+        elif _HTML_ENTITY.fullmatch(p.raw):
+            # Decode entities only after the raw span is closed.  The source
+            # interval remains the original entity, while the spoken value is
+            # its decoded character (``&#x20;`` -> a real space).
+            value = html.unescape(p.raw)
+            kind = CommitKind.LITERAL
+        elif order_id:
+            # An order number is an identifier, not a quantity.  Separate its
+            # digits before calling WeText so ``188888`` is read as
+            # ``一八八八八八`` rather than ``十八万八千八百八十八``.
+            value = self.adapter.normalize_digit_sequence(
+                backend_raw,
+                lang=route_lang or "zh",
+            )
+            if not value:
+                value = self._safe_fallback(
+                    backend_raw,
+                    lang=route_lang or "zh",
+                    kind=SpanKind.IDENTIFIER,
+                )
+            kind = CommitKind.NORMALIZED if value != p.raw else CommitKind.FALLBACK
+        elif p.kind is SpanKind.PHONE:
+            # WeText's generic grammar treats ``+``/``-`` as arithmetic.  The
+            # phone adapter first canonicalizes each number into digit tokens,
+            # then delegates their verbalization to WeText's language graph.
+            value = self.adapter.normalize_phone(
+                backend_raw,
+                lang=route_lang or "zh",
+            )
+            if not value:
+                value = self._safe_fallback(
+                    backend_raw,
+                    lang=route_lang or "zh",
+                    kind=SpanKind.PHONE,
+                )
+            kind = CommitKind.NORMALIZED if value != p.raw else CommitKind.FALLBACK
+        elif p.kind is SpanKind.JSON or projected_markdown:
+            ordered_marker = re.fullmatch(r"(\d{1,4})[.)]\s*", p.raw)
+            inline_ordered = ordered_marker is not None and not _at_line_start(
+                self._raw, p.start
+            )
+            if inline_ordered:
+                # Compact enumerations in generated prose (``：1. ...。2. ...``)
+                # carry semantic numbering.  Preserve that information while
+                # replacing the Markdown dot with a Chinese enumeration pause.
+                # True line-start Markdown markers remain formatting-only and
+                # continue to be suppressed by ``project_readable``.
+                number = ordered_marker.group(1)
+                marker_lang = lang if lang in ("zh", "en") else "zh"
+                if marker_lang == "zh":
+                    # Convert Markdown's formatting dot to the Chinese
+                    # enumeration punctuation before TN.  WeText then owns
+                    # the numeric verbalization (``1、`` -> ``一、``), just as
+                    # it does for the surrounding numeric spans.
+                    marker_input = f"{number}、"
+                    value = self.adapter.normalize_closed_stream(
+                        marker_input,
+                        lang=marker_lang,
+                        kind=SpanKind.NUMBER,
+                    )
+                    if not value or value == marker_input:
+                        spoken_number = self._safe_fallback(
+                            number,
+                            lang=marker_lang,
+                            kind=SpanKind.NUMBER,
+                        )
+                        value = f"{spoken_number}、"
+                else:
+                    marker_input = f"{number}, "
+                    value = self.adapter.normalize_closed_stream(
+                        marker_input,
+                        lang=marker_lang,
+                        kind=SpanKind.NUMBER,
+                    )
+                    if not value or value == marker_input:
+                        spoken_number = self._safe_fallback(
+                            number,
+                            lang=marker_lang,
+                            kind=SpanKind.NUMBER,
+                        )
+                        value = f"{spoken_number}, "
+            else:
+                value = project_readable(p.raw)
             # A late structured suffix is still projected so formatting and
             # transport syntax cannot leak into speech.  Mark it as fallback
             # when it arrived behind a prior fence, making the degradation
@@ -1421,6 +1708,7 @@ class IncrementalTextCommitter:
                     value,
                     lang=route_lang,
                     kind=p.kind,
+                    raw_end=p.end,
                 )
         if value is None:
             value = (
@@ -1446,6 +1734,13 @@ class IncrementalTextCommitter:
             LanguageKind.EN if lang == "en" else LanguageKind.ZH if lang == "zh" else LanguageKind.UNKNOWN,
             raw_end=p.end or p.start + len(p.raw),
             mapping=mapping,
+            semantic_family=semantic_family,
+            decision_source=decision_source,
+            candidate_count=candidate_count,
+            best_cost=best_cost,
+            cost_margin=cost_margin,
+            closure_reason=reason,
+            fallback_reason=reason if kind is CommitKind.FALLBACK else "",
         )
         self.committed_raw_end = max(self.committed_raw_end, p.end or p.start + len(p.raw))
         self.committed_spoken_text += value
@@ -1546,6 +1841,7 @@ class IncrementalTextCommitter:
         *,
         lang: str,
         kind: SpanKind,
+        raw_end: int | None = None,
     ) -> tuple[tuple[int, int], ...]:
         """Convert optional public WeText mappings to session coordinates.
 
@@ -1555,17 +1851,28 @@ class IncrementalTextCommitter:
         coarse interval fallback.
         """
 
+        source_end = start + len(raw) if raw_end is None else int(raw_end)
+        coarse = ((start, source_end),)
+        if source_end < start:
+            return coarse
+        # ``raw`` is the backend spelling, which may be longer than the
+        # original source span after compatibility expansion (for example
+        # ``℃`` -> ``°C``).  Detailed backend offsets cannot be projected back
+        # to Unicode source coordinates without an explicit alignment map.
+        # Keep the owner span conservative in the original raw domain.
+        if raw_end is not None and source_end - start != len(raw):
+            return coarse
         try:
             result = self.adapter.normalize_with_mapping(raw, lang=lang, kind=kind)
         except Exception:
-            return ((start, start + len(raw)),)
+            return coarse
         if isinstance(result, (list, tuple)):
             result = result[0] if result else None
         output = getattr(result, "output_text", None)
         if output is None:
             output = getattr(result, "text", None)
         if output is not None and str(output) != value:
-            return ((start, start + len(raw)),)
+            return coarse
         mappings = getattr(result, "mappings", None)
         if mappings is None:
             mappings = getattr(result, "mapping", None)
@@ -1583,7 +1890,12 @@ class IncrementalTextCommitter:
                     converted.append((start + int(input_start), start + int(input_end)))
             except (TypeError, ValueError):
                 converted = []
-        return tuple(converted) or ((start, start + len(raw)),)
+        if converted and all(
+            start <= item_start <= item_end <= source_end
+            for item_start, item_end in converted
+        ):
+            return tuple(converted)
+        return coarse
 
     def _emit_plain(self, ch: str, source_start: int | None = None) -> None:
         if not self._plain_buffer:
@@ -1629,6 +1941,14 @@ class IncrementalTextCommitter:
         language: LanguageKind | None = None,
         raw_end: int | None = None,
         mapping: tuple[tuple[int, int], ...] | None = None,
+        semantic_family: SemanticFamily = SemanticFamily.PROSE,
+        decision_source: str = "",
+        candidate_count: int = 0,
+        best_cost: float | None = None,
+        cost_margin: float | None = None,
+        calibrated_confidence: float | None = None,
+        closure_reason: str = "",
+        fallback_reason: str = "",
     ) -> TextCommit:
         end = start + len(raw) if raw_end is None else raw_end
         # A fence identifies an append-only commit, not an internal lexer
@@ -1652,6 +1972,14 @@ class IncrementalTextCommitter:
             }.get(self._current_lang, LanguageKind.UNKNOWN),
             commit_id=self._next_commit_id,
             span_id=getattr(self._pending, "span_id", 0),
+            semantic_family=semantic_family,
+            decision_source=decision_source,
+            candidate_count=candidate_count,
+            best_cost=best_cost,
+            cost_margin=cost_margin,
+            calibrated_confidence=calibrated_confidence,
+            closure_reason=closure_reason,
+            fallback_reason=fallback_reason,
         )
         # The frontier is a guard, not a source of provisional text: only a
         # fully formed commit enters it.  Keep a separate source string because
@@ -1666,6 +1994,10 @@ class IncrementalTextCommitter:
         # Classify compatibility spellings (e.g. ``２０％``) using their
         # canonical form while preserving the original raw span in commits.
         raw = _compatibility_spelling(raw)
+        if _ID_CARD.fullmatch(raw):
+            return SpanKind.ID_CARD
+        if _PHONE.fullmatch(raw):
+            return SpanKind.PHONE
         # Transport-like identifiers must win before the generic operator
         # check: query strings contain ``=`` and were previously mislabeled as
         # mathematical expressions (which also changed their fallback).

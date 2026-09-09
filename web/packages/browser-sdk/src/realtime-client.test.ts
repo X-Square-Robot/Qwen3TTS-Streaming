@@ -176,6 +176,37 @@ describe("RealtimeTTSClient", () => {
     expect(socket.sent.at(-1)?.type).toBe("qwen.response.terminal_ack");
   });
 
+  it("keeps progress basis metadata for native-versus-EMA routing", async () => {
+    const {client, socket} = setup();
+    const progress: unknown[] = [];
+    client.onEvent((event) => {
+      if (event.type === "progress") progress.push(event);
+    });
+    await client.connect();
+    const run = await client.synthesize("你好", options);
+    await Promise.resolve();
+    socket.receive({
+      type: "qwen.text_progress",
+      text: "你好",
+      meta: {
+        output_sample_end: "24",
+        progress_basis: "native_cursor_v1",
+        progress_quality: "native",
+      },
+      qwen_delivery_seq: 1,
+    });
+    socket.receive({
+      type: "response.done",
+      qwen_delivery_seq: 2,
+      response: {id: "resp_1", status: "completed"},
+    });
+    await run.done;
+    expect(progress).toMatchObject([{
+      type: "progress",
+      meta: {progress_basis: "native_cursor_v1", progress_quality: "native"},
+    }]);
+  });
+
   it("uses contiguous incremental sequence numbers and playback ACK", async () => {
     const {client, socket} = setup();
     await client.connect();

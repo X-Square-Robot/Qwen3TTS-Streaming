@@ -16,6 +16,7 @@ from enum import Enum, auto
 from typing import Any, Optional
 
 from .observability import ObsLevel
+from .native_cursor import CursorLabelPlan
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +93,9 @@ class TextNormalizationConfig:
     # ``closed_span`` is the safe production mode.  Prefix snapshots from
     # WeText are observations only and never become append-only commits.
     commit_mode: str = "closed_span"
+    candidate_nbest: int = 8
+    calibration_profile: str = ""
+    ambiguity_policy: str = "wait"
 
 
 @dataclass
@@ -197,6 +201,7 @@ class RequestType(Enum):
     APPEND_TOKENS = auto()
     SEGMENT_TOKENS_DONE = auto()  # per-segment: no more tokens for this segment
     SESSION_TOKENS_DONE = auto()  # session-level: upstream has finished all tokens
+    UPDATE_CURSOR_PLAN = auto()  # replace the CPU-owned plan before a decode step
     CANCEL_SESSION = auto()
 
 
@@ -226,6 +231,10 @@ class EngineRequest:
     append_eos: bool = True
     # back-reference so engine thread can push results to the right queue
     result_queue: Optional[asyncio.Queue] = None
+    cursor_label_plan: Optional[CursorLabelPlan] = None
+    # Optional machine-readable reason for lifecycle cancellation.  This stays
+    # on the internal request and is surfaced only in terminal metadata.
+    cancel_reason: Optional[str] = None
 
     # -- Lifecycle timestamps (monotonic clock) --
     enqueued_at: Optional[float] = None  # set by Dispatcher before put()

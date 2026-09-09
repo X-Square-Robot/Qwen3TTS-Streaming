@@ -45,6 +45,8 @@ class SpeechStateTransfer(str, Enum):
     RECONSTRUCTION_APPROXIMATE = "reconstruction_approximate"
 
 
+
+
 def _coerce_enum(value: Any, enum_type: type[Enum], *, field_name: str) -> Enum:
     if isinstance(value, enum_type):
         return value

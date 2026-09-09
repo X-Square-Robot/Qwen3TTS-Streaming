@@ -272,7 +272,7 @@ export class RealtimeTTSClient {
       this.trackDelivery(event);
       const meta = record(event.meta);
       const sample = toBigInt(meta.output_sample_end, this.active.sampleCursor);
-      this.emit({type: "progress", text: String(event.text ?? ""), sample});
+      this.emit({type: "progress", text: String(event.text ?? ""), sample, meta});
       return;
     }
     if (type === "error") {

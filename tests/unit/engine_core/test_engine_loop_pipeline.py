@@ -305,6 +305,51 @@ class TestSessionCancel:
         assert slot.slot_id not in engine_loop._seg_by_slot
         assert StubExecutor.kv_pool.free_count == 4
 
+    def test_duplicate_start_tokens_drops_replaced_cursor_continuation(self, model_config):
+        inbox = queue.Queue()
+        loop = _ImmediateLoop()
+
+        class StubExecutor:
+            kv_pool = KVCachePool(
+                max_slots=4,
+                config=model_config,
+                device=torch.device("cpu"),
+                preallocate=False,
+            )
+            _device = torch.device("cpu")
+            _config = model_config
+
+        engine_loop = EngineLoop(
+            engine_inbox=inbox,
+            async_loop=loop,
+            executor=StubExecutor(),
+            max_batch_size=4,
+        )
+        engine_loop._handle_request(
+            EngineRequest(type=RequestType.NEW_SESSION, session_id="s1")
+        )
+        engine_loop._handle_request(
+            EngineRequest(
+                type=RequestType.START_TOKENS,
+                session_id="s1",
+                segment_idx=0,
+                token_ids=[1],
+            )
+        )
+        group = engine_loop._groups["s1"]
+        group.extension_cursor_states[0] = object()
+
+        engine_loop._handle_request(
+            EngineRequest(
+                type=RequestType.START_TOKENS,
+                session_id="s1",
+                segment_idx=0,
+                token_ids=[2],
+            )
+        )
+
+        assert group.extension_cursor_states == {}
+
     def test_failed_prefill_cleanup_releases_slot_and_removes_session(
         self, model_config
     ):

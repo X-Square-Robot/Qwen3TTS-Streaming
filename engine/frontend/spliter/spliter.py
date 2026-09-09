@@ -24,7 +24,7 @@ from collections import deque
 import logging
 import unicodedata
 from dataclasses import dataclass
-from typing import Deque, List, Optional, Tuple
+from typing import Deque, Iterable, List, Optional, Tuple
 
 from ...core.types import SegmentToken
 from .driver import (
@@ -118,6 +118,8 @@ class _PendingToken:
     token: SegmentToken
     group_key: Optional[int]
     boundary: bool = False
+    boundary_before: bool = False
+    forced_boundary: bool = False
     plan: Optional["_PresplitPlan"] = None
 
 
@@ -268,6 +270,12 @@ class Spliter:
     def safety_ratio(self) -> float:
         """Current monotonic ratio used for future capacity planning."""
         return self._ratios.safety_ratio
+
+    @property
+    def current_thresholds(self) -> SplitThresholds:
+        """Return the thresholds used for the next newly opened segment."""
+
+        return self._make_thresholds()
 
     def ema_ratio_for_segment(self, segment_idx: int) -> float:
         """Return the EMA snapshot frozen when *segment_idx* opened.
@@ -627,6 +635,9 @@ class Spliter:
     def set_full_text(
         self,
         tokens: List[SegmentToken],
+        *,
+        force_boundary_indices: Optional[Iterable[int]] = None,
+        force_boundary_before_indices: Optional[Iterable[int]] = None,
     ) -> List[SegmentAction]:
         """Offline mode: set complete token sequence, pre-split, drive all.
 
@@ -638,6 +649,15 @@ class Spliter:
         self._next_output_group_idx = 0
         self._group_output_idx.clear()
         self._enqueue_presplit_groups(tokens)
+        pending = list(self._pending)
+        for index in force_boundary_indices or ():
+            if 0 <= int(index) < len(pending):
+                pending[int(index)].boundary = True
+                pending[int(index)].forced_boundary = True
+        for index in force_boundary_before_indices or ():
+            if 0 <= int(index) < len(pending):
+                pending[int(index)].boundary_before = True
+        self._pending = deque(pending)
         self._input_complete = True
 
         return self._drive_events()
@@ -773,6 +793,11 @@ class Spliter:
                     plan=block_plan,
                     first_group_key=next_key,
                 )
+                for old_pending, new_pending in zip(block, block_pending):
+                    new_pending.boundary_before = old_pending.boundary_before
+                    new_pending.forced_boundary = old_pending.forced_boundary
+                    if new_pending.forced_boundary:
+                        new_pending.boundary = True
                 rebuilt.extend(block_pending)
                 if self._record_decisions:
                     self._split_decisions.append(
@@ -789,20 +814,22 @@ class Spliter:
                 continue
 
             # This packet was already planned at least as conservatively.
-            current_group: List[SegmentToken] = []
+            current_group: List[_PendingToken] = []
             for pt in block:
-                current_group.append(pt.token)
+                current_group.append(pt)
                 if not pt.boundary:
                     continue
                 last = len(current_group) - 1
                 rebuilt.extend(
                     _PendingToken(
-                        token,
+                        pending.token,
                         next_key,
-                        boundary=(index == last),
+                        boundary=(index == last) or pending.forced_boundary,
+                        boundary_before=pending.boundary_before,
+                        forced_boundary=pending.forced_boundary,
                         plan=old_plan,
                     )
-                    for index, token in enumerate(current_group)
+                    for index, pending in enumerate(current_group)
                 )
                 next_key += 1
                 current_group = []
@@ -815,6 +842,9 @@ class Spliter:
     def push_group_tokens(
         self,
         tokens: List[SegmentToken],
+        *,
+        force_boundary: bool = False,
+        force_boundary_before: bool = False,
     ) -> List[SegmentAction]:
         """Queue one complete long-segment unit for group-level pre-splitting.
 
@@ -825,7 +855,14 @@ class Spliter:
         """
         if not tokens:
             return []
+        pending_start = len(self._pending)
         self._enqueue_presplit_groups(tokens)
+        added = list(self._pending)[pending_start:]
+        if added and force_boundary_before:
+            added[0].boundary_before = True
+        if added and force_boundary:
+            added[-1].boundary = True
+            added[-1].forced_boundary = True
         return self._drive_events()
 
     # ------------------------------------------------------------------
@@ -872,6 +909,18 @@ class Spliter:
         flushed = False
 
         while self._pending and self._pending[0].group_key == cur_key:
+            if self._pending[0].boundary_before and driver.token_count > 0:
+                end_actions, _ = self._results_to_actions(
+                    active_idx,
+                    driver.feed(SpliterEvent(type=ET.END)),
+                    group_idx=group_idx,
+                    local_idx=local_idx,
+                    group_final=is_stream,
+                )
+                out.extend(end_actions)
+                self._finalize_segment(active_idx, out, group_exhausted=True)
+                flushed = True
+                break
             pt = self._pending.popleft()
             evt = self._make_event(
                 pt.token.token_id, pt.token.text, pt.token.punct_level
@@ -1020,6 +1069,9 @@ class Spliter:
     def feed_tokens(
         self,
         tokens: List[SegmentToken],
+        *,
+        force_boundary: bool = False,
+        force_boundary_before: bool = False,
     ) -> List[SegmentAction]:
         """Streaming mode: queue tokens (each its own group) and drive.
 
@@ -1027,13 +1079,22 @@ class Spliter:
         the next segment opens if concurrency allows, otherwise tokens wait in
         the shared pending queue. The driver decides flush points (no boundary).
         """
-        for tok in self._coerce_tokens(tokens):
+        coerced = self._coerce_tokens(tokens)
+        for tok in coerced:
             self._pending.append(_PendingToken(tok, None, boundary=False))
+        if coerced and force_boundary_before:
+            self._pending[-len(coerced)].boundary_before = True
+        if coerced and force_boundary:
+            self._pending[-1].boundary = True
+            self._pending[-1].forced_boundary = True
         return self._drive_events()
 
     def feed_auto(
         self,
         tokens: List[SegmentToken],
+        *,
+        force_boundary: bool = False,
+        force_boundary_before: bool = False,
     ) -> List[SegmentAction]:
         """Auto mode: route a packet by size; Stage 1 engages only when long.
 
@@ -1070,6 +1131,11 @@ class Spliter:
         else:
             for tok in coerced:  # fits: transparent stream (coalesce)
                 self._pending.append(_PendingToken(tok, None, boundary=False))
+        if coerced and force_boundary_before:
+            self._pending[-len(coerced)].boundary_before = True
+        if coerced and force_boundary:
+            self._pending[-1].boundary = True
+            self._pending[-1].forced_boundary = True
         return self._drive_events()
 
     def input_done(self) -> List[SegmentAction]:

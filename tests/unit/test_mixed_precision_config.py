@@ -128,6 +128,34 @@ class TestBuildManifestForExport:
         assert profile["cp_precision"] == "fp32"
         assert profile["code2wav_precision"] == "bf16"
 
+    def test_speech_state_identity_is_explicitly_emitted(self):
+        from triton_manifest_io import build_manifest_for_export
+
+        manifest = build_manifest_for_export(
+            variant="custom-1.7b",
+            weights_config=self._minimal_weights_config(),
+            code2wav_layout=self._minimal_code2wav_layout(),
+            speech_state={
+                "model_fingerprint": "model-v1",
+                "runtime_fingerprint": "runtime-v1",
+            },
+        )
+        assert manifest["speech_state"] == {
+            "model_fingerprint": "model-v1",
+            "runtime_fingerprint": "runtime-v1",
+        }
+
+    def test_partial_speech_state_identity_is_rejected(self):
+        from triton_manifest_io import build_manifest_for_export
+
+        with pytest.raises(ValueError, match="requires model_fingerprint"):
+            build_manifest_for_export(
+                variant="custom-1.7b",
+                weights_config=self._minimal_weights_config(),
+                code2wav_layout=self._minimal_code2wav_layout(),
+                speech_state={"model_fingerprint": "model-v1"},
+            )
+
 
 class TestResolveSubmodelPrecisions:
     """Tests for resolve_submodel_precisions helper."""

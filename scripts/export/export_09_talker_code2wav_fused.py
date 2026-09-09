@@ -52,8 +52,10 @@ import torch
 import torch.nn as nn
 
 _scripts_export = Path(__file__).resolve().parent
+_repo_root = _scripts_export.parent.parent
 sys.path.insert(0, str(_scripts_export))
 sys.path.insert(0, str(_scripts_export.parent / "python"))
+sys.path.insert(0, str(_repo_root))
 
 from code2wav_streaming import (
     COLD_START_DUMMY_PAST_LEN,
@@ -68,6 +70,7 @@ from native_cursor_modules import (
     CursorStreamingStep,
     build_cursor_head_from_checkpoint,
 )
+from engine.core.native_cursor_labelizer import vocab_fingerprint
 from triton_manifest_io import build_manifest_for_export
 
 from utils import (
@@ -91,6 +94,21 @@ from utils import (
 logger = logging.getLogger("onnx_export")
 
 FUSED_CHUNK_T = 1
+
+
+def resolve_fused_tokenizer_path(
+    model_path: Path, models_dir: Optional[str] = None
+) -> Path:
+    """Resolve the tokenizer that belongs to the model being exported.
+
+    Released X2 checkpoints are self-contained and ship ``speech_tokenizer``
+    next to the Talker weights.  Keep the shared models directory as a
+    compatibility fallback for the older split-model layout.
+    """
+    bundled = model_path / "speech_tokenizer"
+    if bundled.is_dir():
+        return bundled
+    return resolve_tokenizer_path(models_dir)
 
 
 class TalkerCode2WavFusedONNX(nn.Module):
@@ -315,12 +333,13 @@ def _export_talker_code2wav_fused_onnx(
     triton_io_float_dtype: str = "bf16",
     cursor_head_path: Optional[str] = None,
     cursor_max_labels: int = 512,
+    tokenizer_path: Optional[Path] = None,
 ) -> str:
     if cursor_head_path and variant != "custom-1.7b":
         raise ValueError(
             "native cursor export is limited to the validated custom-1.7b variant"
         )
-    tokenizer_path = resolve_tokenizer_path(None)
+    tokenizer_path = tokenizer_path or resolve_tokenizer_path(None)
     tokenizer_model = load_speech_tokenizer(
         tokenizer_path, device=device, dtype=torch.float32
     )
@@ -364,14 +383,9 @@ def _export_talker_code2wav_fused_onnx(
             checkpoint_for_vocab = torch.load(
                 cursor_head_path, map_location="cpu", weights_only=False
             )
-            ordered_vocab = sorted(
-                ((str(k), int(v)) for k, v in checkpoint_for_vocab["vocab"].items()),
-                key=lambda item: item[1],
+            cursor_meta["vocab_sha256"] = vocab_fingerprint(
+                checkpoint_for_vocab["vocab"]
             )
-            payload = json.dumps(
-                ordered_vocab, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-            ).encode("utf-8")
-            cursor_meta["vocab_sha256"] = hashlib.sha256(payload).hexdigest()
         cursor_step = CursorStreamingStep(cursor_head.to(device).eval())
         fused = TalkerCode2WavCursorFusedONNX(
             talker_fused,
@@ -525,23 +539,22 @@ def _export_talker_code2wav_fused_onnx(
         "talker_past_kv",
         "c2w_past_kv",
     ]
+    cursor_input_names = [
+        "cursor_label_ids",
+        "cursor_label_count",
+        "cursor_active",
+        "cursor_mu_in",
+        "cursor_frames_since_advance_in",
+        "cursor_delta_history_in",
+        "cursor_conv_history_in",
+        "cursor_last_trunk_input_in",
+        "cursor_seen_frames_in",
+        "cursor_text_start_frame",
+        "cursor_override_valid",
+        "cursor_override_mu",
+    ]
     if cursor_meta is not None:
-        input_names.extend(
-            [
-                "cursor_label_ids",
-                "cursor_label_count",
-                "cursor_active",
-                "cursor_mu_in",
-                "cursor_frames_since_advance_in",
-                "cursor_delta_history_in",
-                "cursor_conv_history_in",
-                "cursor_last_trunk_input_in",
-                "cursor_seen_frames_in",
-                "cursor_text_start_frame",
-                "cursor_override_valid",
-                "cursor_override_mu",
-            ]
-        )
+        input_names.extend(cursor_input_names)
     for name in conv_transconv_names_cold:
         input_names.append(f"c2w_{name}")
 
@@ -559,22 +572,21 @@ def _export_talker_code2wav_fused_onnx(
         output_names.append(f"c2w_new_conv_state_{i}")
     for i in range(NUM_TRANSCONV):
         output_names.append(f"c2w_new_transconv_overlap_{i}")
+    cursor_output_names = [
+        "cursor_valid",
+        "cursor_mu",
+        "cursor_delta",
+        "cursor_confidence",
+        "cursor_candidate_label",
+        "cursor_frames_since_advance",
+        "cursor_delta_history",
+        "cursor_conv_history",
+        "cursor_last_trunk_input",
+        "cursor_seen_frames",
+        "codec0",
+    ]
     if cursor_meta is not None:
-        output_names.extend(
-            [
-                "cursor_valid",
-                "cursor_mu",
-                "cursor_delta",
-                "cursor_confidence",
-                "cursor_candidate_label",
-                "cursor_frames_since_advance",
-                "cursor_delta_history",
-                "cursor_conv_history",
-                "cursor_last_trunk_input",
-                "cursor_seen_frames",
-                "codec0",
-            ]
-        )
+        output_names.extend(cursor_output_names)
 
     # ---- Dynamic axes ----
     dynamic_axes = {
@@ -682,8 +694,8 @@ def _export_talker_code2wav_fused_onnx(
             "cursor_head_sha256": str(cursor_meta.get("head_sha256", "")),
             "cursor_vocab_sha256": str(cursor_meta.get("vocab_sha256", "")),
             "cursor_rules_sha256": str(cursor_meta.get("rules_sha256", "")),
-            "input_names": input_names[12:24],
-            "output_names": output_names[-11:],
+            "input_names": list(cursor_input_names),
+            "output_names": list(cursor_output_names),
             "state_shapes": {
                 "conv_history": [B, int(cursor_meta["left_context"] + cursor_meta["right_context"]), int(cursor_head.d)],
                 "last_trunk_input": [B, int(cursor_head.d)],
@@ -866,6 +878,7 @@ def export_talker_code2wav_fused(
         triton_io_float_dtype=triton_io_float_dtype,
         cursor_head_path=cursor_head_path,
         cursor_max_labels=cursor_max_labels,
+        tokenizer_path=resolve_fused_tokenizer_path(model_path, models_dir),
     )
     del model
     if device != "cpu":

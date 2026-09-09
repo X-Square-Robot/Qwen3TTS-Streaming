@@ -162,6 +162,39 @@ _trtexec_precision_flags() {
     esac
 }
 
+# TensorRT may use TF32 kernels for FP32 matmul unless explicitly disabled.
+# That is fast, but it can flip near-tie CP sampling decisions even when the
+# manifest says fp32.  Fused plans with any explicit FP32 submodule therefore
+# disable TF32 by default; TRT_NO_TF32=0/1/auto remains an explicit escape hatch.
+_trtexec_no_tf32_flag() {
+    local requested="${TRT_NO_TF32:-auto}"
+    case "${requested,,}" in
+        1|true|yes|on)
+            echo "--noTF32"
+            return 0
+            ;;
+        0|false|no|off)
+            return 0
+            ;;
+        auto)
+            local precision
+            for precision in "$ENGINE_DTYPE" "$BACKBONE_PRECISION" "$CP_PRECISION" "$CODE2WAV_PRECISION"; do
+                case "${precision,,}" in
+                    fp32|float32)
+                        echo "--noTF32"
+                        return 0
+                        ;;
+                esac
+            done
+            return 0
+            ;;
+        *)
+            log_error "Unknown TRT_NO_TF32 value: $requested (use auto|0|1)"
+            return 1
+            ;;
+    esac
+}
+
 # _trtexec_io_format: echo IO format string for float tensors (e.g. bf16:chw)
 _trtexec_io_format() {
     case "$ENGINE_DTYPE" in
@@ -447,6 +480,8 @@ build_talker_code2wav_fused_trt() {
         return 0
     fi
     local prec_flag
+    local no_tf32_flag
+    no_tf32_flag=$(_trtexec_no_tf32_flag)
     local fused_io_py="${REPO_ROOT}/scripts/python/trt_fused_io_formats.py"
     local mf="$variant_dir/triton_manifest.json"
     local fused_io_in="" fused_io_out=""
@@ -504,6 +539,7 @@ build_talker_code2wav_fused_trt() {
     if [ -n "$fused_io_in" ] && [ -n "$fused_io_out" ]; then
         if ! _trtexec_run "$variant_dir" talker_code2wav_fused.onnx talker_code2wav_fused.engine -- \
             $prec_flag \
+            $no_tf32_flag \
             "${mixed_args[@]}" \
             --inputIOFormats="$fused_io_in" \
             --outputIOFormats="$fused_io_out" \
@@ -515,6 +551,7 @@ build_talker_code2wav_fused_trt() {
     else
         if ! _trtexec_run "$variant_dir" talker_code2wav_fused.onnx talker_code2wav_fused.engine -- \
             $prec_flag \
+            $no_tf32_flag \
             "${mixed_args[@]}" \
             --memPoolSize=workspace:8192 \
             "${profile_args[@]}"; then

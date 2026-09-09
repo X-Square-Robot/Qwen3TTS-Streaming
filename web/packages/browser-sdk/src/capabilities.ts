@@ -59,6 +59,16 @@ const capabilitiesSchema = z.object({
     icl_available: z.boolean().optional(),
   }).passthrough(),
   protocols: z.object({openai_realtime: realtimeSchema}).passthrough(),
+  native_cursor: z.object({
+    graph_enabled: z.boolean(),
+    progress_available: z.boolean(),
+    supported_progress_modes: z.array(z.string()),
+    reason: z.string().optional(),
+  }).passthrough().optional(),
+  speech_state: z.object({
+    supported: z.boolean(),
+    reason: z.string().optional(),
+  }).passthrough().optional(),
 }).passthrough();
 
 export function parseCapabilities(value: unknown): Capabilities {

@@ -19,6 +19,7 @@ from typing import Any, Optional
 from .speech_state import SpeechStateCapability
 from .types import EngineResult, SessionConfig, SessionState
 from .text_journal import CanonicalTextJournal
+from .native_cursor import CursorLabelPlan, slice_cursor_label_plan
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,33 @@ class Session:
     text_journal: Optional[CanonicalTextJournal] = None
     text_committer: Any = None
     audio_credit_estimator: Any = None
+    # Optional CPU-owned native-cursor plan.  It is populated only when the
+    # frontend is given a model-compatible labelizer; the default path remains
+    # EMA-only and carries no cursor labels across the thread boundary.
+    cursor_commits: list[Any] = field(default_factory=list)
+    cursor_spoken_texts: list[str] = field(default_factory=list)
+    cursor_label_plan: Optional[CursorLabelPlan] = None
+    cursor_plan_revision: int = 0
+    cursor_segment_plans: dict[int, CursorLabelPlan] = field(default_factory=dict)
+    cursor_segment_bounds: dict[int, tuple[int, int]] = field(default_factory=dict)
+    def cursor_plan_for_segment(self, segment_idx: int) -> CursorLabelPlan | None:
+        """Build an owner-safe session-global plan for one segment."""
+        plan = self.cursor_label_plan
+        bounds = self.cursor_segment_bounds.get(int(segment_idx))
+        if plan is None:
+            return None
+        if bounds is None:
+            return CursorLabelPlan(revision=plan.revision, final=plan.final)
+        sliced = slice_cursor_label_plan(
+            plan,
+            normalized_start=bounds[0],
+            normalized_end=bounds[1],
+        )
+        if sliced is None:
+            # Preserve the revision while explicitly disabling the native
+            # route for this segment; never guess a partial owner label range.
+            return CursorLabelPlan(revision=plan.revision, final=plan.final)
+        return sliced
 
     # Segment tracking
     segments_submitted: int = 0
@@ -104,6 +132,9 @@ class Session:
     # observe the same source-frame contract.
     text_progress_estimators: dict[int, Any] = field(default_factory=dict)
     segment_progress_frames: dict[int, int] = field(default_factory=dict)
+    # Per-segment CPU projection state.  The projector never owns neural
+    # state; it only remembers the last published owner-level high-water.
+    native_cursor_projectors: dict[int, Any] = field(default_factory=dict)
     engine_tokens_done_sent: bool = False
 
     # Optional transport-layer callback hook (e.g. gRPC / Triton adapters)
@@ -120,6 +151,16 @@ class Session:
     speech_state_capability: SpeechStateCapability = field(
         default_factory=SpeechStateCapability.disabled
     )
+    # Optional X2 commitment bridge. It observes only main-TN commits; raw
+    # text and spoken-form ownership remain with the frontend committer/journal.
+    # Keep this after the existing capability field to preserve positional ABI.
+    commitment_adapter: Any = None
+
+    @property
+    def extension_commitment(self) -> Any:
+        """Compatibility view of the optional X2 policy, never serialized."""
+
+        return getattr(self.commitment_adapter, "_policy", None)
 
     def append_text(self, text: str) -> None:
         self._text_buffer += text

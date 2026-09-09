@@ -23,11 +23,75 @@ REALTIME_MAX_MESSAGE_BYTES = 8 * 1024 * 1024
 
 _PUBLIC_TASKS = {"base", "voice_clone", "custom_voice", "voice_design"}
 _PUBLIC_AUDIO_ENCODINGS = {"pcm_f32", "pcm_s16le"}
+_PUBLIC_PROGRESS_MODES = ("ema", "disabled")
 
 
 def _public_task(value: Any) -> str:
     normalized = str(value or "").strip()
     return "voice_clone" if normalized == "icl" else normalized
+
+
+def _public_native_cursor_capability(declared: Mapping[str, Any]) -> dict[str, Any]:
+    """Expose graph admission separately from the progress publisher route.
+
+    A cursor-enabled TRT artifact can be loaded before the TN-to-Label-Plan
+    bridge and CPU projector are wired into production.  Advertising the
+    artifact as native progress support in that state would make clients pick
+    a route that the engine cannot actually serve.
+    """
+
+    raw = declared.get("native_cursor")
+    if not isinstance(raw, Mapping):
+        raw = {}
+    # Public capability projection is a trust boundary.  A native route is
+    # meaningful only when the fused graph is actually loaded, and malformed
+    # string values must not become truthy through Python's bool conversion.
+    graph_enabled = raw.get("enabled") is True
+    progress_available = graph_enabled and raw.get("progress_available") is True
+    modes = list(_PUBLIC_PROGRESS_MODES)
+    if progress_available:
+        modes.insert(0, "native")
+    result: dict[str, Any] = {
+        "graph_enabled": graph_enabled,
+        "progress_available": progress_available,
+        "supported_progress_modes": modes,
+    }
+    if graph_enabled and not progress_available:
+        result["reason"] = str(
+            raw.get(
+                "reason",
+                "cursor graph is loaded but TN/Label Plan and progress publishing are not connected",
+            )
+        )
+    for key in (
+        "max_labels",
+        "vocab_size",
+        "cursor_head_sha256",
+        "cursor_vocab_sha256",
+        "cursor_rules_sha256",
+        "model_fingerprint",
+    ):
+        if key in raw:
+            result[key] = raw[key]
+    return result
+
+
+def _public_speech_state_capability(declared: Any) -> dict[str, Any] | None:
+    """Project backend state details onto the small public wire contract.
+
+    Standalone engines internally expose typed handle/operation metadata, but
+    clients only negotiate whether handoff is available and why it is not.
+    Triton already publishes this reduced shape; applying it here keeps both
+    runtime paths byte-for-byte compatible.
+    """
+
+    if not isinstance(declared, Mapping):
+        return None
+    supported = declared.get("supported", declared.get("enabled", False))
+    result: dict[str, Any] = {"supported": supported is True}
+    if "reason" in declared:
+        result["reason"] = str(declared.get("reason", "") or "")
+    return result
 
 
 class RuntimeType(str, Enum):
@@ -50,6 +114,11 @@ def build_gateway_capabilities(
 
     declared = dict(base or {})
     capabilities = normalize_capabilities(declared)
+    public_speech_state = _public_speech_state_capability(
+        capabilities.get("speech_state")
+    )
+    if public_speech_state is not None:
+        capabilities["speech_state"] = public_speech_state
     public_vad_strategies = [
         str(value)
         for value in declared.get("supported_vad_strategies", ()) or ()
@@ -151,6 +220,7 @@ def build_gateway_capabilities(
             "speakers": list(capabilities.get("supported_speakers") or []),
             "languages": list(capabilities.get("supported_languages") or []),
             "input_modes": list(capabilities.get("supported_input_modes") or []),
+            "native_cursor": _public_native_cursor_capability(capabilities),
             "audio_formats": public_audio_formats,
             "limits": {
                 "max_input_tokens": max(0, max_input_tokens),

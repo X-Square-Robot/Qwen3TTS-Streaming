@@ -60,6 +60,32 @@ python tools/validation/prefill_compare.py --mode manual-rollout      # Manual d
 python tools/validation/prefill_compare.py --mode cp-parity           # CP sampled parity
 ```
 
+### `fused_onnx_trt_parity.py` —— 冻结输入的 ORT/TRT 对照
+
+从真实 fused Executor 捕获 prefill/decode 输入，再把同一组输入送入 ORT 和一个或多个
+TRT plan，报告 `full_codec`、hidden、logits、C2W、PCM 与 cursor 输出的逐步误差。适合
+定位 BF16/FP32 与 graph 精度问题，不等价于完整 serving 验收。
+
+传入 `--torch-model /path/to/source-checkpoint` 时，还会用导出器的同一 PyTorch fused
+wrapper 对冻结输入运行参考，并额外输出 `torch_vs_onnx` 与 `torch_vs_trt`。这要求源模型
+目录包含完整 Talker、speech tokenizer，以及 cursor-enabled plan 所需的模型-owned
+`qwen3_tts_12hz_la1_seed0.pt`；它仍是冻结 graph-input 对照，不替代端到端服务验收。
+
+```bash
+ENGINE_CUDA_GRAPH_DECODE=0 python tools/validation/fused_onnx_trt_parity.py \
+  --capture-artifact /path/to/cursor-artifact \
+  --onnx-artifact /path/to/cursor-artifact \
+  --torch-model /path/to/X2Streaming-TTS-1.7B \
+  --trt-artifact /path/to/bf16-artifact \
+  --trt-artifact /path/to/fp32-artifact \
+  --steps 4 --random-prefill --include-prefill \
+  --output /tmp/fused-parity.json
+```
+
+cursor plan 默认固定使用已验证的 TRT profile 0；也可用 `--trt-profile N` 显式指定。
+报告应使用与 capture artifact 相同的 manifest dtype，且 cursor 包必须携带匹配的
+model-owned head；否则工具会暴露 package/engine 输入合同不一致，而不是生成可用证据。
+
 ## 独立工具
 
 | Tool | Purpose |

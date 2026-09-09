@@ -44,10 +44,11 @@ class Dispatcher:
         )
         await self._engine_inbox.put(req)
 
-    async def submit_cancel(self, session_id: str) -> None:
+    async def submit_cancel(self, session_id: str, *, reason: str = "") -> None:
         req = EngineRequest(
             type=RequestType.CANCEL_SESSION,
             session_id=session_id,
+            cancel_reason=str(reason or "") or None,
             enqueued_at=time.monotonic(),
         )
         await self._engine_inbox.put(req)
@@ -59,6 +60,32 @@ class Dispatcher:
             enqueued_at=time.monotonic(),
         )
         await self._engine_inbox.put(req)
+
+    async def submit_cursor_plan(self, session: Session) -> None:
+        """Publish an owner-safe segment plan to active segments.
+
+        A segment gets only complete TN owners.  If its bounds are unknown or
+        cut through an owner, the session returns an inactive plan for that
+        segment and it stays on EMA. Queue ordering gives the engine thread a
+        happens-before edge relative to later token requests from this event-
+        loop turn.
+        """
+        if session.cursor_label_plan is None:
+            return
+        for segment_idx in tuple(session.segment_order):
+            plan = session.cursor_plan_for_segment(segment_idx)
+            if plan is None:
+                continue
+            session.cursor_segment_plans[segment_idx] = plan
+            await self._engine_inbox.put(
+                EngineRequest(
+                    type=RequestType.UPDATE_CURSOR_PLAN,
+                    session_id=session.session_id,
+                    segment_idx=segment_idx,
+                    cursor_label_plan=plan,
+                    enqueued_at=time.monotonic(),
+                )
+            )
 
     async def dispatch_segment_actions(
         self,
@@ -81,6 +108,9 @@ class Dispatcher:
             if action.type == ActionType.PREFILL:
                 session.segments_submitted += 1
                 session.segment_order[seg_idx] = order_meta
+                segment_plan = session.cursor_plan_for_segment(seg_idx)
+                if segment_plan is not None:
+                    session.cursor_segment_plans[seg_idx] = segment_plan
 
                 now = time.monotonic()
                 # Record first text enqueue timestamp on session
@@ -107,6 +137,7 @@ class Dispatcher:
                     segment_idx=seg_idx,
                     priority=priority,
                     token_ids=[action.token],
+                    cursor_label_plan=segment_plan,
                     result_queue=session.result_queue,
                     enqueued_at=now,
                 )

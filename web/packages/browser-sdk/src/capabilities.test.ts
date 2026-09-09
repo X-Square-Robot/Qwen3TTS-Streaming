@@ -30,6 +30,20 @@ describe("capabilities", () => {
     expect(parseCapabilities(capabilities()).tasks).toEqual(["custom_voice"]);
   });
 
+  it("preserves cursor and speech-state capability diagnostics", () => {
+    const value = capabilities();
+    value.native_cursor = {
+      graph_enabled: true,
+      progress_available: false,
+      supported_progress_modes: ["ema", "disabled"],
+      reason: "cursor graph is loaded but bridge is unavailable",
+    };
+    value.speech_state = {supported: false, reason: "runtime_gate_disabled"};
+    const parsed = parseCapabilities(value);
+    expect(parsed.native_cursor?.reason).toContain("bridge");
+    expect(parsed.speech_state).toEqual({supported: false, reason: "runtime_gate_disabled"});
+  });
+
   it("fails closed when a required extension is absent", () => {
     const value = capabilities();
     value.protocols.openai_realtime.supported_extensions.pop();

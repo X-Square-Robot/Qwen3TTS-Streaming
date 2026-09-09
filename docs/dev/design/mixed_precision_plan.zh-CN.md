@@ -12,6 +12,11 @@
 > 精度写入 manifest，由 `scripts/python/trt_fused_io_formats.py --emit layer-precisions` 翻译成 trtexec
 > `--layerPrecisions` 通配符。下文保留原始 Python CLI 设计作为历史记录（其中的 `qwen3tts_*` 模块已移除）。
 
+> **2026-09-09 数值约束补充**：FP32 fused plan 若不传 `--noTF32`，TensorRT 仍可能使用
+> TF32 matmul，并在 CP near-tie 处改变 codebook。相同 FP32 自捕获 5 步中普通 plan
+> 出现 10 个 CP codebook 分叉；关闭 TF32 后 `full_codec` 5/5 精确。构建链现对 FP32
+> 参与的 fused plan 自动加入 `--noTF32`；`TRT_NO_TF32=0` 仅用于性能对照。
+
 ## 背景
 
 当前工程的生产主链路使用单个 fused TensorRT 引擎：
@@ -49,7 +54,10 @@
    - 即使只改输出格式也足以翻转 token 决策
    - 说明 TRT 内部精度选择对 CP 路径极其敏感
 
-综上，最强解释是 **`code_predictor_unrolled` 的 TensorRT BF16 执行本身在数值/语义上不稳定**，将 CP 提升到 FP32 是当前最有前景的缓解手段。
+综上，这些实验解释了为什么 BF16 与 ORT/PyTorch 可能出现 codebook 分叉，但不能把
+逐 token 一致性等同于音频或语义质量。BF16 已是此前验证过的默认基线；CP FP32 保留
+为数值诊断和上界对照，最终质量应以固定语料的 ASR CER/WER、音频连续性和终止行为
+为准。
 
 ## 现状总结
 
@@ -390,7 +398,7 @@ TRITON_IO_FLOAT_DTYPE=bf16        # I/O 精度
 建议默认值：
 
 - `backbone_precision = bf16`
-- `cp_precision = fp32`
+- `cp_precision = bf16`（`fp32` 仅作为诊断对照，不能默认启用）
 - `code2wav_precision = bf16`
 - `triton_io_float_dtype = bf16`
 
@@ -480,7 +488,7 @@ def build_fused_mixed_precision(
 |------|------|---------|
 | `/talker_fused/talker_unified/` | backbone | bf16 |
 | `/talker_fused/codec_sum/` | backbone | bf16 |
-| `/talker_fused/cp/` | cp | fp32 |
+| `/talker_fused/cp/` | cp | bf16（fp32 仅诊断对照） |
 | `/code2wav/` | code2wav | bf16 |
 | 其他 | backbone | bf16 |
 
@@ -641,12 +649,12 @@ if audit.get("unclassified_ratio", 0) > 0.05:
 | Backbone | CP | Code2Wav | I/O | 用途 |
 |----------|----|----------|-----|------|
 | bf16 | bf16 | bf16 | bf16 | 当前基线 |
-| bf16 | fp32 | bf16 | bf16 | **首选候选** |
+| bf16 | fp32 | bf16 | bf16 | 已实测但未通过 full fused parity |
 | bf16 | fp32 | fp32 | bf16 | 判断 code2wav 是否也敏感 |
 | fp32 | fp32 | fp32 | fp32 | 精度上界参考 |
 | fp16 | fp32 | fp16 | fp16 | 观察 fp16 平台表现 |
 
-优先级最高的是第二行。
+优先级最高的是补齐 BF16 主干逐级定位和完整发布矩阵，而不是继续把第二行当作上线候选。
 
 ### 数值验证方法
 
@@ -683,19 +691,21 @@ if audit.get("unclassified_ratio", 0) > 0.05:
 
 缓解方式：
 
-- 优先只提升 `cp` 到 `fp32`
+- 不把只提升 `cp` 到 `fp32` 视为默认解；当前冻结轨迹显示它不能修复 BF16 主干的离散分叉
 - 通过 profile / dumpLayerInfo / Python builder 后验证观察转换数量
 - 若转换过多，再评估是否需要局部重构图边界
 
 预期 cast 开销评估：
-- `backbone(bf16) -> cp(fp32)`：1 次 cast（hidden 张量从 bf16 到 fp32）
+- `backbone(bf16) -> cp(fp32)`：1 次 cast（hidden 张量从 bf16 到 fp32），但当前不能据此推断离散轨迹可用
 - `cp(fp32) -> codec_sum(bf16)`：1 次 cast（logits 从 fp32 到 bf16）
 - `code2wav(bf16)` 内部：无额外 cast
 - 总计约 2 次显式 cast，加上 TRT 可能插入的隐式 reformat
 
 ### 4. 问题可能不只来自 CP 精度
 
-虽然当前定位指向 `cp` 的 `bf16` 敏感性，但仍需防止"改了 CP 精度后问题只部分改善"的情况。
+当前实测表明问题不只来自 `cp` 的 `bf16` 敏感性：`bf16 + cp=fp32 + code2wav=bf16`
+在 5 个冻结步骤仍有 `7/12/10/1/15` 个 `full_codec` mismatch；必须继续拆分
+backbone、CP、Code2Wav、采样边界和 builder 数值路径定位，不能直接开放混合精度方案。
 
 缓解方式：
 
@@ -731,18 +741,20 @@ Python builder 和 trtexec 可能产生不同的 engine 优化结果，即使输
 1. 扩展 manifest / CLI / schema，增加三段精度配置
 2. 保持统一 `triton_io_float_dtype`
 3. 实现 Python builder PoC + ONNX 前缀审计
-4. 优先验证 `bf16 + fp32(cp) + bf16`
-5. 若效果成立，集成到 `build_talker_code2wav_fused()`
+4. 对比 `bf16 + bf16 + bf16` 基线、`bf16 + fp32(cp) + bf16` 诊断方案和关闭 TF32 的 FP32 上界
+5. 只有完整逐帧、EOS/flush、音频和性能证据均通过，才允许将某个组合设为发布配置
 6. 补完整测试矩阵与文档
 7. 中期：评估是否需要 Python builder 替代 trtexec 作为统一构建路径
 
 ## 最终建议
 
-当前阶段最推荐的方案是：
+当前阶段的工程结论是：
 
 - 保持单个 `talker_code2wav_fused` 引擎
 - 外部 I/O 使用统一浮点 dtype
-- 内部让 `cp` 提升到 `fp32`
-- `backbone` 与 `code2wav` 先保持低精度
+- 默认保持已验证的统一 BF16 路径
+- `cp=fp32` 仅作为诊断对照，不得单独作为发布方案
+- FP32 上界实验必须关闭 TensorRT TF32（`--noTF32`）；它是数值定位基线，不是默认部署建议
+- 发布质量以固定语料 ASR CER/WER、音频连续性/终止行为和结构性状态合同为准，不能以 `full_codec` 逐 token 精确为硬门槛
 
-这条路线对现有工程侵入最小，最有机会在较短周期内验证"是否确实由 `cp` 的 `bf16` 数值问题触发幻觉"，同时也为未来更通用的 TensorRT 混合精度构建能力打基础。
+当前优先级是补齐 BF16 默认 plan 的 ASR/音频质量、EOS/flush 和正式性能矩阵；混合精度字段与构建能力保留，但在正式质量和发布 evidence 通过前不单独开放 CP FP32 配置。

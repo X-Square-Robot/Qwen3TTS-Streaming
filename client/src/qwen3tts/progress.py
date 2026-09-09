@@ -8,7 +8,7 @@ from typing import Iterable
 
 from qwen3tts_protocol import AudioChunk, StreamEvent
 
-from .exceptions import ProtocolError
+from .exceptions import ProtocolError, TextProgressProtocolError
 
 
 def _int(meta: dict[str, str], key: str, default: int | None = None) -> int | None:
@@ -66,12 +66,12 @@ class TextProgressAnchor:
             return None
 
         if not all(present):
-            raise ProtocolError("malformed text progress anchor")
+            raise TextProgressProtocolError("malformed text progress anchor")
         values: dict[str, int] = {}
         for key in required:
             value = _int(meta, key)
             if value is None:
-                raise ProtocolError("malformed text progress anchor")
+                raise TextProgressProtocolError("malformed text progress anchor")
             values[key] = value
 
         seq = values["anchor_seq"]
@@ -191,7 +191,7 @@ class PlaybackProgressTracker:
             if old is not None:
                 if old == anchor:
                     return self._recompute_locked()
-                raise ProtocolError(
+                raise TextProgressProtocolError(
                     f"conflicting replay for text progress anchor {anchor.anchor_seq}"
                 )
             self._validate_anchor_locked(anchor)
@@ -239,7 +239,7 @@ class PlaybackProgressTracker:
         anchor = TextProgressAnchor.from_meta(meta, segment_id=segment_id)
         if anchor is not None:
             if require_received and anchor.output_sample_end > self._received_sample:
-                raise ProtocolError(
+                raise TextProgressProtocolError(
                     "text progress anchor is ahead of received output audio"
                 )
             self.add_anchor(anchor)
@@ -262,25 +262,30 @@ class PlaybackProgressTracker:
             or anchor.normalized_codepoint_start < 0
             or anchor.normalized_codepoint_end < anchor.normalized_codepoint_start
         ):
-            raise ProtocolError("malformed text progress anchor")
-        self._remember_sample_rate_locked(anchor.output_sample_rate)
+            raise TextProgressProtocolError("malformed text progress anchor")
+        try:
+            self._remember_sample_rate_locked(anchor.output_sample_rate)
+        except ProtocolError as exc:
+            # Keep audio transport validation fatal, while allowing the
+            # session adapter to isolate a malformed text-progress anchor.
+            raise TextProgressProtocolError(str(exc)) from exc
         for old in self._anchors.values():
             if old.anchor_seq == anchor.anchor_seq:
                 continue
             if anchor.anchor_seq < old.anchor_seq:
-                raise ProtocolError("text progress anchor sequence moved backwards")
+                raise TextProgressProtocolError("text progress anchor sequence moved backwards")
             if anchor.output_sample_start < old.output_sample_start:
-                raise ProtocolError("text progress sample range moved backwards")
+                raise TextProgressProtocolError("text progress sample range moved backwards")
             if anchor.output_sample_end < old.output_sample_end:
-                raise ProtocolError("text progress sample end moved backwards")
+                raise TextProgressProtocolError("text progress sample end moved backwards")
             if anchor.raw_codepoint_start < old.raw_codepoint_start:
-                raise ProtocolError("text progress raw range moved backwards")
+                raise TextProgressProtocolError("text progress raw range moved backwards")
             if anchor.raw_codepoint_end < old.raw_codepoint_end:
-                raise ProtocolError("text progress raw range moved backwards")
+                raise TextProgressProtocolError("text progress raw range moved backwards")
             if anchor.normalized_codepoint_start < old.normalized_codepoint_start:
-                raise ProtocolError("text progress normalized range moved backwards")
+                raise TextProgressProtocolError("text progress normalized range moved backwards")
             if anchor.normalized_codepoint_end < old.normalized_codepoint_end:
-                raise ProtocolError("text progress normalized range moved backwards")
+                raise TextProgressProtocolError("text progress normalized range moved backwards")
 
     def _recompute_locked(self) -> PlaybackTextProgress:
         ordered = sorted(self._anchors.values(), key=lambda item: (item.output_sample_end, item.anchor_seq))
@@ -340,4 +345,5 @@ __all__ = (
     "PlaybackTextProgress",
     "TextCursor",
     "TextProgressAnchor",
+    "TextProgressProtocolError",
 )

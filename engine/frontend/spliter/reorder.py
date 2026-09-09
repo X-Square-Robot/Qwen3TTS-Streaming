@@ -9,7 +9,19 @@ Driver-created sub-segment order inside each group.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
+import time
 from typing import List
+
+
+@dataclass(frozen=True, slots=True)
+class ReorderStall:
+    """A blocked playhead that has exceeded the configured wait budget."""
+
+    blocked_segment: tuple[int, int]
+    elapsed_sec: float
+    buffered_keys: int
+    buffered_chunks: int
 
 
 class AudioReorder:
@@ -23,14 +35,34 @@ class AudioReorder:
         out = reorder.mark_done(0, 0)           # drains g0s1 if ready
     """
 
-    __slots__ = ("_next_group", "_next_local", "_buffers", "_done", "_final_locals")
+    __slots__ = (
+        "_next_group",
+        "_next_local",
+        "_buffers",
+        "_done",
+        "_final_locals",
+        "_stall_timeout_sec",
+        "_clock",
+        "_stall_started_at",
+        "_stall_key",
+    )
 
-    def __init__(self) -> None:
+    def __init__(self, *, stall_timeout_sec: float = 10.0, time_fn=None) -> None:
+        try:
+            timeout = float(stall_timeout_sec)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("stall_timeout_sec must be a finite nonnegative number") from exc
+        if timeout < 0 or timeout != timeout or timeout == float("inf"):
+            raise ValueError("stall_timeout_sec must be a finite nonnegative number")
         self._next_group: int = 0
         self._next_local: int = 0
         self._buffers: dict[tuple[int, int], list[bytes]] = defaultdict(list)
         self._done: set[tuple[int, int]] = set()
         self._final_locals: dict[int, int] = {}
+        self._stall_timeout_sec = timeout
+        self._clock = time_fn or time.monotonic
+        self._stall_started_at: float | None = None
+        self._stall_key: tuple[int, int] | None = None
 
     @property
     def next_emit_segment(self) -> tuple[int, int]:
@@ -43,7 +75,29 @@ class AudioReorder:
             "next_emit": [self._next_group, self._next_local],
             "buffered_keys": len(self._buffers),
             "buffered_chunks": sum(len(v) for v in self._buffers.values()),
+            "stall_key": list(self._stall_key) if self._stall_key is not None else None,
+            "stall_elapsed_ms": self._stall_elapsed_ms(),
+            "stall_timeout_ms": self._stall_timeout_sec * 1000.0,
         }
+
+    def check_stall(self, *, now: float | None = None) -> ReorderStall | None:
+        """Return a timeout verdict when a later segment blocks the playhead.
+
+        A timeout of zero disables the verdict while retaining diagnostic state.
+        The caller owns recovery; this class never emits later audio out of
+        order and never drops buffered chunks implicitly.
+        """
+        if self._stall_timeout_sec <= 0 or self._stall_started_at is None:
+            return None
+        elapsed = max(0.0, (self._clock() if now is None else float(now)) - self._stall_started_at)
+        if elapsed < self._stall_timeout_sec:
+            return None
+        return ReorderStall(
+            blocked_segment=self._stall_key or self.next_emit_segment,
+            elapsed_sec=elapsed,
+            buffered_keys=len(self._buffers),
+            buffered_chunks=sum(len(v) for v in self._buffers.values()),
+        )
 
     def push(self, group_idx: int, local_idx: int, audio: bytes) -> List[bytes]:
         """Push an audio chunk; return chunks ready for emission (in order)."""
@@ -51,6 +105,7 @@ class AudioReorder:
         self._buffers[key].append(audio)
         if key == (self._next_group, self._next_local):
             return self._try_drain()
+        self._refresh_stall_clock()
         return []
 
     def mark_done(
@@ -112,6 +167,7 @@ class AudioReorder:
                 if chunks:
                     out.append((key, chunks, False))
                 break
+        self._refresh_stall_clock()
         return out
 
     def discard(self, group_idx: int, local_idx: int) -> int:
@@ -124,6 +180,7 @@ class AudioReorder:
         drained to the client cannot be recalled. Returns the chunk count
         dropped."""
         buf = self._buffers.pop((group_idx, local_idx), None)
+        self._refresh_stall_clock()
         return len(buf) if buf else 0
 
     def reset(self) -> None:
@@ -132,6 +189,27 @@ class AudioReorder:
         self._buffers.clear()
         self._done.clear()
         self._final_locals.clear()
+        self._stall_started_at = None
+        self._stall_key = None
+
+    def _stall_elapsed_ms(self) -> float:
+        if self._stall_started_at is None:
+            return 0.0
+        return max(0.0, (self._clock() - self._stall_started_at) * 1000.0)
+
+    def _refresh_stall_clock(self) -> None:
+        current = self.next_emit_segment
+        blocked = any(
+            key > current and bool(chunks)
+            for key, chunks in self._buffers.items()
+        )
+        if not blocked:
+            self._stall_started_at = None
+            self._stall_key = None
+            return
+        if self._stall_key != current or self._stall_started_at is None:
+            self._stall_key = current
+            self._stall_started_at = self._clock()
 
 
-__all__ = ("AudioReorder",)
+__all__ = ("AudioReorder", "ReorderStall")

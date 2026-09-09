@@ -20,6 +20,23 @@ def test_percent_waits_for_suffix_and_commits_append_only():
     assert c.pending_raw == ""
 
 
+def test_single_digit_tail_waits_through_transport_delay_before_extension():
+    """Emoji carry must not let a deadline split ``25`` into ``2`` + ``5``."""
+
+    c = IncrementalTextCommitter()
+    first = c.feed("今天温度2", now=0.0)
+    assert [item.tts_text for item in first.commits] == ["今天温度"]
+    assert c.pending_raw == "2"
+
+    delayed = c.poll(now=1.0)
+    assert delayed.commits == ()
+    assert c.pending_raw == "2"
+
+    c.feed("5", now=1.1)
+    final = c.feed("", final=True, now=1.2)
+    assert "".join(item.tts_text for item in final.commits) == "二十五"
+
+
 def test_ordinal_and_word_wait_until_final():
     c = IncrementalTextCommitter()
     assert c.feed("21").commits == ()
@@ -185,6 +202,32 @@ def test_ordered_markdown_list_marker_is_suppressed_but_decimal_survives():
     assert "".join(item.tts_text for item in decimal.commits) == "1.5"
 
 
+def test_inline_ordered_markers_are_suppressed_across_streaming_packets():
+    """Compact model enumerations are lists even when they have no newlines.
+
+    The common ``：1. ...。2. ...`` form used in generated prose must have the
+    same result for one-shot and split transport input.  The dot is list
+    formatting and must not be sent to the synthesizer; a decimal remains
+    numeric because its next character is a digit.
+    """
+
+    raw = "以下几类：1. **日常家务**。2. **宠物照顾**。3. **信息查询**"
+    expected = "以下几类：一、日常家务。二、宠物照顾。三、信息查询"
+
+    one_shot = IncrementalTextCommitter().feed(raw, final=True)
+    assert "".join(item.tts_text for item in one_shot.commits) == expected
+
+    streamed = IncrementalTextCommitter()
+    output: list[str] = []
+    for chunk in ("以下几类：1.", " **日常家务**。2.", " **宠物照顾**。3.", " **信息查询**"):
+        output.extend(item.tts_text for item in streamed.feed(chunk).commits)
+    output.extend(item.tts_text for item in streamed.feed("", final=True).commits)
+    assert "".join(output) == expected
+
+    decimal = IncrementalTextCommitter().feed("版本 1.5", final=True)
+    assert "".join(item.tts_text for item in decimal.commits) == "版本 一点五"
+
+
 def test_structured_span_max_length_falls_back_and_does_not_pin_session():
     config = TextNormalizationConfig(max_pending_chars=4)
     committer = IncrementalTextCommitter(config)
@@ -209,6 +252,77 @@ def test_structured_numeric_fallbacks_cover_decimal_units_currency_and_inequalit
     for raw, expected in cases.items():
         output = "".join(item.tts_text for item in IncrementalTextCommitter().feed(raw, final=True).commits)
         assert output in expected, (raw, output)
+
+
+def test_phone_numbers_are_not_parsed_as_math_and_split_composite_calls():
+    cases = {
+        "010-1234-9876": "零一零一二三四九八七六",
+        "+86-19023459876": "加八六一九零二三四五九八七六",
+        "(+86)19123459876": "加八六一九一二三四五九八七六",
+        "+86-19023459876/(+86)19123459876":
+        "加八六一九零二三四五九八七六，加八六一九一二三四五九八七六",
+    }
+    for raw, expected in cases.items():
+        result = IncrementalTextCommitter().feed(raw, final=True)
+        assert "".join(item.tts_text for item in result.commits) == expected
+        assert all(item.span_kind is SpanKind.PHONE for item in result.commits)
+
+    streamed = IncrementalTextCommitter()
+    output: list[str] = []
+    raw = "+86-19023459876/(+86)19123459876"
+    for chunk in ("+86-190", "23459876/", "(+86)", "19123459876"):
+        output.extend(item.tts_text for item in streamed.feed(chunk).commits)
+    output.extend(item.tts_text for item in streamed.feed("", final=True).commits)
+    assert "".join(output) == cases[raw]
+
+
+def test_order_id_uses_digit_sequence_and_html_entities_are_decoded():
+    raw = "金额是188888元，订单号为188888号 &#x20;"
+    result = IncrementalTextCommitter().feed(raw, final=True)
+    output = "".join(item.tts_text for item in result.commits)
+    assert output == "金额是十八万八千八百八十八元，订单号为一八八八八八号  "
+    entity = next(item for item in result.commits if item.raw_text == "&#x20;")
+    assert entity.tts_text == " "
+    assert entity.mapping == ((raw.index("&#x20;"), raw.index("&#x20;") + 6),)
+
+
+def test_sentence_head_number_waits_past_separator_for_script_context():
+    """A leading ``99%`` must wait for later Chinese evidence."""
+
+    streamed = IncrementalTextCommitter()
+    first = streamed.feed("99%")
+    assert first.commits == ()
+    assert streamed.feed("，").commits == ()
+    result = streamed.feed("我目前", final=True)
+    assert "".join(item.tts_text for item in result.commits) == "百分之九十九，我目前"
+
+    one_shot = IncrementalTextCommitter().feed("99%，我目前", final=True)
+    assert "".join(item.tts_text for item in one_shot.commits) == "百分之九十九，我目前"
+
+
+def test_url_projection_decodes_embedded_html_space_entities():
+    for entity in ("&#x20;", "&#x20"):
+        raw = f"访问http://example.com/{entity}然后继续"
+        result = IncrementalTextCommitter().feed(raw, final=True)
+        output = "".join(item.tts_text for item in result.commits)
+        assert "and hash x twenty" not in output
+        assert "HTTP colon slash slash example dot com slash" in output
+        assert output.endswith("然后继续")
+
+
+def test_id_card_numbers_are_spoken_digit_by_digit():
+    cases = (
+        "身份证43092220000315301X",
+        "身份证430922200003152010",
+    )
+    expected = (
+        "身份证四三零九二二二零零零零三一五三零一X",
+        "身份证四三零九二二二零零零零三一五二零一零",
+    )
+    for raw, spoken in zip(cases, expected):
+        result = IncrementalTextCommitter().feed(raw, final=True)
+        assert "".join(item.tts_text for item in result.commits) == spoken
+        assert any(item.span_kind is SpanKind.ID_CARD for item in result.commits)
 
 
 def test_numeric_spans_follow_english_context():

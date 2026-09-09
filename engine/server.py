@@ -65,6 +65,9 @@ from .frontend.diagnostic_text import (
     format_engine_model_version,
 )
 from .core.mlfq import MLFQConfig
+from .core.extensions import EngineExtensions
+from .core.cursor_plan_adapter import CursorLabelPlanAdapter
+from .core.native_cursor_labelizer import load_native_cursor_labelizer
 from .core.speech_state import SpeechStateCapability
 from .core import observability as obs
 from .core.types import SessionConfig
@@ -132,9 +135,11 @@ class TTSEngine:
         max_sessions: int = 128,
         max_seq_len: int = 512,
         speech_state_adapter: SpeechStateAdapter | None = None,
+        extensions: Optional[EngineExtensions] = None,
     ):
         self._cfg = config or EngineConfig()
         self._model_arch = model_arch or ModelArchConfig()
+        self._extensions = extensions or EngineExtensions()
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -182,6 +187,8 @@ class TTSEngine:
         # closed instead of advertising names inferred from config or docs.
         self._supported_speakers: tuple[str, ...] = ()
         self._supported_languages: tuple[str, ...] = ()
+        self._cursor_plan_adapter_factory = None
+        self._cursor_plan_unavailable_reason = "cursor_labelizer_not_loaded"
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -309,6 +316,8 @@ class TTSEngine:
             repetition_penalty=sampling.repetition_penalty,
             random_seed=sampling.random_seed,
         )
+        if package_paths is not None:
+            executor_kwargs["package_paths"] = package_paths
         # Do not even add a new keyword on the official/legacy path.  This
         # keeps injected Executor test doubles and older embedders source
         # compatible while still allowing an explicit custom adapter.
@@ -342,6 +351,8 @@ class TTSEngine:
             self._speech_state_capability = capability_from_adapter(
                 getattr(self._executor, "speech_state_adapter", None)
             )
+
+        self._cursor_plan_adapter_factory = self._build_cursor_plan_adapter_factory()
 
         # Cross-check the loaded plan's prefill bound against the manifest so a
         # mismatch surfaces at startup rather than mid-stream on the first
@@ -380,7 +391,13 @@ class TTSEngine:
             guarded_delivery_default=self._cfg.server.guarded_delivery_default,
             guarded_delivery_window_ms=self._cfg.server.guarded_delivery_window_ms,
             engine_model_version=engine_model_version,
+            commitment_factory=self._extensions.commitment_factory,
+            extensions=self._extensions,
         )
+        if self._cursor_plan_adapter_factory is not None:
+            frontend_kwargs["cursor_plan_adapter_factory"] = (
+                self._cursor_plan_adapter_factory
+            )
         if not isinstance(self._speech_state_adapter, NullSpeechStateAdapter):
             frontend_kwargs["speech_state_capability"] = self._speech_state_capability
         self._frontend = FrontendInterface(**frontend_kwargs)
@@ -484,6 +501,7 @@ class TTSEngine:
             token_loop_max_retries=sched.token_loop_max_retries,
             length_runaway_ratio=sched.length_runaway_ratio,
             max_slots_per_session=self._cfg.spliter.max_concurrent_segments,
+            extensions=self._extensions,
         )
         self._engine_loop.start()
 
@@ -657,17 +675,99 @@ class TTSEngine:
 
         return self._speech_state_capability
 
+    def _native_cursor_capability(self) -> dict:
+        """Return only the cursor artifact capability known by the runtime.
+
+        The public gateway adds the separate progress-route status.  Keeping
+        this source at the loaded executor prevents a manifest declaration
+        from being mistaken for a successfully admitted TRT graph.
+        """
+
+        executor = self._executor
+        value = getattr(executor, "native_cursor_capability", None)
+        if callable(value):
+            value = value()
+        if isinstance(value, dict):
+            result = dict(value)
+            if (
+                result.get("enabled") is True
+                and result.get("progress_available") is True
+                and self._cursor_plan_adapter_factory is None
+            ):
+                result["progress_available"] = False
+                result["reason"] = self._cursor_plan_unavailable_reason
+                result["supported_progress_modes"] = ["ema", "disabled"]
+            return result
+        return {"enabled": False}
+
+    def _build_cursor_plan_adapter_factory(self):
+        """Build the TN-to-label bridge only for a validated cursor package."""
+
+        executor = self._executor
+        if executor is None or not bool(
+            getattr(executor, "native_cursor_enabled", False)
+        ):
+            self._cursor_plan_unavailable_reason = "cursor_graph_disabled"
+            return None
+        head_path = getattr(executor, "native_cursor_head_path", None)
+        if callable(head_path):
+            head_path = head_path()
+        if not isinstance(head_path, Path) or not head_path.is_file():
+            self._cursor_plan_unavailable_reason = "cursor_head_missing"
+            return None
+        capability = getattr(executor, "native_cursor_capability", {})
+        if callable(capability):
+            capability = capability()
+        expected_vocab_sha = ""
+        if isinstance(capability, dict):
+            expected_vocab_sha = str(capability.get("cursor_vocab_sha256", "") or "")
+        try:
+            labelizer = load_native_cursor_labelizer(
+                head_path,
+                expected_vocab_sha256=expected_vocab_sha or None,
+            )
+        except Exception as exc:
+            self._cursor_plan_unavailable_reason = "cursor_labelizer_unavailable"
+            logger.warning(
+                "Native cursor graph is loaded but its model labelizer is unavailable; "
+                "using EMA progress: %s",
+                exc,
+            )
+            return None
+
+        return lambda: CursorLabelPlanAdapter(labelizer)
+
+    def _speech_state_public_capability(self) -> dict:
+        """Add a diagnostic reason without changing the core typed contract."""
+        capability = self._speech_state_capability.to_dict()
+        if capability.get("supported"):
+            capability["reason"] = "enabled"
+            return capability
+        executor = self._executor
+        reason = getattr(executor, "speech_state_capability_reason", None)
+        if callable(reason):
+            reason = reason()
+        if not isinstance(reason, str) or not reason.strip():
+            reason = (
+                "adapter_disabled"
+                if not capability_from_adapter(self._speech_state_adapter).supported
+                else "runtime_gate_disabled"
+            )
+        capability["reason"] = reason
+        return capability
+
     def health_stats(self) -> dict:
         """Return engine health metrics (safe to call from asyncio thread)."""
         if self._engine_loop is None:
             return {
                 "running": False,
-                "speech_state": self._speech_state_capability.to_dict(),
+                "speech_state": self._speech_state_public_capability(),
             }
         stats = self._engine_loop.health_stats()
         stats["variant"] = self._model_arch.variant
         stats["loaded_model_type"] = self._loaded_model_type()
-        stats["speech_state"] = self._speech_state_capability.to_dict()
+        stats["speech_state"] = self._speech_state_public_capability()
+        stats["native_cursor"] = self._native_cursor_capability()
         if self._model_arch.supported_task_types:
             stats["declared_supported_task_types"] = list(
                 self._model_arch.supported_task_types
@@ -693,7 +793,8 @@ class TTSEngine:
             {
                 "variant": self._model_arch.variant,
                 "loaded_model_type": self._loaded_model_type(),
-                "speech_state": self._speech_state_capability.to_dict(),
+                "speech_state": self._speech_state_public_capability(),
+                "native_cursor": self._native_cursor_capability(),
                 # Release stamp (git tag) baked into the image at build time
                 # (ENGINE_VERSION); the SDK<->engine wheel pairing key the
                 # client checks at connect. Rides this versioned capabilities

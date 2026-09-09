@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_model_manifest, resolve_model_package_paths
+from ..runtime.release_gate import ReleaseCapability, ReleaseGate, evaluate_release_gate
+from ..core.speech_state_bundle import validate_speech_state_bundle
 from ..distribution.sdk import mount_sdk_routes
 from ..distribution.site import mount_demo_config_route
 from ..session import ResumableSessionRegistry, SessionService
@@ -43,6 +45,36 @@ def _runtime_capabilities_from_package(
     """Describe only features proven by the mounted model package."""
 
     arch = load_model_manifest(package_paths.engine_dir, tokenizer_dir=tokenizer_dir)
+    manifest: dict[str, Any] = {}
+    try:
+        loaded_manifest = json.loads(
+            Path(package_paths.manifest_path).read_text(encoding="utf-8")
+        )
+        if isinstance(loaded_manifest, dict):
+            manifest = loaded_manifest
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not read runtime manifest for release gating: %s", exc)
+    evidence = None
+    bundle_root = Path(package_paths.package_dir)
+    for evidence_path in (
+        bundle_root / "capability_evidence.json",
+        Path(package_paths.engine_dir) / "capability_evidence.json",
+    ):
+        if not evidence_path.is_file():
+            continue
+        try:
+            loaded_evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded_evidence = None
+        if isinstance(loaded_evidence, dict):
+            evidence = loaded_evidence
+            break
+    release_gate = evaluate_release_gate(manifest, evidence)
+    bundle_validation = validate_speech_state_bundle(
+        manifest,
+        bundle_root=bundle_root,
+        runtime_artifact_path=Path(package_paths.runtime_artifact_path),
+    )
     weights_config: dict[str, Any] = {}
     weights_config_path = Path(package_paths.weights_dir) / "config.json"
     try:
@@ -79,9 +111,24 @@ def _runtime_capabilities_from_package(
         tasks = [task for task in arch.supported_task_types if task]
         loaded_model_type = tasks[0] if len(tasks) == 1 else "unknown"
     profile = arch.engine_profile
-    return {
+    native_cursor = dict(getattr(arch, "native_cursor", {}) or {})
+    if native_cursor.get("enabled") is not True:
+        native_cursor["enabled"] = False
+        native_cursor["progress_available"] = False
+        native_cursor["reason"] = "malformed_native_cursor_capability"
+    elif native_cursor.get("progress_available") is not True:
+        if "progress_available" in native_cursor and not isinstance(
+            native_cursor["progress_available"], bool
+        ):
+            native_cursor["reason"] = "malformed_native_cursor_capability"
+        native_cursor["progress_available"] = False
+    elif not release_gate.verified(ReleaseCapability.NATIVE_CURSOR):
+        native_cursor["progress_available"] = False
+        native_cursor["reason"] = release_gate.reason(ReleaseCapability.NATIVE_CURSOR)
+    result = {
         "variant": arch.variant,
         "loaded_model_type": loaded_model_type,
+        "native_cursor": native_cursor,
         "engine_version": os.environ.get("ENGINE_VERSION", "").strip(),
         "declared_supported_task_types": list(arch.supported_task_types),
         "supported_input_modes": ["token", "clause", "long_segment", "full_text"],
@@ -108,6 +155,20 @@ def _runtime_capabilities_from_package(
             "triton_io_float_dtype": profile.triton_io_float_dtype,
         },
     }
+    if not isinstance(manifest.get("speech_state"), dict):
+        speech_state_reason = bundle_validation.reason
+    elif not bundle_validation.verified:
+        speech_state_reason = bundle_validation.reason
+    else:
+        speech_state_reason = release_gate.reason(ReleaseCapability.SPEECH_STATE)
+    result["speech_state"] = {
+        "supported": (
+            bundle_validation.verified
+            and release_gate.verified(ReleaseCapability.SPEECH_STATE)
+        ),
+        "reason": speech_state_reason,
+    }
+    return result
 
 
 class JsonlUsageRecorder:

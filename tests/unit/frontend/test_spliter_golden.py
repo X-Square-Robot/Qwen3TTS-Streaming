@@ -302,6 +302,9 @@ def test_auto_backpressure_keeps_stream_before_later_offline_groups():
         "next_emit": [5, 0],
         "buffered_keys": 0,
         "buffered_chunks": 0,
+        "stall_key": None,
+        "stall_elapsed_ms": 0.0,
+        "stall_timeout_ms": 10_000.0,
     }
 
 

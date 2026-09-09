@@ -66,6 +66,17 @@ def test_emoji_filter_keeps_original_raw_offsets_and_mapping():
         previous_end = commit.raw_end
 
 
+def test_compatibility_expansion_keeps_mapping_inside_original_raw_span():
+    """Backend spellings such as ``℃`` must not escape source coordinates."""
+
+    raw = "今天温度25℃"
+    commits = IncrementalTextCommitter().feed(raw, final=True).commits
+    number = next(commit for commit in commits if commit.raw_text == "25℃")
+
+    assert number.raw_end == raw.index("25℃") + len("25℃")
+    assert number.mapping == ((number.raw_start, number.raw_end),)
+
+
 def test_unknown_language_waits_and_uses_literal_final_fallback_for_percent():
     """A bare percent span cannot be routed to a language-specific graph.
 

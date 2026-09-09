@@ -8,7 +8,7 @@ from typing import Iterator
 
 from qwen3tts_protocol import AudioChunk, StreamEvent
 
-from .exceptions import StreamClosedError
+from .exceptions import StreamClosedError, TextProgressProtocolError
 from .progress import PlaybackProgressTracker, PlaybackTextProgress
 
 _QUEUE_SENTINEL = object()
@@ -31,9 +31,18 @@ class BaseStreamSession:
         self._send_closed = False
         self._lock = threading.Lock()
         self.progress_tracker = PlaybackProgressTracker()
+        self.progress_tracking_degraded = False
 
     def _put_message(self, message: StreamEvent | AudioChunk) -> None:
-        self.progress_tracker.observe(message)
+        if not self.progress_tracking_degraded:
+            try:
+                self.progress_tracker.observe(message)
+            except TextProgressProtocolError:
+                # Text progress is auxiliary metadata. A stale/invalid
+                # anchor from a mixed-version peer must not terminate an
+                # otherwise valid audio stream. Stop validating later anchors
+                # to avoid repeating the same error against the old high-water.
+                self.progress_tracking_degraded = True
         self._messages.put(message)
         if _is_terminal_message(message):
             self._close_message_queue()
@@ -161,6 +170,11 @@ class AsyncStreamSession:
         self.transport = sync_session.transport
         self.degraded_to_oneshot = sync_session.degraded_to_oneshot
         self.progress_tracker = sync_session.progress_tracker
+
+    @property
+    def progress_tracking_degraded(self) -> bool:
+        """Whether an invalid remote text anchor disabled local tracking."""
+        return bool(self._sync.progress_tracking_degraded)
 
     @property
     def usage(self) -> dict:

@@ -77,6 +77,22 @@ class _CharTokenizer:
         }
 
 
+class _CommitmentPolicyProbe:
+    def __init__(self):
+        self.feed_text_calls = 0
+        self.punct_levels = []
+
+    def feed_text(self, *_args, **_kwargs):
+        self.feed_text_calls += 1
+        raise AssertionError("frontend must not call the X2 raw-text API")
+
+    def feed_token(self, *, punct_level=0):
+        self.punct_levels.append(punct_level)
+
+    def splitter_config(self):
+        return {"ema_ratio": 3.0, "safety_margin": 4}
+
+
 def test_count_text_tokens_uses_synthesis_normalization_and_tokenizer():
     interface = FrontendInterface(
         engine_inbox=asyncio.Queue(maxsize=16),
@@ -110,6 +126,90 @@ def test_frontend_rejects_safety_baseline_above_ratio_max_at_startup() -> None:
             safety_ratio_initial=5.5,
             ema_max_ratio=5.0,
         )
+
+
+def test_frontend_commitment_factory_consumes_main_tn_commits_only():
+    async def run():
+        inbox = asyncio.Queue(maxsize=16)
+        policy = _CommitmentPolicyProbe()
+        interface = FrontendInterface(
+            engine_inbox=inbox,
+            tokenizer=_CharTokenizer(),
+            max_sessions=2,
+            engine_max_decode_len=64,
+            commitment_factory=lambda _session_id, _config: policy,
+        )
+        session = await interface.create_session("x2-commitment")
+
+        assert session.commitment_adapter is not None
+        assert session.spliter.safety_ratio == pytest.approx(3.0)
+        interface._observe_commitment(
+            session,
+            SimpleNamespace(
+                commit_id=1,
+                fence=1,
+                raw_start=0,
+                raw_end=3,
+            ),
+            "你好。",
+        )
+
+        assert policy.punct_levels == [0, 0, 1]
+        assert policy.feed_text_calls == 0
+        await interface.cancel_session("x2-commitment")
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "input_mode",
+    [InputMode.FULL_TEXT, InputMode.LONG_SEGMENT, InputMode.TOKEN],
+)
+def test_x2_commitment_observes_same_main_tn_projection_across_input_modes(
+    input_mode,
+):
+    async def run():
+        inbox = asyncio.Queue(maxsize=128)
+        policy = _CommitmentPolicyProbe()
+        interface = FrontendInterface(
+            engine_inbox=inbox,
+            tokenizer=_CharTokenizer(),
+            max_sessions=2,
+            engine_max_decode_len=256,
+            max_concurrent_segments=2,
+            commitment_factory=lambda _session_id, _config: policy,
+        )
+        session = await interface.create_session(
+            f"x2-projection-{input_mode.value}",
+            config=SessionConfig(
+                input_mode=input_mode,
+                group_policy=GroupPolicy.NONE,
+            ),
+        )
+        text = "温度是25度。"
+        if input_mode is InputMode.FULL_TEXT:
+            await interface.feed_full_text(session.session_id, text)
+        else:
+            await interface.push_text_input(session.session_id, text[:3])
+            await interface.push_text_input(session.session_id, text[3:])
+            await interface.mark_input_complete(session.session_id)
+
+        assert session.input_complete
+        assert session.text_journal.normalized_text == "温度是二十五度。"
+        assert policy.feed_text_calls == 0
+        assert policy.punct_levels
+        requests = await _drain_requests(inbox)
+        segment_text: dict[int, str] = {}
+        for request in requests:
+            if request.token_ids:
+                segment_text[request.segment_idx] = (
+                    segment_text.get(request.segment_idx, "")
+                    + "".join(chr(token_id) for token_id in request.token_ids)
+                )
+        assert segment_text == {0: "温度是", 1: "二十五度。"}
+        await interface.cancel_session(session.session_id)
+
+    asyncio.run(run())
 
 
 def test_diagnostic_text_alias_is_exact_and_uses_independent_versions():

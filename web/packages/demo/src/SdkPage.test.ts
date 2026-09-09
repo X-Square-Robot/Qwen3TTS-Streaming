@@ -23,4 +23,13 @@ describe("SDK code examples", () => {
       'websocketUrl: "wss://tts.example/infer/instance/v1/realtime"',
     );
   });
+
+  it("maps the long-segment mode in generated examples", () => {
+    const value = {...DEFAULT_DEMO_SETTINGS, inputMode: "long" as const};
+    expect(buildPythonExample("wss://tts.example/v1/ws", value)).toContain(
+      'input_mode="long_segment"',
+    );
+    expect(buildBrowserExample("https://tts.example/v1/capabilities", "wss://tts.example/v1/realtime", value))
+      .toContain("inputMode: InputMode.LongSegment");
+  });
 });

@@ -190,24 +190,30 @@ def main():
 
     # ------------------------------------------------------------------
     # Definitive check: the graph must be BITWISE identical to a plain
-    # (non-graph) enqueue on the same decode profile.  Cross-profile token
-    # flips above are TRT per-profile kernel differences, the same class as
-    # a rebuild; this check isolates the graph capture/replay machinery.
+    # (non-graph) enqueue on the same optimization profile.  Cross-profile
+    # token flips are TRT kernel differences, not graph capture/replay
+    # behavior; cursor-enabled plans are intentionally pinned to profile 0.
     # ------------------------------------------------------------------
-    print("--- graph vs profile-1 eager (bitwise) ---", flush=True)
+    graph_profile = int(getattr(ex._graph_decode, "_profile_idx", 0))
+    print(f"--- graph vs profile-{graph_profile} eager (bitwise) ---", flush=True)
     eng = ex._fused_engine._engine
-    profile_idx = 1 if int(getattr(eng, "num_optimization_profiles", 1)) > 1 else 0
-    scratch = torch.empty(
-        int(eng.get_device_memory_size_for_profile_v2(profile_idx)),
-        dtype=torch.uint8, device=DEVICE,
-    )
-    ctx1 = eng.create_execution_context_without_device_memory()
-    ctx1.set_optimization_profile_async(profile_idx, ex._compute_stream.cuda_stream)
-    ex._compute_stream.synchronize()
-    try:
-        ctx1.set_device_memory(scratch.data_ptr(), scratch.numel())
-    except TypeError:
-        ctx1.device_memory = scratch.data_ptr()
+    scratch = None
+    if graph_profile > 0:
+        scratch = torch.empty(
+            int(eng.get_device_memory_size_for_profile_v2(graph_profile)),
+            dtype=torch.uint8, device=DEVICE,
+        )
+        ctx1 = eng.create_execution_context_without_device_memory()
+        ctx1.set_optimization_profile_async(
+            graph_profile, ex._compute_stream.cuda_stream
+        )
+        ex._compute_stream.synchronize()
+        try:
+            ctx1.set_device_memory(scratch.data_ptr(), scratch.numel())
+        except TypeError:
+            ctx1.device_memory = scratch.data_ptr()
+    else:
+        ctx1 = eng.create_execution_context()
 
     bitwise_ok = True
     for tag, past_lens in [("p1_b2", [64, 64]), ("p1_b64", [64] * 64),
@@ -226,7 +232,8 @@ def main():
         fut.wait()
         logits_g = fut._raw["logits"].float().cpu().clone()
         codec_g = fut._raw["full_codec"].cpu().clone()
-        # re-feed the exact staging inputs through a plain profile-1 enqueue
+        # Re-feed the exact staging inputs through a plain enqueue on the
+        # graph's selected profile.
         key = ex._graph_decode.bucket(len(slots), max(past_lens))
         entry = ex._graph_decode.entry(key)
         plain_inputs = {k: v.clone() for k, v in entry["in"].items()}
@@ -249,7 +256,7 @@ def main():
         f"\nSUMMARY: ctrl_flips={total_ctrl_flips} "
         f"cross-profile graph_flips={total_graph_flips} (informational) "
         f"worst token-same wav diff={worst_wav:.4e} "
-        f"graph-vs-profile1-eager bitwise={bitwise_ok}"
+        f"graph-vs-profile{graph_profile}-eager bitwise={bitwise_ok}"
     )
     ok = bitwise_ok and total_ctrl_flips == 0 and worst_wav < 1e-2
     print("PASS" if ok else "FAIL")

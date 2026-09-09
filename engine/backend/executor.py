@@ -25,6 +25,7 @@ import os
 import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from numbers import Integral, Real
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -37,9 +38,31 @@ from .batch_helper import (
 )
 from .debug_dump import EngineDebugDumper
 from ..core.lifecycle import LifecycleLogger
+from ..runtime.release_gate import (
+    ReleaseCapability,
+    ReleaseGate,
+    evaluate_release_gate,
+)
 from ..core.speech_state import SpeechStateCapability
+from ..core.speech_state_bundle import (
+    SpeechStateBundleValidation,
+    validate_speech_state_bundle,
+)
+from ..core.speech_state_model import (
+    SpeechStateCursorPolicy,
+    SpeechStateModelContract,
+)
+from ..core.native_cursor import (
+    CURSOR_RECURRENT_INPUT_BINDINGS,
+    CURSOR_RECURRENT_OUTPUT_BINDINGS,
+)
+from ..config import ModelPackagePaths
+from .slot_snapshot import SlotOwnedSnapshot, StandaloneSlotSnapshot
 from .speech_state import (
+    SegmentRuntimeMetadata,
     SpeechStateAdapter,
+    SpeechStateContractError,
+    SpeechStateSnapshotBundle,
     capability_from_adapter,
     coerce_speech_state_adapter,
 )
@@ -61,6 +84,39 @@ def _stable_sampling_seed(base_seed: int, *parts: object) -> int:
         h.update(b"\0")
         h.update(str(part).encode("utf-8"))
     return int.from_bytes(h.digest()[:8], "little") & _MAX_TORCH_SEED
+
+
+def _select_cuda_graph_profile(
+    num_profiles: int,
+    *,
+    cursor_enabled: bool,
+    requested: str = "",
+) -> int:
+    """Select a graph profile whose route has an explicit parity contract."""
+    if num_profiles <= 1:
+        return 0
+    default = 0 if cursor_enabled else 1
+    value = str(requested or "").strip()
+    if not value:
+        return default
+    try:
+        profile_idx = int(value)
+    except ValueError:
+        return default
+    if not 0 <= profile_idx < num_profiles:
+        return default
+    if cursor_enabled and profile_idx != 0:
+        return 0
+    return profile_idx
+
+
+def _sha256_file(path: Path) -> str:
+    """Hash a bundle-owned artifact without loading it into memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _wait_stream_for_current(stream: Any, device: torch.device) -> None:
@@ -198,6 +254,31 @@ class TRTEngine:
             if self._engine.get_tensor_mode(name) == trt.TensorIOMode.OUTPUT:
                 dtype_trt = self._engine.get_tensor_dtype(name)
                 self._output_dtypes[name] = self._trt_to_torch_dtype(dtype_trt)
+
+    def select_optimization_profile(
+        self, profile_idx: int, stream: torch.cuda.Stream
+    ) -> None:
+        """Select an optimization profile before direct diagnostic execution.
+
+        Executor-owned CUDA Graph contexts select their profile during graph
+        setup.  Standalone validation callers use this narrow hook to replay
+        the same profile explicitly instead of relying on TensorRT's context
+        default, which is especially important for recurrent cursor plans.
+        """
+        if self._engine is None or self._context is None:
+            raise RuntimeError("TRT engine must be loaded before selecting a profile")
+        count = int(getattr(self._engine, "num_optimization_profiles", 1))
+        if not 0 <= int(profile_idx) < count:
+            raise ValueError(
+                f"optimization profile {profile_idx} is outside [0, {count})"
+            )
+        if count > 1 and not self._context.set_optimization_profile_async(
+            int(profile_idx), stream.cuda_stream
+        ):
+            raise RuntimeError(f"could not select optimization profile {profile_idx}")
+        stream.synchronize()
+        self._prev_input_shapes.clear()
+        self._output_buffers.clear()
 
     def get_io_names(self) -> tuple[list[str], list[str]]:
         """Return (input_names, output_names)."""
@@ -432,6 +513,7 @@ class GPUFuture:
 
         wav = raw.get("wav")
         codec_sum = raw.get("codec_sum")
+        hidden = raw.get("hidden")
         full_codec = raw.get("full_codec")
         codec0 = raw.get("codec0")
         updated_tc = raw.get("updated_token_counts")
@@ -465,7 +547,9 @@ class GPUFuture:
 
         for row_idx in range(batch_size):
             eos_flags.append(eos_list[row_idx])
-            if wav_cpu is not None:
+            # EOS decode emits a waveform tensor for graph shape stability,
+            # but that PCM is not a spoken frame and must never be published.
+            if wav_cpu is not None and not eos_list[row_idx]:
                 chunk = wav_cpu[row_idx].reshape(-1).numpy()
                 audio_chunks.append(chunk.tobytes())
             else:
@@ -488,6 +572,7 @@ class GPUFuture:
                 if raw.get(name) is not None
             },
             codec_sum=codec_sum,
+            hidden=hidden,
             updated_tc=updated_tc,
             used_pingpong=self._used_pingpong,
         )
@@ -520,17 +605,42 @@ class StepOutput:
     split_c2w_transconv: List[List[Optional[torch.Tensor]]] = field(
         default_factory=list
     )
-    # Batch-level per-state output tensors ([B, ...] each); preferred over
-    # the per-slot split lists, which remain for test-constructed outputs.
     batch_c2w_conv: Optional[List[Optional[torch.Tensor]]] = None
     batch_c2w_transconv: Optional[List[Optional[torch.Tensor]]] = None
-    # Batch-level native-cursor outputs. The engine loop updates per-slot
-    # neural state; CPU TN/reanchor/projector code consumes estimates later.
     cursor_outputs: Dict[str, Optional[torch.Tensor]] = field(default_factory=dict)
     codec_sum: Optional[torch.Tensor] = None
+    # Optional final Talker hidden state for method-layer continuity policies.
+    # It is an observation only; the core engine never uses it as a second
+    # inference path.
+    hidden: Optional[torch.Tensor] = None
     updated_tc: Optional[torch.Tensor] = None
     used_pingpong: bool = False
 
+
+@dataclass
+class C2WArenaSnapshot:
+    """Detached A/B C2W state rows for one pool allocation."""
+
+    read_conv: list[torch.Tensor]
+    read_transconv: list[torch.Tensor]
+    write_conv: list[torch.Tensor]
+    write_transconv: list[torch.Tensor]
+    write_in_a: bool
+    source_slot_id: int
+    source_allocation_epoch: int
+
+    @property
+    def tensor_bytes(self) -> int:
+        return sum(
+            tensor.numel() * tensor.element_size()
+            for group in (
+                self.read_conv,
+                self.read_transconv,
+                self.write_conv,
+                self.write_transconv,
+            )
+            for tensor in group
+        )
 
 # ---------------------------------------------------------------------------
 # CUDA-graph decode
@@ -592,6 +702,7 @@ class GraphedFusedDecode:
         self._max_entries = max_entries
         self._max_batch = max_batch
         self._max_past = max_past
+        self._profile_idx = int(profile_idx)
         self._batch_buckets = sorted(
             {b for b in self._BATCH_LADDER if b < max_batch} | {max_batch}
         )
@@ -831,7 +942,12 @@ class Executor:
         repetition_penalty: float = 1.05,
         random_seed: int = 0,
         speech_state_adapter: SpeechStateAdapter | None = None,
+        package_paths: ModelPackagePaths | None = None,
     ):
+        self._package_paths = package_paths
+        if package_paths is not None:
+            engine_dir = package_paths.engine_dir
+            weights_dir = package_paths.weights_dir
         self._engine_dir = Path(engine_dir) if engine_dir else None
         self._weights_dir = Path(weights_dir) if weights_dir else None
         self._device = torch.device("cuda", device_id)
@@ -879,13 +995,22 @@ class Executor:
         self._c2w_transconv_input_names: list[str] = []
         self._c2w_transconv_output_names: list[str] = []
         self._cursor_enabled = False
+        # Set only after a cursor-enabled fused graph exposes the complete
+        # recurrent input/output ABI. Manifest and release gates still decide
+        # whether a model may advertise successor handoff.
+        self._cursor_state_handoff_enabled = False
         self._cursor_input_names: list[str] = []
         self._cursor_output_names: list[str] = []
         self._cursor_max_labels = 0
         self._cursor_d = 0
         self._cursor_history = 0
+        self._cursor_vocab_size = 0
         self._cursor_head_path: Optional[Path] = None
         self._manifest: dict = {}
+        self._speech_state_bundle_validation: SpeechStateBundleValidation = SpeechStateBundleValidation(
+            False, "bundle_not_loaded"
+        )
+        self._release_gate: ReleaseGate = ReleaseGate.disabled()
         self._debug_dumper = EngineDebugDumper(
             engine_dir=self._engine_dir,
             weights_dir=self._weights_dir,
@@ -914,6 +1039,29 @@ class Executor:
         )
 
     @property
+    def speech_state_fingerprints(self) -> tuple[str, str]:
+        """Verified model/runtime identity, empty until the bundle declares it."""
+        manifest = getattr(self, "_manifest", {})
+        declared = manifest.get("speech_state") if isinstance(manifest, dict) else {}
+        declared = declared or {}
+        if not isinstance(declared, dict):
+            declared = {}
+
+        def identity(value: Any) -> str:
+            return value.strip() if isinstance(value, str) else ""
+
+        return (
+            identity(
+                getattr(self, "_speech_state_model_fingerprint", "")
+                or declared.get("model_fingerprint", "")
+            ),
+            identity(
+                getattr(self, "_speech_state_runtime_fingerprint", "")
+                or declared.get("runtime_fingerprint", "")
+            ),
+        )
+
+    @property
     def max_batch_size(self) -> int:
         return self._max_batch
 
@@ -935,8 +1083,137 @@ class Executor:
     @property
     def speech_state_capability(self) -> SpeechStateCapability:
         """Stable, fail-closed capability advertised by the adapter."""
+        capability = capability_from_adapter(self._speech_state_adapter)
+        if not capability.supported:
+            return capability
 
-        return capability_from_adapter(self._speech_state_adapter)
+        # An adapter describes implementation support, but the loaded bundle
+        # must also declare the exact model contract it was validated against.
+        # Keeping this gate at the executor boundary prevents a generic adapter
+        # from accidentally enabling handoff for an incompatible TRT plan.
+        contract = self.speech_state_model_contract
+        if contract is None:
+            return SpeechStateCapability.disabled()
+        if (
+            capability.supports_segment_handoff
+            and not contract.supports_segment_handoff
+        ):
+            return SpeechStateCapability.disabled()
+        if (
+            capability.supports_context_rollover
+            and not contract.supports_segment_handoff
+        ):
+            return SpeechStateCapability.disabled()
+        if capability.transfer is not contract.transfer:
+            return SpeechStateCapability.disabled()
+        # The current fused runtime has no cursor recurrent-state restore ABI.
+        # A model contract asking for MIGRATE must therefore stay closed; a
+        # fresh successor cursor would otherwise be mixed with inherited audio
+        # state. REANCHOR/DISABLE remain explicit model-level policies.
+        if (
+            contract.cursor_policy is SpeechStateCursorPolicy.MIGRATE
+            and not bool(getattr(self, "_cursor_state_handoff_enabled", False))
+        ):
+            return SpeechStateCapability.disabled()
+        bundle_validation = getattr(self, "_speech_state_bundle_validation", None)
+        if bundle_validation is not None and not bundle_validation.verified:
+            return SpeechStateCapability.disabled()
+        release_gate = getattr(self, "_release_gate", None)
+        if release_gate is not None and not release_gate.verified(
+            ReleaseCapability.SPEECH_STATE
+        ):
+            return SpeechStateCapability.disabled()
+        return capability
+
+    @property
+    def speech_state_capability_reason(self) -> str:
+        """Stable public explanation for the current fail-closed decision."""
+        # Once a package has been loaded, its manifest-owned bundle result is
+        # more actionable than the default NullSpeechStateAdapter.  Keeping
+        # this reason ahead of adapter inspection makes standalone and Triton
+        # capability discovery explain the same artifact failure.  The
+        # sentinel is retained for pre-load and legacy injected executors.
+        bundle_validation = getattr(self, "_speech_state_bundle_validation", None)
+        if (
+            bundle_validation is not None
+            and not bundle_validation.verified
+            and str(bundle_validation.reason or "") != "bundle_not_loaded"
+        ):
+            return str(bundle_validation.reason)
+        # A verified package is authoritative even when the runtime still has
+        # the default NullSpeechStateAdapter.  This keeps standalone and the
+        # Triton compatibility layer aligned on the release-gate reason.
+        if bundle_validation is not None and bundle_validation.verified:
+            release_gate = getattr(self, "_release_gate", None)
+            if release_gate is not None and not release_gate.verified(
+                ReleaseCapability.SPEECH_STATE
+            ):
+                return release_gate.reason(ReleaseCapability.SPEECH_STATE)
+        adapter_capability = capability_from_adapter(self._speech_state_adapter)
+        if not adapter_capability.supported:
+            return "adapter_disabled"
+        model_fingerprint, runtime_fingerprint = self.speech_state_fingerprints
+        if not model_fingerprint.strip() or not runtime_fingerprint.strip():
+            return "missing_runtime_fingerprint"
+        contract = self.speech_state_model_contract
+        if contract is None:
+            return "missing_or_invalid_model_contract"
+        if (
+            adapter_capability.supports_segment_handoff
+            and not contract.supports_segment_handoff
+        ):
+            return "model_contract_disallows_segment_handoff"
+        if (
+            adapter_capability.supports_context_rollover
+            and not contract.supports_segment_handoff
+        ):
+            return "model_contract_disallows_context_rollover"
+        if adapter_capability.transfer is not contract.transfer:
+            return "transfer_class_mismatch"
+        if (
+            contract.cursor_policy is SpeechStateCursorPolicy.MIGRATE
+            and not bool(getattr(self, "_cursor_state_handoff_enabled", False))
+        ):
+            return "cursor_state_handoff_unavailable"
+        bundle_validation = getattr(self, "_speech_state_bundle_validation", None)
+        if bundle_validation is not None and not bundle_validation.verified:
+            return bundle_validation.reason
+        release_gate = getattr(self, "_release_gate", None)
+        if release_gate is not None and not release_gate.verified(
+            ReleaseCapability.SPEECH_STATE
+        ):
+            return release_gate.reason(ReleaseCapability.SPEECH_STATE)
+        if not self.speech_state_capability.supported:
+            return "runtime_gate_disabled"
+        return "enabled"
+
+    @property
+    def speech_state_model_contract(self) -> Optional[SpeechStateModelContract]:
+        """Return the validated bundle-owned model contract, if present."""
+        manifest = getattr(self, "_manifest", {})
+        section = manifest.get("speech_state") if isinstance(manifest, dict) else None
+        if not isinstance(section, dict):
+            return None
+        raw_contract = section.get("model_contract")
+        if raw_contract is None:
+            return None
+        try:
+            contract = SpeechStateModelContract.from_mapping(raw_contract)
+            model_fingerprint, runtime_fingerprint = self.speech_state_fingerprints
+            if (
+                not model_fingerprint.strip()
+                or not runtime_fingerprint.strip()
+                or contract.model_fingerprint != model_fingerprint.strip()
+            ):
+                return None
+            return contract
+        except (TypeError, ValueError):
+            logger.warning(
+                "Ignoring malformed speech_state.model_contract; "
+                "state capability remains disabled",
+                exc_info=True,
+            )
+            return None
 
     @property
     def native_cursor_enabled(self) -> bool:
@@ -946,8 +1223,28 @@ class Executor:
     @property
     def native_cursor_capability(self) -> dict:
         """Manifest capability used by request-level progress routing."""
-        value = self._manifest.get("native_cursor") or {}
-        return dict(value) if self.native_cursor_enabled else {"enabled": False}
+        value = getattr(self, "_manifest", {}).get("native_cursor") or {}
+        result = dict(value) if self.native_cursor_enabled else {"enabled": False}
+        if not self.native_cursor_enabled:
+            return result
+        result["enabled"] = True
+        progress_available = result.get("progress_available", False)
+        if progress_available is not True:
+            if "progress_available" in result and not isinstance(
+                progress_available, bool
+            ):
+                result["reason"] = "malformed_native_cursor_capability"
+            result["progress_available"] = False
+            return result
+        release_gate = getattr(self, "_release_gate", None)
+        if (
+            release_gate is not None
+            and not release_gate.verified(ReleaseCapability.NATIVE_CURSOR)
+        ):
+            result["progress_available"] = False
+            result["reason"] = release_gate.reason(ReleaseCapability.NATIVE_CURSOR)
+            result["supported_progress_modes"] = ["ema", "disabled"]
+        return result
 
     @property
     def native_cursor_head_path(self) -> Optional[Path]:
@@ -962,16 +1259,57 @@ class Executor:
         """Load TRT engines, embedding weights, and initialize KV pool."""
         fused_plan: Optional[Path] = None
         if self._engine_dir:
-            mp = self._engine_dir / "model.plan"
-            te = self._engine_dir / "talker_code2wav_fused.engine"
-            if mp.exists():
-                fused_plan = mp
-            elif te.exists():
-                fused_plan = te
-            manifest_path = self._engine_dir / "triton_manifest.json"
+            package_paths = getattr(self, "_package_paths", None)
+            if package_paths is not None:
+                candidate = Path(package_paths.runtime_artifact_path)
+                if candidate.suffix.lower() in {".plan", ".engine"} and candidate.is_file():
+                    fused_plan = candidate
+                manifest_path = Path(package_paths.manifest_path)
+                bundle_root = Path(package_paths.package_dir)
+                evidence_paths = (
+                    bundle_root / "capability_evidence.json",
+                    self._engine_dir / "capability_evidence.json",
+                )
+            else:
+                mp = self._engine_dir / "model.plan"
+                te = self._engine_dir / "talker_code2wav_fused.engine"
+                if mp.exists():
+                    fused_plan = mp
+                elif te.exists():
+                    fused_plan = te
+                manifest_path = self._engine_dir / "triton_manifest.json"
+                bundle_root = (
+                    self._engine_dir.parent
+                    if self._engine_dir.name == "runtime"
+                    else self._engine_dir
+                )
+                evidence_paths = (
+                    bundle_root / "capability_evidence.json",
+                    self._engine_dir / "capability_evidence.json",
+                )
             if manifest_path.exists():
                 with open(manifest_path) as f:
                     self._manifest = json.load(f)
+            self._speech_state_bundle_validation = validate_speech_state_bundle(
+                self._manifest,
+                bundle_root=bundle_root,
+                runtime_artifact_path=fused_plan,
+            )
+            evidence = None
+            for evidence_path in (
+                self._engine_dir / "capability_evidence.json",
+                bundle_root / "capability_evidence.json",
+            ):
+                if not evidence_path.is_file():
+                    continue
+                try:
+                    loaded = json.loads(evidence_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    loaded = None
+                if isinstance(loaded, dict):
+                    evidence = loaded
+                    break
+            self._release_gate = evaluate_release_gate(self._manifest, evidence)
         if self._engine_dir and fused_plan is not None:
             self._fused_engine = TRTEngine(
                 str(fused_plan),
@@ -1071,15 +1409,26 @@ class Executor:
         # max_past × head_dim (7.5 GiB at 128×512 for the 1.7b) — try the
         # requested cap first and step down on OOM.  Steps beyond the cap
         # fall back to the eager path per step.
-        # Prefer a decode-only optimization profile when the engine has one
-        # (build_engines.sh emits it as profile 1): the dedicated context then
-        # only pays decode-sized scratch instead of the full profile's.
-        profile_idx = 0
+        # Standard plans may use the smaller decode-only profile. Cursor plans
+        # stay on profile 0 until every profile has trajectory parity; a
+        # profile that merely builds is not sufficient for a recurrent graph.
         num_profiles = int(
             getattr(self._fused_engine._engine, "num_optimization_profiles", 1)
         )
         if num_profiles > 1:
-            profile_idx = 1
+            requested_profile = os.environ.get("ENGINE_CUDA_GRAPH_PROFILE", "").strip()
+            profile_idx = _select_cuda_graph_profile(
+                num_profiles,
+                cursor_enabled=self._cursor_enabled,
+                requested=requested_profile,
+            )
+            if requested_profile and str(profile_idx) != requested_profile:
+                logger.warning(
+                    "Using CUDA Graph profile %d for cursor/parity safety; "
+                    "requested profile was %r",
+                    profile_idx,
+                    requested_profile,
+                )
         ladder = [p for p in (max_past_cap, 384, 256, 128) if p <= max_past_cap]
         for max_past in dict.fromkeys(ladder):
             try:
@@ -1310,7 +1659,7 @@ class Executor:
         ABI change is explicit rather than inferred from tensor ordering.
         """
         capability = self._manifest.get("native_cursor") or {}
-        if not capability.get("enabled") or self._fused_engine is None:
+        if capability.get("enabled") is not True or self._fused_engine is None:
             return
         head_path = (
             self._weights_dir / _NATIVE_CURSOR_HEAD_FILENAME
@@ -1324,6 +1673,24 @@ class Executor:
                 "disabling native cursor for this package"
             )
             return
+        expected_head_sha = str(capability.get("cursor_head_sha256", "") or "").strip().lower()
+        if expected_head_sha:
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_head_sha):
+                logger.warning(
+                    "Native cursor manifest has an invalid cursor_head_sha256; "
+                    "disabling native cursor for this package"
+                )
+                return
+            actual_head_sha = _sha256_file(head_path)
+            if actual_head_sha != expected_head_sha:
+                logger.warning(
+                    "Native cursor head hash mismatch; disabling native cursor: "
+                    "manifest=%s actual=%s path=%s",
+                    expected_head_sha,
+                    actual_head_sha,
+                    head_path,
+                )
+                return
         self._cursor_head_path = head_path
         if str(self._manifest.get("variant", "")) != "custom-1.7b":
             raise RuntimeError(
@@ -1358,9 +1725,22 @@ class Executor:
                 f"missing inputs={missing} outputs={missing_out}"
             )
         self._cursor_enabled = bool(self._cursor_input_names and self._cursor_output_names)
+        self._cursor_state_handoff_enabled = (
+            self._cursor_enabled
+            and CURSOR_RECURRENT_INPUT_BINDINGS.issubset(self._cursor_input_names)
+            and CURSOR_RECURRENT_OUTPUT_BINDINGS.issubset(self._cursor_output_names)
+        )
+        if self._cursor_enabled and not self._cursor_state_handoff_enabled:
+            logger.warning(
+                "Native cursor graph lacks the complete recurrent handoff ABI; "
+                "successor cursor migration remains disabled"
+            )
         self._cursor_max_labels = int(capability.get("max_labels", 512))
         self._cursor_d = int(capability.get("embedding_dim", 256))
         self._cursor_history = int(capability.get("history_width", 30))
+        self._cursor_vocab_size = int(capability.get("vocab_size", 0))
+        if self._cursor_vocab_size < 0:
+            raise RuntimeError("native cursor label vocabulary size must be non-negative")
         logger.info(
             "Native cursor bindings: enabled=%s labels=%d d=%d history=%d",
             self._cursor_enabled,
@@ -1566,6 +1946,452 @@ class Executor:
             for j, out in enumerate(batch_transconv):
                 arena[n_conv + j][ids_t] = out[rows_t]
 
+    def snapshot_c2w_arena(
+        self,
+        slot: SlotKVState,
+        *,
+        expected_allocation_epoch: int,
+        max_tensor_bytes: Optional[int] = None,
+    ) -> C2WArenaSnapshot:
+        """Detach both rows after the caller has fenced all state writes."""
+        self._validate_c2w_snapshot_target(slot, expected_allocation_epoch)
+        if not slot.c2w_arena_backed:
+            raise ValueError("C2W arena snapshot requires an arena-backed slot")
+        if type(slot.c2w_write_in_a) is not bool:
+            raise ValueError("C2W arena parity must be a bool")
+        expected_read = self._arena_row_views(
+            self._c2w_arena_a if not slot.c2w_write_in_a else self._c2w_arena_b,
+            slot.slot_id,
+        )
+        expected_write = self._arena_row_views(
+            self._c2w_arena_a if slot.c2w_write_in_a else self._c2w_arena_b,
+            slot.slot_id,
+        )
+        actual = (
+            slot.c2w_conv_states, slot.c2w_transconv_states,
+            slot._c2w_conv_write, slot._c2w_transconv_write,
+        )
+        expected = (*expected_read, *expected_write)
+        self._validate_c2w_snapshot_tensors(actual, expected, require_views=True)
+        if max_tensor_bytes is not None:
+            if (
+                isinstance(max_tensor_bytes, bool)
+                or not isinstance(max_tensor_bytes, Integral)
+                or max_tensor_bytes < 0
+            ):
+                raise SpeechStateContractError("max_tensor_bytes must be nonnegative")
+            tensor_bytes = sum(
+                tensor.numel() * tensor.element_size()
+                for group in actual
+                for tensor in group
+            )
+            if tensor_bytes > int(max_tensor_bytes):
+                raise SpeechStateContractError(
+                    "C2W arena snapshot exceeds tensor byte budget"
+                )
+        return C2WArenaSnapshot(
+            read_conv=[tensor.detach().clone() for tensor in actual[0]],
+            read_transconv=[tensor.detach().clone() for tensor in actual[1]],
+            write_conv=[tensor.detach().clone() for tensor in actual[2]],
+            write_transconv=[tensor.detach().clone() for tensor in actual[3]],
+            write_in_a=bool(slot.c2w_write_in_a),
+            source_slot_id=slot.slot_id,
+            source_allocation_epoch=slot.allocation_epoch,
+        )
+
+    @staticmethod
+    def _speech_state_payload_bytes(payload: Any) -> int:
+        """Count detached tensor storage in a capture payload."""
+        if payload is None:
+            return 0
+        if isinstance(payload, torch.Tensor):
+            return payload.numel() * payload.element_size()
+        if isinstance(payload, (list, tuple)):
+            return sum(Executor._speech_state_payload_bytes(item) for item in payload)
+        tensor_bytes = getattr(payload, "tensor_bytes", None)
+        if tensor_bytes is not None:
+            return int(tensor_bytes)
+        raise SpeechStateContractError(
+            f"unsupported speech-state payload type: {type(payload).__name__}"
+        )
+
+    def capture_speech_state_bundle(
+        self,
+        slot: SlotKVState,
+        segment_metadata: SegmentRuntimeMetadata,
+        *,
+        max_tensor_bytes: int,
+        expected_slot_session_id: str | None = None,
+    ) -> SpeechStateSnapshotBundle:
+        """Assemble detached state after the caller has established quiescence.
+
+        The caller must invoke this only after the decode future has completed,
+        deferred KV/arena scatters have landed, and the slot's ping-pong parity
+        is final. This method does not synchronize CUDA or infer that those
+        conditions hold; it only validates ownership and assembles the four
+        storage-owned payloads. It also does not advertise or attach a runtime
+        capability.
+        """
+        if (
+            isinstance(max_tensor_bytes, bool)
+            or not isinstance(max_tensor_bytes, Integral)
+            or max_tensor_bytes < 0
+        ):
+            raise SpeechStateContractError("max_tensor_bytes must be nonnegative")
+        if not isinstance(segment_metadata, SegmentRuntimeMetadata):
+            raise SpeechStateContractError("segment metadata type mismatch")
+        if self._kv_pool is None:
+            raise SpeechStateContractError("speech-state capture requires an initialized KV pool")
+        if slot.is_free:
+            raise SpeechStateContractError("cannot capture a free slot")
+        if (
+            self._kv_pool.get(slot.slot_id) is not slot
+            or isinstance(slot.allocation_epoch, bool)
+            or slot.allocation_epoch <= 0
+        ):
+            raise SpeechStateContractError("speech-state slot ownership mismatch")
+        if (
+            (expected_slot_session_id or segment_metadata.session_id) != slot.session_id
+            or segment_metadata.segment_idx != slot.segment_idx
+            or segment_metadata.retry_idx != slot.retry_idx
+        ):
+            raise SpeechStateContractError("speech-state segment ownership mismatch")
+
+        epoch = int(slot.allocation_epoch)
+        talker_pool = getattr(self._kv_pool, "_talker_kv_pool", None)
+        uses_pooled_talker = talker_pool is not None
+        if uses_pooled_talker and slot.talker_kv is not None and slot.past_len:
+            raise SpeechStateContractError(
+                "pooled Talker slot unexpectedly owns detached talker_kv"
+            )
+
+        uses_external_storage = uses_pooled_talker or slot.c2w_pooled or slot.c2w_arena_backed
+        if not uses_external_storage:
+            slot_payload = StandaloneSlotSnapshot(
+                slot, max_tensor_bytes=int(max_tensor_bytes)
+            )
+            pooled_talker_payload = None
+            pooled_c2w_payload = None
+            c2w_arena_payload = None
+        else:
+            slot_payload = SlotOwnedSnapshot(
+                slot,
+                pooled_talker=uses_pooled_talker,
+                pooled_c2w=slot.c2w_pooled,
+                arena_backed=slot.c2w_arena_backed,
+                max_tensor_bytes=int(max_tensor_bytes),
+            )
+            used_bytes = self._speech_state_payload_bytes(slot_payload)
+            remaining_bytes = int(max_tensor_bytes) - used_bytes
+            try:
+                pooled_talker_payload = (
+                    self._kv_pool.snapshot_pooled_talker_kv(
+                        slot.slot_id,
+                        expected_allocation_epoch=epoch,
+                        max_tensor_bytes=remaining_bytes,
+                    )
+                    if uses_pooled_talker
+                    else None
+                )
+            except ValueError as exc:
+                raise SpeechStateContractError(str(exc)) from exc
+            used_bytes += self._speech_state_payload_bytes(pooled_talker_payload)
+            remaining_bytes = int(max_tensor_bytes) - used_bytes
+            if uses_pooled_talker and slot.past_len and pooled_talker_payload is None:
+                raise SpeechStateContractError("Talker state is missing for capture")
+
+            if slot.c2w_pooled:
+                try:
+                    pooled_c2w_payload = self._kv_pool.snapshot_pooled_c2w_kv(
+                        slot.slot_id,
+                        expected_allocation_epoch=epoch,
+                        max_tensor_bytes=remaining_bytes,
+                    )
+                except ValueError as exc:
+                    raise SpeechStateContractError(str(exc)) from exc
+                if slot.c2w_len and pooled_c2w_payload is None:
+                    raise SpeechStateContractError("pooled C2W state is missing for capture")
+            else:
+                pooled_c2w_payload = None
+                if slot.c2w_len and slot.c2w_kv is None:
+                    raise SpeechStateContractError("C2W state is missing for capture")
+
+            c2w_arena_payload = (
+                self.snapshot_c2w_arena(
+                    slot,
+                    expected_allocation_epoch=epoch,
+                    max_tensor_bytes=(
+                        int(max_tensor_bytes)
+                        - used_bytes
+                        - self._speech_state_payload_bytes(pooled_c2w_payload)
+                    ),
+                )
+                if slot.c2w_arena_backed
+                else None
+            )
+
+        payloads = (
+            slot_payload,
+            pooled_talker_payload,
+            pooled_c2w_payload,
+            c2w_arena_payload,
+        )
+        total_bytes = sum(self._speech_state_payload_bytes(item) for item in payloads)
+        if total_bytes > int(max_tensor_bytes):
+            raise SpeechStateContractError(
+                f"speech-state capture exceeds tensor byte budget: "
+                f"{total_bytes} > {int(max_tensor_bytes)}"
+            )
+        return SpeechStateSnapshotBundle(
+            source_session_id=str(segment_metadata.session_id),
+            source_segment_idx=int(segment_metadata.segment_idx),
+            source_slot_id=int(slot.slot_id),
+            source_allocation_epoch=epoch,
+            segment_metadata=segment_metadata,
+            slot_payload=slot_payload,
+            pooled_talker_payload=pooled_talker_payload,
+            pooled_c2w_payload=pooled_c2w_payload,
+            c2w_arena_payload=c2w_arena_payload,
+            source_slot_session_id=slot.session_id,
+        )
+
+    def restore_speech_state_bundle(
+        self,
+        slot: SlotKVState,
+        bundle: SpeechStateSnapshotBundle,
+        *,
+        expected_allocation_epoch: int,
+    ) -> None:
+        """Restore a same-segment bundle into an already allocated target.
+
+        This baseline deliberately handles PAUSE_RESUME identity only. A
+        successor segment needs a model-specific text/phase contract and is
+        not silently treated as an ordinary slot restore.
+        """
+        if not isinstance(bundle, SpeechStateSnapshotBundle):
+            raise SpeechStateContractError("speech-state bundle type mismatch")
+        self._validate_restore_target(slot, expected_allocation_epoch)
+        if (
+            slot.session_id != bundle.source_slot_session_id
+            or slot.segment_idx != bundle.source_segment_idx
+        ):
+            raise SpeechStateContractError(
+                "same-segment restore requires matching slot identity"
+            )
+
+        slot_payload = bundle.slot_payload
+        if isinstance(slot_payload, StandaloneSlotSnapshot):
+            if any(
+                payload is not None
+                for payload in (
+                    bundle.pooled_talker_payload,
+                    bundle.pooled_c2w_payload,
+                    bundle.c2w_arena_payload,
+                )
+            ):
+                raise SpeechStateContractError(
+                    "standalone bundle contains external storage payloads"
+                )
+            slot_payload.restore_into(slot)
+            return
+        if not isinstance(slot_payload, SlotOwnedSnapshot):
+            raise SpeechStateContractError("unsupported speech-state slot payload")
+
+        if bundle.pooled_c2w_payload is None and slot.c2w_pooled:
+            raise SpeechStateContractError(
+                "non-pooled C2W bundle cannot overwrite a pooled target"
+            )
+        if bundle.c2w_arena_payload is None and slot.c2w_arena_backed:
+            raise SpeechStateContractError(
+                "bundle without arena state cannot overwrite an arena target"
+            )
+
+        pool = self._kv_pool
+        talker_pool = getattr(pool, "_talker_kv_pool", None)
+        c2w_pool = getattr(pool, "_c2w_kv_pool", None)
+        if talker_pool is not None:
+            if not isinstance(bundle.pooled_talker_payload, torch.Tensor):
+                raise SpeechStateContractError("pooled Talker payload is missing")
+            pool._validate_pooled_payload(
+                bundle.pooled_talker_payload, talker_pool, "Talker"
+            )
+        elif bundle.pooled_talker_payload is not None:
+            raise SpeechStateContractError("unexpected pooled Talker payload")
+        if bundle.pooled_c2w_payload is not None:
+            if c2w_pool is None or not isinstance(bundle.pooled_c2w_payload, torch.Tensor):
+                raise SpeechStateContractError("pooled C2W payload is incompatible")
+            pool._validate_pooled_payload(
+                bundle.pooled_c2w_payload, c2w_pool, "C2W"
+            )
+
+        arena = bundle.c2w_arena_payload
+        if arena is not None:
+            if not isinstance(arena, C2WArenaSnapshot):
+                raise SpeechStateContractError("C2W arena payload type mismatch")
+            self._validate_c2w_snapshot_target(slot, expected_allocation_epoch)
+            if (
+                arena.source_slot_id != bundle.source_slot_id
+                or arena.source_allocation_epoch != bundle.source_allocation_epoch
+            ):
+                raise SpeechStateContractError("C2W arena source identity mismatch")
+            if type(arena.write_in_a) is not bool:
+                raise SpeechStateContractError("C2W arena parity is invalid")
+            read_conv, read_trans = self._arena_row_views(
+                self._c2w_arena_a if not arena.write_in_a else self._c2w_arena_b,
+                slot.slot_id,
+            )
+            write_conv, write_trans = self._arena_row_views(
+                self._c2w_arena_a if arena.write_in_a else self._c2w_arena_b,
+                slot.slot_id,
+            )
+            self._validate_c2w_snapshot_tensors(
+                (arena.read_conv, arena.read_transconv,
+                 arena.write_conv, arena.write_transconv),
+                (read_conv, read_trans, write_conv, write_trans),
+            )
+
+        # All representation checks above happen before the first target write.
+        slot_payload.restore_into(slot)
+        if talker_pool is not None:
+            pool.restore_pooled_talker_kv(
+                slot.slot_id,
+                bundle.pooled_talker_payload,
+                expected_allocation_epoch=expected_allocation_epoch,
+            )
+        if bundle.pooled_c2w_payload is not None:
+            pool.restore_pooled_c2w_kv(
+                slot.slot_id,
+                bundle.pooled_c2w_payload,
+                expected_allocation_epoch=expected_allocation_epoch,
+            )
+        if arena is not None:
+            self.restore_c2w_arena(
+                slot,
+                arena,
+                expected_allocation_epoch=expected_allocation_epoch,
+                expected_source_slot_id=bundle.source_slot_id,
+                expected_source_allocation_epoch=bundle.source_allocation_epoch,
+            )
+
+    def _validate_restore_target(
+        self, slot: SlotKVState, expected_allocation_epoch: int
+    ) -> None:
+        if self._kv_pool is None:
+            raise SpeechStateContractError("speech-state restore requires an initialized KV pool")
+        if (
+            slot.is_free
+            or self._kv_pool.get(slot.slot_id) is not slot
+            or type(expected_allocation_epoch) is not int
+            or expected_allocation_epoch <= 0
+            or slot.allocation_epoch != expected_allocation_epoch
+        ):
+            raise SpeechStateContractError("speech-state restore target owner mismatch")
+
+    def synchronize_state_transfer(self) -> None:
+        """Fence state copies/scatters queued by the engine thread."""
+        if self._device.type == "cuda":
+            # TRT runs on the executor stream; batch-end pool/arena copies
+            # run on the engine thread's current stream. A state boundary
+            # must settle both before capturing or releasing an allocation.
+            current_stream = torch.cuda.current_stream(self._device)
+            compute_stream = getattr(self, "_compute_stream", None)
+            if compute_stream is not None:
+                compute_stream.synchronize()
+            if compute_stream is None or getattr(
+                current_stream, "cuda_stream", id(current_stream)
+            ) != getattr(compute_stream, "cuda_stream", id(compute_stream)):
+                current_stream.synchronize()
+
+    def restore_c2w_arena(
+        self,
+        slot: SlotKVState,
+        snapshot: C2WArenaSnapshot,
+        *,
+        expected_allocation_epoch: int,
+        expected_source_slot_id: int,
+        expected_source_allocation_epoch: int,
+    ) -> None:
+        """Restore into a live target; source identity comes from its handle.
+
+        Source and target epochs are independent: migration may follow source
+        release and target allocation. The caller owns handle authentication,
+        write completion and admission of the fully restored runtime state.
+        """
+        self._validate_c2w_snapshot_target(slot, expected_allocation_epoch)
+        if not isinstance(snapshot, C2WArenaSnapshot):
+            raise ValueError("C2W arena snapshot type mismatch")
+        if (
+            snapshot.source_slot_id != expected_source_slot_id
+            or snapshot.source_allocation_epoch != expected_source_allocation_epoch
+        ):
+            raise ValueError("C2W arena snapshot source ownership mismatch")
+        if type(snapshot.write_in_a) is not bool:
+            raise ValueError("C2W arena parity must be a bool")
+        read_conv, read_trans = self._arena_row_views(
+            self._c2w_arena_a if not snapshot.write_in_a else self._c2w_arena_b,
+            slot.slot_id,
+        )
+        write_conv, write_trans = self._arena_row_views(
+            self._c2w_arena_a if snapshot.write_in_a else self._c2w_arena_b,
+            slot.slot_id,
+        )
+        self._validate_c2w_snapshot_tensors(
+            (snapshot.read_conv, snapshot.read_transconv,
+             snapshot.write_conv, snapshot.write_transconv),
+            (read_conv, read_trans, write_conv, write_trans),
+        )
+        for dst, src in zip(read_conv, snapshot.read_conv):
+            dst.copy_(src)
+        for dst, src in zip(read_trans, snapshot.read_transconv):
+            dst.copy_(src)
+        for dst, src in zip(write_conv, snapshot.write_conv):
+            dst.copy_(src)
+        for dst, src in zip(write_trans, snapshot.write_transconv):
+            dst.copy_(src)
+        slot.c2w_conv_states, slot.c2w_transconv_states = read_conv, read_trans
+        slot._c2w_conv_write, slot._c2w_transconv_write = write_conv, write_trans
+        slot.c2w_write_in_a = snapshot.write_in_a
+        slot.c2w_arena_backed = True
+
+    def _validate_c2w_snapshot_target(self, slot, epoch) -> None:
+        if (
+            isinstance(epoch, bool) or not isinstance(epoch, Integral) or epoch <= 0
+            or isinstance(slot.slot_id, bool) or not isinstance(slot.slot_id, Integral)
+            or not 0 <= slot.slot_id < self._kv_pool._max_slots
+            or self._kv_pool.get(slot.slot_id) is not slot
+            or slot.is_free or slot.allocation_epoch != epoch
+        ):
+            raise ValueError("C2W arena owner mismatch")
+        shapes = [*self._c2w_conv_shapes, *self._c2w_transconv_shapes]
+        for arena in (self._c2w_arena_a, self._c2w_arena_b):
+            if arena is None or not shapes or len(arena) != len(shapes):
+                raise ValueError("C2W arena storage unavailable or incomplete")
+            for tensor, shape in zip(arena, shapes):
+                if (
+                    not isinstance(tensor, torch.Tensor)
+                    or tuple(tensor.shape) != (self._kv_pool._max_slots, *shape[1:])
+                    or tensor.dtype != self._config.dtype
+                    or tensor.device != self._device
+                ):
+                    raise ValueError("C2W arena storage ABI mismatch")
+
+    @staticmethod
+    def _validate_c2w_snapshot_tensors(actual, expected, *, require_views=False):
+        for group, rows in zip(actual, expected):
+            if not isinstance(group, (list, tuple)) or len(group) != len(rows):
+                raise ValueError("C2W arena snapshot state count mismatch")
+            for tensor, row in zip(group, rows):
+                if (
+                    not isinstance(tensor, torch.Tensor)
+                    or tensor.shape != row.shape or tensor.dtype != row.dtype
+                    or tensor.device != row.device or tensor.layout != torch.strided
+                ):
+                    raise ValueError("C2W arena snapshot tensor ABI mismatch")
+                if require_views and (
+                    tensor.data_ptr() != row.data_ptr() or tensor.stride() != row.stride()
+                ):
+                    raise ValueError("C2W arena slot views are not bound to their owner row")
+
     def apply_c2w_warm_state(
         self,
         slot: SlotKVState,
@@ -1592,20 +2418,81 @@ class Executor:
             )
             return False
 
-        max_past = max(1, self._config.c2w_sliding_window - FUSED_CHUNK_T)
-        kv = c2w_kv.to(device=self._device, dtype=self._config.dtype).contiguous()
-        if kv.shape[3] > max_past:
-            kv = kv[:, :, :, -max_past:, :].contiguous()
-        slot.c2w_kv = kv
-        slot.c2w_conv_states = [
-            t.to(device=self._device, dtype=self._config.dtype).contiguous()
-            for t in conv_states
-        ]
-        slot.c2w_transconv_states = [
-            t.to(device=self._device, dtype=self._config.dtype).contiguous()
-            for t in transconv_states
-        ]
-        slot.frame_idx = max(0, int(frame_idx))
+        # Prepare every tensor before mutating the target slot.  A malformed
+        # state in the middle of the list must fall back as one transaction;
+        # leaving half of the C2W history installed would mix a successor's
+        # hard-boundary prefill with predecessor state.
+        try:
+            max_past = max(1, self._config.c2w_sliding_window - FUSED_CHUNK_T)
+            prepared_kv = c2w_kv.to(
+                device=self._device, dtype=self._config.dtype
+            ).contiguous()
+            if prepared_kv.ndim < 5:
+                raise ValueError("Code2Wav KV state must have five dimensions")
+            if prepared_kv.shape[3] > max_past:
+                prepared_kv = prepared_kv[:, :, :, -max_past:, :].contiguous()
+            prepared_conv = [
+                t.to(device=self._device, dtype=self._config.dtype).contiguous()
+                for t in conv_states
+            ]
+            prepared_transconv = [
+                t.to(device=self._device, dtype=self._config.dtype).contiguous()
+                for t in transconv_states
+            ]
+            prepared_frame_idx = max(0, int(frame_idx))
+        except (
+            AttributeError,
+            IndexError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            OverflowError,
+        ):
+            logger.warning(
+                "Skipping Code2Wav warm state: tensor preparation failed",
+                exc_info=True,
+            )
+            return False
+
+        # A successor is commonly prefetched before its predecessor context is
+        # available.  That prefill can already have promoted the slot to the
+        # pooled C2W representation.  In that case assigning ``slot.c2w_kv``
+        # would be invisible to decode, which gathers the pool row for pooled
+        # slots.  Restore through the pool owner so the handoff replaces the
+        # prefetched history atomically.
+        if bool(getattr(slot, "c2w_pooled", False)):
+            pool = getattr(self, "_kv_pool", None)
+            restore_pooled = getattr(pool, "restore_pooled_c2w_kv", None)
+            if not callable(restore_pooled):
+                logger.warning(
+                    "Skipping Code2Wav warm state: pooled C2W restore is unavailable"
+                )
+                return False
+            try:
+                restore_pooled(
+                    slot.slot_id,
+                    prepared_kv,
+                    expected_allocation_epoch=slot.allocation_epoch,
+                )
+            except (
+                AttributeError,
+                IndexError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+                OverflowError,
+            ):
+                logger.warning(
+                    "Skipping Code2Wav warm state: pooled C2W restore failed",
+                    exc_info=True,
+                )
+                return False
+            slot.c2w_kv = None
+        else:
+            slot.c2w_kv = prepared_kv
+        slot.c2w_conv_states = prepared_conv
+        slot.c2w_transconv_states = prepared_transconv
+        slot.frame_idx = prepared_frame_idx
         return True
 
     # ------------------------------------------------------------------
@@ -2829,6 +3716,59 @@ class Executor:
         if slot.cursor_override_valid is not None:
             slot.cursor_override_valid.zero_()
 
+    def restore_cursor_state(self, slot: SlotKVState, state: Any) -> None:
+        """Restore fused cursor recurrent state into an allocated slot.
+
+        The successor's labels are installed separately from the primary TN
+        plan; this method only copies neural state and never consumes text.
+        """
+        if not self._cursor_enabled or not bool(
+            getattr(self, "_cursor_state_handoff_enabled", False)
+        ):
+            raise RuntimeError("native cursor state handoff is unavailable")
+        if slot is None or slot.is_free:
+            raise ValueError("cannot restore cursor state into a free slot")
+        self._ensure_cursor_state(slot)
+        restore = getattr(state, "restore_into", None)
+        if not callable(restore):
+            raise ValueError("invalid cursor continuation state")
+        restore(slot)
+
+    def validate_cursor_state(self, slot: SlotKVState, state: Any) -> None:
+        """Validate a detached cursor payload without mutating the slot.
+
+        EngineLoop uses this preflight before installing C2W warm state so a
+        malformed cursor payload cannot leave a partially restored successor.
+        """
+        if not self._cursor_enabled or not bool(
+            getattr(self, "_cursor_state_handoff_enabled", False)
+        ):
+            raise RuntimeError("native cursor state handoff is unavailable")
+        if slot is None or slot.is_free:
+            raise ValueError("cannot validate cursor state for a free slot")
+        specs = {
+            "cursor_mu": ((), self._config.dtype),
+            "cursor_frames_since_advance": ((), self._config.dtype),
+            "cursor_delta_history": ((8,), self._config.dtype),
+            "cursor_conv_history": (
+                (self._cursor_history, self._cursor_d),
+                self._config.dtype,
+            ),
+            "cursor_last_trunk_input": ((self._cursor_d,), self._config.dtype),
+            "cursor_seen_frames": ((), torch.int64),
+        }
+        for name, (tail_shape, dtype) in specs.items():
+            value = getattr(state, name, None)
+            expected_shape = (1, *tail_shape)
+            if (
+                not isinstance(value, torch.Tensor)
+                or tuple(value.shape) != expected_shape
+                or value.dtype != dtype
+                or value.device != self._device
+                or not value.is_contiguous()
+            ):
+                raise ValueError(f"cursor continuation field {name} ABI mismatch")
+
     def set_cursor_text_plan(
         self,
         slot: SlotKVState,
@@ -2846,74 +3786,153 @@ class Executor:
         """
         if not self._cursor_enabled:
             return
-        ids = torch.as_tensor(label_ids, device=self._device, dtype=torch.int64)
+
+        # Validate the CPU-side plan before moving it to the execution device;
+        # plan updates are infrequent, so this also keeps malformed labels from
+        # reaching a device-side embedding/gather operation.
+        ids = torch.as_tensor(label_ids)
         if ids.dim() == 2:
             if ids.shape[0] != 1:
                 raise ValueError("cursor label plan must have one row per slot")
             ids = ids[0]
         if ids.dim() != 1:
             raise ValueError(f"cursor label plan must be [M], got {tuple(ids.shape)}")
-        count = int(ids.numel() if label_count is None else label_count)
-        if count < 0 or count > int(ids.numel()) or count > self._cursor_max_labels:
+        if ids.numel() and (
+            ids.dtype == torch.bool
+            or ids.is_floating_point()
+            or ids.is_complex()
+        ):
+            raise ValueError("cursor label plan must contain integer labels")
+        if ids.numel() and bool((ids < 0).any().item()):
+            raise ValueError("cursor label plan must contain non-negative labels")
+        vocab_size = int(getattr(self, "_cursor_vocab_size", 0) or 0)
+        if vocab_size and ids.numel() and bool((ids >= vocab_size).any().item()):
+            raise ValueError(
+                f"cursor label plan contains an id outside vocabulary size {vocab_size}"
+            )
+        if ids.numel() > self._cursor_max_labels:
+            raise ValueError(
+                f"cursor label plan length={ids.numel()} exceeds capacity "
+                f"{self._cursor_max_labels}"
+            )
+        ids = ids.to(device=self._device, dtype=torch.int64)
+        count = ids.numel() if label_count is None else self._cursor_int(
+            label_count, name="cursor label_count"
+        )
+        if count < 0 or count > int(ids.numel()):
+            raise ValueError(
+                f"cursor label_count={count} exceeds supplied plan length "
+                f"{ids.numel()}"
+            )
+        if count > self._cursor_max_labels:
             raise ValueError(
                 f"cursor label_count={count} exceeds plan capacity {self._cursor_max_labels}"
             )
-        padded = torch.zeros(
-            1, self._cursor_max_labels, device=self._device, dtype=torch.int64
+
+        active_value = self._cursor_active_value(active)
+        text_start_value = self._cursor_int(
+            text_start_frame, name="cursor text_start_frame"
         )
-        if count:
-            padded[:, :count] = ids[:count].view(1, count)
-        slot.cursor_label_ids = padded
-        slot.cursor_label_count = torch.tensor(
-            [count], device=self._device, dtype=torch.int64
-        )
-        slot.cursor_active = torch.tensor(
-            [1 if active else 0], device=self._device, dtype=torch.int64
-        )
-        slot.cursor_text_start_frame = torch.tensor(
-            [int(text_start_frame)], device=self._device, dtype=torch.int64
-        )
+
         self._ensure_cursor_state(slot)
+        slot.cursor_label_ids.zero_()
+        if count:
+            slot.cursor_label_ids[:, :count].copy_(ids[:count].reshape(1, count))
+        slot.cursor_label_count.fill_(count)
+        slot.cursor_active.fill_(active_value)
+        slot.cursor_text_start_frame.fill_(text_start_value)
 
     def set_cursor_reanchor(self, slot: SlotKVState, mu: float) -> None:
         """Inject one CPU-computed TN tail-rewrite reanchor for the next step."""
         if not self._cursor_enabled:
             return
+        mu_value = self._cursor_mu_value(mu)
         self._ensure_cursor_state(slot)
-        slot.cursor_override_mu = torch.tensor(
-            [float(mu)], device=self._device, dtype=self._config.dtype
-        )
-        slot.cursor_override_valid = torch.ones(
-            1, device=self._device, dtype=torch.int64
-        )
+        slot.cursor_override_mu.fill_(mu_value)
+        slot.cursor_override_valid.fill_(1)
+
+    @staticmethod
+    def _cursor_int(value: Any, *, name: str) -> int:
+        """Validate an integer cursor control without coercive truncation."""
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be an integer scalar, not bool")
+        if isinstance(value, torch.Tensor):
+            if value.numel() != 1:
+                raise ValueError(f"{name} must be an integer scalar")
+            if value.dtype == torch.bool or value.is_floating_point() or value.is_complex():
+                raise ValueError(f"{name} must be an integer scalar")
+            value = value.detach().item()
+        if not isinstance(value, Integral):
+            raise ValueError(f"{name} must be an integer scalar")
+        return int(value)
+
+    @staticmethod
+    def _cursor_active_value(value: Any) -> int:
+        """Normalize the active control while rejecting ambiguous values."""
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, torch.Tensor):
+            if value.numel() != 1:
+                raise ValueError("cursor active must be a boolean scalar")
+            if value.dtype == torch.bool:
+                return int(value.detach().item())
+            if value.is_floating_point() or value.is_complex():
+                raise ValueError("cursor active must be a boolean scalar")
+            value = value.detach().item()
+        if isinstance(value, Integral) and int(value) in (0, 1):
+            return int(value)
+        raise ValueError("cursor active must be a boolean scalar")
+
+    @staticmethod
+    def _cursor_mu_value(value: Any) -> float:
+        """Validate a finite scalar reanchor coordinate before slot mutation."""
+        if isinstance(value, bool):
+            raise ValueError("cursor reanchor mu must be a finite numeric scalar")
+        if isinstance(value, torch.Tensor):
+            if value.numel() != 1:
+                raise ValueError("cursor reanchor mu must be a finite numeric scalar")
+            if value.dtype == torch.bool or value.is_complex():
+                raise ValueError("cursor reanchor mu must be a finite numeric scalar")
+            value = value.detach().item()
+        if not isinstance(value, Real):
+            raise ValueError("cursor reanchor mu must be a finite numeric scalar")
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError("cursor reanchor mu must be a finite numeric scalar")
+        return value
 
     def _ensure_cursor_state(self, slot: SlotKVState) -> None:
-        """Lazily allocate zero neural state for a cursor-enabled slot."""
-        if slot.cursor_mu is not None:
-            return
+        """Lazily allocate correctly shaped state without resetting live values."""
         dtype = self._config.dtype
-        slot.cursor_mu = torch.zeros(1, device=self._device, dtype=dtype)
-        slot.cursor_frames_since_advance = torch.zeros(1, device=self._device, dtype=dtype)
-        slot.cursor_delta_history = torch.zeros(1, 8, device=self._device, dtype=dtype)
-        slot.cursor_conv_history = torch.zeros(
-            1, self._cursor_history, self._cursor_d, device=self._device, dtype=dtype
-        )
-        slot.cursor_last_trunk_input = torch.zeros(1, self._cursor_d, device=self._device, dtype=dtype)
-        slot.cursor_seen_frames = torch.zeros(1, device=self._device, dtype=torch.int64)
-        if slot.cursor_label_ids is None:
-            slot.cursor_label_ids = torch.zeros(
-                1, self._cursor_max_labels, device=self._device, dtype=torch.int64
-            )
-        if slot.cursor_label_count is None:
-            slot.cursor_label_count = torch.zeros(1, device=self._device, dtype=torch.int64)
-        if slot.cursor_active is None:
-            slot.cursor_active = torch.zeros(1, device=self._device, dtype=torch.int64)
-        if slot.cursor_text_start_frame is None:
-            slot.cursor_text_start_frame = torch.zeros(1, device=self._device, dtype=torch.int64)
-        if slot.cursor_override_valid is None:
-            slot.cursor_override_valid = torch.zeros(1, device=self._device, dtype=torch.int64)
-        if slot.cursor_override_mu is None:
-            slot.cursor_override_mu = torch.zeros(1, device=self._device, dtype=dtype)
+
+        def _ensure(attr: str, tail_shape: tuple[int, ...], tensor_dtype: torch.dtype) -> None:
+            expected = (1,) + tail_shape
+            value = getattr(slot, attr, None)
+            if (
+                not isinstance(value, torch.Tensor)
+                or tuple(value.shape) != expected
+                or value.device != self._device
+                or value.dtype != tensor_dtype
+                or not value.is_contiguous()
+            ):
+                setattr(
+                    slot,
+                    attr,
+                    torch.zeros(expected, device=self._device, dtype=tensor_dtype),
+                )
+
+        _ensure("cursor_mu", (), dtype)
+        _ensure("cursor_frames_since_advance", (), dtype)
+        _ensure("cursor_delta_history", (8,), dtype)
+        _ensure("cursor_conv_history", (self._cursor_history, self._cursor_d), dtype)
+        _ensure("cursor_last_trunk_input", (self._cursor_d,), dtype)
+        _ensure("cursor_seen_frames", (), torch.int64)
+        _ensure("cursor_label_ids", (self._cursor_max_labels,), torch.int64)
+        _ensure("cursor_label_count", (), torch.int64)
+        _ensure("cursor_active", (), torch.int64)
+        _ensure("cursor_text_start_frame", (), torch.int64)
+        _ensure("cursor_override_valid", (), torch.int64)
+        _ensure("cursor_override_mu", (), dtype)
 
     def _build_dump_metadata(
         self,
@@ -3044,7 +4063,10 @@ class Executor:
             torch.cuda.synchronize(self._device)
             logger.info("Warmup complete (%d rounds)", n_rounds)
         finally:
-            self._kv_pool.release(dummy_slot.slot_id)
+            self._kv_pool.release(
+                dummy_slot.slot_id,
+                expected_allocation_epoch=dummy_slot.allocation_epoch,
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle

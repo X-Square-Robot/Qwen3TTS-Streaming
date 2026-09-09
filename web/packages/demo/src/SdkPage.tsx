@@ -71,23 +71,30 @@ export function SdkPage({loaded, capabilities, settings, docsOnly}: SdkPageProps
   </section>;
 }
 
-export function buildPythonExample(nativeUrl: string, value: DemoSynthesisSettings): string {
+function buildPythonExampleSource(nativeUrl: string, value: DemoSynthesisSettings): string {
   const vadEnabled = value.vad !== "disabled";
-  const imports = value.inputMode === "full"
+  const publicInputMode = value.inputMode === "full" ? "full_text" : value.inputMode === "long" ? "long_segment" : "token";
+  const imports = value.inputMode !== "incremental"
     ? "AudioFormat, OutputPolicy, TTSClient, SynthesisConfig, VADPolicy"
     : "AudioChunk, AudioFormat, OutputPolicy, SessionStartRequest, TTSClient, SynthesisConfig, VADPolicy";
-  const execute = value.inputMode === "full"
+  const execute = publicInputMode !== "token"
     ? `result = client.synthesize_bytes("你好，欢迎使用 Qwen3-TTS。", request=config)\nopen("qwen3tts.pcm", "wb").write(result.audio_bytes)`
     : `session = client.open_stream(SessionStartRequest(session_id="demo", config=config))\nsession.send_text("你好，")\nsession.send_text("欢迎使用 Qwen3-TTS。")\nsession.end()\nwith open("qwen3tts.pcm", "wb") as output:\n    for message in session.iter_messages():\n        if isinstance(message, AudioChunk):\n            output.write(message.pcm_bytes)`;
   return `from qwen3tts import (\n    ${imports},\n)\n\nclient = TTSClient.connect(${JSON.stringify(nativeUrl)})\nconfig = SynthesisConfig(\n    task_type=${JSON.stringify(value.task)},\n    speaker=${JSON.stringify(value.speaker)},\n    language=${JSON.stringify(value.language)},\n    input_mode=${JSON.stringify(value.inputMode === "full" ? "full_text" : "token")},\n    audio=AudioFormat(encoding="pcm_s16le", sample_rate=${value.sampleRate}, channels=1),\n    output_policy=OutputPolicy(\n        vad=VADPolicy(\n            enabled=${vadEnabled ? "True" : "False"}, strategy=${JSON.stringify(value.vad)},\n            chunk_ms=${value.vadChunkMs}, begin_threshold=${value.vadBeginThreshold},\n            begin_count=${value.vadBeginCount}, end_threshold=${value.vadEndThreshold},\n            end_count=${value.vadEndCount}, start_margin_ms=${value.vadStartMarginMs},\n        ),\n        chunk_ms=${value.outputChunkMs}, emit_text_events=${value.emitTextEvents ? "True" : "False"},\n        config={"delivery": ${JSON.stringify(value.delivery)}, "delivery_window_ms": ${value.deliveryWindowMs}},\n    ),\n)\n${execute}`;
+}
+
+export function buildPythonExample(nativeUrl: string, value: DemoSynthesisSettings): string {
+  const source = buildPythonExampleSource(nativeUrl, value);
+  const inputMode = value.inputMode === "full" ? "full_text" : value.inputMode === "long" ? "long_segment" : "token";
+  return source.replace('input_mode="token"', `input_mode="${inputMode}"`);
 }
 
 export function buildBrowserExample(capabilitiesUrl: string, realtimeUrl: string, value: DemoSynthesisSettings): string {
   const task = enumMember({base: "Base", voice_clone: "VoiceClone", custom_voice: "CustomVoice", voice_design: "VoiceDesign"}, value.task);
   const vad = enumMember({disabled: "Disabled", energy: "Energy", tenvad: "TenVad"}, value.vad);
   const delivery = enumMember({guarded: "Guarded", firehose: "Firehose"}, value.delivery);
-  const input = value.inputMode === "full" ? "FullText" : "Token";
-  const start = value.inputMode === "full"
+  const input = value.inputMode === "full" ? "FullText" : value.inputMode === "long" ? "LongSegment" : "Token";
+  const start = value.inputMode !== "incremental"
     ? `const run = await client.synthesize("你好，欢迎使用 Qwen3-TTS。", options);`
     : `const run = await client.startIncremental(options);\nrun.append("你好，");\nrun.append("欢迎使用 Qwen3-TTS。");\nrun.commit();`;
   return `import {\n  AudioEncoding, DeliveryPolicy, InputMode, RealtimeTTSClient,\n  SynthesisTask, VadStrategy,\n} from "@xmultimodalinteraction/qwen3tts-browser";\n\nconst client = new RealtimeTTSClient({\n  capabilitiesUrl: ${JSON.stringify(capabilitiesUrl)},\n  websocketUrl: ${JSON.stringify(realtimeUrl)},\n});\nawait client.connect();\nconst options = {\n  task: SynthesisTask.${task}, speaker: ${JSON.stringify(value.speaker)}, language: ${JSON.stringify(value.language)},\n  inputMode: InputMode.${input},\n  audio: {encoding: AudioEncoding.PcmS16Le, sample_rate: ${value.sampleRate}, channels: 1},\n  vad: {enabled: ${value.vad !== "disabled"}, strategy: VadStrategy.${vad}, chunk_ms: ${value.vadChunkMs},\n    begin_threshold: ${value.vadBeginThreshold}, begin_count: ${value.vadBeginCount},\n    end_threshold: ${value.vadEndThreshold}, end_count: ${value.vadEndCount}, start_margin_ms: ${value.vadStartMarginMs}},\n  outputPolicy: {delivery: DeliveryPolicy.${delivery}, delivery_window_ms: ${value.deliveryWindowMs},\n    chunk_ms: ${value.outputChunkMs}, emit_text_events: ${value.emitTextEvents}},\n};\n${start}\nawait run.done;`;

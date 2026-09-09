@@ -139,6 +139,67 @@ class WetextAdapter:
             return None
         return value if isinstance(value, str) and value else None
 
+    def normalize_phone(self, text: str, *, lang: str) -> Optional[str]:
+        """Normalize phone digits without exposing ``+``/``-`` as math.
+
+        WeText's ordinary grammar reads ``+86-...`` as signed arithmetic.  A
+        phone span is therefore canonicalized into individually separated
+        digits (and a spoken country-code prefix) before calling the same
+        public normalizer API.  Slash-separated numbers remain distinct with
+        a short pause between them.
+        """
+
+        parts = re.split(r"\s*/\s*", text.strip())
+        rendered: list[str] = []
+        for part in parts:
+            digits = re.findall(r"\d", part)
+            if not digits:
+                return None
+            has_country_prefix = part.lstrip().startswith(("+", "(+"))
+            prefix = "加 " if has_country_prefix and lang == "zh" else (
+                "plus " if part.lstrip().startswith("+") else ""
+            )
+            prepared = prefix + " ".join(digits)
+            value = self.normalize_closed_stream(
+                prepared,
+                lang=lang,
+                kind=SpanKind.PHONE,
+            )
+            if not value:
+                return None
+            rendered.append("".join(value.split()))
+        return "，".join(rendered)
+
+    def normalize_digit_sequence(self, text: str, *, lang: str) -> Optional[str]:
+        """Normalize an identifier as individual digits through WeText."""
+
+        digits = re.findall(r"\d", text)
+        if not digits:
+            return None
+        prepared = " ".join(digits)
+        value = self.normalize_closed_stream(
+            prepared,
+            lang=lang,
+            kind=SpanKind.IDENTIFIER,
+        )
+        if not value:
+            return None
+        return "".join(value.split())
+
+    def normalize_id_card(self, text: str, *, lang: str) -> Optional[str]:
+        """Normalize an 18-character ID card as a digit sequence."""
+
+        value = str(text or "")
+        if not re.fullmatch(r"\d{17}[0-9Xx]", value):
+            return None
+        prepared = " ".join(value[:-1]) + " " + value[-1].upper()
+        normalized = self.normalize_closed_stream(
+            prepared,
+            lang=lang,
+            kind=SpanKind.ID_CARD,
+        )
+        return "".join(normalized.split()) if normalized else None
+
     def stream(self, *, lang: str) -> WetextStream:
         """Create an isolated stream for shadow/oracle evaluation.
 
@@ -199,6 +260,10 @@ class WetextAdapter:
             return _version_fallback(text, lang=lang)
         if policy == FallbackPolicy.CARDINAL_OR_LITERAL and kind == SpanKind.IDENTIFIER:
             return _identifier_fallback(text, lang=lang)
+        if kind == SpanKind.PHONE:
+            return _phone_fallback(text, lang=lang)
+        if kind == SpanKind.ID_CARD:
+            return _id_card_fallback(text, lang=lang)
         if lang == "zh" and kind == SpanKind.ENGLISH_WORD:
             particulate = re.fullmatch(r"PM(\d+(?:\.\d+)?)", text, re.I)
             if particulate:
@@ -268,6 +333,33 @@ def _identifier_fallback(text: str, *, lang: str) -> str:
         else:
             parts.append(separators.get(token, token))
     return " ".join(part for part in parts if part)
+
+
+def _phone_fallback(text: str, *, lang: str) -> str:
+    """Speak a recognized phone span digit-by-digit when WeText is absent."""
+
+    parts: list[str] = []
+    for part in re.split(r"\s*/\s*", text.strip()):
+        digits = re.findall(r"\d", part)
+        if not digits:
+            continue
+        if lang == "zh":
+            value = "".join(_ZH_DIGITS[int(d)] for d in digits)
+            if part.lstrip().startswith(("+", "(+")):
+                value = "加" + value
+        else:
+            value = " ".join(_EN_DIGITS[int(d)] for d in digits)
+            if part.lstrip().startswith(("+", "(+")):
+                value = "plus " + value
+        parts.append(value)
+    return "，".join(parts) or text
+
+
+def _id_card_fallback(text: str, *, lang: str) -> str:
+    value = str(text or "")
+    if lang == "zh":
+        return "".join(_ZH_DIGITS[int(ch)] if ch.isdigit() else "X" for ch in value.upper())
+    return " ".join((_EN_DIGITS[int(ch)] if ch.isdigit() else "X") for ch in value.upper())
 
 
 def _version_fallback(text: str, *, lang: str) -> str:

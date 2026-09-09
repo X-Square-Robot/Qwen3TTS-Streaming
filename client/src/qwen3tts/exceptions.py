@@ -21,6 +21,10 @@ class ProtocolError(TTSClientError):
     """Raised when the remote side returns malformed protocol data."""
 
 
+class TextProgressProtocolError(ProtocolError):
+    """Raised when an auxiliary text-progress anchor is invalid."""
+
+
 class ProtocolVersionMismatchError(TTSClientError):
     """Raised when the server speaks an incompatible protocol family or major.
 
