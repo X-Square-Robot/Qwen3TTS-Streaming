@@ -143,6 +143,32 @@ class RealtimeProtocolError(ValueError):
         self.param = param
 
 
+def _parse_playback_sample(value: Any, name: str) -> int:
+    """Parse a non-negative absolute sample cursor from the Realtime wire.
+
+    JavaScript clients must encode ``bigint`` as a decimal string in JSON.
+    Keeping the conversion at the protocol boundary preserves exact cursors
+    without weakening validation for floats, booleans, or malformed strings.
+    """
+
+    if isinstance(value, bool):
+        valid = False
+    elif isinstance(value, int):
+        valid = value >= 0
+    elif isinstance(value, str):
+        token = value.strip()
+        valid = bool(token) and token.isdecimal()
+    else:
+        valid = False
+    if not valid:
+        raise RealtimeProtocolError(
+            "invalid_playback_ack",
+            f"{name} must be a non-negative integer",
+            param=name,
+        )
+    return int(value)
+
+
 @dataclass
 class _SessionSettings:
     session_id: str
@@ -1208,16 +1234,12 @@ class _RealtimeConnection:
             "played_through_sample", event.get("played_audio_sample_end", 0)
         )
         buffered = event.get("buffered_through_sample", played)
-        for name, value in (
-            ("played_through_sample", played),
-            ("buffered_through_sample", buffered),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise RealtimeProtocolError(
-                    "invalid_playback_ack",
-                    f"{name} must be a non-negative integer",
-                    param=name,
-                )
+        # Sample cursors are uint64-like values on the wire.  The browser SDK
+        # serializes bigint cursors as decimal strings so it does not lose
+        # precision once an unusually long stream exceeds JS's safe integer
+        # range.  Accept both JSON integers and canonical decimal strings.
+        played = _parse_playback_sample(played, "played_through_sample")
+        buffered = _parse_playback_sample(buffered, "buffered_through_sample")
         state = self._active or self._last_terminal
         if (
             state is not None
@@ -1645,6 +1667,19 @@ class _RealtimeConnection:
                 metadata[public_name] = (
                     str(value).lower() if isinstance(value, bool) else str(value)
                 )
+        # Preserve the engine-side timing breakdown when the backend publishes
+        # it. These values are diagnostic companions to qwen_server_ttft_ms;
+        # they are not substituted for the canonical response.create → raw
+        # audio metric.
+        for name in (
+            "server_engine_queue_wait_ms",
+            "server_engine_prefill_ms",
+            "server_first_text_dequeue_to_first_raw_audio_ms",
+            "server_first_raw_to_first_effective_audio_ms",
+        ):
+            value = state.terminal_metrics.get(name)
+            if value is not None:
+                metadata[name] = str(value)
         return metadata
 
     async def _send_error(

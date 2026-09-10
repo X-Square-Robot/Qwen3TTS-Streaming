@@ -758,13 +758,23 @@ function pcm16(bytes: Uint8Array): Int16Array {
 function serverDiagnostics(metadata: Record<string, unknown>) {
   const ttft = optionalFinite(metadata.qwen_server_ttft_ms);
   const total = optionalFinite(metadata.qwen_server_total_ms);
+  const queueWait = optionalFinite(metadata.server_engine_queue_wait_ms);
+  const prefill = optionalFinite(metadata.server_engine_prefill_ms);
+  const dequeueToRaw = optionalFinite(metadata.server_first_text_dequeue_to_first_raw_audio_ms);
+  const rawToEffective = optionalFinite(metadata.server_first_raw_to_first_effective_audio_ms);
   const trimmed = optionalFinite(metadata.server_prefix_trimmed_ms);
   const applied = optionalBoolean(metadata.server_prefix_trim_applied);
   const strategy = typeof metadata.vad_strategy === "string" ? metadata.vad_strategy : undefined;
-  if (ttft === undefined && total === undefined && trimmed === undefined && applied === undefined && strategy === undefined) return undefined;
+  if (ttft === undefined && total === undefined && queueWait === undefined && prefill === undefined
+    && dequeueToRaw === undefined && rawToEffective === undefined
+    && trimmed === undefined && applied === undefined && strategy === undefined) return undefined;
   return {
     ...(ttft === undefined ? {} : {ttft_ms: ttft}),
     ...(total === undefined ? {} : {total_ms: total}),
+    ...(queueWait === undefined ? {} : {engine_queue_wait_ms: queueWait}),
+    ...(prefill === undefined ? {} : {engine_prefill_ms: prefill}),
+    ...(dequeueToRaw === undefined ? {} : {first_text_dequeue_to_first_raw_audio_ms: dequeueToRaw}),
+    ...(rawToEffective === undefined ? {} : {first_raw_to_first_effective_audio_ms: rawToEffective}),
     ...(trimmed === undefined ? {} : {prefix_trimmed_ms: trimmed}),
     ...(applied === undefined ? {} : {prefix_trim_applied: applied}),
     ...(strategy === undefined ? {} : {vad_strategy: strategy}),

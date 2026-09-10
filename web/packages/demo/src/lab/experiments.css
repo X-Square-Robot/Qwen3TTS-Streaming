@@ -159,6 +159,13 @@
   font-size: 11px;
 }
 
+.pk-metric-note {
+  margin: 0 0 12px;
+  color: var(--lab-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .pk-results {
   display: grid;
   gap: 10px;
@@ -363,7 +370,7 @@
 
 .concurrency-stats {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
   margin: 20px 0 16px;
 }
@@ -386,6 +393,12 @@
 .concurrency-stats span {
   color: var(--lab-muted);
   font-size: 11px;
+}
+
+@media (max-width: 1050px) {
+  .concurrency-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 .lane-progress {

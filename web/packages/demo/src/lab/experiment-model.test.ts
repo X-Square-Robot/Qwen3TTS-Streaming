@@ -23,8 +23,25 @@ describe("experiment model", () => {
       failed: 1,
       queued: 1,
       active: 1,
-      averageFirstAudioMs: 20,
-      p90FirstAudioMs: 30,
+      started: 4,
+      averageClientFirstAudioMs: 20,
+      p90ClientFirstAudioMs: 30,
+      clientFirstAudioSamples: 2,
+    });
+  });
+  it("uses server TTFT for benchmark statistics when it is available", () => {
+    expect(concurrencyStats([
+      {id: 0, status: "done", firstAudioMs: 900, clientFirstAudioMs: 900, serverTtftMs: 40},
+      {id: 1, status: "done", firstAudioMs: 1100, clientFirstAudioMs: 600, serverTtftMs: 60},
+    ])).toMatchObject({
+      averageServerTtftMs: 50,
+      p90ServerTtftMs: 60,
+      serverTtftSamples: 2,
+      averageClientFirstAudioMs: 750,
+      p90ClientFirstAudioMs: 900,
+      clientFirstAudioSamples: 2,
+      averageBurstFirstAudioMs: 1000,
+      p90BurstFirstAudioMs: 1100,
     });
   });
 });

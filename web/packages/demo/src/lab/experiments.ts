@@ -16,8 +16,29 @@ export interface ExperimentOptions {
   maxAudioBytes?: number;
   capabilities?: Capabilities;
 }
-export interface RunOutput { firstResponseMs: number; firstAudioMs: number; totalMs: number; audioDurationMs?: number; audioUrl?: string; trace: Array<Record<string, unknown>>; error?: string; audioTruncated?: boolean; }
-export interface RunUpdate { phase: "connecting" | "streaming" | "done" | "failed" | "cancelled"; firstAudioMs?: number; totalMs?: number; error?: string; }
+export interface RunOutput {
+  firstResponseMs: number;
+  /** Time from the test/burst origin to the first audio delta. */
+  firstAudioMs: number;
+  /** Client request start to the first audio delta. */
+  clientFirstAudioMs: number;
+  /** Server-reported response-create to first raw audio. */
+  serverTtftMs: number;
+  totalMs: number;
+  audioDurationMs?: number;
+  audioUrl?: string;
+  trace: Array<Record<string, unknown>>;
+  error?: string;
+  audioTruncated?: boolean;
+}
+export interface RunUpdate {
+  phase: "connecting" | "streaming" | "done" | "failed" | "cancelled";
+  firstAudioMs?: number;
+  clientFirstAudioMs?: number;
+  serverTtftMs?: number;
+  totalMs?: number;
+  error?: string;
+}
 export interface ActiveExperiment { readonly cancel: () => void; readonly done: Promise<RunOutput>; }
 
 function endpoints(options: ExperimentOptions) { const capabilitiesUrl = resolveRelativeUrl(options.loaded.config.endpoints.capabilities_url, options.loaded.responseUrl); const websocketUrl = new URL(resolveRelativeUrl(options.loaded.config.endpoints.openai_realtime_url, options.loaded.responseUrl)); websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:"; return {capabilitiesUrl, websocketUrl}; }
@@ -36,14 +57,25 @@ export function startExperiment(options: ExperimentOptions, mode: "streaming" | 
     const trace: Array<Record<string, unknown>> = [];
     let firstResponseMs = 0;
     let firstAudioMs = 0;
+    let clientFirstAudioMs = 0;
+    let serverTtftMs = 0;
+    let requestStartedAt = startAt;
     let collector: WavCollector | undefined;
     const at = () => performance.now() - startAt;
+    const clientAt = () => performance.now() - requestStartedAt;
     client.onRawEvent((event) => { trace.push({at_ms: Number(at().toFixed(2)), type: event.type, sample_start: event.qwen_output_sample_start, sample_end: event.qwen_output_sample_end, text: event.text}); if (trace.length > 300) trace.shift(); });
     client.onEvent((event: TTSEvent) => {
       if (event.type === "response_started" && !firstResponseMs) firstResponseMs = at();
+      if (event.type === "completed") {
+        serverTtftMs = event.server?.ttft_ms ?? 0;
+      }
       if (event.type === "progress") trace.push({at_ms: Number(at().toFixed(2)), type: event.type, sample_end: event.sample.toString(), meta: event.meta});
       if (event.type === "audio" && collector) {
-        if (!firstAudioMs) { firstAudioMs = at(); onUpdate?.({phase: "streaming", firstAudioMs}); }
+        if (!firstAudioMs) {
+          firstAudioMs = at();
+          clientFirstAudioMs = clientAt();
+          onUpdate?.({phase: "streaming", firstAudioMs, clientFirstAudioMs});
+        }
         collector.append(event.pcm);
       }
     });
@@ -60,6 +92,7 @@ export function startExperiment(options: ExperimentOptions, mode: "streaming" | 
     const request: SynthesisOptions = {task: options.task, speaker, language, inputMode, audio, vad: {enabled: false, strategy: VadStrategy.Disabled}};
     const chunks = options.text.match(new RegExp(`.{1,${Math.max(1, options.chunkSize)}}`, "gu")) ?? [options.text];
     if (mode === "offline") for (let index = 0; index < chunks.length; index += 1) await delay(options.chunkDelayMs, () => cancelled);
+    requestStartedAt = performance.now();
     synthesis = mode === "streaming" ? await client.startIncremental(request) : await client.synthesize(options.text, request);
     if (mode === "streaming") { const incremental = synthesis as IncrementalSynthesisRun; for (const chunk of chunks) { if (cancelled) throw new Error("实验已取消"); incremental.append(chunk); await delay(options.chunkDelayMs, () => cancelled); } incremental.commit(); }
     const terminal = await synthesis.done;
@@ -70,15 +103,17 @@ export function startExperiment(options: ExperimentOptions, mode: "streaming" | 
     const output = {
       firstResponseMs,
       firstAudioMs,
+      clientFirstAudioMs,
+      serverTtftMs,
       totalMs: at(),
       audioDurationMs: snapshot.samples / audio.sample_rate * 1000,
       trace,
       ...(audioUrl ? {audioUrl} : {}),
       ...(snapshot.limitReached ? {audioTruncated: true} : {}),
     };
-    onUpdate?.({phase: "done", firstAudioMs, totalMs: output.totalMs});
+    onUpdate?.({phase: "done", firstAudioMs, clientFirstAudioMs, serverTtftMs, totalMs: output.totalMs});
     return output;
-  })().catch((error): RunOutput => { const message = String(error instanceof Error ? error.message : error); onUpdate?.({phase: cancelled ? "cancelled" : "failed", error: message}); return {firstResponseMs: 0, firstAudioMs: 0, totalMs: performance.now() - startAt, trace: [], error: message}; }).finally(() => client?.close());
+  })().catch((error): RunOutput => { const message = String(error instanceof Error ? error.message : error); onUpdate?.({phase: cancelled ? "cancelled" : "failed", error: message}); return {firstResponseMs: 0, firstAudioMs: 0, clientFirstAudioMs: 0, serverTtftMs: 0, totalMs: performance.now() - startAt, trace: [], error: message}; }).finally(() => client?.close());
   return {
     done,
     cancel: () => {

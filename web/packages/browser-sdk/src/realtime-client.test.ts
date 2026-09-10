@@ -181,6 +181,10 @@ describe("RealtimeTTSClient", () => {
         metadata: {
           qwen_server_ttft_ms: "12.5",
           qwen_server_total_ms: "80",
+          server_engine_queue_wait_ms: "4",
+          server_engine_prefill_ms: "7.5",
+          server_first_text_dequeue_to_first_raw_audio_ms: "18",
+          server_first_raw_to_first_effective_audio_ms: "2",
           server_prefix_trimmed_ms: "16",
           server_prefix_trim_applied: "true",
           vad_strategy: "energy",
@@ -192,7 +196,17 @@ describe("RealtimeTTSClient", () => {
     expect(terminal).toMatchObject({
       type: "completed",
       responseId: "resp_1",
-      server: {ttft_ms: 12.5, total_ms: 80, prefix_trimmed_ms: 16, prefix_trim_applied: true, vad_strategy: "energy"},
+      server: {
+        ttft_ms: 12.5,
+        total_ms: 80,
+        engine_queue_wait_ms: 4,
+        engine_prefill_ms: 7.5,
+        first_text_dequeue_to_first_raw_audio_ms: 18,
+        first_raw_to_first_effective_audio_ms: 2,
+        prefix_trimmed_ms: 16,
+        prefix_trim_applied: true,
+        vad_strategy: "energy",
+      },
     });
     expect(client.snapshot()).toMatchObject({state: "ready", responseId: "resp_1", receivedThroughSample: 2n, lastDeliverySequence: 2});
     expect(events).toEqual(["connected", "response_started", "audio", "completed"]);

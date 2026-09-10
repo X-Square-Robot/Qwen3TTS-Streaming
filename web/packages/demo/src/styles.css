@@ -402,6 +402,13 @@ button:disabled { opacity: 0.42; cursor: not-allowed; }
 .metrics small { display: block; margin-bottom: 10px; color: var(--slate); font-size: 10px; line-height: 1.45; }
 .metrics strong { display: block; overflow-wrap: anywhere; color: var(--ink); font: 750 19px/1.25 var(--utility); letter-spacing: -0.04em; }
 
+.diagnostics-note {
+  margin: 0 0 12px;
+  color: var(--slate);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
 .event-log {
   display: grid;
   gap: 5px;

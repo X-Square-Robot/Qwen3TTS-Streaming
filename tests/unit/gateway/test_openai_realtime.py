@@ -435,6 +435,51 @@ async def test_reliable_realtime_validates_absolute_playback_cursor():
 
 
 @pytest.mark.asyncio
+async def test_reliable_realtime_accepts_bigint_playback_cursor_strings():
+    pytest.importorskip("aiohttp")
+    from aiohttp.test_utils import TestClient, TestServer
+
+    engine = _RealtimeStubEngine()
+    server = TestServer(_test_app(engine, reliable=True))
+    async with server:
+        client = TestClient(server)
+        async with client:
+            ws = await client.ws_connect("/v1/realtime")
+            await _receive_json(ws)
+            await ws.send_json(
+                {
+                    "type": "response.create",
+                    "response": {
+                        "metadata": {"qwen_resume_token": "resume-token-0123456789"}
+                    },
+                }
+            )
+            for _ in range(3):
+                await _receive_json(ws)
+            await ws.send_json(
+                {
+                    "type": "qwen.input_text_buffer.append",
+                    "sequence": 1,
+                    "text": "hello",
+                }
+            )
+            delta, _ = await _receive_until(ws, "response.output_audio.delta")
+            await ws.send_json(
+                {
+                    "type": "qwen.playback.ack",
+                    "response_id": delta["response_id"],
+                    "played_through_sample": "100",
+                    "buffered_through_sample": "1200",
+                    "observed_delivery_seq": delta["qwen_delivery_seq"],
+                }
+            )
+            accepted, _ = await _receive_until(ws, "qwen.playback.ack")
+            assert accepted["accepted"] is True
+            assert accepted["played_through_sample"] == 100
+            await ws.close()
+
+
+@pytest.mark.asyncio
 async def test_reliable_realtime_records_async_usage_exactly_once():
     pytest.importorskip("aiohttp")
     from aiohttp.test_utils import TestClient, TestServer

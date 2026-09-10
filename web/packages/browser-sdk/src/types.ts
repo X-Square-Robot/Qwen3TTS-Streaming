@@ -85,6 +85,10 @@ export interface TimingContextOptions {
 export interface ServerDiagnostics {
   ttft_ms?: number;
   total_ms?: number;
+  engine_queue_wait_ms?: number;
+  engine_prefill_ms?: number;
+  first_text_dequeue_to_first_raw_audio_ms?: number;
+  first_raw_to_first_effective_audio_ms?: number;
   prefix_trimmed_ms?: number;
   prefix_trim_applied?: boolean;
   vad_strategy?: string;

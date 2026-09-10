@@ -142,10 +142,21 @@ function Experience({loaded, onCapabilities, onSettings, settings}: {
   const wavLimitWarned = useRef(false);
   const playbackFailed = useRef(false);
   const startedAt = useRef(0);
+  const requestStartedAt = useRef(0);
   const streamGeneration = useRef(0);
   const [usage, setUsage] = useState<Record<string, number>>({});
-  const [timing, setTiming] = useState({ttfb: 0, firstAudio: 0, firstAudible: 0, total: 0});
-  const [serverTiming, setServerTiming] = useState({ttft: 0, total: 0, prefixTrimmed: 0, prefixApplied: false, vad: ""});
+  const [timing, setTiming] = useState({setup: 0, ttfb: 0, firstAudio: 0, firstAudible: 0, total: 0});
+  const [serverTiming, setServerTiming] = useState({
+    ttft: 0,
+    total: 0,
+    queueWait: 0,
+    prefill: 0,
+    dequeueToRaw: 0,
+    rawToEffective: 0,
+    prefixTrimmed: 0,
+    prefixApplied: false,
+    vad: "",
+  });
   const [playback, setPlayback] = useState({played: 0n, buffered: 0n, queuedFrames: 0, underruns: 0});
 
   useEffect(() => onSettings({
@@ -201,14 +212,29 @@ function Experience({loaded, onCapabilities, onSettings, settings}: {
     wavLimitWarned.current = false;
     playbackFailed.current = false;
     setBusy(true);
-    setTiming({ttfb: 0, firstAudio: 0, firstAudible: 0, total: 0});
-    setServerTiming({ttft: 0, total: 0, prefixTrimmed: 0, prefixApplied: false, vad: ""});
+    setTiming({setup: 0, ttfb: 0, firstAudio: 0, firstAudible: 0, total: 0});
+    setServerTiming({
+      ttft: 0,
+      total: 0,
+      queueWait: 0,
+      prefill: 0,
+      dequeueToRaw: 0,
+      rawToEffective: 0,
+      prefixTrimmed: 0,
+      prefixApplied: false,
+      vad: "",
+    });
     setOutputIssue("");
     if (downloadUrlRef.current) URL.revokeObjectURL(downloadUrlRef.current);
     downloadUrlRef.current = "";
     setDownloadUrl("");
     streamGeneration.current += 1;
     const generation = streamGeneration.current;
+    // Keep the click-to-finish wall clock separate from request-to-audio
+    // timings. Connection/player setup is useful client-side telemetry, but it
+    // must not be mislabeled as TTFT.
+    startedAt.current = performance.now();
+    requestStartedAt.current = startedAt.current;
     try {
       const configUrl = loaded.responseUrl;
       const capabilitiesUrl = resolveRelativeUrl(
@@ -237,7 +263,7 @@ function Experience({loaded, onCapabilities, onSettings, settings}: {
           runRef.current?.acknowledgePlayback(played, buffered);
           const snapshot = playerRef.current?.snapshot();
           setPlayback({played, buffered, queuedFrames: snapshot?.queuedFrames ?? 0, underruns: snapshot?.underruns ?? 0});
-          if (played > 0n) setTiming((current) => current.firstAudible ? current : {...current, firstAudible: performance.now() - startedAt.current});
+          if (played > 0n) setTiming((current) => current.firstAudible ? current : {...current, firstAudible: performance.now() - requestStartedAt.current});
         },
         onUnderrun: () => setEvents((current) => [
           ...current,
@@ -259,7 +285,8 @@ function Experience({loaded, onCapabilities, onSettings, settings}: {
       } else {
         setOutputDevices([]);
       }
-      startedAt.current = performance.now();
+      requestStartedAt.current = performance.now();
+      setTiming((current) => ({...current, setup: requestStartedAt.current - startedAt.current}));
       const options = {
         task,
         speaker,
@@ -321,7 +348,7 @@ function Experience({loaded, onCapabilities, onSettings, settings}: {
     if (event.type === "audio") {
       setReceivedSamples(Number(event.endSample));
       setAudioEnvelope((current) => appendAudioEnvelope(current, event.pcm, event.startSample, event.endSample));
-      setTiming((current) => current.firstAudio ? current : {...current, firstAudio: performance.now() - startedAt.current});
+      setTiming((current) => current.firstAudio ? current : {...current, firstAudio: performance.now() - requestStartedAt.current});
       const collector = collectorRef.current;
       collector?.append(event.pcm);
       if (collector?.snapshot().limitReached && !wavLimitWarned.current) {
@@ -344,13 +371,17 @@ function Experience({loaded, onCapabilities, onSettings, settings}: {
         }
       }
     } else if (event.type === "response_started") {
-      setTiming((current) => ({...current, ttfb: performance.now() - startedAt.current}));
+      setTiming((current) => ({...current, ttfb: performance.now() - requestStartedAt.current}));
     } else if (event.type === "completed" || event.type === "cancelled" || event.type === "error") {
       if (event.type === "completed") {
         setUsage(event.usage ?? {});
         setServerTiming({
           ttft: event.server?.ttft_ms ?? 0,
           total: event.server?.total_ms ?? 0,
+          queueWait: event.server?.engine_queue_wait_ms ?? 0,
+          prefill: event.server?.engine_prefill_ms ?? 0,
+          dequeueToRaw: event.server?.first_text_dequeue_to_first_raw_audio_ms ?? 0,
+          rawToEffective: event.server?.first_raw_to_first_effective_audio_ms ?? 0,
           prefixTrimmed: event.server?.prefix_trimmed_ms ?? 0,
           prefixApplied: event.server?.prefix_trim_applied ?? false,
           vad: event.server?.vad_strategy ?? "",
@@ -588,11 +619,14 @@ function Experience({loaded, onCapabilities, onSettings, settings}: {
 
     <section className="panel diagnostics-panel">
       <div className="panel-heading"><div><p className="panel-kicker">SIGNAL TELEMETRY</p><h2>实时诊断</h2></div><p>从请求发出到扬声器消费，按同一条时间线观察。</p></div>
+      <p className="diagnostics-note">同一条请求时间线：先统计客户端连接/播放器准备，再从请求发出观察响应开始、首个音频和首个可听；服务端 TTFT 单独按 response.create → 首个原始音频计算。</p>
       <div className="metrics">
-        <Metric label="Client TTFB" value={formatMs(timing.ttfb)} />
-        <Metric label="Server TTFT" value={formatMs(serverTiming.ttft)} />
-        <Metric label="首个音频（收到）" value={formatMs(timing.firstAudio)} />
-        <Metric label="First audible" value={formatMs(timing.firstAudible)} />
+        <Metric label="客户端准备（连接 / 播放器）" value={formatMs(timing.setup)} />
+        <Metric label="客户端响应开始（请求→响应）" value={formatMs(timing.ttfb)} />
+        <Metric label="服务端 TTFT（响应→原始音频）" value={formatMs(serverTiming.ttft)} />
+        <Metric label="客户端 TTFT（请求→首音频）" value={formatMs(timing.firstAudio)} />
+        <Metric label="客户端首可听（请求→扬声器）" value={formatMs(timing.firstAudible)} />
+        <Metric label="服务端拆解（队列 / Prefill）" value={`${formatMs(serverTiming.queueWait)} / ${formatMs(serverTiming.prefill)}`} />
         <Metric label="总耗时" value={formatMs(timing.total)} />
         <Metric label="音频时长" value={`${audioDuration.toFixed(2)} s`} />
         <Metric label="客户端 RTF" value={audioDuration > 0 && timing.total > 0 ? (timing.total / 1000 / audioDuration).toFixed(3) : "—"} />

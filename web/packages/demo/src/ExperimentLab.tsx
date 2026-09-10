@@ -3,7 +3,7 @@ import {Headphones, Play, RotateCcw} from "lucide-react";
 import {type Capabilities} from "@xmultimodalinteraction/qwen3tts-browser";
 import {DEFAULT_DEMO_SETTINGS, type DemoSynthesisSettings} from "./demo-settings";
 import type {LoadedDemoConfig} from "./config";
-import {BROWSER_ACTIVE_CONCURRENCY, concurrencyStats, MAX_CONCURRENCY, safeConcurrency, type LaneSnapshot} from "./lab/experiment-model";
+import {concurrencyStats, MAX_CONCURRENCY, safeConcurrency, type LaneSnapshot} from "./lab/experiment-model";
 import {discoverExperimentCapabilities, startExperiment, startPkExperiment, type ActiveExperiment, type RunOutput} from "./lab/experiments";
 import {MediaPlayer, type MediaPlayerHandle} from "./components/MediaPlayer";
 import "./lab/experiments.css";
@@ -61,42 +61,43 @@ export function ExperimentLab({loaded, embedded = false, capabilities: providedC
     active.current = [];
     setRunning(true); setError(""); setSelectedAudio(null);
     const count = safeConcurrency(concurrency);
-    const initial = Array.from({length: count}, (_, id) => ({id, status: "queued" as const}));
+    // Launch the selected set as one burst. A worker pool here would turn a
+    // 128-way pressure test into repeated 16-way waves and contaminate TTFT
+    // with client-side queue time.
+    const initial = Array.from({length: count}, (_, id) => ({id, status: "connecting" as const}));
     setLanes(initial);
     const commonStart = performance.now();
-    let nextLane = 0;
-    const takeNextLane = () => nextLane < count ? nextLane++ : undefined;
-    const workers = Array.from({length: Math.min(BROWSER_ACTIVE_CONCURRENCY, count)}, async () => {
-      while (generation === concurrencyGeneration.current) {
-        const laneId = takeNextLane();
-        if (laneId === undefined) return;
+    const launched = Array.from({length: count}, (_, laneId) => {
+      const run = startExperiment(opts, "streaming", commonStart, (update) => {
         if (generation !== concurrencyGeneration.current) return;
-        setLanes((current) => current.map((item) => item.id === laneId ? {...item, status: "connecting"} : item));
-        const run = startExperiment(opts, "streaming", commonStart, (update) => {
-          if (generation !== concurrencyGeneration.current) return;
-          setLanes((current) => current.map((item) => item.id === laneId ? {
-            ...item,
-            status: update.phase === "streaming" ? "streaming" : update.phase === "failed" ? "failed" : item.status,
-            ...(update.firstAudioMs === undefined ? {} : {firstAudioMs: update.firstAudioMs}),
-            ...(update.error ? {error: update.error} : {}),
-          } : item));
-        });
-        active.current.push(run);
-        const output = await run.done;
-        active.current = active.current.filter((item) => item !== run);
-        if (generation !== concurrencyGeneration.current) continue;
-        remember(output);
         setLanes((current) => current.map((item) => item.id === laneId ? {
           ...item,
-          status: output.error ? "failed" : "done",
-          firstAudioMs: output.firstAudioMs,
-          totalMs: output.totalMs,
-          ...(output.error ? {error: output.error} : {}),
-          ...(output.audioUrl ? {audioUrl: output.audioUrl} : {}),
+          status: update.phase === "streaming" ? "streaming" : update.phase === "failed" ? "failed" : item.status,
+          ...(update.firstAudioMs === undefined ? {} : {firstAudioMs: update.firstAudioMs}),
+          ...(update.clientFirstAudioMs === undefined ? {} : {clientFirstAudioMs: update.clientFirstAudioMs}),
+          ...(update.serverTtftMs === undefined ? {} : {serverTtftMs: update.serverTtftMs}),
+          ...(update.error ? {error: update.error} : {}),
         } : item));
-      }
+      });
+      active.current.push(run);
+      return {laneId, run};
     });
-    await Promise.all(workers);
+    await Promise.all(launched.map(async ({laneId, run}) => {
+      const output = await run.done;
+      active.current = active.current.filter((item) => item !== run);
+      if (generation !== concurrencyGeneration.current) return;
+      remember(output);
+      setLanes((current) => current.map((item) => item.id === laneId ? {
+        ...item,
+        status: output.error ? "failed" : "done",
+        firstAudioMs: output.firstAudioMs,
+        clientFirstAudioMs: output.clientFirstAudioMs,
+        serverTtftMs: output.serverTtftMs,
+        totalMs: output.totalMs,
+        ...(output.error ? {error: output.error} : {}),
+        ...(output.audioUrl ? {audioUrl: output.audioUrl} : {}),
+      } : item));
+    }));
     if (generation === concurrencyGeneration.current) {
       setRunning(false);
       active.current = [];
@@ -183,6 +184,7 @@ export function ExperimentLab({loaded, embedded = false, capabilities: providedC
           <span className="pk-overview-time">{formatDuration(pkCursorMs)} / {formatDuration(pkPlaybackMs)}</span>
         </div>}
         {pk.streaming && pk.offline && <p className="pk-lead"><strong>{pkWinner} 提前 {Math.round(pkLead)}ms 出声</strong><span>从同一时刻回放，保留首音频等待。</span></p>}
+        {pkHasResult && <p className="pk-metric-note">服务端 TTFT = response.create → 首个原始音频；客户端 TTFT = 本路请求发出 → 浏览器收到首个音频；轨道上的 burst→首音频用于比较两路从同一实验起点的实际到达。</p>}
         {pkHasResult && !pkReady && <p className="pk-audio-warning">两路都没有可播放音频；重新运行 PK 后可在这里对齐试听。</p>}
         <div className="pk-results">{(["streaming", "offline"] as const).map((key) => <LaneCard key={key} name={key === "streaming" ? "Streaming" : "Offline"} kind={key === "streaming" ? "增量文本" : "完整文本"} audioRef={key === "streaming" ? streamingAudioRef : offlineAudioRef} scaleMs={pkScaleMs} playedMs={pkPlayedMs[key]} onPlay={() => playSingle(key)} onPositionChange={(seconds) => reportPkPosition(key, seconds)} onPlaybackStateChange={(playing) => reportPkPlaybackState(key, playing)} {...(pk[key] ? {output: pk[key]} : {})} tone={key} />)}</div>
         {pk.streaming && pk.offline && <><div className="pk-axis"><span>0 s · 同一起点</span><span>{formatSeconds(pkScaleMs / 2)}</span><span>{formatSeconds(pkScaleMs)}</span></div><div className="pk-legend"><span><i className="is-waiting"/>等待首音频</span><span><i className="is-available"/>可播放音频</span><span><i className="is-played"/>已播放</span><span>播放时标记实时移动</span></div></>}
@@ -190,10 +192,18 @@ export function ExperimentLab({loaded, embedded = false, capabilities: providedC
       <section className="panel lab-card lab-concurrency-card"><div className="panel-heading"><div><p className="panel-kicker">02 · CONCURRENCY</p><h2>并发压力面板</h2></div><span className="capability-chip">{capabilities?.native_cursor?.graph_enabled ? "native cursor" : "Browser SDK"}</span></div>
         <label className="field-label">并发路数<input type="number" min="1" max={MAX_CONCURRENCY} value={concurrency} onChange={(e) => setConcurrency(safeConcurrency(Number(e.target.value)))}/></label>
         <div className="preset-row concurrency-presets"><span>常用基准</span>{[16, 32, 64, 128, 256, 512].map((value) => <button key={value} className={concurrency === value ? "selected" : ""} onClick={() => setConcurrency(value)}>{value} 路</button>)}</div>
-        <p className="hint">可测试 1–{MAX_CONCURRENCY} 路；浏览器同时准入 {BROWSER_ACTIVE_CONCURRENCY} 条连接，其余请求排队。服务端只限制正在占用推理槽位的 active session，超出后会返回 max_sessions。</p>
+        <p className="hint">选择的 1–{MAX_CONCURRENCY} 路会在同一 burst 中全部发起，不在浏览器端按 16 路排队。服务端 active session 上限之外的请求会直接返回 max_sessions。服务端 TTFT = response.create → 首个原始音频；客户端 TTFT = 本路请求发出 → 首个音频；另列 burst → 首音频来观察连接、准入和浏览器调度。</p>
         <div className="actions"><button className="primary" disabled={!canRun || running} onClick={() => void runConcurrency()}>开始并发测试</button></div>
-        <div className="concurrency-stats"><div><strong>{stats.averageFirstAudioMs ? `${stats.averageFirstAudioMs.toFixed(0)}ms` : "—"}</strong><span>平均首音频</span></div><div><strong>{stats.p90FirstAudioMs ? `${stats.p90FirstAudioMs.toFixed(0)}ms` : "—"}</strong><span>p90 首音频</span></div><div><strong>{stats.completed} / {stats.failed}</strong><span>完成 / 失败</span></div></div>
-        {(stats.active > 0 || stats.queued > 0) && <p className="lane-progress">当前连接 {stats.active} 条 · 排队 {stats.queued} 条</p>}
+        <div className="concurrency-stats">
+          <div><strong>{stats.averageServerTtftMs ? `${stats.averageServerTtftMs.toFixed(0)}ms` : "—"}</strong><span>服务端 TTFT 平均 · n={stats.serverTtftSamples}</span></div>
+          <div><strong>{stats.p90ServerTtftMs ? `${stats.p90ServerTtftMs.toFixed(0)}ms` : "—"}</strong><span>服务端 TTFT p90 · n={stats.serverTtftSamples}</span></div>
+          <div><strong>{stats.averageClientFirstAudioMs ? `${stats.averageClientFirstAudioMs.toFixed(0)}ms` : "—"}</strong><span>客户端 TTFT 平均 · n={stats.clientFirstAudioSamples}</span></div>
+          <div><strong>{stats.p90ClientFirstAudioMs ? `${stats.p90ClientFirstAudioMs.toFixed(0)}ms` : "—"}</strong><span>客户端 TTFT p90 · n={stats.clientFirstAudioSamples}</span></div>
+          <div><strong>{stats.completed} / {stats.failed}</strong><span>完成 / 失败</span></div>
+        </div>
+        {lanes.length > 0 && <p className="lane-progress">统计分母：完成 {stats.completed} 条 · 客户端首音频样本 {stats.clientFirstAudioSamples} 条 · 服务端 TTFT 样本 {stats.serverTtftSamples} 条</p>}
+        {stats.averageBurstFirstAudioMs > 0 && <p className="lane-progress">burst → 首音频：平均 {stats.averageBurstFirstAudioMs.toFixed(0)}ms · p90 {stats.p90BurstFirstAudioMs.toFixed(0)}ms（包含连接、准入等待与浏览器调度）</p>}
+        {(stats.active > 0 || stats.queued > 0) && <p className="lane-progress">已发起 {stats.started} 条 · 当前连接 {stats.active} 条 · 浏览器排队 {stats.queued} 条</p>}
         {firstLaneError && <p className="lane-error-summary">最近失败原因：{firstLaneError}</p>}
         <div className="lane-grid">{displayLanes.map((lane) => <button className={`lane lane-${lane.status} ${selectedAudio === lane.audioUrl ? "selected" : ""}`} key={lane.id} title={lane.error ?? `并发 ${lane.id + 1}`} onClick={() => lane.audioUrl && setSelectedAudio(lane.audioUrl)}><span>{String(lane.id + 1).padStart(3, "0")}</span><small>{lane.status === "done" ? "试听" : lane.status === "idle" ? "待启动" : lane.status === "queued" ? "排队" : lane.status === "connecting" ? "连接中" : lane.status === "streaming" ? "生成中" : lane.status === "failed" ? "失败" : "已取消"}</small></button>)}</div>
         {selectedAudio && <MediaPlayer className="selected-audio" src={selectedAudio} label="并发音轨试听" autoPlay />}
@@ -215,7 +225,7 @@ function LaneCard({name, kind, output, tone, audioRef, scaleMs, playedMs, onPlay
   return <article className={`pk-lane ${tone}`}>
     <div className="pk-lane-head"><div><strong>{name}</strong><span>{kind}</span></div><button className="pk-lane-audio" disabled={!output?.audioUrl} onClick={onPlay} title={output?.audioUrl ? `试听 ${name}` : "等待音频"}><Headphones size={16}/><span>{output?.audioUrl ? "可试听" : "等待结果"}</span></button></div>
     <div className="pk-track"><i className="pk-track-wait" style={{width: `${first / scaleMs * 100}%`}}/><i className={`pk-track-audio ${tone}`} style={{left: `${first / scaleMs * 100}%`, width: `${Math.max(0, (total - first) / scaleMs * 100)}%`}}/><i className={`pk-track-played ${tone}`} style={{left: `${first / scaleMs * 100}%`, width: `${played / scaleMs * 100}%`}}/><b className="pk-track-marker" style={{left: `${cursor / scaleMs * 100}%`}}/></div>
-    <div className="pk-lane-meta"><span>首音频 <strong>{output?.firstAudioMs ? `${output.firstAudioMs.toFixed(0)}ms` : "—"}</strong></span><span>合成耗时 <strong>{output?.totalMs ? `${(output.totalMs / 1000).toFixed(2)}s` : "—"}</strong></span><span>音频 <strong>{output?.audioDurationMs ? formatDuration(output.audioDurationMs) : "—"}</strong></span></div>
+    <div className="pk-lane-meta"><span>burst→首音频 <strong>{output?.firstAudioMs ? `${output.firstAudioMs.toFixed(0)}ms` : "—"}</strong></span><span>客户端 TTFT <strong>{output?.clientFirstAudioMs ? `${output.clientFirstAudioMs.toFixed(0)}ms` : "—"}</strong></span><span>服务端 TTFT <strong>{output?.serverTtftMs ? `${output.serverTtftMs.toFixed(0)}ms` : "—"}</strong></span><span>合成耗时 <strong>{output?.totalMs ? `${(output.totalMs / 1000).toFixed(2)}s` : "—"}</strong></span><span>音频 <strong>{output?.audioDurationMs ? formatDuration(output.audioDurationMs) : "—"}</strong></span></div>
     {output?.error && <p className="pk-lane-error">{output.error}</p>}
     {output?.audioUrl && <MediaPlayer ref={audioRef} src={output.audioUrl} label={`${name} 音频`} showControls={false} onPositionChange={onPositionChange} onPlaybackStateChange={onPlaybackStateChange} />}
   </article>;
