@@ -155,6 +155,16 @@ def parse_args() -> argparse.Namespace:
             "-- meant for --concurrency 1 connection-time isolation runs."
         ),
     )
+    parser.add_argument(
+        "--max-connections",
+        type=int,
+        default=128,
+        help=(
+            "SDK websocket connection-pool limit. Set this at or above the "
+            "largest measured concurrency so the client does not serialize "
+            "otherwise concurrent websocket lanes."
+        ),
+    )
     parser.add_argument("--json", action="store_true")
     return parser.parse_args()
 
@@ -166,6 +176,8 @@ def main() -> int:
             "--connection-mode cold only supports --concurrency 1 "
             "(each round needs a dedicated fresh connection to measure cold cost)"
         )
+    if args.max_connections <= 0:
+        raise SystemExit("--max-connections must be greater than zero")
 
     spec = SynthesisConfig(
         task_type=args.task_type, speaker=args.speaker, language=args.language
@@ -175,7 +187,11 @@ def main() -> int:
     shared_client: TTSClient | None = None
     if args.connection_mode == "reuse":
         shared_client = TTSClient.connect(
-            args.endpoint, transport=args.transport, timeout=args.timeout
+            args.endpoint,
+            transport=args.transport,
+            timeout=args.timeout,
+            max_connections=args.max_connections,
+            max_idle_connections=min(8, args.max_connections),
         )
 
     total_rounds = args.warmup_rounds + args.rounds
@@ -186,7 +202,11 @@ def main() -> int:
 
             if args.connection_mode == "cold":
                 client = TTSClient.connect(
-                    args.endpoint, transport=args.transport, timeout=args.timeout
+                    args.endpoint,
+                    transport=args.transport,
+                    timeout=args.timeout,
+                    max_connections=args.max_connections,
+                    max_idle_connections=min(8, args.max_connections),
                 )
             else:
                 client = shared_client

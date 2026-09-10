@@ -497,3 +497,39 @@ full/long/逐字符 token 输入同结果、TN expansion、活动窗口先于 to
 因此 cursor-enabled plan 在生产启用前仍必须完成：真实 cursor state ABI、TRT
 逐帧对照、successor handoff 和标准 plan 的能力路由。这是一项明确的下一步，不允许
 用 Qwen BPE `input_embeds` 冒充 cursor label embedding。
+
+## 10. 当前实现状态（2026-09-10）
+
+上面的首版导图记录保留为历史决策背景；截至本次文档更新，已验证的
+`custom-1.7b` cursor-enabled TRT runtime 已接通以下在线链路：
+
+```text
+主 streaming TN
+  -> TextCommit / CanonicalTextJournal
+  -> CursorLabelPlanAdapter
+  -> cursor-enabled TRT graph
+  -> graph 内 codec0 观察
+  -> CPU owner-span / high-water projection
+  -> qwen.text_progress.v1
+```
+
+当前打包 artifact 的能力边界是 `right_context=1`、`max_labels=512`、16 个 codec
+codebook、80 ms frame，以及 `native`/`ema`/`disabled` 三种 progress route。原生游标
+只对匹配且验证过的 `custom-1.7b` 组合开放；其他模型仍走 standard TRT，并根据能力
+协商降级到 EMA 或关闭进度。正常 EOS 使用已生成并丢弃的 EOS 音频完成 pending
+lookahead，不通过额外的 cursor-only flush 改变 Talker、Code2Wav、KV 或 PCM 状态。
+
+本轮 focused TN/cursor contract tests 在 2026-09-10 为 `99 passed`。这证明当前
+Python 合同、owner 映射、high-water 单调性、plan revision/reanchor 和公开事件形状
+一致；它不等价于所有模型、所有 profile 或跨硬件 TRT 数值验收。
+
+在扩大默认发布范围前仍需完成或持续保持以下 release gates：
+
+1. 每个发布 bundle 的 `model_fingerprint`、cursor-head、label-vocab、TN rules 和语音
+   域 fingerprint 必须非空且匹配；不匹配必须 fail closed 到 standard/EMA 路径。
+2. 以冻结 codec0/label 输入持续比较 PyTorch 参考、ONNX 与 TRT 的逐帧轨迹，并覆盖
+   prefill、decode、lookahead、EOS、tail rewrite、并发 slot 隔离和官方无头 fallback。
+3. 重新采集与当前 cursor-enabled artifact 对应的 Triton/engine 性能和质量证据；旧
+   benchmark 数字不得自动代表新图。
+4. `SOFT_DRAIN`、训练态 coverage 和低接缝 state rollover 仍保持 opt-in/未发布状态，
+   不得在 README 或 capabilities 中暗示已经具备。

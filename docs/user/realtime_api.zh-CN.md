@@ -64,6 +64,39 @@ OpenAI Realtime 没有向已经开始的文本 item 追加内容的标准事件�
 会返回 `error`。客户端应处理 `qwen.input_text_buffer.ack`，并保留尚未确认的输入直到
 response 进入终态。
 
+## 流式 TN 与文本进度事件
+
+主 streaming TN 在 tokenizer/Spliter 之前维护 raw Unicode、mutable tail 和单调
+`TextCommit`。后续字符可能改变 `99%`、日期、URL、型号或中英混排的 spoken form，因此
+开放片段可能暂缓提交；已经提交的 spoken prefix 不会因为 transport 分包改变。
+
+当 `/v1/capabilities` 的 `native_cursor.progress_available` 为 `true` 时，服务可以在
+已验证的 `custom-1.7b` cursor-enabled TRT route 上发布：
+
+```json
+{
+  "type": "qwen.text_progress",
+  "response_id": "resp_...",
+  "item_id": "item_...",
+  "segment_id": 0,
+  "text": "",
+  "meta": {
+    "progress_basis": "native_cursor_v1",
+    "progress_quality": "native",
+    "raw_codepoint_end": "3",
+    "normalized_codepoint_end": "8",
+    "display_raw_position": "2.500000",
+    "alignment_final": "false"
+  }
+}
+```
+
+`progress_basis=native_cursor_v1` 表示使用图内 cursor 估计；`ema_frame_ratio_v1` 表示
+回退到 EMA。`raw_codepoint_end` 和 `normalized_codepoint_end` 是不可回退的整数确认边界，
+而 `display_*_position` 只用于 UI 高亮，不能用于计费、断点恢复、音频 release 或“已读完”
+确认。`alignment_final=true` 只表示该 segment 的文本对齐已完成；播放完成仍由
+`qwen_output_sample_end` 与 `qwen.playback.ack` 决定。
+
 ## 音频游标与播放确认
 
 音频事件携带连续的 `qwen_output_sample_start` 和 `qwen_output_sample_end`。客户端应拒绝

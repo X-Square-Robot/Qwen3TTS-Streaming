@@ -17,6 +17,36 @@
 [`docs/dev/operations/timing_metrics.zh-CN.md`](../operations/timing_metrics.zh-CN.md);
 报告格式遵循 [`docs/user/benchmark_methodology.zh-CN.md`](../../user/benchmark_methodology.zh-CN.md)。
 
+## 当前 cursor/TN 刷新：2026-09-10
+
+当前 cursor-enabled artifact 已通过 SDK 矩阵在 `qwen3-engine:25.10` 上完成测量。
+本轮是 engine-only：没有运行 Triton，因此下方历史 Triton 行没有被本轮更新。完整原始
+数据、条件和汇总见
+[`serving_performance_benchmark_data/refresh_20260910/`](serving_performance_benchmark_data/refresh_20260910/)。
+修正后的 run id 为 `20260910T120301Z`，SDK WebSocket 连接池的
+`max_connections` 显式设为 128。
+
+| 协议 | 并发 | TTFT 均值 | decode step 均值 | 最大观测 batch |
+| --- | ---: | ---: | ---: | ---: |
+| engine-grpc | 1 | 24.593 ms | 13.243 ms | 1 |
+| engine-grpc | 8 | 96.829 ms | 15.682 ms | 8 |
+| engine-grpc | 16 | 175.358 ms | 18.151 ms | 16 |
+| engine-grpc | 32 | 327.079 ms | 24.068 ms | 32 |
+| engine-grpc | 64 | 640.013 ms | 37.106 ms | 64 |
+| engine-grpc | 128 | 1,273.570 ms | 72.465 ms | 128 |
+| engine-websocket | 1 | 23.290 ms | 13.230 ms | 1 |
+| engine-websocket | 8 | 93.928 ms | 15.243 ms | 8 |
+| engine-websocket | 16 | 150.909 ms | 17.464 ms | 16 |
+| engine-websocket | 32 | 280.803 ms | 22.614 ms | 32 |
+| engine-websocket | 64 | 547.713 ms | 34.218 ms | 64 |
+| engine-websocket | 128 | 1,114.293 ms | 61.747 ms | 128 |
+
+这些是当前矩阵的 SDK 客户端 TTFT，不是 2026-07 报告使用的历史服务端 TTFT 口径。
+本轮 11,674 条记录全部成功，固定 workload 的 cache-hit rate 为 100%。SDK WebSocket
+连接池已显式提高到 128，因此 c64/c128 测量的是真实并发 lane，两个 transport 都达到
+请求的 batch 宽度。当前 c128 延迟仍显著慢于历史基线，在此之前不能发布新的生产吞吐
+声明。原生游标正确性与这条性能矩阵分开跟踪。
+
 > **数据集修订(2026-07-08 刷新)。** 下文 engine 侧数字于 2026-07-08 在**全 bf16 重建**
 > (repo HEAD `7db42d7`;自 `b80c38d` 基线以来的两个 commit `9ad7cb0`/`7db42d7` 只改构建期
 > 精度默认与文档、不动引擎 runtime,故 runtime 与基线一致)上以 3 trial 重新采集,复现

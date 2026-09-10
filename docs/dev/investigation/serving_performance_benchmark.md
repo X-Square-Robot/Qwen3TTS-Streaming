@@ -17,6 +17,41 @@ Raw per-request data and the aggregated CSVs backing every number here live in
 [`docs/dev/operations/timing_metrics.md`](../operations/timing_metrics.md);
 report format follows [`docs/user/benchmark_methodology.md`](../../user/benchmark_methodology.md).
 
+## Current cursor/TN refresh: 2026-09-10
+
+The current cursor-enabled artifact was measured through the SDK matrix on
+`qwen3-engine:25.10`. This refresh is engine-only: no Triton service was
+running, so the historical Triton rows below are not updated by this run.
+The full raw data, conditions, and summary are in
+[`serving_performance_benchmark_data/refresh_20260910/`](serving_performance_benchmark_data/refresh_20260910/).
+The corrected run is `20260910T120301Z` and sets the SDK WebSocket
+`max_connections` pool to 128.
+
+| Protocol | Concurrency | TTFT avg | Decode step avg | Max batch seen |
+| --- | ---: | ---: | ---: | ---: |
+| engine-grpc | 1 | 24.593 ms | 13.243 ms | 1 |
+| engine-grpc | 8 | 96.829 ms | 15.682 ms | 8 |
+| engine-grpc | 16 | 175.358 ms | 18.151 ms | 16 |
+| engine-grpc | 32 | 327.079 ms | 24.068 ms | 32 |
+| engine-grpc | 64 | 640.013 ms | 37.106 ms | 64 |
+| engine-grpc | 128 | 1,273.570 ms | 72.465 ms | 128 |
+| engine-websocket | 1 | 23.290 ms | 13.230 ms | 1 |
+| engine-websocket | 8 | 93.928 ms | 15.243 ms | 8 |
+| engine-websocket | 16 | 150.909 ms | 17.464 ms | 16 |
+| engine-websocket | 32 | 280.803 ms | 22.614 ms | 32 |
+| engine-websocket | 64 | 547.713 ms | 34.218 ms | 64 |
+| engine-websocket | 128 | 1,114.293 ms | 61.747 ms | 128 |
+
+These are SDK-client TTFT values from the current matrix, not the historical
+server-side TTFT basis used by the 2026-07 report. All 11,674 records
+completed successfully and the fixed workload reported a 100% cache-hit rate.
+The SDK WebSocket pool was explicitly raised to 128 so the c64/c128 cells
+measured actual concurrent lanes, and both transports reached their requested
+batch width. The current c128 latency is still substantially slower than the
+historical baseline and must be investigated before publishing a new production
+throughput claim. Native cursor correctness is tracked separately from this
+performance matrix.
+
 > **Dataset revision (2026-07-08 refresh).** The engine-side numbers below were re-collected on
 > 2026-07-08 on a **full-bf16 rebuild** (repo HEAD `7db42d7`; the two commits since the `b80c38d`
 > baseline, `9ad7cb0`/`7db42d7`, change only build-time precision defaults and docs, not engine

@@ -16,6 +16,7 @@
 | [Decode FSM Design](architecture/decode_fsm.md) | Decode-phase finite state machine design |
 | [Engine Architecture Decisions](architecture/engine_decisions.md) | Core engine design decisions and rationale |
 | [Streaming Protocol Design](architecture/streaming_protocol.md) | Standalone protocol redesign — gRPC/WebSocket streaming |
+| [Native Cursor, TRT Fusion, and Streaming TN Coordinates](architecture/native_cursor_trt_fusion_decision.zh-CN.md) (Chinese) | TRT graph contract, capability routing, and raw-coordinate projection for the native cursor |
 
 ## Design Goals
 
@@ -24,7 +25,7 @@
 | [VAD Design Goals](design/vad_design_goals.md) | VAD (Voice Activity Detection) design goals and rationale |
 | [Observability Goals](design/observability_goals.md) | Observability and metrics design goals |
 | [Real-Time Audio Streaming](design/realtime_audio.md) | Real-time audio streaming design goals |
-| [Incremental Text Normalization and Soft Drain](design/incremental_text_normalization_and_soft_drain.md) | Monotonic text commitment, ambiguity handling, WAIT/HOLD, Soft Drain, and state rollover design |
+| [Incremental Text Normalization and Soft Drain](design/incremental_text_normalization_and_soft_drain.md) | Implemented incremental TN and monotonic commitment, current WAIT_TEXT, plus unreleased Soft Drain and state-rollover design |
 
 ## Investigation Reports
 

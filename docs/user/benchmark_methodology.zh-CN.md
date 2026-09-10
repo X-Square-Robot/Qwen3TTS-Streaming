@@ -39,9 +39,47 @@ Triton/trace 接口。发布结果时必须记录来源，不能把浏览器实�
 - 输入文本、语言、speaker、cache mode。
 - warmup 策略：是否排除 warmup。
 - 并发数、请求数、失败数。
+- SDK WebSocket 测试的 `max_connections` 必须不小于最大并发档位；否则客户端连接池会
+  在请求到达引擎前串行化 lane。
 - 测量位置：服务端、adapter、客户端。
 - 实验来源：内置 `/demo/#/lab` 的公共 Realtime、可选 `demo_api`，或直接 engine/Triton 客户端。
 - 是否使用 fixture trace。
+
+## 流式 TN 与原生游标的记录要求
+
+流式 TN/文本进度属于正确性与协议能力，不应只用 TTFT 或吞吐量推断。每次发布新
+benchmark 时还应记录：
+
+- `/v1/capabilities` 中的 `loaded_model_type`、`native_cursor.graph_enabled`、
+  `native_cursor.progress_available` 和 `supported_progress_modes`；
+- `native_cursor` 使用的 model/cursor-head/label-vocab/TN rules fingerprint，以及
+  `right_context`、`max_labels`、codebook 数和 frame 时长；
+- 实际 progress route：`native`、`ema` 或 `disabled`，以及事件中的
+  `progress_basis`；
+- TN 回放或合同测试的结果。`raw_codepoint_end`、
+  `normalized_codepoint_end` 是单调整数 high-water，不应被展示插值替代；
+- 是否验证了 `WAIT_TEXT`、EOS、tail rewrite、并发 slot 隔离和无游标头 fallback。
+
+性能矩阵与文本进度正确性必须分开报告。不能把 standard TRT/EMA、cursor-enabled TRT/
+native，或不同 artifact 的 Triton 数字合并成一个平均值。
+
+## 当前矩阵入口
+
+性能矩阵使用真实 SDK 客户端，要求目标服务已经启动。必须在项目虚拟环境中运行：
+
+```bash
+mamba run -n qwen3-tts bash -c \
+  'TARGETS="engine-grpc,engine-websocket" LEVELS="1,8,16,32,64,128" \
+   CONCURRENCY_SAMPLES=20 CONCURRENCY_WARMUP=3 CONN_SAMPLES=50 CONN_WARMUP=5 \
+   MAX_CONNECTIONS=128 \
+   bash tools/validation/run_perf_matrix.sh'
+mamba run -n qwen3-tts python tools/validation/summarize_perf_matrix.py \
+  workspace/perf_matrix/<run_id>
+```
+
+Triton 只有在对应 Triton 服务正在运行时才加入 `TARGETS`；没有运行 Triton 时不要用
+空结果或历史数据冒充本次重测。原始 JSON、环境快照和汇总 CSV 应按 run id 保存，并在
+报告中注明服务版本、artifact 和是否为 engine-only refresh。
 
 ## 单路 TTFT 的口径
 

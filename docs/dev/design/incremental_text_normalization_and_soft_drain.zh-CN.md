@@ -2,8 +2,8 @@
 
 # 流式文本消歧、增量文本规范化与 Soft Drain 设计
 
-> 编写日期：2026-07-28<br>
-> 状态：**设计稿**；Phase 0 可复用现有 `WAIT_TEXT`，`Soft Drain`、coverage 与低接缝 rollover 目标需要训练和运行时实现；除完整 state snapshot/restore 的迁移基线外不承诺状态等价<br>
+> 编写日期：2026-07-28；最近实现状态：2026-09-10<br>
+> 状态：**设计稿；Phase 0 已落地**：主 streaming TN、单调 `TextCommit`、raw/spoken owner 映射和当前 `WAIT_TEXT` 已接入运行时；`Soft Drain`、coverage 与低接缝 rollover 仍需要训练和运行时实现，尚未作为默认能力发布<br>
 > 范围：`engine/frontend/` 的文本入口与切分前处理、`engine/backend/` 的等待/恢复控制、后续 Talker 适配训练与 Code2Wav 状态继承<br>
 > 关联：[前端文本切分流水线](frontend_segmentation_pipeline.zh-CN.md) · [解码 FSM](../architecture/decode_fsm.zh-CN.md) · [引擎总览](../architecture/engine_overview.zh-CN.md) · [实时音频流](realtime_audio.zh-CN.md) · [可观测性目标](observability_goals.zh-CN.md)
 
@@ -202,15 +202,26 @@ text EOS 与 codec EOS 只用于完整输入或明确 hard segment。`mutable ta
 
 这条路径是 Phase 0 的声学基础，但它会在 text queue 耗尽时立即冻结，未必能把 `This is` 的全部尾音生成完。Phase 0 首先解决不可逆误读安全，不承诺充分利用所有潜在音频余量；后者属于 Phase 1 `SOFT_DRAIN`。
 
-### 4.2 当前缺口：增量 TN 只有 emoji carry
+### 4.2 Phase 0 已落地：主 streaming TN 与单调提交
 
-流式模式目前只在 `engine/frontend/interface.py` 中保留 incomplete emoji suffix；其他文本经过简单空白/emoji 清理后立即 tokenize 和 dispatch。系统没有：
+当前运行时已经在 tokenizer/Spliter 之前接入
+`engine/frontend/text_commitment/IncrementalTextCommitter`。它维护完整 raw Unicode
+来源、可继续扩展的 mutable tail，并通过 `SpanDetector`、WeText backend、领域规则和
+显式 fallback 生成单调 `TextCommit`。已经提交的 spoken prefix 不会因为 transport
+分包或后续 tail rewrite 被重新写入。
 
-- 通用 raw mutable tail；
-- semiotic span closure；
-- raw ↔ normalized offset；
-- 候选 verbalization；
-- commit/fallback 事件。
+当前实现包括：
+
+- 通用 raw mutable tail、语义 span closure 和按 `SpanKind` 分类；
+- raw → spoken 的 mapping、`CanonicalTextJournal` 以及 owner-level 坐标；
+- WeText/混合语言路由、候选 verbalization、literal/cardinal fallback；
+- `TextCommit`/commit fence 和 `qwen.text_progress` 所需的对齐元数据；
+- 主 TN 到 native cursor label plan 的适配，以及 owner-span reanchor；
+- 没有可提交文本时复用现有 `WAIT_TEXT`，不注入临时 text EOS 或多 PAD 恢复。
+
+这仍然不是 Soft Drain：当前服务不会在没有新文本时用 `<tts_wait>` 继续生成声学尾部，
+也不会把跨 segment 的状态 rollover 当成已验证能力。Phase 1/2 的 coverage、训练态
+控制 token、低接缝继承和质量门槛仍按后续章节执行。
 
 ### 4.3 当前 hard flush 是终止，不是暂停
 
@@ -985,7 +996,10 @@ O → O2 → O2O
 - [引擎总览](../architecture/engine_overview.zh-CN.md)：保持 `prefill → streaming input/WAIT → flush` 的现有三阶段主干；本文在 streaming input 内增加 commit gate。
 - [实时音频流](realtime_audio.zh-CN.md)：客户端 pacing/jitter buffer 负责等时播放；本文的 `audio_credit` 只用于决策和测量，不让引擎 `sleep()`。
 - [可观测性目标](observability_goals.zh-CN.md) 与 [指标目录](observability_metrics_catalog.zh-CN.md)：实现前应把 commit/wait/fallback/underflow 观测点并入指标单一真相源。
-- 当前主要落点：`engine/frontend/interface.py`、`engine/core/session.py`、新 `engine/frontend/text_commitment/`（建议）、`engine/backend/engine_loop.py`（Phase 1+）。
+- 当前主要落点：`engine/frontend/text_commitment/`、`engine/core/text_journal.py`、
+  `engine/core/cursor_plan_adapter.py`、`engine/core/text_coordinates.py`、
+  `engine/core/text_progress.py`、`engine/frontend/interface.py` 和
+  `engine/backend/engine_loop.py`。
 
 ## 20. 外部参考
 

@@ -26,6 +26,21 @@ Qwen3TTS-Streaming is an **engineering preview** project: it exports the officia
 
 > ⚠️ **Status: v0.1 engineering preview, not production-ready.** Streaming mode may still exhibit **hallucination, repetition, and dropped reading** (roughly 10–18% on the current checkpoint, rooted in the model and sampling; see [Known Limitations](docs/user/known_limitations.md)). **The currently recommended stable scope is the `custom-1.7b` / `custom_voice` path.** `design-1.7b`, `base-1.7b` / x-vector voice cloning, and `icl` voice cloning are experimental; the `0.6b` variants are not part of the v0.1 mainline. Do not use it directly for production content generation.
 
+## News
+
+- **2026-09-10: Streaming TN and native text progress are now wired into the current engine.**
+  The primary streaming TN layer owns raw Unicode, mutable tails, and monotonic
+  `TextCommit` records. WeText and mixed-language routing decide the spoken form on CPU, while
+  already committed spoken prefixes remain append-only across transport packetization.
+- **2026-09-10: `custom-1.7b` supports the cursor-enabled TRT progress route.** The native cursor
+  observes the fused graph's sampled codec codebook-0 and projects its continuous label position
+  back to normalized/raw text coordinates through stable owner spans. The public extension is
+  `qwen.text_progress.v1`, with `native`, `ema`, and `disabled` progress routes.
+- **The capability boundary remains explicit.** Native cursor is enabled only for a matched and
+  validated `custom-1.7b` cursor artifact. Other models use standard TRT plus EMA/disabled
+  progress; the runtime never silently attaches an incompatible 2M cursor head. `SOFT_DRAIN`
+  training and low-seam state rollover are not released as default runtime capabilities.
+
 ## Features
 
 ### Token-Level Streaming
@@ -42,10 +57,40 @@ Qwen3TTS-Streaming (token-level)
            │        │       │       │        │         │
            ▼        ▼       ▼       ▼        ▼         ▼
          chunk    chunk   chunk   chunk    chunk     chunk   ──▶  🔊
-                                                                    first chunk lands in ~15ms
+                                                                    current c1 chunk ~23ms
 ```
 
-**14.9 ± 0.3ms** server TTFT (n=50, min 14.4ms) is faster than a single 60Hz screen refresh (16.7ms) and well under the ~100–400ms a human eye takes to blink — the first audio chunk is already playing before a wait would even register. Under a 128-stream simultaneous burst the client-side average is 242–275ms depending on transport. Both numbers come with conditions attached; see [Performance Claims](#performance-claims) for exactly what they depend on.
+The historical low-latency baseline was **14.9 ± 0.3ms** server TTFT (n=50, min 14.4ms), with
+242–275ms client TTFT under a 128-stream burst. The current 2026-09-10 cursor/TN refresh uses
+an SDK-client basis and exposes a c128 latency regression signal versus that historical baseline; see
+[Performance Claims](#performance-claims) and the
+[current benchmark refresh](docs/dev/investigation/serving_performance_benchmark.md#current-cursortn-refresh-2026-09-10).
+
+### Streaming TN and Native Text Progress
+
+Streaming input cannot safely send every transport delta directly to the tokenizer: `99%`, dates,
+URLs, model identifiers, and mixed-language spans can change their spoken form when later
+characters arrive. The engine now places a primary streaming TN layer before tokenization and
+splitting:
+
+```text
+raw Unicode delta
+  -> mutable tail / open-span detection
+  -> WeText + domain resolution
+  -> monotonic TextCommit
+  -> tokenizer / Spliter / fused TRT
+```
+
+On a `custom-1.7b` cursor-enabled artifact, the fused TRT graph consumes the cursor label plan and
+the codec0 sampled inside the graph; CPU owns TN, owner provenance, tail rewrite/reanchor, and
+protocol projection. Public `raw_codepoint_end` and `normalized_codepoint_end` values are
+conservative integer high-water marks. `display_*_position` values are display-only interpolation
+for highlighting and must not be used for billing, resume, or audio-release decisions.
+
+Clients should read `/v1/capabilities` first. Select native progress only when
+`native_cursor.progress_available=true`; otherwise use EMA or disable text progress. Progress is
+published through `qwen.text_progress.v1` / `qwen.text_progress`. See
+[Realtime endpoints and events](docs/user/realtime_api.md) for field and playback-ack semantics.
 
 ### A Scheduler Built for Autoregressive Streaming
 
@@ -92,7 +137,7 @@ The whole path is in this repo, not the `third_party/` submodule — export code
 
 ## Highlights
 
-- ⚡ **Token-level streaming, not sentence-level** — first audio chunk in ~15ms (server TTFT 14.9 ± 0.3ms), 242–275ms avg under a 128-stream burst
+- ⚡ **Token-level streaming, not sentence-level** — token-level first-chunk delivery; current performance evidence is tracked separately from the historical baseline
 - 🧩 **A scheduler built for autoregressive decode**, not Triton's stateless `dynamic_batching` — continuous batching + `WAIT_TEXT` pause/resume
 - 🌐 **Compile once, deploy anywhere** — fingerprint a target, build a matching bundle, import it with no GPU toolchain on-site
 - 🧵 **One TensorRT engine per decode step, not four** — talker + Code Predictor + codec-embedding sum + code2wav fused into a single exported graph, export-to-test code all in this repo
@@ -110,6 +155,8 @@ The first four points above are unpacked in [Features](#features); the last two 
   - [Compile Once, Deploy Anywhere](#compile-once-deploy-anywhere)
   - [One Engine, Not Four](#one-engine-not-four)
 - [Performance Claims](#performance-claims)
+- [News](#news)
+- [Streaming TN and Native Text Progress](#streaming-tn-and-native-text-progress)
 - [Capability Status](#capability-status)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
@@ -129,10 +176,15 @@ The low-latency numbers mentioned in this project are conditional results, not g
 
 | Scenario | TTFT | Conditions |
 | --- | --- | --- |
-| Single request, warm engine | **14.9 ± 0.3ms** server-side (min 14.4, p99 15.9, n=50); ~16.1ms p50 client-side over a reused local gRPC channel | RTX 5090, warm engine, prefix-cache hit, single-request load, local link, all-bf16 `custom-1.7b`, batch=128 profile |
-| 128 concurrent streams (simultaneous burst, avg) | **242–275ms** by transport (engine-websocket 242 / engine-grpc 275; p99 341–494ms). Triton path not re-benchmarked after the 2026-07-07/08 engine optimizations (last measured 309 avg on the older engine core) | same stack, single service per run, all 128 admitted and decoded in one batch; burst arrival is the worst case — staggered arrivals see lower TTFT |
+| **Current 2026-09-10 engine-only refresh, single request** | **23.290ms WebSocket / 24.593ms gRPC** SDK-client TTFT avg | RTX 5090, `qwen3-engine:25.10`, cursor-enabled `custom-1.7b`, bf16, fixed text/speaker, cache hit |
+| **Current 2026-09-10 engine-only refresh, 128-stream burst** | **1,273.570ms gRPC / 1,114.293ms WebSocket** SDK-client TTFT avg | SDK WebSocket pool explicitly set to 128; both transports reached max batch 128; 0/11,674 failures overall; Triton not running |
+| Historical 2026-07-08 single request | **14.9 ± 0.3ms** server-side (min 14.4, p99 15.9, n=50); ~16.1ms p50 client-side over a reused local gRPC channel | RTX 5090, warm engine, prefix-cache hit, local link, all-bf16 `custom-1.7b`, batch=128 profile |
+| Historical 2026-07-08 128 concurrent streams | **242–275ms** by transport (engine-websocket 242 / engine-grpc 275; p99 341–494ms); Triton was not re-benchmarked after those engine optimizations | same stack, single service per run, all 128 admitted and decoded in one batch; historical baseline only |
 
-> ⚠️ **128 streams is the tested ceiling, not a safe production target.** After three decode-optimization rounds (2026-07-06: CP in-graph KV + CUDA-graph decode replay + arena-ized KV gather; 2026-07-07: batched burst admission + per-slot state pooling + serving hot-path slimming; 2026-07-08: post-review audit fix batch + batched p3_launch), the benchmarked GPU (RTX 5090, all-bf16 engine, batch=128 profile) sustains 128 concurrent streams at a decode step of 42.1ms per 80ms audio frame — RTF (audio duration / wall-clock decode time) ≈ 1.90, i.e. ~47% headroom above real-time (pre-optimization this was 119.8ms/frame, RTF ≈ 0.67 — below real-time). That margin absorbs normal jitter, but a sustained load spike or heavier-than-usual requests can still eat it. Size production concurrency with margin below 128 rather than running at it; at 64 streams the decode step is 24.5ms (RTF ≈ 3.3) with ample margin. Full breakdown and raw data: [serving performance benchmark](docs/dev/investigation/serving_performance_benchmark.md).
+> ⚠️ **The current 2026-09-10 refresh is not a production throughput claim.** Its c128 latency is
+> substantially slower than the historical baseline even after correcting the SDK WebSocket pool
+> configuration. Investigate and remeasure before sizing production concurrency. The historical
+> 128-stream baseline remains available in the [serving performance benchmark](docs/dev/investigation/serving_performance_benchmark.md).
 
 - Standalone `engine-grpc` TTFT is measured by default over a ready/reused gRPC channel and, like WebSocket, does not count the client connection setup cost toward first-packet latency; a cold/lazy channel adds roughly 13ms.
 - A one-off browser metric in the Demo Lab uses a different measurement window and load shape from the table above and is not directly comparable; public claims must use benchmark data with complete conditions.
@@ -145,6 +197,9 @@ For detailed benchmark methodology, see [Benchmark Methodology](docs/user/benchm
 | Path | Current status | Open-source scope |
 | --- | --- | --- |
 | `custom-1.7b` / `custom_voice` | 🟢 Prioritized/stable | The v0.1 recommended path; the product Demo showcases it by default |
+| streaming TN / monotonic commitment | 🟢 Integrated | The primary TN owns spoken-form truth; open semantic tails may wait, then resolve or use an explicit fallback |
+| native text progress | 🟢 Limited scope | Only a matched `custom-1.7b` cursor-enabled TRT artifact; other models fall back to EMA/disabled |
+| `SOFT_DRAIN` / state rollover | ⚪ Not released | Design and acceptance contracts exist; current runtime continues to use `WAIT_TEXT` and explicit hard finalization |
 | `design-1.7b` / `voice_design` | 🟡 Experimental | Code and export entry points can be kept, but must be marked as not fully validated |
 | `base-1.7b` / x-vector voice clone | 🟡 Experimental | Standalone already wires up ref audio → speaker embedding; needs the base export artifacts and real end-to-end validation |
 | `icl` voice clone | 🟡 Experimental | Standalone already wires up ref audio + ref text → ref codec/code injection; needs the TRT ref-audio engine and real end-to-end validation |
@@ -331,11 +386,20 @@ Test entry points are unified under `tests/`; for a detailed map, see [tests/REA
 
 ```bash
 # Unit + integration tests
-pytest tests/unit tests/integration -q
+mamba run -n qwen3-tts pytest tests/unit tests/integration -q
 
 # Main entry point for serving acceptance and benchmarks
 mamba run -n qwen3-tts python tools/validation/serving_endpoints.py --targets engine-grpc
 mamba run -n qwen3-tts python tools/validation/serving_endpoints.py --targets triton-grpc,triton-http
+
+# Current SDK performance matrix (add Triton only when its service is running)
+mamba run -n qwen3-tts bash -c \
+  'TARGETS="engine-grpc,engine-websocket" LEVELS="1,8,16,32,64,128" \
+   CONCURRENCY_SAMPLES=20 CONCURRENCY_WARMUP=3 CONN_SAMPLES=50 CONN_WARMUP=5 \
+   MAX_CONNECTIONS=128 \
+   bash tools/validation/run_perf_matrix.sh'
+mamba run -n qwen3-tts python tools/validation/summarize_perf_matrix.py \
+  workspace/perf_matrix/<run_id>
 ```
 
 Validate the base/icl reference resolver and the ICL prefix cache:

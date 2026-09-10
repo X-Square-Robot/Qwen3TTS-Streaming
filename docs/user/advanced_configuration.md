@@ -49,6 +49,24 @@ for message in session.iter_messages():
 `session.end()` closes text input; it does not mean playback has completed. Consume through a
 terminal event.
 
+## Streaming TN and Text Progress
+
+An incremental session sends transport deltas through the primary streaming TN layer before the
+tokenizer and `Spliter`. The TN layer owns raw Unicode, a mutable tail that may still be rewritten,
+monotonic `TextCommit` records, and owner mappings from raw text to normalized/spoken text. Open
+spans such as `99%`, dates, URLs, model identifiers, and mixed-language text may wait for later
+characters; this is semantic safety, not an audio failure.
+
+On a deployment advertising `native_cursor.progress_available=true`, `custom-1.7b` text progress
+comes from the cursor-enabled TRT graph and is published as `qwen.text_progress` events. Other
+deployments use EMA or disable text progress. Read `/v1/capabilities` first; do not infer native
+support from the model name.
+
+`raw_codepoint_end` and `normalized_codepoint_end` in a progress event are conservative integer
+high-water marks. `display_*_position` values are display-only interpolation for highlighting.
+`alignment_final=true` means alignment for that segment is complete, not that the speaker has
+finished playback; use audio sample cursors and `qwen.playback.ack` for playback confirmation.
+
 ## Audio format
 
 Start with mono 24 kHz PCM16 for browser playback, WAV wrapping, and common realtime pipelines:

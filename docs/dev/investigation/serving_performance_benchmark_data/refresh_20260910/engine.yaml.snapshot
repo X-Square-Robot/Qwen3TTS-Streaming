@@ -1,0 +1,137 @@
+# =============================================================================
+# Qwen3-TTS Engine Configuration
+# =============================================================================
+# Model architecture is auto-loaded from the manifest inside the model package.
+# This file contains deployment package path + runtime parameters.
+#
+# Priority:
+#   Engine params:  CLI args (debug) > ENGINE_* env > engine.yaml > defaults
+#   Model arch:     package manifest > auto-detect (tokenizer) > defaults
+#
+# In production, just set the paths below and run:
+#   python -m engine.server --config engine.yaml
+# =============================================================================
+
+# --- Deployment paths (fill once per deployment) ---
+paths:
+  model_package_dir: workspace/model_repository/tts_orchestrator/1
+
+server:
+  port: 50051
+  websocket_port: 50052           # WebSocket streaming gateway (0 to disable)
+  websocket_path: /v1/ws
+  tls_cert_file: ""               # Optional PEM chain for direct HTTPS/WSS
+  tls_key_file: ""                # Mounted PEM key; configure both or neither
+  health_port: 8080              # HTTP health/metrics endpoint (0 to disable)
+  health_probe_mode: ready       # /health: "ready" = 503 until engine ready then 200
+                                 # (for unified liveness/readiness/startup probes);
+                                 # "alive" = 200 once port is up (escape hatch when
+                                 # probe grace can't cover model load, ~20-40s)
+  max_sessions: 128
+  request_timeout_sec: 120.0
+  warmup_rounds: 3               # dummy inferences at startup to warm TRT cache
+  guarded_delivery_default: true # first chunk is immediate; later excess stays retractable
+  guarded_delivery_window_ms: 100 # maximum audio lead ahead of the estimated playhead
+  prewarm_speakers: []           # speakers to prewarm prefix KV cache at startup
+                                 # (e.g. [Serena]); first real request per speaker
+                                 # then hits cache (~20ms TTFT vs ~50ms cold). []=off
+
+scheduler:
+  max_batch_size: 128
+  max_seq_len: 512
+  # MLFQ dynamic priority
+  mlfq_q1_threshold: 50     # steps before demotion Q0→Q1
+  mlfq_q2_threshold: 200    # steps before demotion Q1→Q2
+  mlfq_aging_interval: 100  # steps before anti-starvation boost
+  mlfq_starvation_limit: 50 # max consecutive skips before force-schedule
+  # Slot management
+  max_idle_sec: 10.0         # evict slots idle longer than this
+  max_queue_size: 256        # backpressure: reject new sessions beyond this
+  session_timeout_sec: 300.0 # force-cancel sessions exceeding this duration
+  # Hallucination loop guard, stage 1: codebook-0 repeats at this threshold are
+  # observable suspects only. A short run that changes token is recorded as a
+  # recovery and is never truncated. 0 disables suspect/recovery telemetry.
+  token_loop_suspect_frames: 4
+  # Stage 2: retry/abort only after the same run persists to this threshold.
+  # 0 disables the whole token-loop guard. Historical true loops ran 10-39
+  # frames; a production false positive recovered immediately after frame 4.
+  token_loop_abort_frames: 10
+  # A confirmed run is terminal only after input completion and this minimum
+  # generated-audio/text-token ratio. 0 restores the legacy ungated behavior.
+  token_loop_min_audio_text_ratio: 2.0
+  # Unconditional safety cap if progress is not ready (0 = disabled).
+  token_loop_emergency_abort_frames: 20
+  # Reseed-and-rerun a guarded-abort segment when its audio is still fully
+  # buffered behind an earlier live segment (transparent to the client).
+  # 0 = always abort instead.
+  token_loop_max_retries: 1
+  # At max_seq_len, only implausibly long audio is considered a runaway.
+  length_runaway_ratio: 10.0
+
+prefix_cache:
+  enabled: true
+  max_entries: 16            # number of distinct prefix KV entries to cache
+  max_prefix_len: 512        # max token length for a cached prefix
+
+reference_cache:
+  enabled: true
+  max_entries: 16            # cached ref-audio preprocessing results (separate from prefix KV)
+
+spliter:
+  # Clean completions update duration EMA for progress/hold estimation only.
+  ema_ratio_initial: 4.5
+  # Conservative capacity baseline.  Unlike duration EMA, this never falls;
+  # max_seq_len=512 therefore starts with a safe 89-token hard cap.
+  safety_ratio_initial: 5.5
+  ema_alpha: 0.1
+  # Safety-controller backoff after overflow/loop/length failure.
+  ema_overflow_alpha: 0.5
+  ema_min_observation_tokens: 8
+  safety_failure_multiplier: 1.25
+  max_concurrent_segments: 2
+  prefill_len: 12
+  # Min tokens before split at L1/L2/L3 punct — each is cap * ratio
+  l1_split_cap_ratio: 0.70
+  l2_split_cap_ratio: 0.80
+  l3_split_cap_ratio: 0.90
+
+sampling:
+  do_sample: true
+  temperature: 0.9
+  repetition_penalty: 1.05
+  top_k: 50
+  random_seed: 0
+
+# Tiered observability (see docs/dev/design/observability_tiers.md).
+#   level:             daily | debug | dump  —— global default tier (L1/L2/L3)
+#   max_session_level: cap for per-request `obs_level` escalation (keep `daily`
+#                      in production so clients cannot crank a session to dump).
+# Override globally with ENGINE_OBSERVABILITY_LEVEL=debug (or ENGINE_OBS_LEVEL).
+observability:
+  level: daily
+  max_session_level: daily
+  text_capture: preview          # disabled | preview | hashed | full
+  text_preview_chars: 64
+  health_interval_sec: 30.0      # engine.health gauge cadence (0 to disable)
+  # L3 dump (equivalent to ENGINE_DUMP_*); only active at level=dump or a
+  # per-session escalation to dump.
+  dump_dir: ""
+  dump_limit: 0
+  dump_include_wav: true
+  dump_sessions: ""
+
+# Prefill: CustomVoice client speaker missing / invalid (must exist in weights spk_id)
+prefill:
+  default_speaker: "001"
+  fallback_speaker: "001"
+
+# Optional Base/ICL reference library. When entries is empty, Base/ICL default
+# reference still falls back to ENGINE_DEFAULT_BASE_REF_AUDIO_PATH /
+# ENGINE_DEFAULT_BASE_REF_TEXT or workspace/default_refs/base_ref.wav.
+references:
+  default: liangwuque
+  entries:
+    liangwuque:
+      audio_path: resources/speakers/liangwuque/ref.wav
+      ref_text_path: resources/speakers/liangwuque/ref.txt
+      language: zh

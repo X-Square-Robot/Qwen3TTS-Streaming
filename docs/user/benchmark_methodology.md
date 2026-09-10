@@ -41,10 +41,53 @@ Public benchmarks must record:
 - Input text, language, speaker, cache mode.
 - Warmup strategy: whether warmup is excluded.
 - Concurrency, request count, failure count.
+- For SDK WebSocket runs, `max_connections` must be at least the largest
+  measured concurrency; otherwise the client pool serializes lanes before the
+  engine sees them.
 - Measurement location: server, adapter, client.
 - Experiment source: built-in `/demo/#/lab` over public Realtime, optional
   `demo_api`, or a direct engine/Triton client.
 - Whether a fixture trace is used.
+
+## Streaming TN and Native Cursor Reporting
+
+Streaming TN and text progress are correctness and protocol capabilities; they cannot be inferred
+from TTFT or throughput alone. A new benchmark report should also record:
+
+- `loaded_model_type`, `native_cursor.graph_enabled`,
+  `native_cursor.progress_available`, and `supported_progress_modes` from
+  `/v1/capabilities`;
+- model/cursor-head/label-vocabulary/TN-rules fingerprints, plus `right_context`,
+  `max_labels`, codebook count, and frame duration;
+- the actual progress route: `native`, `ema`, or `disabled`, and the event
+  `progress_basis`;
+- TN replay or contract-test results. `raw_codepoint_end` and
+  `normalized_codepoint_end` are monotonic integer high-water marks and must
+  not be replaced by display interpolation;
+- whether `WAIT_TEXT`, EOS, tail rewrite, concurrent slot isolation, and the
+  no-cursor-head fallback were verified.
+
+Keep performance matrices separate from text-progress correctness. Do not average standard
+TRT/EMA, cursor-enabled TRT/native, or Triton results from different artifacts into one number.
+
+## Current Matrix Entry Point
+
+The performance matrix uses the real SDK client and requires the target services to be running.
+Run it inside the project virtual environment:
+
+```bash
+mamba run -n qwen3-tts bash -c \
+  'TARGETS="engine-grpc,engine-websocket" LEVELS="1,8,16,32,64,128" \
+   CONCURRENCY_SAMPLES=20 CONCURRENCY_WARMUP=3 CONN_SAMPLES=50 CONN_WARMUP=5 \
+   MAX_CONNECTIONS=128 \
+   bash tools/validation/run_perf_matrix.sh'
+mamba run -n qwen3-tts python tools/validation/summarize_perf_matrix.py \
+  workspace/perf_matrix/<run_id>
+```
+
+Add Triton to `TARGETS` only when the corresponding Triton service is running. Do not represent an
+unavailable Triton run with empty results or historical data. Preserve raw JSON, environment
+snapshots, and summary CSVs by run id, and state whether the refresh is engine-only.
 
 ## The Single-Stream TTFT Convention
 

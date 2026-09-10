@@ -11,6 +11,12 @@
 
 ### Added
 
+- 流式 TN 现在在 tokenizer/Spliter 之前维护 raw Unicode、mutable tail、主
+  `TextCommit` 和 `CanonicalTextJournal`；WeText、混合语言路由、显式 fallback 以及
+  raw → spoken provenance 由同一套前端合同负责。
+- 已验证的 `custom-1.7b` cursor-enabled TRT plan 现在可以在图内消费 codec0 并发布原生
+  文本进度；`qwen.text_progress.v1` 暴露 `native`、`ema`、`disabled` 三种 progress
+  route，owner-level raw/normalized high-water 与展示插值分离。
 - 版本 tag 现在触发 wheel-first GitHub/GitLab 发布流水线：只检出顶层仓库且不拉
   子模块，每个平台各自只构建一份 client wheel；GitHub 发布到 Release，GitLab
   发布到 PyPI Registry 并挂 Release 链接，再将该平台已发布、SHA256 完全相同的
@@ -25,6 +31,8 @@
 
 ### Changed
 
+- serving performance matrix 现在显式设置 SDK WebSocket `max_connections`，确保 64/128 路
+  测量不会被默认 32 条连接的客户端池提前串行化；当前刷新与历史数据集分开保存。
 - 将原独立的 `webui/` 特性展示前端并入 `web/packages/demo`，由运行时统一从
   `/demo/` 提供版本匹配的门户。试听、SDK、文档和实验页共用该门户，
   `/demo/#/lab` 是唯一实验入口，深度工程面板按可选后端能力门控；`demo_api` 只提供

@@ -4,6 +4,10 @@
 
 支撑 [`../serving_performance_benchmark.zh-CN.md`](../serving_performance_benchmark.zh-CN.md) 的原始数据。
 
+**当前刷新:** [`refresh_20260910/`](refresh_20260910/) 是 2026-09-10
+cursor-enabled artifact 的 engine-only 结果，属于当前性能证据，并与下方历史混合数据集
+分开保存。本轮没有运行 Triton。
+
 **数据出处(混合数据集):** engine 侧行(`engine-grpc`/`engine-websocket`)于
 **2026-07-08 在全 bf16 重建(repo HEAD `7db42d7`,runtime 等同 `b80c38d` 基线)上重新采集**
 (3 trial,复现 `ca6ddb9` 数据集,噪声范围内一致);`triton-grpc` 行**沿用 2026-07-06 数据集**,
@@ -20,7 +24,7 @@
 
 ```bash
 # engine 侧(Triton 停止):
-TARGETS="engine-grpc,engine-websocket" bash tools/validation/run_perf_matrix.sh
+TARGETS="engine-grpc,engine-websocket" MAX_CONNECTIONS=128 bash tools/validation/run_perf_matrix.sh
 # Triton 侧(engine 停止):
 TARGETS="triton-grpc" bash tools/validation/run_perf_matrix.sh
 # 写入 workspace/perf_matrix/<UTC 时间戳>/*.json
@@ -29,7 +33,7 @@ TARGETS="triton-grpc" bash tools/validation/run_perf_matrix.sh
 python tools/validation/summarize_perf_matrix.py workspace/perf_matrix/<run_id>
 ```
 
-环境变量覆盖项(`TARGETS`、`LEVELS`、`CONCURRENCY_SAMPLES`、`CONCURRENCY_WARMUP`、`CONN_SAMPLES`、`CONN_WARMUP`、各 endpoint)记录在 `run_perf_matrix.sh` 文件头。本数据集 engine 侧用 `LEVELS=1,8,16,32,64,128 CONCURRENCY_SAMPLES=20 CONCURRENCY_WARMUP=3 CONN_SAMPLES=50 CONN_WARMUP=5` 跑 3 次(Triton 侧为相同采样,档位 1,16,32,64,128)。
+环境变量覆盖项(`TARGETS`、`LEVELS`、`CONCURRENCY_SAMPLES`、`CONCURRENCY_WARMUP`、`CONN_SAMPLES`、`CONN_WARMUP`、`MAX_CONNECTIONS`、各 endpoint)记录在 `run_perf_matrix.sh` 文件头。WebSocket 的 `MAX_CONNECTIONS` 必须不小于最大并发档位，否则 SDK 连接池会在请求到达引擎前把 lane 串行化。本历史数据集 engine 侧用 `LEVELS=1,8,16,32,64,128 CONCURRENCY_SAMPLES=20 CONCURRENCY_WARMUP=3 CONN_SAMPLES=50 CONN_WARMUP=5` 跑 3 次(Triton 侧为相同采样,档位 1,16,32,64,128)。
 
 ## 数据解读
 

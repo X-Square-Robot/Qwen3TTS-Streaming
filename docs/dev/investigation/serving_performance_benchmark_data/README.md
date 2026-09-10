@@ -4,6 +4,11 @@
 
 Raw data backing [`../serving_performance_benchmark.md`](../serving_performance_benchmark.md).
 
+**Current refresh:** [`refresh_20260910/`](refresh_20260910/) is the
+2026-09-10 engine-only run for the cursor-enabled artifact. It is the current
+performance evidence and is intentionally kept separate from the historical
+mixed engine/Triton dataset below. Triton was not running during that refresh.
+
 **Provenance (mixed dataset):** engine-side rows (`engine-grpc`/`engine-websocket`) were
 **re-collected 2026-07-08 on a full-bf16 rebuild** (repo HEAD `7db42d7`, runtime identical to the
 `b80c38d` baseline) — 3 trials that reproduce the `ca6ddb9` dataset within noise; `triton-grpc` rows
@@ -21,7 +26,7 @@ Requires a running engine (`engine-grpc`/`engine-websocket`) **or** Triton (`tri
 
 ```bash
 # Engine side (Triton stopped):
-TARGETS="engine-grpc,engine-websocket" bash tools/validation/run_perf_matrix.sh
+TARGETS="engine-grpc,engine-websocket" MAX_CONNECTIONS=128 bash tools/validation/run_perf_matrix.sh
 # Triton side (engine stopped):
 TARGETS="triton-grpc" bash tools/validation/run_perf_matrix.sh
 # writes workspace/perf_matrix/<UTC timestamp>/*.json
@@ -30,7 +35,7 @@ TARGETS="triton-grpc" bash tools/validation/run_perf_matrix.sh
 python tools/validation/summarize_perf_matrix.py workspace/perf_matrix/<run_id>
 ```
 
-Env overrides (`TARGETS`, `LEVELS`, `CONCURRENCY_SAMPLES`, `CONCURRENCY_WARMUP`, `CONN_SAMPLES`, `CONN_WARMUP`, endpoints) are documented in the header of `run_perf_matrix.sh`. The engine side of this dataset used `LEVELS=1,8,16,32,64,128 CONCURRENCY_SAMPLES=20 CONCURRENCY_WARMUP=3 CONN_SAMPLES=50 CONN_WARMUP=5`, run 3 times (the Triton side used the same sampling at levels 1,16,32,64,128).
+Env overrides (`TARGETS`, `LEVELS`, `CONCURRENCY_SAMPLES`, `CONCURRENCY_WARMUP`, `CONN_SAMPLES`, `CONN_WARMUP`, `MAX_CONNECTIONS`, endpoints) are documented in the header of `run_perf_matrix.sh`. Set `MAX_CONNECTIONS` at or above the largest WebSocket concurrency level; otherwise the SDK pool serializes lanes before they reach the engine. The engine side of the historical dataset used `LEVELS=1,8,16,32,64,128 CONCURRENCY_SAMPLES=20 CONCURRENCY_WARMUP=3 CONN_SAMPLES=50 CONN_WARMUP=5`, run 3 times (the Triton side used the same sampling at levels 1,16,32,64,128).
 
 ## Reading the data
 

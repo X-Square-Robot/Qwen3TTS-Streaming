@@ -24,6 +24,7 @@
 #    CONCURRENCY_WARMUP       default: 2   (warmup rounds per level, excluded)
 #    CONN_SAMPLES             default: 30  (measured rounds per connection mode)
 #    CONN_WARMUP              default: 3
+#    MAX_CONNECTIONS          default: 128 (SDK websocket pool limit)
 #    ENGINE_GRPC_ENDPOINT     default: localhost:50051
 #    ENGINE_WS_ENDPOINT       default: ws://localhost:50052/v1/ws
 #    TRITON_GRPC_ENDPOINT     default: localhost:8001
@@ -48,6 +49,7 @@ CONCURRENCY_SAMPLES="${CONCURRENCY_SAMPLES:-8}"
 CONCURRENCY_WARMUP="${CONCURRENCY_WARMUP:-2}"
 CONN_SAMPLES="${CONN_SAMPLES:-30}"
 CONN_WARMUP="${CONN_WARMUP:-3}"
+MAX_CONNECTIONS="${MAX_CONNECTIONS:-128}"
 ENGINE_GRPC_ENDPOINT="${ENGINE_GRPC_ENDPOINT:-localhost:50051}"
 ENGINE_WS_ENDPOINT="${ENGINE_WS_ENDPOINT:-ws://localhost:50052/v1/ws}"
 TRITON_GRPC_ENDPOINT="${TRITON_GRPC_ENDPOINT:-localhost:8001}"
@@ -103,6 +105,7 @@ for target in "${TARGET_ARR[@]}"; do
       --concurrency "$level" \
       --rounds "$CONCURRENCY_SAMPLES" \
       --warmup-rounds "$CONCURRENCY_WARMUP" \
+      --max-connections "$MAX_CONNECTIONS" \
       --connection-mode reuse
   done
 done
@@ -117,6 +120,7 @@ for target in "${TARGET_ARR[@]}"; do
     --concurrency 1 \
     --rounds "$CONN_SAMPLES" \
     --warmup-rounds "$CONN_WARMUP" \
+    --max-connections "$MAX_CONNECTIONS" \
     --connection-mode reuse
   run_case "${target}_conn-cold" \
     --endpoint "$endpoint" \
@@ -124,6 +128,7 @@ for target in "${TARGET_ARR[@]}"; do
     --concurrency 1 \
     --rounds "$CONN_SAMPLES" \
     --warmup-rounds "$CONN_WARMUP" \
+    --max-connections "$MAX_CONNECTIONS" \
     --connection-mode cold
 done
 

@@ -18,6 +18,27 @@ python tools/validation/serving_endpoints.py --targets triton-grpc,triton-http
 python tools/validation/serving_endpoints.py --targets engine-grpc --ttft-warmup 3 --ttft-samples 30
 ```
 
+### Current Engine Performance Matrix
+
+Use the SDK-based matrix from the `qwen3-tts` virtual environment when refreshing streaming
+TN/native-cursor performance. Target services must already be running. Without Triton, run only
+the standalone engine targets and label the report as an engine-only refresh:
+
+```bash
+mamba run -n qwen3-tts bash -c \
+  'TARGETS="engine-grpc,engine-websocket" LEVELS="1,8,16,32,64,128" \
+   CONCURRENCY_SAMPLES=20 CONCURRENCY_WARMUP=3 CONN_SAMPLES=50 CONN_WARMUP=5 \
+   MAX_CONNECTIONS=128 \
+   bash tools/validation/run_perf_matrix.sh'
+mamba run -n qwen3-tts python tools/validation/summarize_perf_matrix.py \
+  workspace/perf_matrix/<run_id>
+```
+
+`run_perf_matrix.sh` is the current cross-protocol matrix entry point;
+`summarize_perf_matrix.py` writes `raw_requests.csv` and `summary.csv`.
+`benchmark.py` and older direct-client scripts remain compatibility/investigation tools and do not
+replace the current environment snapshot or connection-mode comparison.
+
 ## Unified Tools (replaces many legacy scripts)
 
 ### `compare_audio.py` — Audio generation and comparison

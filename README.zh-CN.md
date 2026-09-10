@@ -26,6 +26,19 @@ Qwen3TTS-Streaming 是一个**工程预览版**项目：把官方 Qwen3-TTS PyTo
 
 > ⚠️ **状态：v0.1 工程预览，非生产就绪。** 流式模式仍可能出现**幻觉、重复、漏读**（当前 checkpoint 上约 10–18%，根因在模型+采样，见 [已知限制](docs/user/known_limitations.zh-CN.md)）。**当前建议稳定范围为 `custom-1.7b` / `custom_voice` 路径**；`design-1.7b`、`base-1.7b` / x-vector 语音克隆、`icl` 语音克隆处于实验状态；`0.6b` 变体未作为 v0.1 主线。请勿直接用于生产内容生成。
 
+## News
+
+- **2026-09-10：流式 TN 与原生文本进度已接入当前引擎。** 主 streaming TN 现在维护
+  raw Unicode、可变尾部和单调 `TextCommit`；WeText/混合语言路由只在 CPU 侧决定 spoken
+  form，已经提交的 spoken prefix 不会被后续 transport 分包改写。
+- **2026-09-10：`custom-1.7b` 支持 cursor-enabled TRT progress route。** 原生游标观察
+  融合图内采样的 codec codebook-0，并把连续 label 坐标通过稳定 owner spans 投影回
+  normalized/raw 文本坐标；当前公开扩展为 `qwen.text_progress.v1`，并支持
+  `native`、`ema`、`disabled` 三种 progress route。
+- **能力范围保持显式。** 原生游标只对已匹配并验证的 `custom-1.7b` cursor artifact
+  开启；其他模型没有匹配游标头时走 standard TRT + EMA/disabled，不会静默挂载不匹配的
+  2M 游标头。`SOFT_DRAIN` 训练能力和低接缝 state rollover 仍未作为当前默认能力发布。
+
 ## 特色
 
 ### Token 级流式
@@ -42,10 +55,37 @@ Qwen3TTS-Streaming（token 级）
            │       │      │        │        │        │
            ▼       ▼      ▼        ▼        ▼        ▼
          chunk   chunk  chunk    chunk    chunk    chunk   ──▶  🔊
-                                                                 首个 chunk ~15ms 到达
+                                                                 当前 c1 chunk ~23ms 到达
 ```
 
-服务端 TTFT **14.9 ± 0.3ms**（n=50，最低 14.4ms），比一次 60Hz 屏幕刷新（16.7ms）还快，远低于人眼一次眨眼所需的约 100–400ms——第一个音频 chunk 播放时，你甚至还来不及感知到等待。128 路同时突发时客户端均值为 242–275ms（随传输方式而异）。这两个数字都带有前提条件，具体依赖见[性能声明](#性能声明)。
+历史低延迟基线是服务端 TTFT **14.9 ± 0.3ms**（n=50，最低 14.4ms），128 路突发时客户端
+TTFT 均值为 242–275ms。本次 2026-09-10 cursor/TN 刷新使用 SDK 客户端口径，并暴露了
+相对历史基线的 c128 延迟回归信号，因此单独记录；详见[性能声明](#性能声明)和
+[当前 benchmark 刷新](docs/dev/investigation/serving_performance_benchmark.zh-CN.md#当前-cursortn-刷新-2026-09-10)。
+
+### 流式 TN 与原生文本进度
+
+流式输入不能简单地把每个 transport delta 立即送进 tokenizer：`99%`、日期、URL、
+型号和中英混排等片段可能在后续字符到达后改变读法。当前引擎在 tokenizer/Spliter 之前
+加入主 streaming TN 层：
+
+```text
+raw Unicode delta
+  -> mutable tail / open-span detection
+  -> WeText + domain resolution
+  -> monotonic TextCommit
+  -> tokenizer / Spliter / fused TRT
+```
+
+在 `custom-1.7b` cursor-enabled artifact 上，融合 TRT 图直接消费 cursor label plan 和
+图内产生的 codec0；CPU 只负责 TN、owner provenance、tail rewrite/reanchor 和协议投影。
+对外的 `raw_codepoint_end`、`normalized_codepoint_end` 是保守、整数、单调的确认边界；
+owner 内的 `display_*_position` 只适合高亮等展示，不应被用于计费、断点恢复或音频 release。
+
+客户端先读取 `/v1/capabilities`：只有 `native_cursor.progress_available=true` 时才选择
+native progress；否则使用 EMA 或关闭文本进度。文本进度通过
+`qwen.text_progress.v1` / `qwen.text_progress` 事件发布，具体字段和播放确认规则见
+[Realtime 接口与事件](docs/user/realtime_api.zh-CN.md)。
 
 ### 为自回归流式定制的调度器
 
@@ -92,7 +132,7 @@ Qwen3TTS-Streaming —— 每个 decode step 1 个融合 engine
 
 ## 亮点
 
-- ⚡ **Token 级流式，而非句子级** —— 首个音频 chunk ~15ms 到达（服务端 TTFT 14.9 ± 0.3ms），128 路突发均值 242–275ms
+- ⚡ **Token 级流式，而非句子级** —— 首包按 token 级交付；当前性能证据与历史基线分开维护
 - 🧩 **为自回归 decode 定制的调度器**，而非 Triton 的无状态 `dynamic_batching` —— 连续批处理 + `WAIT_TEXT` 暂停/恢复
 - 🌐 **编译一次，到处部署** —— 采集目标机指纹、编译匹配产物包、目标机零 GPU 工具链导入
 - 🧵 **每个 decode step 一个 TensorRT engine，而非四个** —— talker + Code Predictor + codec-embedding 求和 + code2wav 融合进一张导出图，导图到测试全流程都在本仓库
@@ -110,6 +150,8 @@ Qwen3TTS-Streaming —— 每个 decode step 1 个融合 engine
   - [编译一次，到处部署](#编译一次到处部署)
   - [一个引擎，而非四个](#一个引擎而非四个)
 - [性能声明](#性能声明)
+- [News](#news)
+- [流式 TN 与原生文本进度](#流式-tn-与原生文本进度)
 - [能力状态](#能力状态)
 - [前置要求](#前置要求)
 - [快速开始](#快速开始)
@@ -129,10 +171,14 @@ Qwen3TTS-Streaming —— 每个 decode step 1 个融合 engine
 
 | 场景 | TTFT | 前提条件 |
 | --- | --- | --- |
-| 单路请求，warm engine | 服务端 **14.9 ± 0.3ms**（min 14.4，p99 15.9，n=50）；本地复用 gRPC channel 的客户端侧 p50 ~16.1ms | RTX 5090、warm engine、prefix-cache 命中、单路请求、本地链路、全 bf16 `custom-1.7b`、batch=128 profile |
-| 128 路并发（同时突发，均值） | **242–275ms** 随传输方式而异（engine-websocket 242 / engine-grpc 275;p99 341–494ms）。Triton 路径在 2026-07-07/08 引擎优化后未重测（旧引擎核心上最近实测均值 309） | 同一套栈、单服务隔离运行、128 路全部接纳并同批解码;突发到达是最坏情况——错峰到达时 TTFT 更低 |
+| **当前 2026-09-10 engine-only 刷新，单路** | **WebSocket 23.290ms / gRPC 24.593ms** SDK 客户端 TTFT 均值 | RTX 5090、`qwen3-engine:25.10`、cursor-enabled `custom-1.7b`、bf16、固定文本/说话人、cache 命中 |
+| **当前 2026-09-10 engine-only 刷新，128 路突发** | **gRPC 1,273.570ms / WebSocket 1,114.293ms** SDK 客户端 TTFT 均值 | SDK WebSocket 连接池显式设为 128；两个 transport 最大观测 batch 都为 128；总计 11,674 条记录 0 失败；本轮未运行 Triton |
+| 历史 2026-07-08 单路 | 服务端 **14.9 ± 0.3ms**（min 14.4，p99 15.9，n=50）；本地复用 gRPC channel 的客户端侧 p50 ~16.1ms | RTX 5090、warm engine、prefix-cache 命中、本地链路、全 bf16 `custom-1.7b`、batch=128 profile |
+| 历史 2026-07-08 128 路并发 | **242–275ms** 随传输方式而异（engine-websocket 242 / engine-grpc 275；p99 341–494ms）；Triton 在这些引擎优化后未重测 | 同一套栈、单服务隔离运行、128 路全部接纳并同批解码；仅作历史基线 |
 
-> ⚠️ **128 路并发是压测出来的天花板，不是生产安全值。** 经三轮 decode 优化（2026-07-06:CP 展开图内 KV + CUDA graph decode 回放 + KV gather arena 化;2026-07-07:突发批量准入 + 逐 slot 状态入池 + 服务热路径瘦身;2026-07-08:复盘审计修复批 + 批量化 p3_launch）后，压测 GPU（RTX 5090，全 bf16 引擎，batch=128 profile）在 128 路并发下每 80ms 音频帧的解码耗时 42.1ms——RTF（音频时长 / 实际解码耗时）≈ 1.90，即约 47% 的实时余量（优化前为 119.8ms/帧，RTF ≈ 0.67,低于实时）。这点余量能吸收正常抖动，但持续的负载尖峰或偏重的请求仍可能把它吃掉。生产环境的并发规划仍应在 128 之下留足 buffer，不要顶格跑；64 路时解码耗时 24.5ms（RTF ≈ 3.3），余量充足。完整拆解与原始数据见[服务性能压测报告](docs/dev/investigation/serving_performance_benchmark.zh-CN.md)。
+> ⚠️ **当前 2026-09-10 刷新不是生产吞吐声明。** 在修正 SDK WebSocket 连接池配置后，
+> c128 延迟仍显著慢于历史基线。在规划生产并发前必须先调查并重测。历史 128 路基线仍
+> 保留在[服务性能压测报告](docs/dev/investigation/serving_performance_benchmark.zh-CN.md)中。
 
 - standalone `engine-grpc` TTFT 默认按 ready/reused gRPC channel 统计，和 WebSocket 一样不把客户端建连成本计入首包延迟；cold/lazy channel 会额外增加约 13ms。
 - Demo 实验页的单次浏览器指标与上表不是同一测量窗口或负载形态，不能直接对比；公开性能口径必须使用带完整条件的 benchmark 数据。
@@ -145,6 +191,9 @@ Qwen3TTS-Streaming —— 每个 decode step 1 个融合 engine
 | 路径 | 当前状态 | 开源口径 |
 | --- | --- | --- |
 | `custom-1.7b` / `custom_voice` | 🟢 优先稳定 | v0.1 推荐路径，产品 Demo 默认围绕它展示 |
+| streaming TN / monotonic commitment | 🟢 已接入 | 主 TN 负责 spoken-form 真相；开放语义尾部可能暂缓提交，最终仍会显式 fallback 或完成 |
+| native text progress | 🟢 有限范围可用 | 仅匹配的 `custom-1.7b` cursor-enabled TRT artifact；其他模型降级 EMA/disabled |
+| `SOFT_DRAIN` / state rollover | ⚪ 尚未发布 | 设计和验收合同已记录，当前运行时继续使用 `WAIT_TEXT` 与明确的 hard finalize |
 | `design-1.7b` / `voice_design` | 🟡 实验 | 可保留代码和导出入口，需标注未充分测通 |
 | `base-1.7b` / x-vector voice clone | 🟡 实验 | standalone 已接入 ref audio → speaker embedding；需 base 导出产物和真实端到端验证 |
 | `icl` voice clone | 🟡 实验 | standalone 已接入 ref audio + ref text → ref codec/code 注入；需 TRT ref-audio engine 和真实端到端验证 |
@@ -322,11 +371,20 @@ print(session.response_id, session.response_status, session.usage)
 
 ```bash
 # 单元 + 集成测试
-pytest tests/unit tests/integration -q
+mamba run -n qwen3-tts pytest tests/unit tests/integration -q
 
 # Serving 验收与 benchmark 主入口
 mamba run -n qwen3-tts python tools/validation/serving_endpoints.py --targets engine-grpc
 mamba run -n qwen3-tts python tools/validation/serving_endpoints.py --targets triton-grpc,triton-http
+
+# 当前 SDK 性能矩阵（仅在 Triton 服务运行时加入 Triton target）
+mamba run -n qwen3-tts bash -c \
+  'TARGETS="engine-grpc,engine-websocket" LEVELS="1,8,16,32,64,128" \
+   CONCURRENCY_SAMPLES=20 CONCURRENCY_WARMUP=3 CONN_SAMPLES=50 CONN_WARMUP=5 \
+   MAX_CONNECTIONS=128 \
+   bash tools/validation/run_perf_matrix.sh'
+mamba run -n qwen3-tts python tools/validation/summarize_perf_matrix.py \
+  workspace/perf_matrix/<run_id>
 ```
 
 验证 base/icl reference resolver 与 ICL prefix cache：

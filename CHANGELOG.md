@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Streaming TN now maintains raw Unicode, a mutable tail, primary
+  `TextCommit` records, and the `CanonicalTextJournal` before the
+  tokenizer/Spliter boundary. WeText, mixed-language routing, explicit
+  fallback, and raw-to-spoken provenance share one frontend contract.
+- The validated `custom-1.7b` cursor-enabled TRT plan can now consume codec0
+  inside the graph and publish native text progress. `qwen.text_progress.v1`
+  exposes `native`, `ema`, and `disabled` routes while keeping owner-level
+  raw/normalized high-water marks separate from display interpolation.
 - Version tags now run wheel-first GitHub and GitLab release pipelines: the
   main repository is checked out without submodules, each forge builds one
   client wheel, GitHub publishes it to its Release, and GitLab publishes it to
@@ -28,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The serving performance matrix now sets the SDK WebSocket
+  `max_connections` explicitly, so 64/128-stream measurements are not
+  serialized by the default 32-connection client pool. The current refresh is
+  stored separately from the historical dataset.
 - Consolidated the former standalone `webui/` feature showcase into
   `web/packages/demo`, the single version-matched portal served at `/demo/`.
   Playback, SDK, documentation, and the Lab now share that portal;

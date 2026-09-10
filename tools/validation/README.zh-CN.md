@@ -18,6 +18,26 @@ python tools/validation/serving_endpoints.py --targets triton-grpc,triton-http
 python tools/validation/serving_endpoints.py --targets engine-grpc --ttft-warmup 3 --ttft-samples 30
 ```
 
+### 当前引擎性能矩阵
+
+涉及 streaming TN/native cursor 的性能重测统一使用 `qwen3-tts` 虚拟环境中的 SDK
+矩阵脚本；目标服务必须已启动。没有 Triton 服务时只跑 standalone engine，并在报告中
+明确这是 engine-only refresh：
+
+```bash
+mamba run -n qwen3-tts bash -c \
+  'TARGETS="engine-grpc,engine-websocket" LEVELS="1,8,16,32,64,128" \
+   CONCURRENCY_SAMPLES=20 CONCURRENCY_WARMUP=3 CONN_SAMPLES=50 CONN_WARMUP=5 \
+   MAX_CONNECTIONS=128 \
+   bash tools/validation/run_perf_matrix.sh'
+mamba run -n qwen3-tts python tools/validation/summarize_perf_matrix.py \
+  workspace/perf_matrix/<run_id>
+```
+
+`run_perf_matrix.sh` 是当前跨协议矩阵入口；`summarize_perf_matrix.py` 生成
+`raw_requests.csv` 和 `summary.csv`。`benchmark.py` 以及早期直连脚本只保留兼容/调查
+用途，不能替代当前矩阵的环境快照和 connection-mode 对照。
+
 ## 统一工具（取代大量遗留脚本）
 
 ### `compare_audio.py` —— 音频生成与对比

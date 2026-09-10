@@ -1,0 +1,111 @@
+{
+  "run_id": "20260910T120301Z",
+  "date_utc": "2026-09-10",
+  "dataset_type": "current_engine_only_refresh",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "gpu_memory_mib": 32607,
+    "driver_version": "580.173.02"
+  },
+  "software": {
+    "engine_image": "qwen3-engine:25.10",
+    "engine_container_created_utc": "2026-09-10T09:47:32.574523412Z",
+    "tensorrt_version": "10.13.3.9",
+    "client_version": "qwen3-tts-client 0.2.1a2.dev23+g45e5d86.d20260910",
+    "engine_version": "v0.2.1a1-23-g45e5d86-dirty",
+    "version_skew_note": "The SDK emitted a release-skew warning; the client continued because protocol compatibility and advertised capabilities matched."
+  },
+  "model": {
+    "variant": "custom-1.7b",
+    "loaded_model_type": "custom_voice",
+    "engine_dtype": "bf16",
+    "triton_io_float_dtype": "bf16",
+    "native_cursor": {
+      "graph_enabled": true,
+      "progress_available": true,
+      "supported_progress_modes": [
+        "native",
+        "ema",
+        "disabled"
+      ],
+      "right_context": 1,
+      "max_labels": 512,
+      "vocab_size": 503,
+      "num_codebooks": 16,
+      "frame_duration_us": 80000,
+      "cursor_head_sha256": "aa94527fddff97cca0c337529a3b840b141d8301c4a6082557984438a7e584bc",
+      "cursor_vocab_sha256": "48cd0c9cb433257706a2ac328221ddfa6e6936ed5179748dcebf6472425434bc",
+      "cursor_rules_sha256": "",
+      "model_fingerprint": ""
+    }
+  },
+  "engine_profile": {
+    "max_batch_size": 128,
+    "max_input_len": 128,
+    "max_seq_len": 512,
+    "max_sessions": 128
+  },
+  "benchmark_request": {
+    "task_type": "custom_voice",
+    "speaker": "Serena",
+    "language": "auto",
+    "text": "你好，欢迎使用 Qwen3-TTS 语音合成系统，这是一段用于压测的示例文本。",
+    "cache_hit_rate": 1.0
+  },
+  "targets": {
+    "tested": [
+      "engine-grpc",
+      "engine-websocket"
+    ],
+    "not_tested": [
+      "triton-grpc",
+      "triton-http"
+    ],
+    "endpoints": {
+      "engine-grpc": "localhost:50051",
+      "engine-websocket": "ws://localhost:50052/v1/ws"
+    }
+  },
+  "trial_design": {
+    "concurrency_levels": [
+      1,
+      8,
+      16,
+      32,
+      64,
+      128
+    ],
+    "measured_rounds_per_level": 20,
+    "warmup_rounds_per_level": 3,
+    "connection_modes": [
+      "reuse",
+      "cold"
+    ],
+    "connection_mode_measured_rounds": 50,
+    "connection_mode_warmup_rounds": 5,
+    "total_records_including_warmup": 11674,
+    "failures": 0,
+    "aggregation_note": "summary.csv includes warmup rows, matching the existing summarizer convention; filter raw_requests.csv on phase=measure for measured-only analysis."
+  },
+  "observations": {
+    "engine_grpc_c128_max_batch_seen": 128,
+    "engine_websocket_c128_max_batch_seen": 128,
+    "engine_grpc_c128_ttft_avg_ms": 1273.57,
+    "engine_websocket_c128_ttft_avg_ms": 1114.293,
+    "engine_grpc_c1_ttft_avg_ms": 24.593,
+    "engine_websocket_c1_ttft_avg_ms": 23.29,
+    "sdk_websocket_pool_limit": 128
+  },
+  "tooling": {
+    "harness": "tools/validation/perf_matrix_sdk.py",
+    "orchestration": "tools/validation/run_perf_matrix.sh",
+    "summarizer": "tools/validation/summarize_perf_matrix.py",
+    "workspace_run": "workspace/perf_matrix/20260910T120301Z"
+  },
+  "limitations": [
+    "This refresh is engine-only because no Triton service was running.",
+    "The SDK websocket pool was explicitly raised to 128 so c64/c128 measured actual concurrent lanes.",
+    "The current burst result is substantially slower than the historical 2026-07 baseline and must not be merged with that dataset.",
+    "Native cursor correctness and performance are separate evidence tracks; this matrix does not prove TRT trajectory parity."
+  ]
+}

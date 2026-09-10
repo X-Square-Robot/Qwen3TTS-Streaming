@@ -47,6 +47,23 @@ for message in session.iter_messages():
 
 `session.end()` 表示文本输入完成，不表示音频已经播放完成。继续消费消息直到终态。
 
+## 流式 TN 与文本进度
+
+增量 session 会先把 transport delta 交给主 streaming TN，再送入 tokenizer 和
+`Spliter`。主 TN 维护 raw Unicode、仍可能改写的 mutable tail、单调
+`TextCommit` 以及 raw → normalized/spoken 的 owner 映射。`99%`、日期、URL、型号和
+中英混排等开放片段可能暂时等待后续字符；这不是音频暂停错误，而是为了避免把尚未确定
+的读法不可逆地送入 TTS。
+
+对于声明 `native_cursor.progress_available=true` 的 `custom-1.7b` 部署，文本进度来自
+cursor-enabled TRT 图，并通过 `qwen.text_progress` 事件发布。其他部署会使用 EMA 或
+关闭文本进度。应用应先读取 `/v1/capabilities`，不要根据模型名自行假设 native route。
+
+进度事件中的 `raw_codepoint_end` 和 `normalized_codepoint_end` 是保守的整数
+high-water 边界；`display_*_position` 只用于高亮等展示。`alignment_final=true` 表示
+该 segment 的文本对齐事件完成，不表示声卡已经播放完成；播放完成仍以音频 sample 游标和
+`qwen.playback.ack` 为准。
+
 ## 音频格式
 
 推荐从单声道 24 kHz PCM16 开始，它适合网页播放、WAV 封装和大多数实时音频链路：

@@ -67,6 +67,41 @@ service uses a namespaced extension while keeping output in standard Realtime ev
 a gap or different text for the same sequence produces an `error`. Handle
 `qwen.input_text_buffer.ack` and retain unacknowledged input until the response is terminal.
 
+## Streaming TN and Text Progress Events
+
+The primary streaming TN layer owns raw Unicode, the mutable tail, and monotonic `TextCommit`
+records before tokenizer/Spliter dispatch. Later characters can change the spoken form of `99%`,
+dates, URLs, model identifiers, or mixed-language spans, so an open span may be held briefly;
+already committed spoken prefixes are not changed by transport packetization.
+
+When `/v1/capabilities` advertises `native_cursor.progress_available=true`, a validated
+`custom-1.7b` cursor-enabled TRT route can publish:
+
+```json
+{
+  "type": "qwen.text_progress",
+  "response_id": "resp_...",
+  "item_id": "item_...",
+  "segment_id": 0,
+  "text": "",
+  "meta": {
+    "progress_basis": "native_cursor_v1",
+    "progress_quality": "native",
+    "raw_codepoint_end": "3",
+    "normalized_codepoint_end": "8",
+    "display_raw_position": "2.500000",
+    "alignment_final": "false"
+  }
+}
+```
+
+`progress_basis=native_cursor_v1` means the estimate came from the fused cursor route;
+`ema_frame_ratio_v1` means the session fell back to EMA. `raw_codepoint_end` and
+`normalized_codepoint_end` are monotonic integer confirmation boundaries. `display_*_position`
+values are UI-only interpolation for highlighting and must not drive billing, resume, audio
+release, or an "already read" decision. `alignment_final=true` means alignment for the segment
+is complete; playback completion still uses `qwen_output_sample_end` and `qwen.playback.ack`.
+
 ## Audio cursors and playback acknowledgement
 
 Audio events carry continuous `qwen_output_sample_start` and `qwen_output_sample_end` cursors. Reject

@@ -2,8 +2,8 @@
 
 # Streaming Text Disambiguation, Incremental Text Normalization, and Soft Drain Design
 
-> Authored: 2026-07-28<br>
-> Status: **Design draft**; Phase 0 can reuse the existing `WAIT_TEXT`, while `Soft Drain`, coverage, and the low-seam rollover target require training and runtime implementation; state equivalence is not claimed except for the complete state snapshot/restore migration baseline<br>
+> Authored: 2026-07-28; implementation status updated: 2026-09-10<br>
+> Status: **Design draft; Phase 0 is implemented**: the primary streaming TN, monotonic `TextCommit`, raw/spoken owner mapping, and current `WAIT_TEXT` path are wired into the runtime. `Soft Drain`, coverage, and low-seam rollover still require training and runtime work and are not released as default capabilities<br>
 > Scope: Text ingestion and pre-segmentation processing in `engine/frontend/`, wait/resume control in `engine/backend/`, future Talker adaptation training, and Code2Wav state inheritance<br>
 > Related: [Frontend Text Segmentation Pipeline](frontend_segmentation_pipeline.md) · [Decode FSM](../architecture/decode_fsm.md) · [Engine Overview](../architecture/engine_overview.md) · [Real-Time Audio Streaming](realtime_audio.md) · [Observability Goals](observability_goals.md)
 
@@ -202,15 +202,29 @@ Implementation entry points:
 
 This path is the acoustic foundation of Phase 0, but it freezes as soon as the text queue is exhausted and may not finish generating the entire acoustic tail of `This is`. Phase 0 first solves irreversible misreading safety; fully exploiting the available audio slack belongs to Phase 1 `SOFT_DRAIN`.
 
-### 4.2 Current Gap: Incremental TN Has Only Emoji Carry
+### 4.2 Phase 0 Implemented: Primary Streaming TN and Monotonic Commitment
 
-Streaming mode currently retains only an incomplete emoji suffix in `engine/frontend/interface.py`; all other text is immediately tokenized and dispatched after simple whitespace/emoji cleanup. The system has no:
+The runtime now wires
+`engine/frontend/text_commitment/IncrementalTextCommitter` in front of tokenizer/Spliter
+dispatch. It retains the complete raw Unicode source and an extendable mutable tail, then
+produces monotonic `TextCommit` records through `SpanDetector`, the WeText backend, domain
+rules, and explicit fallbacks. An already committed spoken prefix is not rewritten by transport
+packetization or a later tail revision.
 
-- general raw mutable tail;
-- semiotic span closure;
-- raw ↔ normalized offsets;
-- candidate verbalizations;
-- commit/fallback events.
+The current implementation includes:
+
+- a general raw mutable tail, semantic span closure, and `SpanKind` classification;
+- raw-to-spoken mappings, the `CanonicalTextJournal`, and owner-level coordinates;
+- WeText/mixed-language routing, candidate verbalization, and literal/cardinal fallbacks;
+- the `TextCommit`/commit fence and alignment metadata used by `qwen.text_progress`;
+- adaptation from primary-TN commits to native-cursor label plans with owner-span reanchoring;
+- reuse of the existing `WAIT_TEXT` path when no text is committable, without temporary text EOS
+  or multi-PAD resume.
+
+This is still not Soft Drain: the service does not generate an acoustic tail with `<tts_wait>`
+when no new text is available, and cross-segment state rollover is not treated as a validated
+capability. Coverage, trained control tokens, low-seam state inheritance, and their quality gates
+remain Phase 1/2 work described below.
 
 ### 4.3 Current Hard Flush Is Termination, Not Suspension
 
@@ -985,7 +999,10 @@ Before opt-in, Phase 1 must meet predeclared thresholds:
 - [Engine Overview](../architecture/engine_overview.md): retains the existing three-stage `prefill → streaming input/WAIT → flush` backbone; this design adds a commit gate inside streaming input.
 - [Real-Time Audio Streaming](realtime_audio.md): client pacing/jitter buffering provides isochronous playback; this design uses `audio_credit` only for decisions and measurement and does not make the engine `sleep()`.
 - [Observability Goals](observability_goals.md) and [Metrics Catalog](observability_metrics_catalog.md): commit/wait/fallback/underflow observation points should be incorporated into the single source of truth for metrics before implementation.
-- Primary implementation points: `engine/frontend/interface.py`, `engine/core/session.py`, a proposed new `engine/frontend/text_commitment/`, and `engine/backend/engine_loop.py` (Phase 1+).
+- Primary implementation points: `engine/frontend/text_commitment/`,
+  `engine/core/text_journal.py`, `engine/core/cursor_plan_adapter.py`,
+  `engine/core/text_coordinates.py`, `engine/core/text_progress.py`,
+  `engine/frontend/interface.py`, and `engine/backend/engine_loop.py`.
 
 ## 20. External References
 
