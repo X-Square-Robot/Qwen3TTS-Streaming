@@ -12,6 +12,7 @@ from .service import (
     ExecutionHandle,
     InputAck,
     SessionHandle,
+    SessionCapacityError,
     SessionProtocolError,
     SessionService,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "ProtocolKind",
     "SessionCommandKind",
     "SessionHandle",
+    "SessionCapacityError",
     "SessionOutput",
     "SessionOutputKind",
     "SessionProtocolError",

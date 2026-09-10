@@ -36,6 +36,12 @@ export interface RealtimeTTSClientOptions {
   capabilitiesUrl: URL | string;
   websocketUrl?: URL | string;
   model?: string;
+  /**
+   * Reuse a capabilities snapshot that was already discovered by the host
+   * application. This is especially useful for a browser-side concurrency
+   * probe, where every lane otherwise performs the same HTTP request.
+   */
+  capabilities?: Capabilities;
   fetcher?: typeof fetch;
   webSocketFactory?: WebSocketFactory;
   connectTimeoutMs?: number;
@@ -115,7 +121,7 @@ export class RealtimeTTSClient {
     }
     this.state = ClientState.Connecting;
     try {
-      this.capabilities = await discoverCapabilities(
+      this.capabilities = this.options.capabilities ?? await discoverCapabilities(
         this.options.capabilitiesUrl,
         this.options.fetcher,
       );
@@ -164,7 +170,19 @@ export class RealtimeTTSClient {
 
   close(): void {
     if (this.state === ClientState.Closed) return;
-    this.active?.cancel();
+    const active = this.active;
+    if (active) {
+      try {
+        active.cancel();
+      } catch {
+        // The transport may already be gone. The local run still needs a
+        // terminal result so callers never wait forever on run.done.
+      }
+      this.finishActive(
+        {type: "cancelled", responseId: active.responseId},
+        ClientState.Closed,
+      );
+    }
     this.socket?.close(1000, "client closed");
     this.socket = null;
     this.rejectWaiters(new Error("Realtime client closed"));
@@ -226,13 +244,29 @@ export class RealtimeTTSClient {
       this.handleResponseEvent(event);
     };
     socket.onerror = () => undefined;
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       if (this.socket !== socket) return;
       if (this.state !== ClientState.Closed) {
-        this.rejectWaiters(new Error("Realtime WebSocket closed"));
+        const code = Number(event.code || 0);
+        const reason = String(event.reason || "").trim();
+        const detail = code || reason
+          ? ` (${code || "unknown"}${reason ? `: ${reason}` : ""})`
+          : "";
+        this.rejectWaiters(new Error(`Realtime WebSocket closed${detail}`));
         this.socket = null;
         if (this.active && this.state === ClientState.Responding) {
-          void this.recoverActiveResponse();
+          if (this.lastSessionUpdate && (this.options.resumeAttempts ?? 3) > 0) {
+            void this.recoverActiveResponse();
+          } else {
+            this.finishActive(
+              {
+                type: "error",
+                code: "websocket_closed",
+                message: `Realtime WebSocket closed${detail}`,
+              },
+              ClientState.Idle,
+            );
+          }
         } else {
           this.state = ClientState.Idle;
         }
@@ -241,8 +275,19 @@ export class RealtimeTTSClient {
   }
 
   private handleResponseEvent(event: Record<string, unknown>): void {
-    if (!this.active) return;
     const type = String(event.type);
+    if (type === "error") {
+      const error = record(event.error);
+      const code = String(error.code ?? "realtime_error");
+      const message = String(error.message ?? "Realtime request failed");
+      if (this.active) {
+        this.failActive(code, message);
+      } else {
+        this.emit({type: "warning", message});
+      }
+      return;
+    }
+    if (!this.active) return;
     if (type === "response.created") {
       const response = record(event.response);
       const responseId = String(response.id ?? "");
@@ -273,14 +318,6 @@ export class RealtimeTTSClient {
       const meta = record(event.meta);
       const sample = toBigInt(meta.output_sample_end, this.active.sampleCursor);
       this.emit({type: "progress", text: String(event.text ?? ""), sample, meta});
-      return;
-    }
-    if (type === "error") {
-      const error = record(event.error);
-      this.emit({
-        type: "warning",
-        message: String(error.message ?? "Realtime request warning"),
-      });
       return;
     }
     if (type !== "response.done") return;
@@ -322,13 +359,13 @@ export class RealtimeTTSClient {
     if (sequence > 0) this.lastDeliverySequence = Math.max(this.lastDeliverySequence, sequence);
   }
 
-  private finishActive(event: TTSEvent): void {
+  private finishActive(event: TTSEvent, nextState: ClientState = ClientState.Ready): void {
     const active = this.active;
     if (!active) return;
     this.lastResponseId = active.responseId;
     this.lastReceivedThroughSample = active.sampleCursor;
     this.active = null;
-    this.state = ClientState.Ready;
+    this.state = nextState;
     active.resolve(event);
     this.emit(event);
   }
@@ -339,7 +376,18 @@ export class RealtimeTTSClient {
   }
 
   private async recoverActiveResponse(): Promise<void> {
-    if (this.recovering || !this.active || !this.lastSessionUpdate) return;
+    if (this.recovering || !this.active) return;
+    if (!this.lastSessionUpdate) {
+      this.finishActive(
+        {
+          type: "error",
+          code: "websocket_closed",
+          message: "Realtime WebSocket closed before response recovery was possible",
+        },
+        ClientState.Idle,
+      );
+      return;
+    }
     this.recovering = true;
     let lastError: unknown = new Error("Realtime WebSocket closed");
     const attempts = Math.max(0, this.options.resumeAttempts ?? 3);
@@ -379,8 +427,14 @@ export class RealtimeTTSClient {
           this.rejectWaiters(error instanceof Error ? error : new Error(String(error)));
         }
       }
-      this.failActive("resume_failed", `Realtime response resume failed: ${String(lastError)}`);
-      this.state = ClientState.Idle;
+      this.finishActive(
+        {
+          type: "error",
+          code: "resume_failed",
+          message: `Realtime response resume failed: ${String(lastError)}`,
+        },
+        ClientState.Idle,
+      );
     } finally {
       this.recovering = false;
     }

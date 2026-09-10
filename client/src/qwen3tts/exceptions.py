@@ -21,6 +21,14 @@ class ProtocolError(TTSClientError):
     """Raised when the remote side returns malformed protocol data."""
 
 
+class SynthesisError(TTSClientError):
+    """Raised when the remote engine rejects or fails a synthesis request."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = str(code or "synthesis_failed")
+        super().__init__(f"{self.code}: {message}")
+
+
 class TextProgressProtocolError(ProtocolError):
     """Raised when an auxiliary text-progress anchor is invalid."""
 

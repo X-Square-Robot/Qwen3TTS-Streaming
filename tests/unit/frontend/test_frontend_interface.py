@@ -20,6 +20,7 @@ from engine.frontend.interface import (
     _metric_bool,
     _normalize_tts_text,
 )
+from engine.session import SessionCapacityError
 from engine.frontend.diagnostic_text import (
     DEFAULT_ENGINE_BUILD_VERSION,
     DEFAULT_ENGINE_MODEL_VERSION,
@@ -126,6 +127,22 @@ def test_frontend_rejects_safety_baseline_above_ratio_max_at_startup() -> None:
             safety_ratio_initial=5.5,
             ema_max_ratio=5.0,
         )
+
+
+@pytest.mark.asyncio
+async def test_frontend_rejects_new_session_when_admission_slots_are_full() -> None:
+    interface = FrontendInterface(
+        engine_inbox=asyncio.Queue(maxsize=16),
+        tokenizer=_CharTokenizer(),
+        max_sessions=1,
+        engine_max_decode_len=64,
+    )
+
+    await interface.create_session("admitted")
+    with pytest.raises(SessionCapacityError, match=r"Max sessions \(1\) reached"):
+        await interface.create_session("rejected")
+
+    await interface.cancel_session("admitted")
 
 
 def test_frontend_commitment_factory_consumes_main_tn_commits_only():

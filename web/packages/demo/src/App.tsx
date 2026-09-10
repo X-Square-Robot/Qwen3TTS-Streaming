@@ -289,12 +289,35 @@ function Experience({loaded, onCapabilities, onSettings, settings}: {
     } catch (cause) {
       setEvents((current) => [...current, {type: "error", code: "demo_error", message: String(cause)}]);
       setBusy(false);
+      setPaused(false);
+      runRef.current = null;
     }
   }
 
   function handleEvent(event: TTSEvent) {
+    const maxSessions =
+      (event.type === "warning" && isMaxSessionsMessage(event.message))
+      || (event.type === "error" && (event.code === "max_sessions" || isMaxSessionsMessage(event.message)));
+    const displayEvent = event.type === "warning" && isMaxSessionsMessage(event.message)
+      ? {...event, message: "本次请求未启动：推理槽位已满，请稍后重试。"}
+      : event.type === "error" && (event.code === "max_sessions" || isMaxSessionsMessage(event.message))
+        ? {...event, code: "max_sessions", message: "本次请求未启动：推理槽位已满，请稍后重试。"}
+        : event;
     if (event.type === "progress") setProgressHistory((current) => [...current.slice(-4_999), event]);
-    setEvents((current) => [...current.slice(-199), event]);
+    setEvents((current) => [...current.slice(-199), displayEvent]);
+    if (maxSessions) {
+      setOutputIssue("本次请求未启动：引擎当前推理槽位已满，请稍后重试。");
+      setBusy(false);
+      setPaused(false);
+      runRef.current = null;
+      // Drop a stale response/socket after the capacity rejection. The SDK
+      // settles its active run before closing, so connectAndPlay cannot hang.
+      if (clientRef.current?.snapshot().state === "responding") {
+        clientRef.current.close();
+        clientRef.current = null;
+      }
+      return;
+    }
     if (event.type === "audio") {
       setReceivedSamples(Number(event.endSample));
       setAudioEnvelope((current) => appendAudioEnvelope(current, event.pcm, event.startSample, event.endSample));
@@ -365,6 +388,8 @@ function Experience({loaded, onCapabilities, onSettings, settings}: {
         setDownloadUrl(url);
       }
       setBusy(false);
+      setPaused(false);
+      runRef.current = null;
     }
   }
 
@@ -587,7 +612,11 @@ function Experience({loaded, onCapabilities, onSettings, settings}: {
         : events.slice(-12).map((event, index) => <code key={index}>{event.type}{event.type === "warning" || event.type === "error" ? ` · ${event.message}` : ""}</code>)}</div>
     </section>
     {loaded && <section className="experience-lab-dock" aria-label="实验室">
-      <div className="experience-lab-intro"><p className="eyebrow">ENGINEERING LAB · 02 / 03</p><h2>把实时体验继续拆开看</h2><p>文本进度、LLM 模拟 PK 与并发压测都使用上方同一个实例。</p></div>
+      <div className="experience-lab-intro">
+        <p className="eyebrow">ENGINEERING LAB · 02 / 03</p>
+        <h2>把实时体验继续拆开看</h2>
+        <p>文本进度、LLM 模拟 PK 与并发压测都使用上方同一个实例。</p>
+      </div>
       <ExperimentLab loaded={loaded} embedded capabilities={caps} settings={settings} />
     </section>}
   </>;
@@ -742,6 +771,10 @@ function AudioTextCursor({text, events, playback, sampleRate, showTrack}: {text:
 }
 
 function formatMs(value: number): string { return value > 0 ? `${Math.round(value)} ms` : "—"; }
+
+function isMaxSessionsMessage(message: string): boolean {
+  return /max[\s_-]+sessions/i.test(message) || /推理槽位已满/.test(message);
+}
 
 function isRiffWave(bytes: Uint8Array): boolean {
   return bytes.length >= 12

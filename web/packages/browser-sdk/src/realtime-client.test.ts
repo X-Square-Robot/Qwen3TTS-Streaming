@@ -100,6 +100,29 @@ const options = {
 };
 
 describe("RealtimeTTSClient", () => {
+  it("reuses a supplied capabilities snapshot without fetching it again", async () => {
+    const socket = new FakeWebSocket();
+    let fetches = 0;
+    const client = new RealtimeTTSClient({
+      capabilitiesUrl: "https://host/infer/id/v1/capabilities",
+      capabilities: capabilities as any,
+      fetcher: async () => {
+        fetches += 1;
+        return new Response(JSON.stringify(capabilities));
+      },
+      webSocketFactory: (url) => {
+        expect(url).toBe("wss://host/infer/id/v1/realtime");
+        queueMicrotask(() => socket.open());
+        return socket;
+      },
+    });
+
+    await client.connect();
+
+    expect(fetches).toBe(0);
+    expect(client.capabilities).toEqual(capabilities);
+  });
+
   it("matches the Python SDK golden session core", async () => {
     const golden = JSON.parse(readFileSync(new URL(
       "../../../../protocol/contracts/golden/realtime-session-core.json",
@@ -228,6 +251,56 @@ describe("RealtimeTTSClient", () => {
       played_through_sample: "12",
       buffered_through_sample: "24",
     });
+  });
+
+  it("settles an active response when the gateway returns a request error", async () => {
+    const {client, socket} = setup();
+    await client.connect();
+    const run = await client.synthesize("hello", options);
+    await Promise.resolve();
+
+    socket.receive({
+      type: "error",
+      error: {code: "max_sessions", message: "Max sessions (128) reached"},
+    });
+
+    await expect(run.done).resolves.toMatchObject({
+      type: "error",
+      code: "max_sessions",
+      message: "Max sessions (128) reached",
+    });
+    expect(client.snapshot().state).toBe("ready");
+  });
+
+  it("settles an active response when the client is closed", async () => {
+    const {client} = setup();
+    await client.connect();
+    const run = await client.synthesize("hello", options);
+
+    client.close();
+
+    await expect(run.done).resolves.toMatchObject({
+      type: "cancelled",
+    });
+    expect(client.snapshot().state).toBe("closed");
+  });
+
+  it("keeps an idle server error visible as a warning", async () => {
+    const {client, socket} = setup();
+    const warnings: string[] = [];
+    client.onEvent((event) => {
+      if (event.type === "warning") warnings.push(event.message);
+    });
+    await client.connect();
+
+    socket.receive({
+      type: "error",
+      error: {code: "max_sessions", message: "Max sessions (128) reached"},
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(warnings).toEqual(["Max sessions (128) reached"]);
+    expect(client.snapshot().state).toBe("ready");
   });
 
   it("rejects capabilities that do not advertise the requested VAD", async () => {

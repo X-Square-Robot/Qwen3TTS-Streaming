@@ -54,6 +54,7 @@ from .text_commitment.types import (
 from ..core.lifecycle import LifecycleLogger
 from ..core import observability as obs
 from ..core.timing import ServerTimingAccumulator
+from ..session import SessionCapacityError
 from ..text_normalization import strip_emoji, split_pending_emoji
 from ..interface.output import ENGINE_SAMPLE_RATE
 from .diagnostic_text import (
@@ -506,7 +507,19 @@ class FrontendInterface:
             await self.cancel_session(session_id)
 
         if len(self._sessions) >= self._max_sessions:
-            raise RuntimeError(f"Max sessions ({self._max_sessions}) reached")
+            LifecycleLogger.emit(
+                session_id=session_id,
+                phase="session.admission_rejected",
+                request_id=(
+                    config.timing.request_id
+                    if config is not None and config.timing.request_id
+                    else None
+                ),
+                reason="max_sessions",
+                max_sessions=self._max_sessions,
+                active_sessions=len(self._sessions),
+            )
+            raise SessionCapacityError(self._max_sessions)
 
         if config is None:
             config = SessionConfig(

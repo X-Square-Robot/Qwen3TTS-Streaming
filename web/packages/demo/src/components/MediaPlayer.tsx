@@ -14,6 +14,7 @@ export interface MediaPlayerProps {
    */
   readonly showControls?: boolean;
   readonly onPlay?: () => void | Promise<void>;
+  readonly onPlaybackStateChange?: (playing: boolean) => void;
   readonly onPositionChange?: (seconds: number) => void;
   readonly volume?: number;
   readonly className?: string;
@@ -35,12 +36,13 @@ export function formatPlaybackTime(seconds: number): string {
 
 /** A small, keyboard-friendly audio control shared by generated clips and live samples. */
 export const MediaPlayer = forwardRef<MediaPlayerHandle, MediaPlayerProps>(function MediaPlayer(
-  {src, label, autoPlay = false, showControls = true, onPlay, onPositionChange, volume, className},
+  {src, label, autoPlay = false, showControls = true, onPlay, onPlaybackStateChange, onPositionChange, volume, className},
   ref,
 ) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const frameRef = useRef<number | null>(null);
   const onPlayRef = useRef(onPlay);
+  const onPlaybackStateChangeRef = useRef<MediaPlayerProps["onPlaybackStateChange"]>();
   const onPositionChangeRef = useRef(onPositionChange);
   const playGenerationRef = useRef(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -50,6 +52,7 @@ export const MediaPlayer = forwardRef<MediaPlayerHandle, MediaPlayerProps>(funct
   const [error, setError] = useState<string | null>(null);
 
   onPlayRef.current = onPlay;
+  onPlaybackStateChangeRef.current = onPlaybackStateChange;
   onPositionChangeRef.current = onPositionChange;
 
   const reportPosition = useCallback((seconds: number) => {
@@ -161,6 +164,7 @@ export const MediaPlayer = forwardRef<MediaPlayerHandle, MediaPlayerProps>(funct
       onLoadedMetadata={(event) => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
       onPlay={() => {
         setIsPlaying(true);
+        onPlaybackStateChangeRef.current?.(true);
         void (async () => {
           try {
             await onPlayRef.current?.();
@@ -173,11 +177,13 @@ export const MediaPlayer = forwardRef<MediaPlayerHandle, MediaPlayerProps>(funct
       }}
       onPause={() => {
         setIsPlaying(false);
+        onPlaybackStateChangeRef.current?.(false);
         stopFrame();
         reportPosition(audioRef.current?.currentTime ?? current);
       }}
       onEnded={() => {
         setIsPlaying(false);
+        onPlaybackStateChangeRef.current?.(false);
         stopFrame();
         reportPosition(audioRef.current?.duration ?? duration);
       }}

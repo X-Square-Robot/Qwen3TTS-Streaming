@@ -38,6 +38,7 @@ from ..session import (
     ResumableLogicalSession,
     ResumableSessionError,
     ResumableSessionRegistry,
+    SessionCapacityError,
     SessionProtocolError,
     SessionService,
     StartedOutput,
@@ -485,6 +486,20 @@ class _RealtimeConnection:
                             RealtimeProtocolError(exc.code, str(exc)),
                             client_event_id=client_event_id,
                         )
+                    except SessionCapacityError as exc:
+                        # Capacity rejection is an expected admission outcome
+                        # under a burst. Keep it actionable for clients without
+                        # logging a server traceback for a non-fatal request.
+                        logger.warning(
+                            "Realtime request rejected: max sessions reached "
+                            "(limit=%d)",
+                            exc.max_sessions,
+                        )
+                        await self._send_error(
+                            RealtimeProtocolError("max_sessions", str(exc)),
+                            client_event_id=client_event_id,
+                            error_type="server_error",
+                        )
                     except Exception as exc:  # keep request errors non-fatal
                         logger.exception("Realtime client event failed")
                         await self._send_error(
@@ -905,6 +920,20 @@ class _RealtimeConnection:
                     return
         except asyncio.CancelledError:
             raise
+        except SessionCapacityError as exc:
+            # Capacity is a normal admission rejection. Do not emit a
+            # traceback or leave the client waiting for response.done.
+            logger.warning(
+                "Realtime response rejected: max sessions reached (limit=%d)",
+                exc.max_sessions,
+            )
+            await self._send_error(
+                RealtimeProtocolError("max_sessions", str(exc)),
+                error_type="server_error",
+            )
+            await self._finish_response(
+                state, status="failed", failure_message=str(exc)
+            )
         except Exception as exc:
             logger.exception("Realtime response failed: %s", state.response_id)
             await self._send_error(

@@ -24,17 +24,6 @@ python quickstart.py localhost:50051                  # 旧 engine gRPC
 python quickstart.py http://localhost:8000            # 旧 Triton HTTP
 ```
 
-本地服务默认走 HTTP/WS，不需要证书。如果显式启用了自签名 WSS：
-
-```bash
-# 严格校验指定证书（推荐）
-python quickstart.py wss://localhost:50052/v1/ws \
-  --tls-ca-file /path/to/cert.local.pem
-
-# 仅限临时本地联调
-python quickstart.py wss://localhost:50052/v1/ws --insecure
-```
-
 | Example | Shows |
 |---------|-------|
 | `quickstart.py` | `TTSClient.connect` + `synthesize_bytes`, save WAV |

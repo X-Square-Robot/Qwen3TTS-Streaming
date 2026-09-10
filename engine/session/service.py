@@ -21,6 +21,16 @@ class SessionProtocolError(ValueError):
         self.code = code
 
 
+class SessionCapacityError(RuntimeError):
+    """A stable admission rejection when all execution slots are occupied."""
+
+    code = "max_sessions"
+
+    def __init__(self, max_sessions: int) -> None:
+        self.max_sessions = max_sessions
+        super().__init__(f"Max sessions ({max_sessions}) reached")
+
+
 @dataclass(frozen=True, slots=True)
 class AppendText:
     seq_no: int

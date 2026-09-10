@@ -16,6 +16,15 @@ describe("experiment model", () => {
       {id: 0, status: "done", firstAudioMs: 10},
       {id: 1, status: "done", firstAudioMs: 30},
       {id: 2, status: "failed"},
-    ])).toMatchObject({completed: 2, failed: 1, averageFirstAudioMs: 20, p90FirstAudioMs: 30});
+      {id: 3, status: "queued"},
+      {id: 4, status: "connecting"},
+    ])).toMatchObject({
+      completed: 2,
+      failed: 1,
+      queued: 1,
+      active: 1,
+      averageFirstAudioMs: 20,
+      p90FirstAudioMs: 30,
+    });
   });
 });

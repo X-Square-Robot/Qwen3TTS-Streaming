@@ -5,8 +5,6 @@ See the repo README for how to start one.
 
     pip install "qwen3-tts-client @ <matching-github-or-gitlab-release-wheel-url>"
     python quickstart.py [endpoint]
-    python quickstart.py wss://localhost:50052/v1/ws --tls-ca-file cert.local.pem
-    python quickstart.py wss://localhost:50052/v1/ws --insecure  # local only
 
 Use the tag in the engine's ``capabilities.engine_version``; the deployed
 service also serves the matching wheel at its public GET /sdk/ endpoint.
@@ -32,14 +30,28 @@ OUT = "quickstart.wav"
 
 def main() -> None:
     args = _parse_args()
-    tls_verify = False if args.insecure else (args.tls_ca_file or True)
     # transport defaults to "auto": the SDK probes the endpoint and picks the
     # Native WebSocket first, with Realtime and older transports as fallbacks.
-    client = TTSClient.connect(args.endpoint, tls_verify=tls_verify)
+    client = TTSClient.connect(args.endpoint)
     result = client.synthesize_bytes(
         TEXT,
         request=SynthesisConfig(task_type="custom_voice", speaker="serena"),
     )
+
+    terminal = next(
+        (event for event in reversed(result.events) if event.type in {"done", "error"}),
+        None,
+    )
+    if terminal is not None and terminal.type == "error":
+        code = terminal.meta.get("code", "synthesis_failed")
+        raise RuntimeError(
+            f"engine synthesis failed ({code}): "
+            f"{terminal.message or 'the server returned an error event'}"
+        )
+    if not result.audio_bytes:
+        raise RuntimeError(
+            "engine returned no audio bytes; inspect result.events for the terminal event"
+        )
 
     fmt = result.audio_format
     print(
@@ -55,16 +67,6 @@ def main() -> None:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("endpoint", nargs="?", default=DEFAULT_ENDPOINT)
-    tls = parser.add_mutually_exclusive_group()
-    tls.add_argument(
-        "--tls-ca-file",
-        help="CA certificate bundle for HTTPS/WSS verification",
-    )
-    tls.add_argument(
-        "--insecure",
-        action="store_true",
-        help="disable HTTPS/WSS certificate verification (local debugging only)",
-    )
     return parser.parse_args()
 
 

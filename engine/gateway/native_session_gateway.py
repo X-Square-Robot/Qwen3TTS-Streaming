@@ -243,8 +243,9 @@ class NativeSessionGateway:
             input_closed = False
 
         async def send_error(exc: Exception) -> None:
+            raw_code = getattr(exc, "code", None)
             code = _native_resume_error_code(
-                str(getattr(exc, "code", "invalid_request"))
+                str(raw_code or "invalid_request")
             )
             if not ws.closed:
                 if isinstance(exc, ResumableSessionError):

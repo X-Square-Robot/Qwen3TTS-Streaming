@@ -47,7 +47,12 @@ from ..constants import (
     QWEN_RESPONSE_RESUME_EXTENSION,
     TRANSPORT_OPENAI_REALTIME,
 )
-from ..exceptions import ProtocolError, StreamClosedError, StreamRecoveryError
+from ..exceptions import (
+    ProtocolError,
+    StreamClosedError,
+    StreamRecoveryError,
+    SynthesisError,
+)
 from ..exceptions import PoolAcquireTimeoutError, PoolSaturatedError
 
 
@@ -171,6 +176,15 @@ class OpenAIRealtimeAdapter:
                 terminal_seen = True
         if not terminal_seen:
             raise ProtocolError("Realtime connection ended without response.done")
+        terminal_event = next(
+            (event for event in reversed(events) if event.type in {"done", "error"}),
+            None,
+        )
+        if terminal_event is not None and terminal_event.type == "error":
+            raise SynthesisError(
+                terminal_event.meta.get("code", "synthesis_failed"),
+                terminal_event.message or "the Realtime server returned an error event",
+            )
         return build_bytes_result(
             audio_bytes=b"".join(audio_parts),
             audio_format=audio_format,

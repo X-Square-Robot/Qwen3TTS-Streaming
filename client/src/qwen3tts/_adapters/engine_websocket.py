@@ -47,6 +47,7 @@ from ..exceptions import (
     PoolSaturatedError,
     ProtocolError,
     ProtocolVersionMismatchError,
+    SynthesisError,
     StreamClosedError,
     StreamRecoveryError,
 )
@@ -1028,6 +1029,7 @@ class EngineWebSocketAdapter:
         audio_format = request.config.audio
         audio_parts: list[bytes] = []
         reusable = False
+        terminal_event: StreamEvent | None = None
         try:
             terminal_seen = False
             for message in _iter_conn_messages(conn, timeout=self.timeout):
@@ -1040,6 +1042,7 @@ class EngineWebSocketAdapter:
                     warnings.append(message.message)
                 if message.type in {"done", "error"}:
                     terminal_seen = True
+                    terminal_event = message
                     reusable = _terminal_allows_connection_reuse(message)
                     break
             if not terminal_seen:
@@ -1049,6 +1052,11 @@ class EngineWebSocketAdapter:
                 raise ProtocolError(
                     "websocket stream closed without terminal event "
                     f"({len(audio_parts)} audio chunks received)"
+                )
+            if terminal_event is not None and terminal_event.type == "error":
+                raise SynthesisError(
+                    terminal_event.meta.get("code", "synthesis_failed"),
+                    terminal_event.message or "the engine returned an error event",
                 )
         finally:
             if reusable:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import queue
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -711,6 +712,42 @@ def test_health_stats_exposes_loaded_model_binding():
     assert stats["variant"] == "custom-1.7b"
     assert stats["loaded_model_type"] == "custom_voice"
     assert stats["declared_supported_task_types"] == ["custom_voice"]
+    assert stats["frontend_active_sessions"] == 0
+    assert stats["frontend_max_sessions"] == 128
+    assert stats["request_relay_alive"] is False
+
+
+def test_relay_inbox_applies_backpressure_without_dying():
+    async def _run():
+        engine = TTSEngine.__new__(TTSEngine)
+        engine._async_inbox = asyncio.Queue(maxsize=2)
+        engine._engine_inbox = queue.Queue(maxsize=1)
+
+        first = object()
+        second = object()
+        engine._engine_inbox.put_nowait(first)
+        await engine._async_inbox.put(second)
+
+        relay = asyncio.create_task(engine._relay_inbox())
+        await asyncio.sleep(0.01)
+        assert not relay.done()
+
+        assert engine._engine_inbox.get_nowait() is first
+        for _ in range(100):
+            try:
+                delivered = engine._engine_inbox.get_nowait()
+            except queue.Empty:
+                await asyncio.sleep(0.001)
+            else:
+                assert delivered is second
+                break
+        else:
+            pytest.fail("relay did not deliver after backend queue capacity returned")
+
+        relay.cancel()
+        await relay
+
+    asyncio.run(_run())
 
 
 def test_describe_capabilities_reports_loaded_model_contract():

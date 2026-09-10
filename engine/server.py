@@ -758,12 +758,28 @@ class TTSEngine:
 
     def health_stats(self) -> dict:
         """Return engine health metrics (safe to call from asyncio thread)."""
+        frontend = self._frontend
+        relay_task = self._relay_task
+        frontend_stats = {
+            # The GPU loop and the frontend admission table are separate
+            # lifecycles.  Exposing both prevents a stale frontend session map
+            # from looking healthy merely because all backend slots are idle.
+            "frontend_active_sessions": (
+                frontend.active_count if frontend is not None else 0
+            ),
+            "frontend_max_sessions": self._max_sessions,
+            "request_relay_alive": bool(
+                relay_task is not None and not relay_task.done()
+            ),
+        }
         if self._engine_loop is None:
             return {
                 "running": False,
+                **frontend_stats,
                 "speech_state": self._speech_state_public_capability(),
             }
         stats = self._engine_loop.health_stats()
+        stats.update(frontend_stats)
         stats["variant"] = self._model_arch.variant
         stats["loaded_model_type"] = self._loaded_model_type()
         stats["speech_state"] = self._speech_state_public_capability()
@@ -1441,9 +1457,22 @@ class TTSEngine:
         try:
             while True:
                 req = await self._async_inbox.get()
-                self._engine_inbox.put_nowait(req)
+                # ``_engine_inbox`` is a bounded stdlib queue owned by the
+                # engine thread.  A burst can fill it temporarily; letting
+                # ``put_nowait`` raise here kills this relay task and leaves
+                # every admitted frontend session stranded forever.  Apply
+                # async backpressure instead and keep the relay alive.
+                while True:
+                    try:
+                        self._engine_inbox.put_nowait(req)
+                        break
+                    except queue.Full:
+                        await asyncio.sleep(0.001)
         except asyncio.CancelledError:
             pass
+        except Exception:
+            logger.exception("Engine request relay stopped unexpectedly")
+            raise
 
 
 # ---------------------------------------------------------------------------

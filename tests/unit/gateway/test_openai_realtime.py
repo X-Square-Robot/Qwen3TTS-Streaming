@@ -17,6 +17,7 @@ from qwen3tts import (
 from qwen3tts.constants import TRANSPORT_OPENAI_REALTIME
 from engine.gateway.openai_realtime import OpenAIRealtimeGateway
 from engine.gateway.websocket_server import WebSocketGateway
+from engine.session import SessionCapacityError
 
 
 class _RealtimeStubEngine:
@@ -74,6 +75,13 @@ class _RealtimeStubEngine:
 
     async def cancel(self, session_id: str) -> None:
         self.cancel_calls.append(session_id)
+
+
+class _CapacityLimitedStubEngine(_RealtimeStubEngine):
+    async def start_session(
+        self, session_id, *, config, on_audio=None, on_done=None, on_event=None
+    ):
+        raise SessionCapacityError(128)
 
 
 async def _receive_json(ws, *, timeout: float = 1.0) -> dict:
@@ -579,6 +587,40 @@ async def test_sequence_error_is_nonfatal_and_next_event_is_accepted():
             )
             ack = await _receive_json(ws)
             assert ack["type"] == "qwen.input_text_buffer.ack"
+            assert not ws.closed
+            await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_session_capacity_rejection_is_a_stable_protocol_error():
+    pytest.importorskip("aiohttp")
+    from aiohttp.test_utils import TestClient, TestServer
+
+    engine = _CapacityLimitedStubEngine()
+    server = TestServer(_test_app(engine))
+    async with server:
+        client = TestClient(server)
+        async with client:
+            ws = await client.ws_connect("/v1/realtime")
+            await _receive_json(ws)
+            await ws.send_json(
+                {
+                    "event_id": "capacity-check",
+                    "type": "qwen.input_text_buffer.append",
+                    "sequence": 1,
+                    "text": "hello",
+                }
+            )
+            ack = await _receive_json(ws)
+            assert ack["type"] == "qwen.input_text_buffer.ack"
+            await ws.send_json(
+                {"type": "response.create", "event_id": "capacity-check"}
+            )
+            error, _ = await _receive_until(ws, "error")
+            assert error["type"] == "error"
+            assert error["error"]["code"] == "max_sessions"
+            assert error["error"]["type"] == "server_error"
+            assert "Max sessions (128) reached" in error["error"]["message"]
             assert not ws.closed
             await ws.close()
 

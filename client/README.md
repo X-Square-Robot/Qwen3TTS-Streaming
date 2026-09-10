@@ -301,8 +301,6 @@ python examples/quickstart.py                  # one-shot     -> quickstart.wav
 python examples/streaming.py                   # incremental  -> streaming.wav
 python examples/realtime.py                    # wall-clock aligned frames
 python examples/quickstart.py localhost:50051  # point at engine gRPC
-python examples/quickstart.py wss://localhost:50052/v1/ws \
-  --tls-ca-file /path/to/cert.local.pem
 ```
 
 ## API reference

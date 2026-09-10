@@ -32,6 +32,7 @@ from qwen3tts.exceptions import (
     ProtocolVersionMismatchError,
     StreamClosedError,
     StreamRecoveryError,
+    SynthesisError,
 )
 
 
@@ -559,6 +560,47 @@ class TestEngineWebSocketAdapter:
         assert result.transport == TRANSPORT_ENGINE_WEBSOCKET
         assert sent[0]["type"] == "oneshot"
         assert sent[0]["text"] == "hello"
+
+    def test_synthesize_bytes_surfaces_server_error(self, monkeypatch):
+        error_event = {
+            "type": "event",
+            "event": {
+                "type": "error",
+                "session_id": "s1",
+                "message": "Max sessions (128) reached",
+                "meta": {"code": "max_sessions"},
+            },
+        }
+        fake_conn = FakeRawWebSocketConnection()
+        closed = [False]
+
+        monkeypatch.setattr(
+            "qwen3tts._adapters.engine_websocket.ws_connect",
+            _make_ws_connect(fake_conn),
+        )
+        monkeypatch.setattr(
+            "qwen3tts._adapters.engine_websocket.ws_send_json",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            "qwen3tts._adapters.engine_websocket.ws_recv_frame",
+            _make_ws_recv_frame([error_event]),
+        )
+        monkeypatch.setattr(
+            "qwen3tts._adapters.engine_websocket.ws_close",
+            _make_ws_close(closed),
+        )
+
+        adapter = EngineWebSocketAdapter("ws://localhost:50052/v1/ws", timeout=5.0)
+        with pytest.raises(SynthesisError, match=r"max_sessions: Max sessions"):
+            adapter.synthesize_bytes(
+                "hello",
+                request=SessionStartRequest(
+                    session_id="s1",
+                    config=SynthesisConfig(task_type="custom_voice"),
+                ),
+            )
+        assert closed[0]
 
     def test_open_stream_sends_start_and_text(self, monkeypatch):
         fake_conn = FakeRawWebSocketConnection()
