@@ -31,7 +31,19 @@ export function startExperiment(options: ExperimentOptions, mode: "streaming" | 
     if (mode === "offline") for (let index = 0; index < chunks.length; index += 1) await delay(options.chunkDelayMs, () => cancelled);
     synthesis = mode === "streaming" ? await client.startIncremental(request) : await client.synthesize(options.text, request);
     if (mode === "streaming") { const incremental = synthesis as IncrementalSynthesisRun; for (const chunk of chunks) { if (cancelled) throw new Error("实验已取消"); incremental.append(chunk); await delay(options.chunkDelayMs, () => cancelled); } incremental.commit(); }
-    await synthesis.done; const snapshot = collector.snapshot(); const audioUrl = URL.createObjectURL(collector.toBlob()); const output = {firstResponseMs, firstAudioMs, totalMs: at(), audioUrl, trace, ...(snapshot.limitReached ? {audioTruncated: true} : {})}; onUpdate?.({phase: "done", firstAudioMs, totalMs: output.totalMs}); return output;
+    await synthesis.done;
+    const snapshot = collector.snapshot();
+    const audioUrl = snapshot.samples > 0 ? URL.createObjectURL(collector.toBlob()) : undefined;
+    const output = {
+      firstResponseMs,
+      firstAudioMs,
+      totalMs: at(),
+      trace,
+      ...(audioUrl ? {audioUrl} : {}),
+      ...(snapshot.limitReached ? {audioTruncated: true} : {}),
+    };
+    onUpdate?.({phase: "done", firstAudioMs, totalMs: output.totalMs});
+    return output;
   })().catch((error): RunOutput => { const message = String(error instanceof Error ? error.message : error); onUpdate?.({phase: cancelled ? "cancelled" : "failed", error: message}); return {firstResponseMs: 0, firstAudioMs: 0, totalMs: performance.now() - startAt, trace: [], error: message}; }).finally(() => client?.close());
   return {done, cancel: () => { cancelled = true; synthesis?.cancel(); client?.close(); }};
 }

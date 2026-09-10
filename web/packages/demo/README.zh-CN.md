@@ -14,12 +14,9 @@
 | `/demo/` | 发现实例、合成、播放与诊断 |
 | `/demo/#/sdk` | 匹配的 Python/Browser SDK 元数据与下载 |
 | `/demo/#/docs/` | 同版本 Markdown 文档 |
-| `/demo/#/lab` | 工程实验：公共 Realtime 的 LLM PK/并发，以及可选 trace 工具 |
 
-设置 `DEMO_ENABLED=false` 会关闭整个门户。基础实验和 Lab 使用当前实例公共的
-`/v1/realtime`；trace、LLM PK 和多路并发均由统一 Gateway 提供，不依赖独立后端或 Triton
-直连。docs-only
-构建没有 live runtime，也没有可交互实验。
+设置 `DEMO_ENABLED=false` 会关闭整个门户。docs-only 构建没有 live runtime，也没有可交互
+合成。
 
 ## 本地开发
 
@@ -38,7 +35,7 @@ npm run dev --workspace @xmultimodalinteraction/qwen3tts-demo
 ```
 
 Vite 服务适合只做 UI/文档迭代。应用会读取相对路径 `./config.json`，并使用相对的
-`/v1/*` URL；要验证真实合成和实验，请使用构建后的 runtime（或配置本地反向代理）。
+`/v1/*` URL；要验证真实合成，请使用构建后的 runtime（或配置本地反向代理）。
 不要启动或重新创建已经退出的独立 `webui/` 开发服务器。
 
 ## 测试与打包

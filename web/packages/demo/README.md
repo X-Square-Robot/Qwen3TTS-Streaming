@@ -15,13 +15,9 @@ The portal keeps one browser entry point and uses hash routes for its surfaces:
 | `/demo/` | Instance discovery, synthesis, playback, and diagnostics |
 | `/demo/#/sdk` | Matching Python and Browser SDK metadata/downloads |
 | `/demo/#/docs/` | Same-release Markdown documentation |
-| `/demo/#/lab` | Engineering Lab: public-Realtime LLM PK/concurrency and optional trace tools |
 
-`DEMO_ENABLED=false` disables the whole portal. The Lab uses the current
-instance's public `/v1/realtime` endpoint. Trace capture, LLM PK, and
-concurrency experiments all use the same Gateway; there is no separate backend
-or direct Triton connection. A docs-only build has no live runtime or
-interactive Lab.
+`DEMO_ENABLED=false` disables the whole portal. A docs-only build has no live
+runtime or interactive synthesis.
 
 ## Local development
 
@@ -41,7 +37,7 @@ npm run dev --workspace @xmultimodalinteraction/qwen3tts-demo
 
 The Vite server is useful for UI-only work. The app fetches `./config.json` and
 uses relative `/v1/*` URLs, so use a built runtime (or a local reverse proxy)
-for live synthesis and Lab checks. Do not start or recreate the retired
+for live synthesis. Do not start or recreate the retired
 standalone `webui/` development server.
 
 ## Tests and packaging

@@ -168,41 +168,6 @@ test("keeps an instance prefix and gates controls from capabilities", async ({pa
   await expect(page.getByText(/TTSClient\.connect\("ws:\/\/127\.0\.0\.1:4173\/infer\/instance\/v1\/ws"\)/)).toBeVisible();
 });
 
-test("runs the built-in LLM comparison through public Realtime", async ({page}) => {
-  let sequence = 0;
-  await page.routeWebSocket(/\/infer\/instance\/v1\/realtime$/, (socket) => {
-    const id = ++sequence;
-    socket.send(JSON.stringify({type: "session.created", session: {id: `lab_${id}`}}));
-    socket.onMessage((message) => {
-      const event = JSON.parse(String(message)) as {type: string};
-      if (event.type === "session.update") {
-        socket.send(JSON.stringify({type: "session.updated", session: {id: `lab_${id}`}}));
-      }
-      if (event.type === "response.create") {
-        socket.send(JSON.stringify({type: "response.created", response: {id: `resp_lab_${id}`}}));
-        setTimeout(() => {
-          socket.send(JSON.stringify({
-            type: "response.output_audio.delta", response_id: `resp_lab_${id}`,
-            delta: Buffer.alloc(480).toString("base64"), qwen_delivery_seq: 1,
-            qwen_output_sample_start: 0, qwen_output_sample_end: 240,
-          }));
-          socket.send(JSON.stringify({
-            type: "response.done", qwen_delivery_seq: 2,
-            response: {id: `resp_lab_${id}`, status: "completed", usage: {audio_tokens: 1}},
-          }));
-        }, 300);
-      }
-    });
-  });
-  await page.goto("/infer/instance/demo/#/lab");
-  await expect(page.getByRole("heading", {name: "同一入口，观察不同负载。"})).toBeVisible();
-  await page.getByRole("button", {name: "运行 LLM PK"}).click();
-  await expect(page.getByText("增量文本", {exact: true})).toBeVisible();
-  await expect(page.getByText("完整文本", {exact: true})).toBeVisible();
-  await expect(page.getByRole("button", {name: "下载 JSON trace"})).toBeVisible();
-  expect(sequence).toBe(2);
-});
-
 test("Pages stays useful in docs-only mode", async ({page}) => {
   await page.goto("/pages/#/docs/quickstart-zh");
   await expect(page.getByRole("heading", {name: "先让声音出来，再按需深入。"})).toBeVisible();

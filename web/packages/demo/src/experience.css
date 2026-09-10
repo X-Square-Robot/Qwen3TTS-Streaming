@@ -64,8 +64,7 @@
 .cursor-text span { display: inline-block; min-width: .22em; transition: color 140ms ease, background 140ms ease; }
 .cursor-text span.is-read { color: var(--ink); }
 .cursor-text span.is-current { color: #fff; background: var(--copper); box-shadow: 0 0 0 2px var(--copper); }
-.cursor-progress-track { height: 7px; overflow: hidden; background: #e8edf2; }
-.cursor-progress-track i { display: block; height: 100%; background: linear-gradient(90deg, var(--green), var(--cyan)); transition: width 180ms ease; }
+.cursor-progress-track { margin:16px 4px 3px; }
 .cursor-trajectory { margin-top: 17px; padding-top: 14px; border-top: 1px solid var(--line); }
 .cursor-chart { display: block; width: 100%; height: 112px; margin-top: 8px; overflow: visible; background: linear-gradient(180deg, rgb(98 199 204 / .04), transparent); }
 .cursor-chart path { fill: none; stroke-linecap: round; stroke-linejoin: round; }
@@ -73,7 +72,7 @@
 .cursor-chart .chart-native { stroke: var(--green); stroke-width: 2.5; }
 .cursor-chart .chart-ema { stroke: var(--copper); stroke-width: 2; stroke-dasharray: 5 4; }
 .cursor-chart text { fill: var(--muted); font: 7px var(--utility); }
-.cursor-legend { display: flex; gap: 18px; color: var(--slate); font: 9px var(--utility); }
+.cursor-legend { display: flex; flex-wrap: wrap; gap: 18px; color: var(--slate); font: 9px var(--utility); }
 .cursor-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .cursor-legend i { display: inline-block; width: 18px; height: 2px; background: var(--green); }
 .cursor-legend .ema-key i { background: var(--copper); }
@@ -272,13 +271,26 @@
 .waveform i:nth-child(6n) { background: var(--copper); box-shadow: none; }
 .waveform i:not(.is-played) { opacity: .28; }
 .waveform i.is-played { opacity: 1; }
+.waveform-svg {
+  width: 100%;
+  height: 106px;
+  display: block;
+  margin-top: 18px;
+  padding: 8px 0;
+  overflow: hidden;
+  border-top: 1px solid rgb(42 59 90 / 0.65);
+  border-bottom: 1px solid rgb(42 59 90 / 0.65);
+  background: repeating-linear-gradient(90deg, transparent 0 31px, rgb(98 199 204 / 0.07) 31px 32px);
+}
+.waveform-svg .waveform__baseline { stroke: rgb(42 59 90 / 0.9); stroke-width: 1; }
+.waveform-svg .waveform__bars rect { fill: var(--cyan); opacity: .28; }
+.waveform-svg .waveform__bars--played rect { fill: var(--cyan); opacity: .92; filter: drop-shadow(0 0 5px rgb(98 199 204 / .3)); }
+.waveform-svg .waveform__playhead { stroke: var(--copper); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .monitor-empty { margin: 17px 0 0; color: #7487a3; font-size: 11px; line-height: 1.55; }
 .audio-text-cursor { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--monitor-line); }
-.audio-cursor-labels, .audio-cursor-foot { display: flex; justify-content: space-between; gap: 10px; color: #7588a5; font: 8px/1.2 var(--utility); letter-spacing: .06em; }
+.audio-cursor-labels, .audio-cursor-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; color: #7588a5; font: 8px/1.2 var(--utility); letter-spacing: .06em; }
 .audio-cursor-labels b { color: #d9e5f5; font-weight: 700; }
-.audio-text-line { position: relative; height: 7px; margin: 10px 0 9px; overflow: visible; background: #253754; }
-.audio-generated { position: absolute; inset: 0 auto 0 0; width: 0; background: linear-gradient(90deg, var(--cyan), var(--green)); transition: width 180ms ease; }
-.audio-played { position: absolute; top: -4px; width: 2px; height: 15px; background: #fff; box-shadow: 0 0 0 2px rgb(255 255 255 / .15); transition: left 180ms ease; }
+.audio-text-line { margin:14px 4px; }
 .audio-text-preview { min-height: 26px; color: #617492; font-size: 11px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
 .audio-text-preview span { transition: color 140ms ease, background 140ms ease; }
 .audio-text-preview span.is-read { color: #d7e5f4; }
@@ -296,8 +308,8 @@
 .monitor-controls { display: grid; gap: 14px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--monitor-line); }
 .monitor-controls label { color: #93a4bf; }
 .monitor-controls select { border-color: var(--monitor-line); background: var(--monitor-soft); color: #e5ecf7; }
-.recording-result { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 9px; margin-top: 17px; }
-.replay { width: 100%; height: 40px; }
+.recording-result { display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; gap: 10px; margin-top: 17px; }
+.recording-result .download-action { justify-self: end; }
 .download-action { border-color: var(--monitor-line); background: var(--monitor-soft); color: #eaf1fb; }
 
 .diagnostics-panel { margin-top: 18px; }
@@ -350,3 +362,10 @@
   .stage-heading { display: flex; }
   .recording-result { grid-template-columns: 1fr; }
 }
+
+/* The volume control uses the same quiet rail as playback, on a dark surface. */
+.monitor-controls input[type="range"] { appearance:none; background:transparent; height:28px; }
+.monitor-controls input[type="range"]::-webkit-slider-runnable-track { height:5px; border-radius:999px; background:var(--monitor-line); }
+.monitor-controls input[type="range"]::-moz-range-track { height:5px; border-radius:999px; background:var(--monitor-line); }
+.monitor-controls input[type="range"]::-webkit-slider-thumb { appearance:none; width:12px; height:12px; border-radius:50%; margin-top:-3.5px; background:var(--cyan); border:2px solid var(--monitor); }
+.monitor-controls input[type="range"]::-moz-range-thumb { width:10px; height:10px; border-radius:50%; background:var(--cyan); border:2px solid var(--monitor); }

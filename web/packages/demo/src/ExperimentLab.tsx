@@ -4,6 +4,7 @@ import {DEFAULT_DEMO_SETTINGS, type DemoSynthesisSettings} from "./demo-settings
 import type {LoadedDemoConfig} from "./config";
 import {concurrencyStats, MAX_CONCURRENCY, safeConcurrency, type LaneSnapshot} from "./lab/experiment-model";
 import {discoverExperimentCapabilities, startExperiment, startPkExperiment, type ActiveExperiment, type RunOutput} from "./lab/experiments";
+import {MediaPlayer, type MediaPlayerHandle} from "./components/MediaPlayer";
 import "./lab/experiments.css";
 
 export interface ExperimentLabProps { loaded: LoadedDemoConfig | null; embedded?: boolean; capabilities?: Capabilities | null; settings?: DemoSynthesisSettings; }
@@ -15,8 +16,8 @@ export function ExperimentLab({loaded, embedded = false, capabilities: providedC
   const [pk, setPk] = useState<{streaming?: RunOutput; offline?: RunOutput}>({});
   const [lanes, setLanes] = useState<LaneSnapshot[]>([]); const [error, setError] = useState("");
   const [selectedAudio, setSelectedAudio] = useState<string | null>(null);
-  const streamingAudioRef = useRef<HTMLAudioElement | null>(null);
-  const offlineAudioRef = useRef<HTMLAudioElement | null>(null);
+  const streamingAudioRef = useRef<MediaPlayerHandle | null>(null);
+  const offlineAudioRef = useRef<MediaPlayerHandle | null>(null);
   const alignedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const active = useRef<ActiveExperiment[]>([]); const objectUrls = useRef<string[]>([]);
   const [capabilities, setCapabilities] = useState<Capabilities | null>(providedCapabilities ?? null);
@@ -33,10 +34,18 @@ export function ExperimentLab({loaded, embedded = false, capabilities: providedC
     const stream = streamingAudioRef.current; const offline = offlineAudioRef.current; const streamOutput = pk.streaming; const offlineOutput = pk.offline;
     if (!stream || !offline || !streamOutput?.audioUrl || !offlineOutput?.audioUrl) return;
     if (alignedTimer.current) clearTimeout(alignedTimer.current);
-    stream.currentTime = 0; offline.currentTime = 0;
-    void stream.play();
-    const wait = Math.max(0, (offlineOutput.firstAudioMs || 0) - (streamOutput.firstAudioMs || 0));
-    alignedTimer.current = setTimeout(() => { void offline.play(); alignedTimer.current = null; }, wait);
+    stream.reset(); offline.reset();
+    const start = (player: MediaPlayerHandle, label: string) => {
+      void player.play().catch(() => setError(`${label} 音频加载失败，请重新运行 PK。`));
+    };
+    const offset = (offlineOutput.firstAudioMs || 0) - (streamOutput.firstAudioMs || 0);
+    const delayed = offset >= 0 ? offline : stream;
+    const immediate = offset >= 0 ? stream : offline;
+    start(immediate, offset >= 0 ? "Streaming" : "Offline");
+    alignedTimer.current = setTimeout(() => {
+      start(delayed, offset >= 0 ? "Offline" : "Streaming");
+      alignedTimer.current = null;
+    }, Math.abs(offset));
   }
   function stopAligned() { if (alignedTimer.current) clearTimeout(alignedTimer.current); alignedTimer.current = null; streamingAudioRef.current?.pause(); offlineAudioRef.current?.pause(); }
   const stats = concurrencyStats(lanes);
@@ -59,12 +68,18 @@ export function ExperimentLab({loaded, embedded = false, capabilities: providedC
         <div className="actions"><button className="primary" disabled={!canRun || running} onClick={() => void runConcurrency()}>开始并发测试</button></div>
         <div className="concurrency-stats"><strong>{stats.averageFirstAudioMs ? `${stats.averageFirstAudioMs.toFixed(0)}ms` : "—"}</strong><span>平均首音频</span><strong>{stats.p90FirstAudioMs ? `${stats.p90FirstAudioMs.toFixed(0)}ms` : "—"}</strong><span>p90 首音频</span><strong>{stats.completed} / {stats.failed}</strong><span>完成 / 失败</span></div>
         <div className="lane-grid">{lanes.map((lane) => <button className={`lane lane-${lane.status} ${selectedAudio === lane.audioUrl ? "selected" : ""}`} key={lane.id} title={lane.error ?? `并发 ${lane.id + 1}`} onClick={() => lane.audioUrl && setSelectedAudio(lane.audioUrl)}><span>{lane.id + 1}</span><small>{lane.status === "done" ? "试听" : lane.status}</small></button>)}</div>
-        {selectedAudio && <audio className="selected-audio" controls autoPlay src={selectedAudio}>当前浏览器不支持音频控件。</audio>}
+        {selectedAudio && <MediaPlayer className="selected-audio" src={selectedAudio} label="并发音轨试听" autoPlay />}
       </section>
     </div>
     {(pk.streaming || pk.offline) && <button className="trace-button" onClick={() => downloadTrace({text, chunkDelayMs, chunkSize, pk})}>下载 JSON trace</button>}
     {error && <p className="alert">{error}</p>}
   </section>;
 }
-function LaneCard({name, output, tone, audioRef, scaleMs}: {name: string; output?: RunOutput; tone: string; audioRef: React.MutableRefObject<HTMLAudioElement | null>; scaleMs: number}) { return <article className={`pk-lane ${tone}`}><div><strong>{name}</strong><small>{output?.error ?? "等待结果"}</small></div><div className="timeline"><i style={{width: output ? `${Math.min(100, output.totalMs / scaleMs * 100)}%` : "0%"}}/><b style={{left: output ? `${Math.min(100, output.firstAudioMs / scaleMs * 100)}%` : "0%"}}/><span>首音频 {output?.firstAudioMs ? `${output.firstAudioMs.toFixed(0)}ms` : "—"} · 完成 {output?.totalMs ? `${output.totalMs.toFixed(0)}ms` : "—"}</span></div>{output?.audioUrl && <audio ref={audioRef} controls src={output.audioUrl}>当前浏览器不支持音频控件。</audio>}</article>; }
+function LaneCard({name, output, tone, audioRef, scaleMs}: {name: string; output?: RunOutput; tone: string; audioRef: React.MutableRefObject<MediaPlayerHandle | null>; scaleMs: number}) {
+  return <article className={`pk-lane ${tone}`}>
+    <div><strong>{name}</strong><small>{output?.error ?? "等待结果"}</small></div>
+    <div className="timeline"><i style={{width: output ? `${Math.min(100, output.totalMs / scaleMs * 100)}%` : "0%"}}/><b style={{left: output ? `${Math.min(100, output.firstAudioMs / scaleMs * 100)}%` : "0%"}}/><span>首音频 {output?.firstAudioMs ? `${output.firstAudioMs.toFixed(0)}ms` : "—"} · 完成 {output?.totalMs ? `${output.totalMs.toFixed(0)}ms` : "—"}</span></div>
+    {output?.audioUrl && <MediaPlayer ref={audioRef} src={output.audioUrl} label={`${name} 音频`} showControls={false} />}
+  </article>;
+}
 function downloadTrace(value: unknown) { const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], {type: "application/json"})); const anchor = document.createElement("a"); anchor.href = url; anchor.download = "qwen3tts-experiment-trace.json"; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 0); }
