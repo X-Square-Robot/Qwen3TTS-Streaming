@@ -31,8 +31,9 @@ variables:
   TRITON_BASE_IMAGE: "m.daocloud.io/nvcr.io/nvidia/tritonserver:26.02-py3"
   TRITON_TENSORRT_PYTHON_VERSION: "10.15.1.29"
   TRITON_PYTORCH_CUDA_TAG: "cu130"
-  TRITON_RUNTIME_PARENT_TAG: "runtime-base_26.02_trt10.15.1.29_cu130_r2"
-  TRITON_RUNTIME_BASE_TAG: "runtime-base_26.02_trt10.15.1.29_cu130_r3"
+  # r4 adds the TN runtime dependencies; r3 predates those fixes.
+  TRITON_RUNTIME_PARENT_TAG: "runtime-base_26.02_trt10.15.1.29_cu130_r3"
+  TRITON_RUNTIME_BASE_TAG: "runtime-base_26.02_trt10.15.1.29_cu130_r4"
   RUNNER_PYTHON_IMAGE: "m.daocloud.io/docker.io/library/python:3.11-slim"
   RUNNER_DOCKER_CLI_IMAGE: "m.daocloud.io/docker.io/library/docker:27.4.1-cli"
   RUNNER_DOCKER_DIND_IMAGE: "m.daocloud.io/docker.io/library/docker:27.4.1-dind"
@@ -312,7 +313,7 @@ build-engine-image:
         exit 1
       fi
       docker run --rm --entrypoint python3 "$TRITON_RUNTIME_BASE_IMAGE" -c \
-        "import aiohttp, attr, packaging, pypinyin; print(f'aiohttp={aiohttp.__version__} attrs={attr.__version__} packaging={packaging.__version__} pypinyin={pypinyin.__version__}')"
+        "import aiohttp, attr, packaging, wetext, pypinyin; print(f'aiohttp={aiohttp.__version__} attrs={attr.__version__} packaging={packaging.__version__} wetext=ready pypinyin={pypinyin.__version__}')"
       TRITON_RUNTIME_BASE_DIGEST="$(docker image inspect --format '{{ index .RepoDigests 0 }}' "$TRITON_RUNTIME_BASE_IMAGE")"
       case "$TRITON_RUNTIME_BASE_DIGEST" in
         *@sha256:*) ;;

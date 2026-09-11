@@ -69,7 +69,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     attrs \
     packaging \
     'pypinyin>=0.55,<1' \
-    && python3 -c "import aiohttp, attr, packaging, pypinyin; print(f'aiohttp {aiohttp.__version__}, attrs {attr.__version__}, packaging {packaging.__version__}, pypinyin {pypinyin.__version__}')"
+    && pip install \
+    -i https://mirrors.bfsu.edu.cn/pypi/web/simple \
+    --trusted-host mirrors.bfsu.edu.cn \
+    'wetext==0.1.7' \
+    && python3 -c "import aiohttp, attr, packaging, wetext, pypinyin; print(f'aiohttp {aiohttp.__version__}, attrs {attr.__version__}, packaging {packaging.__version__}, wetext runtime ready, pypinyin {pypinyin.__version__}')"
 
 # Local Compose builds use the triton-deps stage by default. Release CI passes
 # an immutable Registry image here; BuildKit then prunes triton-deps completely,

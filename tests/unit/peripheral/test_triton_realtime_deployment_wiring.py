@@ -48,6 +48,8 @@ def test_triton_image_contains_sidecar_runtime_dependencies_and_protocol():
     assert "    attrs \\\n" not in dependency_runs[1]
     assert "    attrs \\\n" in dependency_runs[2]
     assert "    packaging \\\n" in dependency_runs[2]
+    assert "    'pypinyin>=0.55,<1' \\\n" in dependency_runs[2]
+    assert "    'wetext==0.1.7' \\\n" in dependency_runs[2]
     assert "pip install --force-reinstall --no-deps" in dependency_runs[2]
     assert "    attrs \\\n" in dockerfile
     assert "aiohttp" in dockerfile

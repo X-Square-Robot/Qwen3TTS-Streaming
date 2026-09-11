@@ -35,8 +35,15 @@ runtime_parent_image="${TRITON_RUNTIME_PARENT_IMAGE:-}"
 
 if [[ "${TRITON_RUNTIME_BASE_ALLOW_OVERWRITE:-0}" != "1" ]] \
     && docker manifest inspect "$runtime_base_image" >/dev/null 2>&1; then
-    echo "Triton runtime base already exists; keeping immutable image: $runtime_base_image"
-    exit 0
+    echo "Triton runtime base already exists; validating its dependency contract: $runtime_base_image"
+    if docker run --rm --entrypoint python3 "$runtime_base_image" -c \
+        "import aiohttp, attr, packaging, torch, tokenizers, tensorrt, yaml, grpc, numpy, soxr, wetext, pypinyin"; then
+        echo "Triton runtime base is valid and immutable: $runtime_base_image"
+        exit 0
+    fi
+    echo "Existing Triton runtime base is incomplete: $runtime_base_image" >&2
+    echo "Bump TRITON_RUNTIME_BASE_TAG and set TRITON_RUNTIME_PARENT_TAG to the previous base before rebuilding." >&2
+    exit 1
 fi
 
 if [[ -n "$cache_image" ]]; then
