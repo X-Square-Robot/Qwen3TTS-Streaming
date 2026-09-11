@@ -94,6 +94,11 @@ class Session:
     cursor_spoken_texts: list[str] = field(default_factory=list)
     cursor_label_plan: Optional[CursorLabelPlan] = None
     cursor_plan_revision: int = 0
+    # Native cursor is an optional progress route.  Once plan construction or
+    # labelization fails, the session stays alive and the shared progress
+    # publisher uses EMA for the remainder of the session.
+    native_cursor_disabled: bool = False
+    native_cursor_fallback_reason: str = ""
     cursor_segment_plans: dict[int, CursorLabelPlan] = field(default_factory=dict)
     cursor_segment_bounds: dict[int, tuple[int, int]] = field(default_factory=dict)
     def cursor_plan_for_segment(self, segment_idx: int) -> CursorLabelPlan | None:

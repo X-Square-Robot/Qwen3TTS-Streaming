@@ -133,6 +133,26 @@ def project_readable(text: str) -> str:
         lambda match: match.group(1).strip(),
         text,
     )
+    # Markdown markers can appear inline in generated prose after a Chinese
+    # clause (for example ``比如# 标题，1. 项目``).  The lexer keeps the
+    # complete structured span together, so the line-start-only rule below is
+    # insufficient and would leak marker digits into the spoken text.
+    text = re.sub(
+        r"(^|[\s，。！？!?；;：:])([ \t]*#{1,6}[ \t]+)",
+        r"\1",
+        text,
+        flags=re.M,
+    )
+    text = re.sub(
+        r"(^|[\s，。！？!?；;：:])([ \t]*(?:[-+*>]|\d{1,4}[.)])[ \t]+)",
+        r"\1",
+        text,
+        flags=re.M,
+    )
+    # A compact Chinese list marker is also commonly written without a space
+    # before the dash: ``比如- 项目一``.  Require whitespace after the dash
+    # so ordinary hyphenated words remain untouched.
+    text = re.sub(r"([\u3400-\u9fff])[-+*>][ \t]+", r"\1", text)
     text = re.sub(
         # Put line-prefix markers before the generic ``*`` delimiter.  In
         # ``* item`` the latter would otherwise win the alternation and leave

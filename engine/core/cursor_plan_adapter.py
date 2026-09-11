@@ -150,7 +150,16 @@ class CursorLabelPlanAdapter:
             raw_start, raw_end = _raw_span(commit)
             try:
                 if callable(encode_with_spans):
-                    labels, spans = encode_with_spans(spoken)
+                    try:
+                        # Cursor labelization is an optional projection of the
+                        # TN result. Unsupported symbols/digits must leave a
+                        # coordinate gap, not abort the whole native route.
+                        labels, spans = encode_with_spans(spoken, strict=False)
+                    except TypeError:
+                        # Preserve compatibility with injected legacy
+                        # labelizers that expose the original one-argument
+                        # method.
+                        labels, spans = encode_with_spans(spoken)
                     labels = tuple(labels)
                     spans = tuple(spans)
                     if len(spans) != len(labels):

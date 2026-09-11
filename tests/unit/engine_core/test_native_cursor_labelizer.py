@@ -87,6 +87,12 @@ def test_labelizer_rejects_unspoken_or_unmapped_characters(text: str) -> None:
         labelizer.encode_with_spans(text)
 
 
+def test_labelizer_tolerates_unmapped_characters_for_cursor_fallback():
+    labelizer = NativeCursorLabelizer({"en:a": 1, "en:b": 2})
+
+    assert labelizer.encode_with_spans("A 1 é", strict=False) == ((1,), ((0, 1),))
+
+
 def test_labelizer_ignores_math_and_unit_symbols():
     labelizer = NativeCursorLabelizer({"en:a": 1, "en:b": 2})
 

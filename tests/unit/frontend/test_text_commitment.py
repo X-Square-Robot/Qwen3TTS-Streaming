@@ -282,6 +282,16 @@ def test_inline_ordered_markers_are_suppressed_across_streaming_packets():
     assert "".join(item.tts_text for item in decimal.commits) == "版本 一点五"
 
 
+def test_inline_markdown_markers_in_chinese_prose_do_not_reach_cursor_labels():
+    raw = "标题的话，比如# 一级标题，## 二级标题。比如- 项目一，1. 项目二。"
+
+    result = IncrementalTextCommitter().feed(raw, final=True)
+
+    assert "".join(item.tts_text for item in result.commits) == (
+        "标题的话，比如一级标题，二级标题。比如项目一，项目二。"
+    )
+
+
 def test_structured_span_max_length_falls_back_and_does_not_pin_session():
     config = TextNormalizationConfig(max_pending_chars=4)
     committer = IncrementalTextCommitter(config)

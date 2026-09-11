@@ -104,6 +104,7 @@ def test_rebuilt_plan_cannot_rewrite_published_prefix():
             for item in (inbox.get_nowait() for _ in range(inbox.qsize()))
         )
         assert session.session_id not in interface._cursor_plan_adapters
+        assert session.native_cursor_disabled is True
 
         await interface.cancel_session("s")
 

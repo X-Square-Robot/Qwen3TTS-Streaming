@@ -1035,6 +1035,8 @@ class FrontendInterface:
         spoken_texts: Optional[list[str]] = None,
     ) -> None:
         """Build and publish a TN-derived plan when a labelizer is injected."""
+        if getattr(session, "native_cursor_disabled", False):
+            return
         adapter = self._cursor_plan_adapters.get(session.session_id)
         if adapter is None:
             return
@@ -1057,10 +1059,27 @@ class FrontendInterface:
                 previous=previous,
                 committed_label_count=committed_label_count,
             )
-        except Exception:
-            logger.exception(
-                "Disabling native cursor plan after labelization failure for session %s",
+        except Exception as exc:
+            # Native cursor is an optional progress route.  A malformed
+            # label/plan must never abort text ingestion or acoustic state;
+            # freeze this route for the session and let the shared publisher
+            # continue with its conservative EMA estimator.
+            session.native_cursor_disabled = True
+            session.native_cursor_fallback_reason = type(exc).__name__
+            session.cursor_segment_plans.clear()
+            LifecycleLogger.emit(
+                session_id=session.session_id,
+                phase="progress.native_fallback",
+                request_id=session.config.timing.request_id or None,
+                turn_id=session.config.timing.turn_id or None,
+                session_level=session.config.observability_level,
+                route="ema",
+                reason=type(exc).__name__,
+            )
+            logger.warning(
+                "Native cursor disabled for session %s; falling back to EMA: %s",
                 session.session_id,
+                exc,
             )
             self._cursor_plan_adapters.pop(session.session_id, None)
             return
@@ -2594,7 +2613,8 @@ class FrontendInterface:
             projectors = {}
         projector = projectors.get(segment_idx)
         native_revision_ready = cursor_revision == (plan.revision if plan else None)
-        if plan is not None and plan.active and plan.label_normalized_spans:
+        native_allowed = not getattr(session, "native_cursor_disabled", False)
+        if native_allowed and plan is not None and plan.active and plan.label_normalized_spans:
             # The model estimates label progress. Only this adapter knows that
             # vocabulary; all protocol coordinates below use tokenizer spans.
             if (native_revision_ready and has_cursor_observation) or (
@@ -2635,6 +2655,8 @@ class FrontendInterface:
         if final and projector is not None and plan is not None:
             native_revision_ready = projector.plan.revision == plan.revision
         if (
+            native_allowed
+            and
             plan is not None
             and plan.active
             and not plan.label_normalized_spans

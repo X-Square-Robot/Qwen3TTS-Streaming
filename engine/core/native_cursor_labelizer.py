@@ -91,7 +91,7 @@ class NativeCursorLabelizer:
         return labels
 
     def encode_with_spans(
-        self, spoken_text: str
+        self, spoken_text: str, *, strict: bool = True
     ) -> tuple[tuple[int, ...], tuple[tuple[int, int], ...]]:
         """Encode spoken text and return the source span for every label.
 
@@ -117,6 +117,8 @@ class NativeCursorLabelizer:
         def append_label(spoken_label: str, span: tuple[int, int]) -> None:
             index = self.vocab.get(spoken_label)
             if index is None:
+                if not strict:
+                    return
                 raise NativeCursorLabelizerError(
                     f"spoken label {spoken_label!r} is missing from cursor vocabulary"
                 )
@@ -159,6 +161,8 @@ class NativeCursorLabelizer:
                     )
                 continue
             else:
+                if not strict:
+                    continue
                 raise NativeCursorLabelizerError(
                     f"unsupported spoken character for cursor labels: {ch!r}"
                 )
