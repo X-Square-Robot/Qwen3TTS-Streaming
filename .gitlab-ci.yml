@@ -147,6 +147,14 @@ build-web-release:
   variables:
     GIT_STRATEGY: clone
     RELEASE_ALLOW_UNTRACKED: "1"
+    NPM_CACHE_DIR: "$CI_PROJECT_DIR/.cache/npm"
+  cache:
+    key:
+      files:
+        - web/package-lock.json
+      prefix: npm-web
+    paths:
+      - .cache/npm/
   script:
     - bash scripts/bash/prepare_release_checkout.sh "$RELEASE_VERSION" "$RELEASE_COMMIT_SHA"
     - bash scripts/bash/release_web.sh "$RELEASE_VERSION"

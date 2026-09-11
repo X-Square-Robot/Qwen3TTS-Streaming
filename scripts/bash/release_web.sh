@@ -25,7 +25,17 @@ case "$semver" in
 esac
 export DOCS_SOURCE_BASE="${DOCS_SOURCE_BASE:-https://github.com/X-Square-Robot/Qwen3TTS-Streaming/blob/v${release_version}}"
 cd "$repo_root/web"
-npm ci
+npm_cache_dir="${NPM_CACHE_DIR:-$(npm config get cache)}"
+npm ci \
+    --cache "$npm_cache_dir" \
+    --prefer-offline \
+    --no-audit \
+    --no-fund \
+    --fetch-retries "${NPM_FETCH_RETRIES:-5}" \
+    --fetch-retry-factor "${NPM_FETCH_RETRY_FACTOR:-2}" \
+    --fetch-retry-mintimeout "${NPM_FETCH_RETRY_MIN_TIMEOUT:-10000}" \
+    --fetch-retry-maxtimeout "${NPM_FETCH_RETRY_MAX_TIMEOUT:-120000}" \
+    --fetch-timeout "${NPM_FETCH_TIMEOUT:-300000}"
 npm run typecheck
 npm run lint
 npm test

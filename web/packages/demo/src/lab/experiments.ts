@@ -60,7 +60,7 @@ export function startExperiment(options: ExperimentOptions, mode: "streaming" | 
     let clientFirstAudioMs = 0;
     let serverTtftMs = 0;
     let requestStartedAt = startAt;
-    let collector: WavCollector | undefined;
+    const collector: WavCollector | undefined;
     const at = () => performance.now() - startAt;
     const clientAt = () => performance.now() - requestStartedAt;
     client.onRawEvent((event) => { trace.push({at_ms: Number(at().toFixed(2)), type: event.type, sample_start: event.qwen_output_sample_start, sample_end: event.qwen_output_sample_end, text: event.text}); if (trace.length > 300) trace.shift(); });
