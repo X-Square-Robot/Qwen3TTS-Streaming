@@ -716,8 +716,12 @@ function CursorProgressPanel({text, events, capabilities, busy, playback}: {
   const generated = progressEvents.at(-1);
   const heard = [...progressEvents].reverse().find((event) => event.sample <= playback.played);
   const latest = playback.played > 0n ? heard : undefined;
-  const rawEnd = latest ? progressRawEnd(latest, textLength) : 0;
-  const progress = latest ? progressFraction(latest, textLength) : 0;
+  const latestIndex = latest ? progressEvents.lastIndexOf(latest) : -1;
+  const generatedIndex = generated ? progressEvents.length - 1 : -1;
+  const rawEnd = latestIndex >= 0
+    ? monotonicRawEnd(progressEvents, latestIndex, textLength)
+    : 0;
+  const progress = textLength ? rawEnd / textLength : 0;
   const nativeReady = Boolean(capabilities?.native_cursor?.progress_available);
   return <section className="cursor-panel" aria-label="文本游标进度">
     <div className="cursor-panel-head"><div><p className="panel-kicker">TEXT CURSOR · 01 / 03</p><h2>看见每个字何时被说出来</h2></div>
@@ -725,11 +729,11 @@ function CursorProgressPanel({text, events, capabilities, busy, playback}: {
     <p className="cursor-panel-copy">高亮跟随正在播放的声音。实色表示已听到的位置，浅色表示已生成的文本。</p>
     <div className="cursor-text-stage"><div className="cursor-text-meta"><span>RAW TEXT</span><span>{rawEnd.toFixed(1)}/{textLength} codepoints</span></div>
       <div className="cursor-text" aria-live="polite">{Array.from(text).map((character, index) => <span key={`${index}-${character}`} className={index < Math.floor(rawEnd) ? "is-read" : index === Math.floor(rawEnd) ? "is-current" : ""}>{character === " " ? " " : character}</span>)}</div>
-      <ProgressTrack className="cursor-progress-track" label="文本已播放进度" value={progress} buffered={generated ? progressFraction(generated, textLength) : 0}/>
+      <ProgressTrack className="cursor-progress-track" label="文本已播放进度" value={progress} buffered={generatedIndex >= 0 ? monotonicRawEnd(progressEvents, generatedIndex, textLength) / Math.max(1, textLength) : 0}/>
     </div>
     <div className="cursor-trajectory"><div className="cursor-trajectory-head"><span>TRAJECTORY</span><span>{busy ? "LIVE" : progressEvents.length ? "CAPTURED" : "WAITING FOR AUDIO"}</span></div>
       <CursorChart native={native} ema={ema} textLength={textLength}/>
-      <div className="cursor-legend"><span className="native-key"><i/>原生游标 {native.length ? `${native.length} points` : "等待"}</span><span className="ema-key"><i/>EMA {ema.length ? `${ema.length} points` : "降级时显示"}</span><span>已听 {latest ? `${progressRawEnd(latest, textLength).toFixed(1)}/${textLength}` : "—"} · 生成 {generated ? `${progressRawEnd(generated, textLength).toFixed(1)}/${textLength}` : "—"}</span></div>
+      <div className="cursor-legend"><span className="native-key"><i/>原生游标 {native.length ? `${native.length} points` : "等待"}</span><span className="ema-key"><i/>EMA {ema.length ? `${ema.length} points` : "降级时显示"}</span><span>已听 {latestIndex >= 0 ? `${rawEnd.toFixed(1)}/${textLength}` : "—"} · 生成 {generatedIndex >= 0 ? `${monotonicRawEnd(progressEvents, generatedIndex, textLength).toFixed(1)}/${textLength}` : "—"}</span></div>
     </div>
   </section>;
 }
@@ -739,7 +743,11 @@ function CursorChart({native, ema, textLength}: {native: Extract<TTSEvent, {type
   const maxSample = Math.max(1, ...points.map((event) => progressSample(event)));
   const path = (series: Extract<TTSEvent, {type: "progress"}>[]) => series.map((event, index) => {
     const x = 8 + progressSample(event) / maxSample * 484;
-    const y = 72 - progressRawEnd(event, textLength) / Math.max(1, textLength) * 58;
+    const prior = series.slice(0, index).reduce(
+      (highWater, item) => Math.max(highWater, progressRawEnd(item, textLength)),
+      0,
+    );
+    const y = 72 - Math.max(prior, progressRawEnd(event, textLength)) / Math.max(1, textLength) * 58;
     return `${index ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(" ");
   return <svg className="cursor-chart" viewBox="0 0 500 84" role="img" aria-label="原生游标和 EMA 文本进度轨迹"><path className="chart-grid" d="M8 14H492M8 43H492M8 72H492"/>{native.length > 0 && <path className="chart-native" d={path(native)}/>} {ema.length > 0 && <path className="chart-ema" d={path(ema)}/>}<text x="8" y="82">0</text><text x="476" y="82">audio samples</text></svg>;
@@ -756,8 +764,12 @@ function progressRawEnd(event: Extract<TTSEvent, {type: "progress"}>, length: nu
   const value = Number.isFinite(display) ? display : Number.isFinite(committed) ? committed : 0;
   return Math.max(0, Math.min(length, Number.isFinite(value) ? value : 0));
 }
-function progressFraction(event: Extract<TTSEvent, {type: "progress"}>, length: number): number { return length ? progressRawEnd(event, length) / length : 0; }
-
+function monotonicRawEnd(events: Extract<TTSEvent, {type: "progress"}>[], index: number, length: number): number {
+  return events.slice(0, index + 1).reduce(
+    (highWater, event) => Math.max(highWater, progressRawEnd(event, length)),
+    0,
+  );
+}
 function StatusItem({icon, label, value, detail, className = ""}: {
   icon: React.ReactNode;
   label: string;

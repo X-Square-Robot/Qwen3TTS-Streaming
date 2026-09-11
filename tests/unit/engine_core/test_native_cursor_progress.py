@@ -74,6 +74,25 @@ def test_owner_boundary_is_conservative_and_display_is_interpolated() -> None:
     assert crossed.to_meta()["progress_basis"] == NATIVE_CURSOR_PROGRESS_BASIS
 
 
+def test_display_interpolation_never_recedes_after_tail_reanchor() -> None:
+    projector = NativeCursorProgressProjector(segment_idx=4, plan=_plan())
+    first = projector.update(mu=1.25, valid=True)
+    assert first is not None
+
+    reanchored = CursorLabelPlan(
+        label_ids=(11, 12, 21, 22, 23),
+        owner_spans=(
+            CursorOwnerSpan(1, 0, 2, 0, 2, 0, 1),
+            CursorOwnerSpan(2, 2, 5, 2, 5, 1, 2),
+        ),
+        revision=2,
+    )
+    projector.update_plan(reanchored)
+    second = projector.update(mu=1.25, valid=True)
+    assert second is not None
+    assert second.display_raw_position >= first.display_raw_position
+
+
 def test_high_water_never_recedes_on_mu_regression_or_tail_revision() -> None:
     projector = NativeCursorProgressProjector(segment_idx=0, plan=_plan())
     first = projector.update(mu=2.1, valid=True)

@@ -124,6 +124,8 @@ class NativeCursorProgressProjector:
         self.plan = plan
         self._last_normalized_end = 0
         self._last_raw_end = 0
+        self._last_display_normalized = 0.0
+        self._last_display_raw = 0.0
         self._last_mu = 0.0
 
     @property
@@ -204,6 +206,15 @@ class NativeCursorProgressProjector:
                 owner.normalized_end - owner.normalized_start
             )
             display_raw = owner.raw_start + fraction * (owner.raw_end - owner.raw_start)
+            # Display interpolation is UI-only, but it must not visibly move
+            # backwards when a mutable tail is re-anchored or an owner closes.
+            # The integer protocol high-water above remains authoritative.
+            display_normalized = max(
+                self._last_display_normalized, display_normalized
+            )
+            display_raw = max(self._last_display_raw, display_raw)
+            self._last_display_normalized = display_normalized
+            self._last_display_raw = display_raw
 
         normalized_total = max(
             self.plan.owner_spans[-1].normalized_end,
