@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/actions/workflows/ci.yml/badge.svg)](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
-[![Status](https://img.shields.io/badge/status-v0.1%20engineering%20preview-orange.svg)](#能力状态)
+[![Status](https://img.shields.io/badge/status-v0.2%20stability%20release-blue.svg)](#能力状态)
 [![GitHub stars](https://img.shields.io/github/stars/X-Square-Robot/Qwen3TTS-Streaming?style=social)](https://github.com/X-Square-Robot/Qwen3TTS-Streaming)
 
 <img src="docs/images/文本播放器.gif" width="720" alt="合并前的 Text Player 历史截图；当前统一门户请打开 /demo/">
@@ -22,12 +22,15 @@
 
 ## 引言
 
-Qwen3TTS-Streaming 是一个**工程预览版**项目：把官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运行时，围绕 Triton/standalone engine 做**token 级流式 TTS**、模型 fuse、前端分词、prefix cache、连续批处理和内置产品 Demo。项目开放一条已高度优化、可复现、可继续验证的工程链路，让社区一起打磨成可靠的开源推理系统。
+Qwen3TTS-Streaming 是一个**以稳定性为重点的 v0.2 开源推理系统**：把官方 Qwen3-TTS PyTorch 权重导出为 ONNX/TensorRT 运行时，围绕 Triton/standalone engine 做**token 级流式 TTS**、模型 fuse、前端分词、prefix cache、连续批处理和内置产品 Demo。项目提供一条高度优化、可复现、可持续验证的实时语音生成工程链路。
 
-> ⚠️ **状态：v0.1 工程预览，非生产就绪。** 流式模式仍可能出现**幻觉、重复、漏读**（当前 checkpoint 上约 10–18%，根因在模型+采样，见 [已知限制](docs/user/known_limitations.zh-CN.md)）。**当前建议稳定范围为 `custom-1.7b` / `custom_voice` 路径**；`design-1.7b`、`base-1.7b` / x-vector 语音克隆、`icl` 语音克隆处于实验状态；`0.6b` 变体未作为 v0.1 主线。请勿直接用于生产内容生成。
+> **状态：v0.2 稳定性版本。** 已验证的 `custom-1.7b` / `custom_voice` checkpoint 与运行时防护已经大幅抑制流式幻觉、重复和漏读；当前记录的全 bf16 引擎确定性验证为**跑飞 0/100**，历史 0601 checkpoint 的跑飞率约为 10–18%。这代表显著改善，但不等于任意 checkpoint、输入和采样配置都具备语义正确性保证，生产部署仍需按业务负载验收。`design-1.7b`、`base-1.7b` / x-vector 语音克隆、`icl` 语音克隆仍为实验路径；`0.6b` 变体不属于当前 v0.2 稳定范围。详见[已知限制](docs/user/known_limitations.zh-CN.md)。
 
 ## News
 
+- **2026-09-10：v0.2 已显著提升流式稳定性。** 经过重训的已验证 checkpoint 与运行时防护
+  已抑制历史上的跑飞型幻觉问题；当前记录的全 bf16 确定性验证集为 0/100。这是强改善，
+  但不是对任意 checkpoint 的语义完全正确保证。
 - **2026-09-10：流式 TN 与原生文本进度已接入当前引擎。** 主 streaming TN 现在维护
   raw Unicode、可变尾部和单调 `TextCommit`；WeText/混合语言路由只在 CPU 侧决定 spoken
   form，已经提交的 spoken prefix 不会被后续 transport 分包改写。
@@ -190,14 +193,14 @@ Qwen3TTS-Streaming —— 每个 decode step 1 个融合 engine
 
 | 路径 | 当前状态 | 开源口径 |
 | --- | --- | --- |
-| `custom-1.7b` / `custom_voice` | 🟢 优先稳定 | v0.1 推荐路径，产品 Demo 默认围绕它展示 |
+| `custom-1.7b` / `custom_voice` | 🟢 优先稳定 | v0.2 推荐路径，产品 Demo 默认围绕它展示 |
 | streaming TN / monotonic commitment | 🟢 已接入 | 主 TN 负责 spoken-form 真相；开放语义尾部可能暂缓提交，最终仍会显式 fallback 或完成 |
 | native text progress | 🟢 有限范围可用 | 仅匹配的 `custom-1.7b` cursor-enabled TRT artifact；其他模型降级 EMA/disabled |
 | `SOFT_DRAIN` / state rollover | ⚪ 尚未发布 | 设计和验收合同已记录，当前运行时继续使用 `WAIT_TEXT` 与明确的 hard finalize |
 | `design-1.7b` / `voice_design` | 🟡 实验 | 可保留代码和导出入口，需标注未充分测通 |
 | `base-1.7b` / x-vector voice clone | 🟡 实验 | standalone 已接入 ref audio → speaker embedding；需 base 导出产物和真实端到端验证 |
 | `icl` voice clone | 🟡 实验 | standalone 已接入 ref audio + ref text → ref codec/code 注入；需 TRT ref-audio engine 和真实端到端验证 |
-| `0.6b` variants | ⚪ 未作为 v0.1 主线 | 可保留导出/下载入口，发布前需单独验证 |
+| `0.6b` variants | ⚪ 不属于 v0.2 稳定范围 | 可保留导出/下载入口，发布前需单独验证 |
 
 ## 前置要求
 
@@ -319,7 +322,7 @@ Python SDK 在 `transport="auto"` 时优先选择原生 `engine-websocket`。Ope
 
 ```bash
 curl http://<engine-host>:<ws-port>/v1/capabilities
-# → {"engine_version": "v0.1.0", ...}
+# → {"engine_version": "v0.2.0", ...}
 
 # 精确且可直接复制的安装命令见当前实例的 /demo/#/sdk 页面。
 # 也可在对应版本的发布页选择 wheel：
@@ -532,7 +535,8 @@ Qwen3TTS-Streaming/
 
 ## 参与贡献
 
-本项目是 **v0.1 工程预览**，流式质量仍在打磨，欢迎以 issue、讨论、PR 形式参与。
+本项目是**以稳定性为重点的 v0.2 版本**。已验证 checkpoint 已大幅降低跑飞型幻觉，
+但仍欢迎社区继续补充更广泛的 checkpoint 和业务负载验收，欢迎以 issue、讨论、PR 形式参与。
 
 - 🤝 [贡献指南](CONTRIBUTING.zh-CN.md) — 开发环境、测试、proto 工作流、代码风格
 - 💬 [求助渠道](SUPPORT.zh-CN.md) — 提问 / 报 Bug / 提建议如何分流

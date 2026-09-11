@@ -141,8 +141,10 @@ python -m engine.server --config engine.yaml
 
 ## 重要约束
 
-- `custom-1.7b` / `custom_voice` 是 v0.1 推荐路径，其他变体为实验状态
-- 流式模式仍可能出现幻觉/重复/漏读，生产使用需自行评估。幻觉强依赖 checkpoint 且本项目不发布权重（内部 0601 权重 ~10-18% 种子跑飞、0701 重训后 0/100，方法论见 streaming_hallucination.md）——用户权重必须自行验证
+- `custom-1.7b` / `custom_voice` 是 v0.2 推荐稳定路径，其他变体为实验状态
+- v0.2 已通过重训 checkpoint 与运行时防护大幅抑制流式幻觉/重复/漏读；已验证 0701
+  checkpoint 在全 bf16 引擎确定性探针上 0/100。幻觉仍依赖 checkpoint、输入和采样，
+  且本项目不发布权重；用户自带权重必须自行验证（方法论见 `streaming_hallucination.md`）
 - 默认全 bf16（cp/c2w 均跟随 ENGINE_DTYPE=bf16）——batch-128 服务档最优；`CP_PRECISION=fp32` 仅数值对齐调试。`CODE2WAV_PRECISION=fp16` 是**低并发 opt-in**：fp16 卷积在 sm120 更快，但 c2w 状态每步 bf16↔fp16 reformat 随 batch 放大，**低并发赢(c1 decode −21%)、高并发输(c128 +8%,交叉 ~c32,实测 2026-07-08)**；启用时混合构建由 `trt_fused_io_formats.py` 自动判定 `--precisionConstraints=prefer`
 - `workspace/` 是运行时产物目录，不提交到 git
 - `third_party/Qwen3-TTS/` 是 git 子模块，不要修改其中的代码

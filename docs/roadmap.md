@@ -2,14 +2,15 @@
 
 # Roadmap
 
-The frontend references below describe the historical v0.1 plan. The former
-standalone WebUI has since been consolidated into the capability-gated built-in
+The v0.1 section below is historical. The current release line is v0.2, focused
+on streaming stability, native text progress, and reproducible release evidence.
+The former standalone WebUI has since been consolidated into the capability-gated built-in
 Demo; current implementation and acceptance are tracked in
 [`demo_browser_sdk_docs_plan.zh-CN.md`](dev/design/demo_browser_sdk_docs_plan.zh-CN.md).
 
 Goal: evolve the current high-performance engineering prototype into a trustworthy, reproducible, collaboration-friendly, high-quality open-source project.
 
-## v0.1: Engineering Preview
+## v0.1: Engineering Preview (completed baseline)
 
 Scope:
 
@@ -29,21 +30,26 @@ Exit criteria:
 - The built-in Demo builds.
 - The README no longer advertises untested paths as stable and ready to use.
 
-## v0.2: Stability Focus
+## v0.2: Stability Release (current)
 
 Focus:
 
-- Systematically locate streaming hallucination, repetition, dropped reading, and inserted content issues.
-- Build a text corpus: short sentences, long sentences, numbers, English, mixed Chinese-English, punctuation-dense text, and long paragraphs.
-- Add audio quality regression tests and a manual acceptance sheet.
-- Improve spliter, EOS/pad, cache, and sampling defaults.
-- Distill failure cases into `docs/streaming_hallucination_investigation.md` or a new Chinese document.
+- Ship the validated retrained checkpoint and runtime safeguards that substantially suppress
+  the historical runaway-hallucination failure mode.
+- Keep the 0/100 deterministic probe evidence and any future regression evidence tied to exact
+  checkpoint, engine profile, sampling settings, and request corpus.
+- Maintain text corpora across short sentences, long sentences, numbers, English, mixed
+  Chinese-English, punctuation-dense text, and long paragraphs.
+- Keep improving streaming TN, spliter behavior, EOS/pad handling, cache, and sampling defaults.
+- Publish known limitations and reproduction inputs with every release.
 
 Exit criteria:
 
-- Publish a set of stability test cases.
-- Every release can provide known issues and reproduction inputs.
-- The probability of severe hallucination/repetition under default parameters is significantly reduced.
+- `custom-1.7b` / `custom_voice` remains the recommended stable path for v0.2.
+- The validated full-bf16 engine has a recorded 0/100 deterministic runaway probe result.
+- Every release can provide known issues, reproduction inputs, and benchmark conditions.
+- Severe hallucination/repetition under default parameters is substantially reduced, while
+  arbitrary checkpoints remain caller/operator validation scope.
 
 ## v0.3: base / ICL Voice Cloning
 

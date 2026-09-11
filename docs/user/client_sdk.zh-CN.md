@@ -39,7 +39,7 @@ SDK 作为独立子项目放在仓库的 [`client/`](../../client) 目录下：
 
 ```bash
 curl http://<engine-host>:<ws-port>/v1/capabilities
-# → {"loaded_model_type": "...", "engine_version": "v0.1.0", "protocol_version": "...", ...}
+# → {"loaded_model_type": "...", "engine_version": "v0.2.0", "protocol_version": "...", ...}
 ```
 
 推荐安装该版本的 SDK，以便完整复现发布环境。`connect()` 读取服务端
@@ -71,7 +71,7 @@ pip install "https://<public-service-base>/sdk/<wheel-filename>"
 ```bash
 pip install \
   --index-url "https://<gitlab-host>/api/v4/projects/<project-id>/packages/pypi/simple" \
-  "qwen3-tts-client[all]==0.1.0"
+  "qwen3-tts-client[all]==0.2.0"
 ```
 
 私有项目建议使用 PyPI Registry，并把个人 Token 或只读 Deploy Token 配在

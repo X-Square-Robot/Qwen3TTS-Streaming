@@ -30,4 +30,7 @@ Including the following information when you ask lets us help you faster:
 - GPU model, driver / CUDA version, NGC container version, commit hash;
 - The reproduction command and relevant logs (please remove sensitive information).
 
-> ⚠️ This project is a **v0.1 engineering preview**; streaming mode may still exhibit hallucination/repetition/dropped reading, and is not recommended for production. Such known phenomena are covered in "Known Limitations" above and usually do not need to be reported separately.
+> This project is in the **v0.2 stability release** line. The validated checkpoint substantially
+> reduces runaway hallucination, but residual repetition, dropped reading, and input-dependent
+> quality issues can still occur. See "Known Limitations" above; please report reproducible
+> regressions with the checkpoint, input, gateway, and sampling details.

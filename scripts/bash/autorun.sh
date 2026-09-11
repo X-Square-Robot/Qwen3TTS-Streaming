@@ -1113,7 +1113,7 @@ _prompt_deployment_metadata() {
                     "  模型发布版本 MODEL_VERSION" \
                     "$current_model_release")
             else
-                read -rp "  模型发布版本 MODEL_VERSION（必填，例如 zehan@20260818）: " \
+                read -rp "  模型发布版本 MODEL_VERSION（必填，例如 researcher@20260820）: " \
                     -t 30 entered_model_release || true
             fi
             if [ -z "$entered_model_release" ]; then

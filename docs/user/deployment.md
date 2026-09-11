@@ -6,7 +6,7 @@ This document describes the currently recommended deployment modes, profile para
 
 ## Recommended Path
 
-For v0.1, start with:
+For v0.2, start with:
 
 ```bash
 bash scripts/bash/autorun.sh all -m custom-1.7b
@@ -47,8 +47,8 @@ When `autorun.sh` starts without a command, its **Release and package metadata**
 
 ```bash
 bash scripts/bash/autorun.sh package -m custom-1.7b \
-  --model-release-version 'zehan@20260818' \
-  --packager rime \
+  --model-release-version 'researcher@20260820' \
+  --packager packager \
   --package-date 2026-08-20
 ```
 
@@ -96,23 +96,23 @@ This version number is the Triton model repository version directory, not a Hugg
 The model's own release identity is separate and travels with the model. A source model can carry a read-only `MODEL_VERSION`, or the value can be entered directly in the autorun TUI and written as a read-only export sidecar. It contains one version line, for example:
 
 ```text
-zehan@20260601
+researcher@20260820
 ```
 
-Phase A copies it to `workspace/exported/<variant>/MODEL_VERSION`; an explicit TUI value takes precedence and is written to the same location. Phase C copies it again to the model-package root at `tts_orchestrator/<N>/MODEL_VERSION`; both files use mode `0444`. Export, repository validation, and engine startup reject a missing, writable, or malformed file. A model release must use `researcher@YYYYMMDD`, for example `zehan@20260818`.
+Phase A copies it to `workspace/exported/<variant>/MODEL_VERSION`; an explicit TUI value takes precedence and is written to the same location. Phase C copies it again to the model-package root at `tts_orchestrator/<N>/MODEL_VERSION`; both files use mode `0444`. Export, repository validation, and engine startup reject a missing, writable, or malformed file. A model release must use `researcher@YYYYMMDD`, for example `researcher@20260820`.
 
 When upgrading from an older export whose `MODEL_VERSION` combines the engine build ID and model release, Phase A will not propagate the legacy value. Supply `--model-release-version` (or enter it in the TUI) and re-export/repackage.
 
-When the exact text `自变量语音合成版本号` is synthesized, the diagnostic response now includes the Git tag, model release, and TRT engine build version in order, for example: `引擎版本号：v0.2.0a14，模型版本号：zehan@20260818，引擎编译版本号：rime@20260902_580_5090_v1`.
+When the exact text `自变量语音合成版本号` is synthesized, the diagnostic response includes the Git release tag, model release, and TRT engine build version in order. The trigger is configurable in `engine.yaml` under `diagnostics.version_query_text` and can also be overridden with `ENGINE_DIAGNOSTICS_VERSION_QUERY_TEXT`; matching remains exact. For source-tree runs without a model package, the optional `diagnostics.engine_version`, `diagnostics.model_version`, and `diagnostics.engine_build_version` fields provide neutral fallback metadata; package sidecars and `ENGINE_VERSION` take precedence.
 
-TensorRT uses a separate `ENGINE_BUILD_VERSION`. After Phase B compiles on the target GPU, it is generated as `builder@build-date_driver-major_target-device_export-protocol`, for example `rime@20260902_580_5090_v1`, and carried into Phase C with `artifact_manifest.json` and the engine artifact. Normal workflows do not prompt for or override this value; the artifact manifest remains the source of the complete engine SHA256, TensorRT/GPU, and profile metadata.
+TensorRT uses a separate `ENGINE_BUILD_VERSION`. After Phase B compiles on the target GPU, it is generated as `builder@build-date_driver-major_target-device_export-protocol`, for example `builder@20260820_580_5090_v1`, and carried into Phase C with `artifact_manifest.json` and the engine artifact. Normal workflows do not prompt for or override this value; the artifact manifest remains the source of the complete engine SHA256, TensorRT/GPU, and profile metadata.
 
 Model-package provenance is stored separately from the model release identity. Phase C creates a read-only `PACKAGE_INFO.json` in the same model-package root:
 
 ```json
 {
   "package_info_schema_version": 1,
-  "packager": "rime",
+  "packager": "packager",
   "packaged_on": "2026-08-20"
 }
 ```

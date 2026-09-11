@@ -9,7 +9,7 @@
 
 [project]
 name = "qwen3tts-streaming"
-version = "0.1.0"
+version = "0.2.0"
 description = "Qwen3TTS-Streaming inference system"
 requires-python = ">=3.10"
 license = {text = "MIT"}

@@ -5,6 +5,17 @@
 This page describes product boundaries an API caller must own. How the service is built, scheduled,
 or deployed does not change these conclusions.
 
+## Current v0.2 quality status
+
+The v0.2 line uses the validated `custom_voice` checkpoint and runtime safety guards that
+substantially suppress the historical runaway-hallucination failure mode. The recorded
+full-bf16 engine validation measured 0/100 runaway cases on the deterministic probe set,
+where the historical 0601 checkpoint ran away at roughly 10–18%.
+
+Treat that as strong release evidence for the validated artifact, not as a universal semantic
+correctness guarantee. Different checkpoints, speakers, text distributions, sampling settings,
+and deployment policies still need their own validation.
+
 ## Trust the running service's capabilities
 
 Deployments may load different models and disable individual features. Read `/v1/capabilities`
@@ -13,12 +24,13 @@ before making requests. Do not infer availability from SDK types or another depl
 `custom_voice` is the primary validated path today. Use voice design or voice clone in production
 only when capabilities advertise it and the operator confirms that deployment has been validated.
 
-## Synthesized content is not strongly consistent
+## Synthesized content still needs application safeguards
 
-Streaming TTS may repeat, omit, or insert content, produce abnormal silence, or degrade on long text.
-Punctuation, numbers, English, and mixed-language input can change segmentation and prosody. Guarded
-delivery, VAD, and length guards can reduce the chance that some bad tails reach a client, but they
-cannot prove that speech matches the source text.
+Streaming TTS is much more stable in v0.2 on the validated artifact, but it may still repeat, omit,
+or insert content, produce abnormal silence, or degrade on long text in unsupported conditions.
+Punctuation, numbers, English, and mixed-language input can change segmentation and prosody.
+Guarded delivery, VAD, and length guards can reduce the chance that some bad tails reach a client,
+but they cannot prove that speech matches the source text.
 
 Customer service, medical, financial, legal, alerting, and other high-risk uses need application-level
 text constraints, output sampling, cancellation, and human fallback. A completed synthesis state is

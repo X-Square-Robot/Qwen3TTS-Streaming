@@ -5,10 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-VERSION_QUERY_TEXT = "自变量语音合成版本号"
-DEFAULT_ENGINE_VERSION = "v0.2.0a14"
-DEFAULT_ENGINE_BUILD_VERSION = "unknown"
-DEFAULT_MODEL_VERSION = "zehan@20260818"
+DEFAULT_VERSION_QUERY_TEXT = "自变量语音合成版本号"
+# Keep the historical name as a public compatibility alias.  Runtime routing
+# uses the configured value passed to the router/resolver.
+VERSION_QUERY_TEXT = DEFAULT_VERSION_QUERY_TEXT
+# Release identities are deployment metadata, not source-code defaults.  The
+# neutral value is used only for source-tree/test runs without package
+# metadata; production values come from ENGINE_VERSION or package sidecars.
+UNKNOWN_VERSION = "unknown"
+DEFAULT_ENGINE_VERSION = UNKNOWN_VERSION
+DEFAULT_ENGINE_BUILD_VERSION = UNKNOWN_VERSION
+DEFAULT_MODEL_VERSION = UNKNOWN_VERSION
 
 
 def format_engine_model_version(
@@ -47,7 +54,20 @@ class DiagnosticTextResolution:
     query_matched: bool = False
 
 
-def resolve_diagnostic_text(text: str, version_text: str) -> str:
+def normalize_version_query_text(value: str) -> str:
+    """Normalize and validate the configured spoken version trigger."""
+
+    query_text = str(value or "").strip()
+    if not query_text:
+        raise ValueError("version_query_text must not be empty")
+    return query_text
+
+
+def resolve_diagnostic_text(
+    text: str,
+    version_text: str,
+    version_query_text: str = VERSION_QUERY_TEXT,
+) -> str:
     """Resolve an exact, complete synthesis query to its spoken payload.
 
     The query is deliberately exact-match only.  Applying it after full-text
@@ -56,7 +76,7 @@ def resolve_diagnostic_text(text: str, version_text: str) -> str:
     input modes.
     """
 
-    if text != VERSION_QUERY_TEXT:
+    if text != normalize_version_query_text(version_query_text):
         return text
     return version_text
 
@@ -70,8 +90,14 @@ class DiagnosticTextRouter:
     sequence is released unchanged.
     """
 
+    version_query_text: str = VERSION_QUERY_TEXT
     _pending: list[str] = field(default_factory=list)
     _passthrough: bool = False
+
+    def __post_init__(self) -> None:
+        self.version_query_text = normalize_version_query_text(
+            self.version_query_text
+        )
 
     @property
     def pending_text(self) -> str:
@@ -92,7 +118,7 @@ class DiagnosticTextRouter:
             return (text,)
 
         candidate = "".join((*self._pending, text))
-        if VERSION_QUERY_TEXT.startswith(candidate):
+        if self.version_query_text.startswith(candidate):
             self._pending.append(text)
             return ()
 
@@ -109,7 +135,7 @@ class DiagnosticTextRouter:
         complete_text = "".join(pending)
         self._pending.clear()
         self._passthrough = True
-        if complete_text == VERSION_QUERY_TEXT:
+        if complete_text == self.version_query_text:
             return DiagnosticTextResolution((version_text,), query_matched=True)
         return DiagnosticTextResolution(pending)
 
@@ -119,9 +145,12 @@ __all__ = [
     "DEFAULT_ENGINE_BUILD_VERSION",
     "DEFAULT_ENGINE_VERSION",
     "DEFAULT_MODEL_VERSION",
+    "DEFAULT_VERSION_QUERY_TEXT",
     "DiagnosticTextResolution",
     "DiagnosticTextRouter",
+    "UNKNOWN_VERSION",
     "VERSION_QUERY_TEXT",
     "format_engine_model_version",
+    "normalize_version_query_text",
     "resolve_diagnostic_text",
 ]

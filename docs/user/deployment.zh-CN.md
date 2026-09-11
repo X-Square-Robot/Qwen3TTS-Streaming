@@ -6,7 +6,7 @@
 
 ## 推荐路径
 
-v0.1 推荐先使用：
+v0.2 推荐先使用：
 
 ```bash
 bash scripts/bash/autorun.sh all -m custom-1.7b
@@ -47,8 +47,8 @@ bash scripts/bash/autorun.sh deploy -m custom-1.7b --gateway engine-docker
 
 ```bash
 bash scripts/bash/autorun.sh package -m custom-1.7b \
-  --model-release-version 'zehan@20260818' \
-  --packager rime \
+  --model-release-version 'researcher@20260820' \
+  --packager packager \
   --package-date 2026-08-20
 ```
 
@@ -96,23 +96,23 @@ bash scripts/bash/autorun.sh deploy -m custom-1.7b \
 模型自身的发布版本使用另一套、随模型走的标识。源模型目录可以携带只读文本文件 `MODEL_VERSION`；也可以在 autorun TUI 中直接输入，由导出阶段写入只读版本文件。内容为单行版本号，例如：
 
 ```text
-zehan@20260601
+researcher@20260820
 ```
 
-Phase A 会把它复制到 `workspace/exported/<variant>/MODEL_VERSION`；TUI 输入的显式版本优先，并写入同一位置。Phase C 再复制到模型包根目录 `tts_orchestrator/<N>/MODEL_VERSION`，两处文件都设置为 `0444`。组装、仓库校验和引擎启动都会拒绝缺失、可写或格式不合法的文件。模型版本必须是 `研究员@YYYYMMDD`，例如 `zehan@20260818`。
+Phase A 会把它复制到 `workspace/exported/<variant>/MODEL_VERSION`；TUI 输入的显式版本优先，并写入同一位置。Phase C 再复制到模型包根目录 `tts_orchestrator/<N>/MODEL_VERSION`，两处文件都设置为 `0444`。组装、仓库校验和引擎启动都会拒绝缺失、可写或格式不合法的文件。模型版本必须是 `研究员@YYYYMMDD`，例如 `researcher@20260820`。
 
 从旧版本升级时，如果导出目录中的 `MODEL_VERSION` 仍是把 engine build ID 和模型版本拼接在一起的旧值，Phase A 不会继续传播它；请在 autorun 中填写 `--model-release-version`（或在 TUI 中填写）后重新导出/打包。
 
-发送精确文本 `自变量语音合成版本号` 时，后门播报会依次包含 Git tag、模型发布版本和 TRT 引擎编译版本，例如：`引擎版本号：v0.2.0a14，模型版本号：zehan@20260818，引擎编译版本号：rime@20260902_580_5090_v1`。
+发送精确文本 `自变量语音合成版本号` 时，后门播报会依次包含 Git 发布 tag、模型发布版本和 TRT 引擎编译版本。触发短语可在 `engine.yaml` 的 `diagnostics.version_query_text` 中配置，也可以用 `ENGINE_DIAGNOSTICS_VERSION_QUERY_TEXT` 覆盖；匹配仍然要求完整精确文本。源码直跑且没有模型包时，可用 `diagnostics.engine_version`、`diagnostics.model_version` 和 `diagnostics.engine_build_version` 提供 fallback；正式模型包的 sidecar 和 `ENGINE_VERSION` 优先。
 
-TRT 引擎版本使用单独的 `ENGINE_BUILD_VERSION`。Phase B 在目标 GPU 上编译完成后，按 `编译人@编译日期_驱动大版本_适配设备_导图协议版本` 自动生成，例如 `rime@20260902_580_5090_v1`，并将它随 `artifact_manifest.json` 和 engine artifact 带入 Phase C。正常流程不再要求手工输入或覆盖引擎编译版本；完整的 engine SHA256 和 TensorRT/GPU/profile 信息仍保存在 artifact manifest 中。
+TRT 引擎版本使用单独的 `ENGINE_BUILD_VERSION`。Phase B 在目标 GPU 上编译完成后，按 `编译人@编译日期_驱动大版本_适配设备_导图协议版本` 自动生成，例如 `builder@20260820_580_5090_v1`，并将它随 `artifact_manifest.json` 和 engine artifact 带入 Phase C。正常流程不再要求手工输入或覆盖引擎编译版本；完整的 engine SHA256 和 TensorRT/GPU/profile 信息仍保存在 artifact manifest 中。
 
 模型包的打包溯源与模型发布版本分开保存。Phase C 会在同一模型包根目录生成只读的 `PACKAGE_INFO.json`：
 
 ```json
 {
   "package_info_schema_version": 1,
-  "packager": "rime",
+  "packager": "packager",
   "packaged_on": "2026-08-20"
 }
 ```

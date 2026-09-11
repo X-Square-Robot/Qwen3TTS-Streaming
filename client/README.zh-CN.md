@@ -36,7 +36,7 @@ SDK 是否兼容由 capabilities 中的**协议族和协议大版本**决定。`
 
 ```bash
 curl http://<engine-host>:<ws-port>/v1/capabilities
-# → {"engine_version": "v0.1.0", ...}
+# → {"engine_version": "v0.2.0", ...}
 ```
 
 **通道一 —— GitHub/GitLab Release。** 安装对应

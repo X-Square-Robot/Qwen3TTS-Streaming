@@ -7,8 +7,9 @@ body:
     attributes:
       value: |
         感谢反馈！请先搜索是否已有相同 issue。
-        ⚠️ 本项目为 v0.1 工程预览，**流式模式仍可能出现幻觉/重复/漏读**（见
-        [已知限制](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/blob/main/docs/user/known_limitations.md)）——这类已知现象无需单独报告。
+        本项目当前为 v0.2 稳定性版本。已验证 checkpoint 已大幅降低跑飞型幻觉，但仍可能存在
+        依赖输入的质量问题（见[已知限制](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/blob/main/docs/user/known_limitations.md)）。
+        请报告可复现的回归，并附上 checkpoint、输入、gateway 和采样参数。
         如涉及**安全漏洞**，请勿在此公开，改走 [SECURITY.md](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/blob/main/SECURITY.md)。
   - type: checkboxes
     attributes:
@@ -16,7 +17,7 @@ body:
       options:
         - label: 我已搜索过现有 issue，未发现重复
           required: true
-        - label: 该问题不属于「已知限制」中描述的流式质量现象
+        - label: 我已核对「已知限制」，或已提供新的可复现回归证据
           required: true
   - type: textarea
     attributes:

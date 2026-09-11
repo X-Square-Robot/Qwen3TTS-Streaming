@@ -40,7 +40,7 @@ does not reject the connection. First ask the engine which release it is running
 
 ```bash
 curl http://<engine-host>:<ws-port>/v1/capabilities
-# → {"engine_version": "v0.1.0", ...}
+# → {"engine_version": "v0.2.0", ...}
 ```
 
 **Channel 1 — GitHub/GitLab Release.** Install the wheel attached to the

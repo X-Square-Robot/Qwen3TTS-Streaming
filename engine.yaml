@@ -135,3 +135,14 @@ references:
       audio_path: resources/speakers/liangwuque/ref.wav
       ref_text_path: resources/speakers/liangwuque/ref.txt
       language: zh
+
+# Spoken deployment diagnostics. The trigger is matched exactly, including
+# across packetized streaming input. Override with
+# ENGINE_DIAGNOSTICS_VERSION_QUERY_TEXT when needed.
+diagnostics:
+  version_query_text: "自变量语音合成版本号"
+  # Optional fallbacks for source-tree runs without a model package. In a
+  # packaged deployment, ENGINE_VERSION and the read-only model sidecars win.
+  engine_version: ""
+  model_version: ""
+  engine_build_version: ""

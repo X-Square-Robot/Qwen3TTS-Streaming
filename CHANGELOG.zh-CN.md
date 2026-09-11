@@ -11,6 +11,9 @@
 
 ### Added
 
+- v0.2 稳定性版本已经在已验证的重训 checkpoint 上大幅抑制历史跑飞型幻觉问题。
+  当前记录的全 bf16 确定性验证为 0/100；旧 0601 checkpoint 的 10–18% 结果仅作为
+  历史证据保留。
 - 流式 TN 现在在 tokenizer/Spliter 之前维护 raw Unicode、mutable tail、主
   `TextCommit` 和 `CanonicalTextJournal`；WeText、混合语言路由、显式 fallback 以及
   raw → spoken provenance 由同一套前端合同负责。

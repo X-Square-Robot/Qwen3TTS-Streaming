@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
+from .frontend.diagnostic_text import DEFAULT_VERSION_QUERY_TEXT
+
 if TYPE_CHECKING:
     import torch
 
@@ -275,6 +277,21 @@ class ReferencesConfig:
 
 
 @dataclass
+class DiagnosticsConfig:
+    """Spoken diagnostic triggers and source-only identity fallbacks.
+
+    The identity fields are used only when the engine is started without a
+    model package. A package's MODEL_VERSION / ENGINE_BUILD_VERSION sidecars
+    and the ENGINE_VERSION environment variable remain authoritative.
+    """
+
+    version_query_text: str = DEFAULT_VERSION_QUERY_TEXT
+    engine_version: str = ""
+    model_version: str = ""
+    engine_build_version: str = ""
+
+
+@dataclass
 class ObservabilityConfig:
     """Tiered observability control (see docs/dev/design/observability_tiers.md).
 
@@ -309,6 +326,7 @@ class EngineConfig:
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
     prefill: PrefillConfig = field(default_factory=PrefillConfig)
     references: ReferencesConfig = field(default_factory=ReferencesConfig)
+    diagnostics: DiagnosticsConfig = field(default_factory=DiagnosticsConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
 
@@ -326,6 +344,7 @@ _CONFIG_SECTION_NAMES = (
     "sampling",
     "prefill",
     "references",
+    "diagnostics",
     "observability",
 )
 
@@ -418,6 +437,7 @@ def _dict_to_config(raw: dict) -> EngineConfig:
         ("sampling", SamplingConfig),
         ("prefill", PrefillConfig),
         ("references", ReferencesConfig),
+        ("diagnostics", DiagnosticsConfig),
         ("observability", ObservabilityConfig),
     ]:
         section_data = raw.get(section_name, {})

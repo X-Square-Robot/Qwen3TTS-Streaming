@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- The v0.2 stability line substantially suppresses the historical
+  runaway-hallucination failure mode on the validated retrained checkpoint.
+  The recorded full-bf16 deterministic validation is 0/100; the old 0601
+  checkpoint's 10–18% result remains documented as historical evidence.
 - Streaming TN now maintains raw Unicode, a mutable tail, primary
   `TextCommit` records, and the `CanonicalTextJournal` before the
   tokenizer/Spliter boundary. WeText, mixed-language routing, explicit

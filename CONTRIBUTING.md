@@ -2,7 +2,7 @@
 
 # Contributing Guide
 
-Thank you for your interest in Qwen3TTS-Streaming! This project is a **v0.1 engineering preview**, and streaming quality is still being polished (see [Known Limitations](docs/user/known_limitations.md)); you are welcome to participate via issues, discussions, and PRs.
+Thank you for your interest in Qwen3TTS-Streaming! This project is in the **v0.2 stability release** line. The validated checkpoint substantially reduces runaway hallucination, while broader checkpoint and workload validation is still valuable (see [Known Limitations](docs/user/known_limitations.md)); you are welcome to participate via issues, discussions, and PRs.
 
 ## Development Environment
 

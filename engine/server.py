@@ -59,10 +59,9 @@ from .runtime.fingerprint import (
 from .runtime.engine_build_version import load_engine_build_version
 from .runtime.model_version import load_model_version
 from .frontend.diagnostic_text import (
-    DEFAULT_ENGINE_BUILD_VERSION,
-    DEFAULT_ENGINE_VERSION,
-    DEFAULT_MODEL_VERSION,
+    UNKNOWN_VERSION,
     format_engine_model_version,
+    normalize_version_query_text,
 )
 from .core.mlfq import MLFQConfig
 from .core.extensions import EngineExtensions
@@ -256,10 +255,11 @@ class TTSEngine:
 
         # Release identity is cheap package metadata and must fail before any
         # tokenizer, weights, or TensorRT plan is loaded.
+        diagnostics = self._cfg.diagnostics
         model_version = (
             load_model_version(self._cfg.paths.model_package_dir)
             if self._cfg.paths.model_package_dir
-            else DEFAULT_MODEL_VERSION
+            else str(diagnostics.model_version or "").strip() or UNKNOWN_VERSION
         )
         # ENGINE_BUILD_VERSION remains package/fingerprint metadata, but the
         # public engine version is the release tag advertised by capabilities.
@@ -268,15 +268,21 @@ class TTSEngine:
         engine_build_version = (
             load_engine_build_version(self._cfg.paths.model_package_dir)
             if self._cfg.paths.model_package_dir
-            else DEFAULT_ENGINE_BUILD_VERSION
+            else str(diagnostics.engine_build_version or "").strip()
+            or UNKNOWN_VERSION
         )
         engine_version = (
-            os.environ.get("ENGINE_VERSION", "").strip() or DEFAULT_ENGINE_VERSION
+            os.environ.get("ENGINE_VERSION", "").strip()
+            or str(diagnostics.engine_version or "").strip()
+            or UNKNOWN_VERSION
         )
         engine_model_version = format_engine_model_version(
             engine_version,
             model_version,
             engine_build_version,
+        )
+        version_query_text = normalize_version_query_text(
+            self._cfg.diagnostics.version_query_text
         )
 
         self._tokenizer = LightQwen3TTSTokenizer(self._tokenizer_dir)
@@ -391,6 +397,7 @@ class TTSEngine:
             guarded_delivery_default=self._cfg.server.guarded_delivery_default,
             guarded_delivery_window_ms=self._cfg.server.guarded_delivery_window_ms,
             engine_model_version=engine_model_version,
+            version_query_text=version_query_text,
             commitment_factory=self._extensions.commitment_factory,
             extensions=self._extensions,
         )

@@ -6,7 +6,7 @@ Thank you for helping keep Qwen3TTS-Streaming and its users secure.
 
 ## Supported Versions
 
-This project is currently in the **v0.1 engineering preview** stage, and provides security fixes only for the latest commit on the `main` branch. The preview version is not recommended for production use (see [Known Limitations](docs/user/known_limitations.md)).
+This project is currently in the **v0.2 stability release** line, and provides security fixes only for the latest commit on the `main` branch. The validated checkpoint substantially reduces runaway hallucination, but operators should still review the [Known Limitations](docs/user/known_limitations.md) and validate their own workloads.
 
 | Version | Security updates provided |
 |---------|---------------------------|

@@ -18,7 +18,7 @@ Every design in the whole engine is a downstream product of these four constrain
 | **C1** | The model is **autoregressive**, with a **fixed KV budget per segment** (a hard cap of 512 steps/slot) | Hardware/model, cannot be eliminated |
 | **C2** | Text **arrives asynchronously** (fed from an upstream LLM token stream); decode must be able to "wait for text" (WAIT_TEXT) | Business semantics, cannot be eliminated |
 | **C3** | The frontend **can only control text tokens**; audio steps are a downstream product and can only be estimated with an EMA (~3 steps per Chinese character) | Caused by the three-stage architecture, cannot be eliminated |
-| **C4** | The model **may not reliably emit EOS** — how often is **checkpoint-dependent**, and the project ships no weights, so this stays a standing constraint the engine must always defend against. Observed range: one internal checkpoint (0601) never finished on ~10–18% of seeds → ran out the full 512 → hallucinated; its retrain (0701) measures 0/100 on the same deterministic seeds (both cp=fp32 and full-bf16 engines). The 512-step cap, VAD gating, and runaway handling exist for whatever checkpoint a user brings | Model checkpoint + sampling, **not an implementation bug** |
+| **C4** | The model **may not reliably emit EOS** on arbitrary checkpoints — how often is **checkpoint-dependent**, and the project ships no weights, so this stays a standing constraint the engine must always defend against. Historically, the internal 0601 checkpoint never finished on ~10–18% of seeds → ran out the full 512 → hallucinated. The retrained/current v0.2 checkpoint measures 0/100 on the same deterministic seeds (both cp=fp32 and full-bf16 engines), so the release line substantially suppresses that failure mode. The 512-step cap, VAD gating, and runaway handling remain for whatever checkpoint a user brings | Model checkpoint + sampling, **not an implementation bug** |
 
 > In one sentence: this engine does **real-time streaming TTS on an autoregressive model that will overflow, may never finish, can only be controlled indirectly, and must work while waiting for text**. Nearly all of the complexity comes from bearing these four points head-on.
 
@@ -106,8 +106,8 @@ Every design in the whole engine is a downstream product of these four constrain
 
 ## 3. Output Layer (All C4 Cleanup)
 
-VAD output gating (trimming leading/trailing hallucinated silence), isochronous audio streaming (padding silence for the WebRTC jitter buffer), and 14-stage observability.
-- **Why**: C4 hallucination cannot be cured at the model layer, so it is patched after the fact at the output end (VAD ~0.1-0.2ms, transparent to the engine).
+VAD output gating (trimming leading/trailing abnormal silence), isochronous audio streaming (padding silence for the WebRTC jitter buffer), and 14-stage observability.
+- **Why**: v0.2 fixes the main runaway source at the checkpoint level, but arbitrary checkpoints and inputs still need defense-in-depth at the output end (VAD ~0.1-0.2ms, transparent to the engine).
 - **Common flaw**: **None of them reduces TTFT** — the trimmed/padded parts were still synthesized first. They improve experience (clipping, noise), not latency.
 - See [[vad_design_goals]], [[realtime_audio]], and [[observability_goals]] for details.
 
@@ -126,7 +126,7 @@ VAD output gating (trimming leading/trailing hallucinated silence), isochronous 
 ### 🔴 Unavoidable (Intrinsic to C1–C4, Can Only Be Mitigated)
 | Flaw | Root | What Can Be Done |
 |---|---|---|
-| Hallucination ~10-18% | C4 model + sampling | VAD cleanup, EOS temperature tuning, forced truncation; **the real fix is training** |
+| Historical 0601 runaway hallucination; v0.2 validated checkpoint 0/100 on the probe | C4 model + sampling | Retrained/validated checkpoint, VAD cleanup, loop guards, EOS tuning, forced truncation; user checkpoints still need validation |
 | KV 512 overflow risk | C1 hard budget | Packing, watermark early cut, tail carry-over (no loss) |
 | Only text is controllable, audio is estimated | C3 three-stage | The watermark replaces the intra-segment estimate with a measurement; inter-segment packing still relies on the EMA |
 | Completeness must be signaled explicitly | C2 async text | The protocol clarifies the signal; it cannot be removed |

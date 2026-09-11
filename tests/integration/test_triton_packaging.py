@@ -83,7 +83,7 @@ def _write_custom_export(exported_dir: Path) -> None:
         encoding="utf-8",
     )
     (variant_dir / "MODEL_VERSION").write_text(
-        "zehan@20260601\n",
+        "researcher@20260601\n",
         encoding="utf-8",
     )
     (variant_dir / "MODEL_VERSION").chmod(0o444)
@@ -363,7 +363,7 @@ def test_custom_trt_package_excludes_verification_and_icl_assets(tmp_path):
     assert not (repo_dir / "artifact_manifest.json").exists()
     assert (runtime_dir / "model.plan").is_file()
     assert (package_dir / "MODEL_VERSION").read_text(encoding="utf-8") == (
-        "zehan@20260601\n"
+        "researcher@20260601\n"
     )
     assert (package_dir / "MODEL_VERSION").stat().st_mode & 0o222 == 0
     engine_version_path = package_dir / "ENGINE_BUILD_VERSION"

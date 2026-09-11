@@ -5,7 +5,7 @@
 ## 结论
 
 本轮坐标、流式 TN、cursor、Splitter、Native Gateway 和 Triton 兼容层验证通过。
-本次服务级验收使用 `/data/models/tts/qwen3-tts/trained/zehan/0818-trained/`
+本次服务级验收使用 `/data/models/tts/qwen3-tts/trained/sample-model/0818-trained/`
 导出的 native-cursor 包，而不是 standard plan。
 
 ## 核心协议
@@ -74,8 +74,8 @@ workspace/validation/triton_local/triton-grpc/triton_grpc_synthesize.wav
 本次 native-cursor 双入口实际产物为：
 
 ```text
-workspace/validation/zehan_cursor_native.wav
-workspace/validation/zehan_cursor_triton/triton-grpc/triton_grpc_synthesize.wav
+workspace/validation/sample-cursor_native.wav
+workspace/validation/sample-cursor_triton/triton-grpc/triton_grpc_synthesize.wav
 ```
 
 Native Gateway 目标模型 `custom-1.7b` 的 `max_batch=1` profile 下，单请求、流式文本、

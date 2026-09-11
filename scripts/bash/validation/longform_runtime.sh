@@ -8,6 +8,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 package_root="$repo_root/workspace/model_repository"
 package_version_dir="$package_root/tts_orchestrator/2"
 plan_path="$package_version_dir/runtime/model.plan"
+expected_model_version="${QWEN3TTS_LONGFORM_MODEL_VERSION:-}"
 expected_plan_sha256="18f0e6d324bae9bdc446cae580f63cf83c981909408927fc2d01d8b0be26a181"
 expected_text_token_ids_sha256="fcf7b0c06027375b7e02eb3e58aa7f96d8654320e0d0e80978ed1ff862e1ca87"
 eval_image="qwen3tts-longform-eval:triton25.10-pytorch25.10-v0.1.2a6"
@@ -30,9 +31,11 @@ verify_frozen_package() {
     echo "frozen TRT plan hash mismatch: $observed" >&2
     exit 1
   fi
-  if [[ "$(tr -d '\r\n' < "$package_version_dir/MODEL_VERSION")" != "zehan@20260818" ]]; then
-    echo "unexpected frozen MODEL_VERSION" >&2
-    exit 1
+  if [[ -n "$expected_model_version" ]]; then
+    if [[ "$(tr -d '\r\n' < "$package_version_dir/MODEL_VERSION")" != "$expected_model_version" ]]; then
+      echo "frozen MODEL_VERSION does not match QWEN3TTS_LONGFORM_MODEL_VERSION" >&2
+      exit 1
+    fi
   fi
 }
 

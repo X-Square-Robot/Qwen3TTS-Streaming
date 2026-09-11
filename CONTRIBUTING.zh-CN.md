@@ -2,7 +2,8 @@
 
 # 贡献指南
 
-感谢你对 Qwen3TTS-Streaming 的关注！本项目是 **v0.1 工程预览**，流式质量仍在打磨（见 [已知限制](docs/user/known_limitations.zh-CN.md)），欢迎以 issue、讨论、PR 形式参与。
+感谢你对 Qwen3TTS-Streaming 的关注！本项目当前处于 **v0.2 稳定性版本**阶段。已验证
+checkpoint 已大幅降低跑飞型幻觉，仍需要继续覆盖更多 checkpoint 和业务负载（见[已知限制](docs/user/known_limitations.zh-CN.md)），欢迎以 issue、讨论、PR 形式参与。
 
 ## 开发环境
 

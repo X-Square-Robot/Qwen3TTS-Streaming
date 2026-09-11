@@ -220,7 +220,7 @@ class LanguageResolver:
                 LanguageKind.ZH,
             )
         # Product identifiers and versions often contain Latin characters but
-        # are embedded in Chinese prose (``模型版本号: zehan@...``).  Their
+        # are embedded in Chinese prose (``模型版本号: researcher@...``).  Their
         # internal alphabet is not enough to select the English graph; use the
         # surrounding script first.
         local = _local_script_resolution(context_before, context_after)

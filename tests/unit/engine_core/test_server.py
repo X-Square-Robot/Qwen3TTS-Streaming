@@ -88,7 +88,7 @@ def test_start_rejects_missing_model_version_before_loading_runtime(tmp_path):
 
 def test_start_rejects_missing_engine_build_version_before_loading_runtime(tmp_path):
     model_version = tmp_path / "MODEL_VERSION"
-    model_version.write_text("zehan@20260818\n", encoding="utf-8")
+    model_version.write_text("researcher@20260818\n", encoding="utf-8")
     model_version.chmod(0o444)
     cfg = EngineConfig()
     cfg.paths.model_package_dir = str(tmp_path)

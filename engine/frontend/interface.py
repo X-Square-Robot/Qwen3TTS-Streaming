@@ -60,6 +60,8 @@ from ..interface.output import ENGINE_SAMPLE_RATE
 from .diagnostic_text import (
     DEFAULT_ENGINE_MODEL_VERSION,
     DiagnosticTextRouter,
+    VERSION_QUERY_TEXT,
+    normalize_version_query_text,
     resolve_diagnostic_text,
 )
 from .dispatcher import Dispatcher
@@ -399,6 +401,7 @@ class FrontendInterface:
         guarded_delivery_window_ms: int = 100,
         reorder_stall_timeout_ms: int = 10_000,
         engine_model_version: str = DEFAULT_ENGINE_MODEL_VERSION,
+        version_query_text: str = VERSION_QUERY_TEXT,
         speech_state_capability: Optional[SpeechStateCapability] = None,
         cursor_plan_adapter_factory: Optional[Callable[[], Any]] = None,
         commitment_factory: Optional[Callable[[str, Any], Any]] = None,
@@ -451,6 +454,7 @@ class FrontendInterface:
         self._engine_model_version = str(engine_model_version).strip()
         if not self._engine_model_version:
             raise ValueError("engine_model_version must not be empty")
+        self._version_query_text = normalize_version_query_text(version_query_text)
         # Session is asyncio-owned and may expose this read-only descriptor,
         # but never owns the backend's opaque state handle or payload.
         self._speech_state_capability = coerce_speech_state_capability(
@@ -700,7 +704,9 @@ class FrontendInterface:
         session.event_callback = on_event
         self._sessions[session_id] = session
         self._tn_locks[session_id] = asyncio.Lock()
-        diagnostic_router = DiagnosticTextRouter()
+        diagnostic_router = DiagnosticTextRouter(
+            version_query_text=self._version_query_text
+        )
         self._diagnostic_text_routers[session_id] = diagnostic_router
         # Keep a read-only-by-convention reference on the session so the
         # static raw-source helper can include a held exact-query prefix
@@ -1238,7 +1244,11 @@ class FrontendInterface:
         # Resolve only the exact diagnostic trigger before the normal TN
         # committer.  The replacement is an input to TN, never a post-TN
         # literal journal or tokenizer shortcut.
-        tn_input = resolve_diagnostic_text(raw_text, self._engine_model_version)
+        tn_input = resolve_diagnostic_text(
+            raw_text,
+            self._engine_model_version,
+            self._version_query_text,
+        )
         decision = session.text_committer.feed(tn_input, final=True)
         self._log_tn_commits(session, decision.commits)
         self._log_tn_pending(session, decision)

@@ -233,30 +233,84 @@ def test_x2_commitment_observes_same_main_tn_projection_across_input_modes(
 
 
 def test_diagnostic_text_alias_is_exact_and_uses_independent_versions():
+    engine_version = "engine-release"
+    model_version = "model-release"
+    engine_build_version = "builder@20260820_580_5090_v1"
     version_text = format_engine_model_version(
-        DEFAULT_ENGINE_VERSION,
-        DEFAULT_MODEL_VERSION,
-        DEFAULT_ENGINE_BUILD_VERSION,
+        engine_version,
+        model_version,
+        engine_build_version,
     )
     assert version_text == (
-        "引擎版本号：v0.2.0a14，"
-        "模型版本号：zehan@20260818，"
-        "引擎编译版本号：unknown"
+        "引擎版本号：engine-release，"
+        "模型版本号：model-release，"
+        "引擎编译版本号：builder@20260820_580_5090_v1"
     )
-    assert version_text == DEFAULT_ENGINE_MODEL_VERSION
     assert format_engine_model_version(
         DEFAULT_ENGINE_VERSION,
         DEFAULT_MODEL_VERSION,
-        "rime@20260902_580_5090_v1",
+        DEFAULT_ENGINE_BUILD_VERSION,
+    ) == DEFAULT_ENGINE_MODEL_VERSION
+    assert format_engine_model_version(
+        engine_version,
+        model_version,
+        "builder@20260821_580_5090_v1",
     ) == (
-        "引擎版本号：v0.2.0a14，"
-        "模型版本号：zehan@20260818，"
-        "引擎编译版本号：rime@20260902_580_5090_v1"
+        "引擎版本号：engine-release，"
+        "模型版本号：model-release，"
+        "引擎编译版本号：builder@20260821_580_5090_v1"
     )
     assert resolve_diagnostic_text(VERSION_QUERY_TEXT, version_text) == version_text
     assert resolve_diagnostic_text(
         f"请合成{VERSION_QUERY_TEXT}", version_text
     ) == f"请合成{VERSION_QUERY_TEXT}"
+
+
+@pytest.mark.parametrize("input_mode", [InputMode.FULL_TEXT, InputMode.AUTO])
+def test_configured_version_query_text_synthesizes_engine_model_version(input_mode):
+    async def run():
+        query_text = "播报当前部署版本"
+        inbox = asyncio.Queue(maxsize=256)
+        interface = FrontendInterface(
+            engine_inbox=inbox,
+            tokenizer=_CharTokenizer(),
+            max_sessions=2,
+            engine_max_decode_len=256,
+            version_query_text=query_text,
+            safety_ratio_initial=4.5,
+        )
+        session = await interface.create_session(
+            f"configured-version-query-{input_mode.value}",
+            config=SessionConfig(
+                task_type="custom_voice",
+                speaker="Serena",
+                input_mode=input_mode,
+                group_policy=GroupPolicy.NONE,
+            ),
+        )
+
+        await interface.push_text_input(session.session_id, query_text[:4])
+        await interface.push_text_input(session.session_id, query_text[4:])
+        await interface.mark_input_complete(session.session_id)
+
+        requests = await _drain_requests(inbox)
+        token_text = "".join(
+            chr(token_id)
+            for request in requests
+            for token_id in (request.token_ids or [])
+        )
+        expected_spoken = "引擎版本号：unknown，模型版本号：unknown，引擎编译版本号：unknown"
+        assert token_text == expected_spoken
+
+        await session.result_queue.put(
+            EngineResult(
+                type=ResultType.SESSION_DONE,
+                session_id=session.session_id,
+            )
+        )
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("input_mode", [InputMode.FULL_TEXT, InputMode.AUTO])
@@ -297,7 +351,7 @@ def test_version_query_synthesizes_engine_model_version(input_mode):
             for request in requests
             for token_id in (request.token_ids or [])
         )
-        expected_spoken = "引擎版本号：v零点二点零a一四，模型版本号：zehan艾特二零二六零八一八，引擎编译版本号：unknown"
+        expected_spoken = "引擎版本号：unknown，模型版本号：unknown，引擎编译版本号：unknown"
         assert token_text == expected_spoken
         assert session.text_journal.normalized_text == expected_spoken
         assert session.text_journal.raw_text in {

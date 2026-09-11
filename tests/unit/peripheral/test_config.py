@@ -6,6 +6,7 @@ import tempfile
 
 import pytest
 
+from engine.frontend.diagnostic_text import DEFAULT_VERSION_QUERY_TEXT
 from engine.config import (
     EngineConfig,
     ModelArchConfig,
@@ -94,6 +95,29 @@ class TestEnvOverrides:
             _apply_env_overrides(raw)
         assert raw["server"]["health_probe_mode"] == "alive"
 
+    def test_applies_diagnostics_version_query_override(self):
+        raw: dict = {}
+        env = {"ENGINE_DIAGNOSTICS_VERSION_QUERY_TEXT": "播报部署版本"}
+        with _patch_env(env):
+            _apply_env_overrides(raw)
+        assert raw["diagnostics"]["version_query_text"] == "播报部署版本"
+
+    def test_applies_diagnostics_identity_fallback_overrides(self):
+        raw: dict = {}
+        env = {
+            "ENGINE_DIAGNOSTICS_ENGINE_VERSION": "engine-release",
+            "ENGINE_DIAGNOSTICS_MODEL_VERSION": "model-release",
+            "ENGINE_DIAGNOSTICS_ENGINE_BUILD_VERSION": "builder@20260820_580_5090_v1",
+        }
+        with _patch_env(env):
+            _apply_env_overrides(raw)
+        assert raw["diagnostics"]["engine_version"] == "engine-release"
+        assert raw["diagnostics"]["model_version"] == "model-release"
+        assert (
+            raw["diagnostics"]["engine_build_version"]
+            == "builder@20260820_580_5090_v1"
+        )
+
     def test_applies_token_loop_guard_overrides(self):
         raw: dict = {}
         env = {
@@ -156,17 +180,28 @@ class TestLoadConfig:
         assert cfg.spliter.ema_ratio_initial == pytest.approx(4.5)
         assert cfg.spliter.safety_ratio_initial == pytest.approx(5.5)
         assert cfg.spliter.ema_min_observation_tokens == 8
+        assert cfg.diagnostics.version_query_text == DEFAULT_VERSION_QUERY_TEXT
 
     def test_yaml_file(self):
         pytest.importorskip("yaml")
 
-        content = "scheduler:\n  max_batch_size: 16\n"
+        content = (
+            "scheduler:\n"
+            "  max_batch_size: 16\n"
+            "diagnostics:\n"
+            '  version_query_text: "播报部署版本"\n'
+            '  engine_version: "engine-release"\n'
+            '  model_version: "model-release"\n'
+        )
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             f.write(content)
             f.flush()
-            cfg = load_config(f.name)
+        cfg = load_config(f.name)
         os.unlink(f.name)
         assert cfg.scheduler.max_batch_size == 16
+        assert cfg.diagnostics.version_query_text == "播报部署版本"
+        assert cfg.diagnostics.engine_version == "engine-release"
+        assert cfg.diagnostics.model_version == "model-release"
 
     def test_no_model_section(self):
         """EngineConfig no longer has a model section."""

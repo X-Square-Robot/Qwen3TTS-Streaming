@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/actions/workflows/ci.yml/badge.svg)](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
-[![Status](https://img.shields.io/badge/status-v0.1%20engineering%20preview-orange.svg)](#capability-status)
+[![Status](https://img.shields.io/badge/status-v0.2%20stability%20release-blue.svg)](#capability-status)
 [![GitHub stars](https://img.shields.io/github/stars/X-Square-Robot/Qwen3TTS-Streaming?style=social)](https://github.com/X-Square-Robot/Qwen3TTS-Streaming)
 
 <img src="docs/images/文本播放器.gif" width="720" alt="Historical pre-consolidation Text Player screenshot; open the current unified portal at /demo/">
@@ -22,12 +22,16 @@
 
 ## Introduction
 
-Qwen3TTS-Streaming is an **engineering preview** project: it exports the official Qwen3-TTS PyTorch weights into an ONNX/TensorRT runtime and builds **token-level streaming TTS** around a Triton/standalone engine, together with model fusion, frontend segmentation, prefix cache, continuous batching, and a built-in product Demo. The project opens up a highly optimized, reproducible, and continuously verifiable engineering pipeline, inviting the community to polish it together into a reliable open-source inference system.
+Qwen3TTS-Streaming is a **v0.2 stability-focused open-source inference system**: it exports the official Qwen3-TTS PyTorch weights into an ONNX/TensorRT runtime and builds **token-level streaming TTS** around a Triton/standalone engine, together with model fusion, frontend segmentation, prefix cache, continuous batching, and a built-in product Demo. The project provides a highly optimized, reproducible, and continuously verifiable engineering pipeline for real-time speech generation.
 
-> ⚠️ **Status: v0.1 engineering preview, not production-ready.** Streaming mode may still exhibit **hallucination, repetition, and dropped reading** (roughly 10–18% on the current checkpoint, rooted in the model and sampling; see [Known Limitations](docs/user/known_limitations.md)). **The currently recommended stable scope is the `custom-1.7b` / `custom_voice` path.** `design-1.7b`, `base-1.7b` / x-vector voice cloning, and `icl` voice cloning are experimental; the `0.6b` variants are not part of the v0.1 mainline. Do not use it directly for production content generation.
+> **Status: v0.2 stability release.** The validated `custom-1.7b` / `custom_voice` checkpoint and runtime safeguards substantially suppress streaming hallucination, repetition, and dropped reading. The recorded deterministic validation is **0/100 runaway cases** on the validated full-bf16 engine, compared with the historical 0601 checkpoint's roughly 10–18% runaway rate. Residual behavior remains checkpoint-, input-, and sampling-dependent, so production deployments still need workload-specific validation. `design-1.7b`, `base-1.7b` / x-vector voice cloning, and `icl` voice cloning remain experimental; the `0.6b` variants are outside the current v0.2 stable scope. See [Known Limitations](docs/user/known_limitations.md).
 
 ## News
 
+- **2026-09-10: v0.2 substantially improves streaming stability.** The validated retrained
+  checkpoint and runtime defenses suppress the historical runaway-hallucination failure mode;
+  the recorded full-bf16 validation is 0/100 on the deterministic probe set. This is a
+  strong reduction, not a universal semantic-correctness guarantee for arbitrary checkpoints.
 - **2026-09-10: Streaming TN and native text progress are now wired into the current engine.**
   The primary streaming TN layer owns raw Unicode, mutable tails, and monotonic
   `TextCommit` records. WeText and mixed-language routing decide the spoken form on CPU, while
@@ -196,14 +200,14 @@ For detailed benchmark methodology, see [Benchmark Methodology](docs/user/benchm
 
 | Path | Current status | Open-source scope |
 | --- | --- | --- |
-| `custom-1.7b` / `custom_voice` | 🟢 Prioritized/stable | The v0.1 recommended path; the product Demo showcases it by default |
+| `custom-1.7b` / `custom_voice` | 🟢 Prioritized/stable | The v0.2 recommended path; the product Demo showcases it by default |
 | streaming TN / monotonic commitment | 🟢 Integrated | The primary TN owns spoken-form truth; open semantic tails may wait, then resolve or use an explicit fallback |
 | native text progress | 🟢 Limited scope | Only a matched `custom-1.7b` cursor-enabled TRT artifact; other models fall back to EMA/disabled |
 | `SOFT_DRAIN` / state rollover | ⚪ Not released | Design and acceptance contracts exist; current runtime continues to use `WAIT_TEXT` and explicit hard finalization |
 | `design-1.7b` / `voice_design` | 🟡 Experimental | Code and export entry points can be kept, but must be marked as not fully validated |
 | `base-1.7b` / x-vector voice clone | 🟡 Experimental | Standalone already wires up ref audio → speaker embedding; needs the base export artifacts and real end-to-end validation |
 | `icl` voice clone | 🟡 Experimental | Standalone already wires up ref audio + ref text → ref codec/code injection; needs the TRT ref-audio engine and real end-to-end validation |
-| `0.6b` variants | ⚪ Not part of the v0.1 mainline | Export/download entry points can be kept, but need separate validation before release |
+| `0.6b` variants | ⚪ Outside the v0.2 stable scope | Export/download entry points can be kept, but need separate validation before release |
 
 ## Prerequisites
 
@@ -333,7 +337,7 @@ way to reproduce an exactly matched environment:
 
 ```bash
 curl https://<public-service-base>/v1/capabilities
-# → {"engine_version": "v0.1.0", ...}
+# → {"engine_version": "v0.2.0", ...}
 
 # For an exact, copyable command, open the current instance's /demo/#/sdk page.
 # Forge users can instead select the wheel attached to the matching release:
@@ -566,7 +570,9 @@ Qwen3TTS-Streaming/
 
 ## Contributing
 
-This project is a **v0.1 engineering preview**, and streaming quality is still being polished; you are welcome to participate via issues, discussions, and PRs.
+This project is a **v0.2 stability-focused release**. The validated checkpoint substantially
+reduces runaway hallucination, while broader checkpoint and workload validation remains valuable;
+you are welcome to participate via issues, discussions, and PRs.
 
 - 🤝 [Contributing Guide](CONTRIBUTING.md) — development environment, testing, proto workflow, code style
 - 💬 [Support Channels](SUPPORT.md) — how questions / bug reports / suggestions are routed

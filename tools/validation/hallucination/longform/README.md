@@ -20,7 +20,9 @@ base 环境。Triton 评测镜像不从 PyPI 安装任何包：它由本机不�
 `4c314475...`（NGC PyTorch 25.10）和原始 Triton 25.10 镜像 `9ff4dd7a...`
 组合，保留 torch 2.9.0a0、Triton 2.62.0 和 TRT 10.13.3.9。安全构建与只读启动见
 `scripts/bash/validation/longform_runtime.sh`；该脚本不调用 assemble/autorun，会检查
-动态库、Python backend、677-token 输入哈希，并在 GPU 非独占时拒绝启动。由于历史上
+动态库、Python backend、677-token 输入哈希，并在 GPU 非独占时拒绝启动。若设置
+`QWEN3TTS_LONGFORM_MODEL_VERSION`，还会校验冻结模型包的发布身份；未设置时不会把某个
+具体研究模型身份写死在运行器中。由于历史上
 没有发布完整的 v0.1.2a6 Triton 镜像，这个可审计组合运行时也是报告中必须披露的限制。
 
 设定输出目录与解释器：

@@ -2,6 +2,13 @@
 
 # Streaming Hallucination Investigation Summary
 
+> **Current v0.2 status (2026-09-10):** the 10–18% runaway rates below describe the
+> historical internal 0601 checkpoint and are not the current release quality. The
+> validated retrained/current checkpoint measured 0/100 runaway cases on the
+> deterministic probe set in the full-bf16 engine. Keep the old data as root-cause
+> evidence, but describe v0.2 as substantially suppressing the failure mode, not
+> as inheriting the 0601 rate.
+
 ## Scope
 
 This document summarizes the investigation background for the streaming/sampling hallucination issue in the development branch.

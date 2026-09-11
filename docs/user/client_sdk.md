@@ -41,7 +41,7 @@ liveness probe and carries no version). To find out what a running engine is:
 
 ```bash
 curl http://<engine-host>:<ws-port>/v1/capabilities
-# → {"loaded_model_type": "...", "engine_version": "v0.1.0", "protocol_version": "...", ...}
+# → {"loaded_model_type": "...", "engine_version": "v0.2.0", "protocol_version": "...", ...}
 ```
 
 Installing that SDK version is recommended for an exactly reproducible release.
@@ -78,7 +78,7 @@ The identical file is exposed through the project's GitLab PyPI registry:
 ```bash
 pip install \
   --index-url "https://<gitlab-host>/api/v4/projects/<project-id>/packages/pypi/simple" \
-  "qwen3-tts-client[all]==0.1.0"
+  "qwen3-tts-client[all]==0.2.0"
 ```
 
 For a private project, prefer the PyPI registry and configure a personal or
