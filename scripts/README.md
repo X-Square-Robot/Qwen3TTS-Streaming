@@ -5,6 +5,8 @@
 ## Where To Start
 
 - **`scripts/bash/autorun.sh`**: primary operator entry point (setup → build → package → deploy)
+- **`scripts/bash/prepare_release_checkout.sh`**: resolve a release candidate commit and create a local-only version tag
+- **`scripts/bash/promote_container_image.sh`**: promote a verified candidate image without overwriting a different release digest
 - **`scripts/python/audit_tooling_surface.py`**: governance report for scripts/ + tests/ surface
 - **`tools/validation/serving_endpoints.py`**: canonical serving acceptance and benchmark tool
 - **`tests/README.md`**: main map for pytest suites and manual validation tools
@@ -13,7 +15,7 @@
 
 | Location | Role | Audience |
 | --- | --- | --- |
-| `scripts/bash/` | lifecycle and operator workflows (14 files) | users deploying or packaging the project |
+| `scripts/bash/` | lifecycle and operator workflows | users deploying or packaging the project |
 | `scripts/bash/lib/` | shared shell library code | maintainers extending shell flows |
 | `scripts/export/` | model export implementation (01–09) | maintainers working on ONNX / TRT export |
 | `scripts/python/` | bash-called Python helpers (JSON/profile/NGC/Triton-config) | maintainers |

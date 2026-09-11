@@ -53,9 +53,9 @@ capabilities：协议族或协议大版本不兼容时抛出
 
 ### 通道一 —— GitHub/GitLab Release 与 GitLab Package Registry
 
-每个版本 tag 都会在两个代码托管平台生成 Release wheel。权威、可直接复制的安装命令
-由已部署实例的 `/demo/#/sdk` 动态生成；它使用精确的相对 `/sdk/` 资源地址，因此能
-保留反向代理前缀。也可以从对应的
+每次晋级发布都会创建正式版本 tag，并在两个代码托管平台生成 Release wheel。权威、可直接
+复制的安装命令由已部署实例的 `/demo/#/sdk` 动态生成；它使用精确的相对 `/sdk/`
+资源地址，因此能保留反向代理前缀。也可以从对应的
 [GitHub Release](https://github.com/X-Square-Robot/Qwen3TTS-Streaming/releases)
 或 GitLab Release 的 `client-sdk` 链接选择 wheel。不要把旧发布的文件名复制进长期
 维护的文档。
@@ -92,7 +92,7 @@ PyPI package forwarding，还需配置可信的依赖索引或预装 wheel 的�
 
 ### 通道二 —— 从运行中引擎获取同一 wheel
 
-每个正式运行时镜像都嵌入 tag 流水线已经发布的 wheel，并在公共服务的
+每个正式运行时镜像都嵌入候选发布流水线已验证的 wheel，并在公共服务的
 `GET /sdk/` 提供：
 
 ```bash
@@ -102,20 +102,18 @@ pip install "https://<public-service-base>/sdk/<wheel-filename>"
 
 ### 发版不变量
 
-向某个平台推送（或镜像同步）`vX.Y.Z`、`vX.Y.ZaN`、`vX.Y.ZbN` 或
-`vX.Y.ZrcN` tag 后，该平台的 `.gitlab-ci.yml` 或
-`.github/workflows/release.yml` 会独立执行同一套 build-once 约束：
+发布维护者手动启动候选流水线，传入目标 `release_version` / `RELEASE_VERSION` 和
+source ref。只有最后的 promotion job 会创建正式的 `vX.Y.Z`、`vX.Y.ZaN`、
+`vX.Y.ZbN` 或 `vX.Y.ZrcN` tag。两套 forge 都独立执行同一套 build-once 约束：
 
 1. 只检出主仓库（GitLab 为 `GIT_SUBMODULE_STRATEGY=none`，GitHub 为
    `submodules: false`）。
 2. 用 `release_client_wheel.sh` 构建且仅构建一个 wheel，并做安装烟测。
-3. GitLab 把 wheel 发布到 PyPI Package Registry；GitHub 把 wheel 上传到草稿
-   Release。这个持久对象成为该流水线后续步骤的唯一标准输入。
-4. 两边的镜像 job 都从各自标准发布位置下载 wheel、校验 SHA256，再把完全相同的
-   字节放入 `/app/sdk/`，分别推送到 `cr.x2robot.cn/audio/qwen3tt-streaming`
-   与 GHCR。
-5. 镜像成功后，GitLab 幂等地创建或更新指向 Registry 对象的 Release 链接，
-   GitHub 则公开已验证的草稿 Release；两者都不链接会过期的 job artifact。
+3. 镜像 job 把候选 wheel 字节放入 `/app/sdk/`，校验 SHA256 和镜像 label，只推送
+   candidate 镜像 tag。
+4. promotion job 将已验证候选镜像晋级到正式 tag，幂等发布包 Registry 产物，创建或
+   校验正式版本 tag，然后发布 Release。
+5. 两边的 Release 都不链接会过期的 job artifact，失败的候选流水线也不会占用公开版本号。
 
 引擎镜像 job 需要能运行 Docker 且有足够磁盘的 runner（NVIDIA PyTorch 运行时镜像
 及构建缓存建议至少预留 50 GB）。该基础镜像已经包含版本匹配的 CUDA、PyTorch 和
@@ -126,12 +124,11 @@ Docker 与 GitHub CLI（`gh`）。若所选 NGC 基础镜像要求认证，还�
 `NGC_API_KEY` secret。GitLab 镜像 job 声明了 3 小时超时，Runner 自身配置的
 maximum timeout 也必须不小于 3 小时。GitLab 还必须配置 masked 的
 `X2ROBOT_REGISTRY_USER` 和
-`X2ROBOT_REGISTRY_PASSWORD` CI/CD 变量；若变量设为 protected，触发发布的
-`v*` tag 也必须是 protected。GitLab 发布镜像沿用
-`cr.x2robot.cn/audio/qwen3tt-streaming:trt25.10_580_cu13_<git-tag>` 命名，并使用
-与其一致的 NVIDIA PyTorch 25.10 运行时（CUDA 13.0、TensorRT 10.13、Driver 580
-通道）。应保护 `v*` tag 命名空间与发布
-environment，确保只有发布维护者能触发带发布凭据的 job。GHCR package 默认私有；
+`X2ROBOT_REGISTRY_PASSWORD` CI/CD 变量；若变量设为 protected，候选发布流水线必须在
+protected ref 上运行。GitLab 发布镜像沿用
+`cr.x2robot.cn/audio/qwen3tt-streaming:trt25.10_580_cu13_<release-version>` 命名，
+并使用与其一致的 NVIDIA PyTorch 25.10 运行时（CUDA 13.0、TensorRT 10.13、Driver 580
+通道）。应保护 `v*` tag 命名空间与发布 environment，确保只有发布维护者能触发带发布凭据的 job。GHCR package 默认私有；
 若正式镜像要求匿名拉取，需要显式改为 public。
 
 两套 CI 对国内 runner 默认启用可覆盖的下载入口：普通 Python 包使用 BFSU，
@@ -160,12 +157,12 @@ Actions、Release API、GHCR 推送或 GitLab 发布流量，runner 仍需能访
 `TRITON_RUNTIME_BASE_TAG` 指定的不可变基座并解析成 Registry digest，不能现场安装
 Python/TensorRT 依赖，也不会导入可变的 Triton 全量镜像缓存；流水线只重建较小的
 应用层，并在最终镜像内再次执行依赖探针。
-创建 release tag 之前，先通过 GitLab 手动 `BUILD_TRITON_RUNTIME_BASE=1` 流水线或
+准备候选发布之前，先通过 GitLab 手动 `BUILD_TRITON_RUNTIME_BASE=1` 流水线或
 GitHub 的 **Build Triton Runtime Base** workflow 构建一次基座。这样不稳定的
-PyPI/NVIDIA 下载不在 tag 发布关键路径中；基座缺失会立即失败。
+PyPI/NVIDIA 下载不在正式 tag 创建关键路径中；基座缺失会在创建 tag 前立即失败。
 
 `client/dist/` 保持为被忽略的本地/CI 暂存目录；wheel 二进制不提交进 Git。
-两个 tag CI 都不会调用会重新构建 wheel 的本地 `compose.sh` 路径。
+两套发布流水线都不会调用会重新构建 wheel 的本地 `compose.sh` 路径。
 
 ### 本地检出（开发）
 

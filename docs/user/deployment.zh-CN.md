@@ -604,7 +604,7 @@ tar -C "${QWEN_LOG_DIR:-/var/log/qwen3tts}" \
 浏览器前端。工程实验统一从 `/demo/#/lab` 进入。
 CI/CD 只构建一次 Browser SDK npm tarball，并将同一份产物内置到
 `/demo/downloads/`；SDK 页面会生成指向当前实例的 `npm install "https://...tgz"`
-命令，调用方不需要拉取源码仓库。GitLab tag 流水线还会把同一 tarball 发布到项目 npm
+命令，调用方不需要拉取源码仓库。GitLab promotion job 还会把同一 tarball 发布到项目 npm
 Registry，作为第二种安装渠道。
 启动时设置 `DEMO_ENABLED=false` 可将其关闭：
 

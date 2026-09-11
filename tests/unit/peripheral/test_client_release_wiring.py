@@ -1,9 +1,9 @@
-"""Static guards for the wheel-first GitHub and GitLab release paths.
+"""Static guards for the candidate-first GitHub and GitLab release paths.
 
-The release contract is deliberately simple: tag CI builds one wheel without
-submodules, publishes it, and the image job downloads those same bytes.  These
-checks catch accidental reintroduction of a source/VCS install or a second
-wheel build in the image job.
+The release contract is deliberately simple: a manually selected candidate
+builds one wheel without submodules, verifies it, and promotes those same bytes
+only after the image checks pass. These checks catch accidental reintroduction
+of a tag-triggered build or a second wheel build in the image job.
 """
 
 import subprocess
@@ -44,49 +44,57 @@ def test_gitlab_shell_commands_parse_as_strings():
                 try:
                     _assert_gitlab_command_strings(job[key])
                 except AssertionError as exc:
-                    raise AssertionError(f"{job_name}.{key} contains a non-string") from exc
+                    raise AssertionError(
+                        f"{job_name}.{key} contains a non-string"
+                    ) from exc
 
 
-def test_tag_pipeline_builds_one_wheel_without_submodules():
+def test_candidate_pipeline_builds_one_wheel_without_submodules():
     ci = _read(".gitlab-ci.yml")
     github = _read(".github/workflows/release.yml")
 
     assert 'GIT_SUBMODULE_STRATEGY: "none"' in ci
     assert 'GIT_DEPTH: "0"' in ci
+    assert "prepare-release-candidate:" in ci
+    assert "workflow_dispatch:" in github
+    assert "prepare_release_checkout.sh" in ci
+    assert "prepare_release_checkout.sh" in github
+    assert 'RELEASE_ALLOW_UNTRACKED: "1"' in ci
+    assert "push:" not in github.split("\njobs:", 1)[0]
+    assert "CI_COMMIT_TAG" not in ci
     assert ci.count("scripts/bash/release_client_wheel.sh") == 1
     assert "submodules: false" in github
     assert "fetch-depth: 0" in github
     assert github.count("scripts/bash/release_client_wheel.sh") == 1
 
-    build_job = _job(ci, "build-client-wheel", "publish-client-wheel")
+    build_job = _job(ci, "build-client-wheel", "build-engine-image")
     assert "git submodule status" in build_job
     assert "Expected exactly one client wheel" in build_job
+    assert "RELEASE_VERSION" in build_job
+    assert "CI_COMMIT_TAG" not in build_job
 
 
-def test_image_consumes_published_wheel_instead_of_rebuilding_it():
+def test_image_consumes_candidate_wheel_instead_of_rebuilding_it():
     ci = _read(".gitlab-ci.yml")
     github = _read(".github/workflows/release.yml")
-    publish_job = _job(ci, "publish-client-wheel", "build-engine-image")
-    image_job = _job(ci, "build-engine-image", "create-release")
+    image_job = _job(ci, "build-engine-image", "promote-engine-images")
     github_image_job = github.split("\n  build-engine-image:\n", 1)[1].split(
-        "\n  finalize-release:\n", 1
+        "\n  promote-release:\n", 1
     )[0]
 
-    assert "/packages/pypi" in publish_job
-    assert "python -m twine upload" in publish_job
-    assert "WHEEL_REGISTRY_URL" in image_job
+    assert "build/client-dist" in image_job
     assert "WHEEL_SHA256" in image_job
-    assert '--output "client/dist/$WHEEL_FILENAME"' in image_job
     assert '--build-arg "CLIENT_WHEEL_FILENAME=$WHEEL_FILENAME"' in image_job
     assert '--build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256"' in image_job
     assert "release_client_wheel.sh" not in image_job
     assert "pip wheel" not in image_job
     assert "compose.sh" not in image_job
-    assert "gh release download" in github_image_job
-    assert "--dir client/dist" in github_image_job
+    assert "actions/download-artifact" in github_image_job
+    assert "candidate-" in github_image_job
     assert "WHEEL_SHA256" in github_image_job
     assert '--build-arg "CLIENT_WHEEL_FILENAME=$WHEEL_FILENAME"' in github_image_job
     assert '--build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256"' in github_image_job
+    assert "gh release download" not in github_image_job
     assert "release_client_wheel.sh" not in github_image_job
     assert "pip wheel" not in github_image_job
     assert "compose.sh" not in github_image_job
@@ -144,9 +152,9 @@ def test_runner_downloads_default_to_overridable_china_mirrors():
 def test_engine_release_build_reuses_registry_layers_and_has_a_timeout():
     ci = _read(".gitlab-ci.yml")
     github = _read(".github/workflows/release.yml")
-    image_job = _job(ci, "build-engine-image", "create-release")
+    image_job = _job(ci, "build-engine-image", "promote-engine-images")
     github_image_job = github.split("\n  build-engine-image:\n", 1)[1].split(
-        "\n  finalize-release:\n", 1
+        "\n  promote-release:\n", 1
     )[0]
 
     assert "timeout: 3h" in image_job
@@ -155,24 +163,30 @@ def test_engine_release_build_reuses_registry_layers_and_has_a_timeout():
     assert 'DOCKER_BUILDKIT: "1"' in github_image_job
     for job in (image_job, github_image_job):
         assert "--cache-from" in job
-        assert 'BUILDKIT_INLINE_CACHE=1' in job
+        assert "BUILDKIT_INLINE_CACHE=1" in job
         assert ":buildcache" in job or "ENGINE_BUILD_CACHE_IMAGE" in job
 
 
 def test_gitlab_engine_image_uses_the_x2robot_registry():
     ci = _read(".gitlab-ci.yml")
-    image_job = _job(ci, "build-engine-image", "create-release")
+    image_job = _job(ci, "build-engine-image", "promote-engine-images")
     release_job = ci.split("\ncreate-release:\n", 1)[1]
 
     assert 'X2ROBOT_REGISTRY: "cr.x2robot.cn"' in ci
     assert 'X2ROBOT_IMAGE: "cr.x2robot.cn/audio/qwen3tt-streaming"' in ci
     assert 'X2ROBOT_IMAGE_TAG_PREFIX: "trt25.10_580_cu13_"' in ci
-    assert "${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}${CI_COMMIT_TAG}" in image_job
+    assert (
+        'candidate_suffix="${X2ROBOT_IMAGE_TAG_PREFIX}candidate-${CI_PIPELINE_ID}"'
+        in image_job
+    )
+    assert 'ENGINE_CANDIDATE_IMAGE="${X2ROBOT_IMAGE}:${candidate_suffix}"' in image_job
+    assert "${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}${RELEASE_VERSION}" in image_job
     assert "${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}buildcache" in image_job
     assert "X2ROBOT_REGISTRY_USER is required" in image_job
     assert "X2ROBOT_REGISTRY_PASSWORD is required" in image_job
     assert '--password-stdin "$X2ROBOT_REGISTRY"' in image_job
     assert "$CI_REGISTRY" not in image_job
+    assert "promote_container_image.sh" in ci
     assert "ENGINE_RELEASE_IMAGE" in release_job
 
 
@@ -225,8 +239,17 @@ def test_release_links_are_durable_and_docs_never_use_vcs_installs():
     assert "$WHEEL_REGISTRY_URL" in gitlab_release
     assert "$WHEEL_RELEASE_URL" in gitlab_release
     assert "require_release_environment" in gitlab_release
+    assert "RELEASE_VERSION" in gitlab_release
+    assert "GitLab Release already exists" in gitlab_release
     assert "artifacts/raw" not in gitlab
     assert "gh release upload" in github
+    assert "promote_container_image.sh" in github
+    assert "promote-client-wheel:" in gitlab
+    assert "promote-browser-sdk:" in gitlab
+    assert "publish-gitlab-npm.mjs" in gitlab
+    assert '--tag "$RELEASE_VERSION"' in _read(
+        "web/scripts/publish-gitlab-npm.mjs"
+    ) or '--tag", distTag' in _read("web/scripts/publish-gitlab-npm.mjs")
     vcs_prefix = "git" + "+"
     client_subdirectory = "subdirectory=" + "client"
     assert not (vcs_prefix in markdown and client_subdirectory in markdown)

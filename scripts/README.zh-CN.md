@@ -5,6 +5,8 @@
 ## 从哪里开始
 
 - **`scripts/bash/autorun.sh`**：主要的操作者入口（setup → build → package → deploy）
+- **`scripts/bash/prepare_release_checkout.sh`**：解析发布候选 commit，并创建仅存在于 CI 工作区的版本 tag
+- **`scripts/bash/promote_container_image.sh`**：晋级已验证候选镜像，禁止覆盖不同的正式 digest
 - **`scripts/python/audit_tooling_surface.py`**：针对 scripts/ + tests/ 面的治理报告
 - **`tools/validation/serving_endpoints.py`**：规范的 serving 验收与基准工具
 - **`tests/README.zh-CN.md`**：pytest 套件与手动验证工具的主索引
@@ -13,7 +15,7 @@
 
 | Location | Role | Audience |
 | --- | --- | --- |
-| `scripts/bash/` | 生命周期与操作者工作流（14 个文件） | 部署或打包本项目的用户 |
+| `scripts/bash/` | 生命周期与操作者工作流 | 部署或打包本项目的用户 |
 | `scripts/bash/lib/` | 共享的 shell 库代码 | 扩展 shell 流程的维护者 |
 | `scripts/export/` | 模型导出实现（01–09） | 从事 ONNX / TRT 导出的维护者 |
 | `scripts/python/` | 被 bash 调用的 Python 辅助（JSON/profile/NGC/Triton-config） | 维护者 |

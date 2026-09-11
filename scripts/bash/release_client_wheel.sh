@@ -1,14 +1,14 @@
 #!/bin/bash
 # ===========================================================================
-#  release_client_wheel.sh — Build the distributable client SDK wheel on a tag
+#  release_client_wheel.sh — Build the distributable client SDK wheel
 #
-#  The wheel version is derived from the git tag via hatch-vcs, so the package
-#  registry artifact and engine image built by the tag pipeline carry the same
-#  version. This script therefore refuses to build from a dirty tree or an
-#  untagged commit.
+#  The wheel version is derived from the exact local release tag via hatch-vcs.
+#  Candidate CI creates that local-only tag before calling this script; the tag
+#  is pushed only by the final promotion job.
 #
 #  Usage:
-#    git tag v0.2.0 && bash scripts/bash/release_client_wheel.sh
+#    bash scripts/bash/prepare_release_checkout.sh v0.2.0 main
+#    bash scripts/bash/release_client_wheel.sh
 #    bash scripts/bash/release_client_wheel.sh --out /tmp/delivery
 #
 #  Options:
@@ -38,7 +38,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]]; then
+status_args=(--porcelain)
+if [[ "${RELEASE_ALLOW_UNTRACKED:-0}" == "1" ]]; then
+    status_args+=(--untracked-files=no)
+fi
+if [[ -n "$(git -C "$REPO_ROOT" status "${status_args[@]}")" ]]; then
     log_error "working tree is dirty; commit or stash before building a release wheel"
     exit 1
 fi
@@ -46,8 +50,8 @@ fi
 # --match "v[0-9]*": only version tags qualify — being on a personal marker
 # tag (rime/xxx) must not look like being on a release tag.
 tag="$(git -C "$REPO_ROOT" describe --tags --exact-match --match "v[0-9]*" HEAD 2>/dev/null)" || {
-    log_error "HEAD is not on a version tag (got '$(git -C "$REPO_ROOT" describe --tags --always --match "v[0-9]*")')."
-    log_error "Release wheels must be built on a tag: git tag vX.Y.Z && re-run."
+    log_error "HEAD is not on a local version tag (got '$(git -C "$REPO_ROOT" describe --tags --always --match "v[0-9]*")')."
+    log_error "Prepare the candidate checkout first: bash scripts/bash/prepare_release_checkout.sh vX.Y.Z <ref>."
     exit 1
 }
 

@@ -67,15 +67,15 @@ make proto-check  # 校验已同步（CI 会跑）
 | `main` | 稳定版本（所有人可见） | **仅** `beta` |
 
 **Hotfix 例外** —— 唯一绕过 `beta` 进 `main` 的通道：稳定版出紧急问题时，
-从 `main` 切 `hotfix/<topic>`，修复后合回 `main`（打补丁版本 tag
-`vX.Y.Z`），并**立即**把修复同步回 `dev`（若 `beta` 正在测试周期中也要同步）。
+从 `main` 切 `hotfix/<topic>`，修复后合回 `main`，为 `vX.Y.Z` 运行补丁候选发布，
+并**立即**把修复同步回 `dev`（若 `beta` 正在测试周期中也要同步）。
 
 **版本 tag** 是引擎镜像与 client wheel 的配对键（见
 [docs/user/client_sdk.zh-CN.md](docs/user/client_sdk.zh-CN.md)）：
 
-- 一律 `v` + PEP 440 形式：稳定 `vX.Y.Z`（打在 `main`），beta `vX.Y.Zb1` /
-  `vX.Y.Zrc1`（打在 `beta`）。版本 tag 只打在 `dev` / `beta` / `main` ——
-  **个人分支禁止打版本 tag**。
+- 一律 `v` + PEP 440 形式：稳定 `vX.Y.Z`（从 `main` 晋级），beta `vX.Y.Zb1` /
+  `vX.Y.Zrc1`（从 `beta` 晋级）。版本 tag 由发布 promotion 流水线在候选验证通过后
+  创建，**不要从个人分支手工推版本 tag**。
 - 个人分支不需要版本 tag：hatch-vcs 自动推导 `X.Y.Z.devN+g<hash>`，引擎
   在版本化 capabilities 的 `engine_version` 中携带 `git describe` 输出，
   两者都精确到 commit。
@@ -83,21 +83,24 @@ make proto-check  # 校验已同步（CI 会跑）
   `release_client_wheel.sh` 里的 `git describe --match`）。个人标记请用
   命名空间形式，如 `rime/some-checkpoint` —— 对版本推导完全不可见。
 
-**发版流程**：`dev` 收敛 → 合入 `beta` → 打 `vX.Y.Zb1` → 测试通过 →
-合入 `main` → 打 `vX.Y.Z`。GitHub Actions 与 GitLab CI 都只检出顶层仓库
-（不拉子模块），各自构建唯一一份 wheel。GitHub 发布到 Release；GitLab 发布到
-PyPI Package Registry 并挂到 Release。随后各流水线按 SHA256 将自己的同一文件
-放进引擎镜像，分别推送 GHCR/GitLab Container Registry。每条发布流水线内都
-禁止手工再构建或上传第二份 wheel。
+**发版流程**：`dev` 收敛 → 合入 `beta` → 手动运行发布 workflow，传入
+`RELEASE_VERSION=vX.Y.Zb1` / `release_version=vX.Y.Zb1` 和目标 source ref →
+测试已晋级的 beta → 合入 `main` → 用同样方式发布 `vX.Y.Z`。GitHub Actions 与
+GitLab CI 先从选定 commit 构建候选产物和候选镜像（不拉子模块），最后的 promotion
+job 才创建正式 tag/Release。CI、脚本或 runner 临时失败时重跑同一个候选 job，不要
+新造版本号；只有源码 commit 或发布内容真的变化时才换版本。
 
-Triton 镜像使用单独发布、不可变的依赖基座，release tag 流水线不再从 PyPI
+启动方式：在 GitHub Actions → **Release** → **Run workflow** 中填写
+`release_version` 和 `source_ref`；或在目标 GitLab ref 上运行 pipeline，填写
+`RELEASE_VERSION`，必要时填写 `RELEASE_SOURCE_REF`。GitHub 和 GitLab 的候选流水线
+相互独立，只晋级凭据和产物均已准备好的平台。
+
+Triton 镜像使用单独发布、不可变的依赖基座，候选发布流水线不再从 PyPI
 下载数 GB 的 TensorRT wheel。某套运行时矩阵第一次发布前，先运行 GitLab 手动
 流水线并设置 `BUILD_TRITON_RUNTIME_BASE=1`，以及/或者运行 GitHub 的
 **Build Triton Runtime Base** workflow。`triton-deps` 阶段或
-CUDA/TensorRT/PyTorch 矩阵变化时，先提升 `TRITON_RUNTIME_BASE_TAG`。维护者也可以
-在向 GitLab 推送受保护的 release tag 时附加
-`-o ci.variable=BUILD_TRITON_RUNTIME_BASE=1`，使 `runtime-base` stage 先完成并
-门禁后续发布。基座缺失时 release 会立即失败，这是有意的发布门禁。
+CUDA/TensorRT/PyTorch 矩阵变化时，先提升 `TRITON_RUNTIME_BASE_TAG`。基座缺失时
+候选发布会立即失败，且发生在正式版本 tag 创建之前，这是有意的发布门禁。
 
 ## 提交 PR
 

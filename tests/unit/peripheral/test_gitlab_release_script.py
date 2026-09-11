@@ -27,7 +27,9 @@ def _release_environment(tmp_path: Path) -> dict[str, str]:
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "GLAB_CALL_LOG": str(tmp_path / "glab-calls.log"),
         "CI_COMMIT_SHA": "a" * 40,
-        "CI_COMMIT_TAG": tag,
+        "RELEASE_VERSION": tag,
+        "RELEASE_COMMIT_SHA": "a" * 40,
+        "CANDIDATE_ID": "0.2.0a13-aaaaaaaaaaaa-1",
         "CI_PROJECT_ID": "844",
         "CI_PROJECT_PATH": "group/project",
         "CI_PROJECT_URL": project_url,
@@ -100,11 +102,19 @@ case "${1:-}" in
           ;;
       esac
     done
+    case "$endpoint" in
+      projects/*/repository/tags/*|projects/*/releases/*)
+        case "$endpoint" in
+          */assets/links) ;;
+          *) exit 1 ;;
+        esac
+        ;;
+    esac
     [ "$endpoint" != job ] || exit 0
     if [ "$method" = POST ]; then
       [ -n "$name" ] && [ -n "$url" ]
       case "$direct_path" in /*) ;; *) exit 3 ;; esac
-      direct_url="${CI_PROJECT_URL}/-/releases/${CI_COMMIT_TAG}/downloads${direct_path}"
+      direct_url="${CI_PROJECT_URL}/-/releases/${RELEASE_VERSION}/downloads${direct_path}"
       jq -cn \
         --arg name "$name" \
         --arg url "$url" \
@@ -178,7 +188,8 @@ def test_release_job_downloads_each_originating_dotenv_artifact():
         for entry in config["create-release"]["needs"]
     }
 
-    assert needs["publish-client-wheel"] is True
+    assert needs["prepare-release-candidate"] is True
     assert needs["build-web-release"] is True
-    assert needs["publish-browser-sdk"] is True
-    assert needs["build-engine-image"] is False
+    assert needs["promote-engine-images"] is True
+    assert needs["promote-client-wheel"] is True
+    assert needs["promote-browser-sdk"] is True

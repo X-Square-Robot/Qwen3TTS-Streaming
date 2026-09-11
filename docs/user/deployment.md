@@ -632,7 +632,7 @@ Use `/demo/#/lab` as the single browser entry for the engineering Lab.
 CI/CD builds the Browser SDK npm tarball once and embeds the
 same bytes under `/demo/downloads/`; the SDK page generates an `npm install
 "https://...tgz"` command for the current instance, without requiring a source
-checkout. GitLab tag pipelines also publish that tarball to the project npm
+checkout. GitLab promotion jobs also publish that tarball to the project npm
 Registry as a second installation channel. Set `DEMO_ENABLED=false` at startup
 to disable it:
 

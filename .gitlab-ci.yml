@@ -1,36 +1,36 @@
 workflow:
   rules:
-    - if: '$CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$/'
+    - if: '($CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api") && $RELEASE_VERSION =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$/'
     - if: '$BUILD_TRITON_RUNTIME_BASE == "1"'
     - when: never
 
 stages:
   - runtime-base
+  - candidate
   - web-build
   - sdk-build
-  - sdk-publish
   - image
+  - image-promote
+  - package-promote
   - release
+  - post-release
 
-# hatch-vcs derives the SDK version from the release tag, so the main checkout
-# needs complete tag metadata. The SDK is self-contained under client/ and
-# must never fetch the upstream model repository. Project/group CI variables
-# can override every mirror default below (prefer an internal Registry in
-# production).
+# Release pipelines are deliberately manual. RELEASE_VERSION is only a
+# proposed version until create-release succeeds; no formal tag pipeline is
+# used as the build trigger anymore.
 variables:
   GIT_DEPTH: "0"
   GIT_SUBMODULE_STRATEGY: "none"
+  RELEASE_VERSION: ""
+  RELEASE_SOURCE_REF: ""
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
   PIP_INDEX_URL: "https://mirrors.bfsu.edu.cn/pypi/web/simple"
   PIP_DEFAULT_TIMEOUT: "120"
   PIP_RETRIES: "10"
-  # Keep the GitLab production image on the established Driver 580 channel.
-  # The NVIDIA PyTorch image already includes matched CUDA and TensorRT.
   ENGINE_BASE_IMAGE: "m.daocloud.io/nvcr.io/nvidia/pytorch:25.10-py3"
   TRITON_BASE_IMAGE: "m.daocloud.io/nvcr.io/nvidia/tritonserver:26.02-py3"
   TRITON_TENSORRT_PYTHON_VERSION: "10.15.1.29"
   TRITON_PYTORCH_CUDA_TAG: "cu130"
-  # Bump this only when the triton-deps stage or its pinned runtime matrix changes.
   TRITON_RUNTIME_PARENT_TAG: "runtime-base_26.02_trt10.15.1.29_cu130_r2"
   TRITON_RUNTIME_BASE_TAG: "runtime-base_26.02_trt10.15.1.29_cu130_r3"
   RUNNER_PYTHON_IMAGE: "m.daocloud.io/docker.io/library/python:3.11-slim"
@@ -38,7 +38,6 @@ variables:
   RUNNER_DOCKER_DIND_IMAGE: "m.daocloud.io/docker.io/library/docker:27.4.1-dind"
   RUNNER_GLAB_IMAGE: "m.daocloud.io/registry.gitlab.com/gitlab-org/cli:v1.112.0"
   RUNNER_NODE_IMAGE: "m.daocloud.io/docker.io/library/node:22-bookworm-slim"
-  # Matches web/package-lock.json and carries all three browsers plus OS deps.
   RUNNER_PLAYWRIGHT_IMAGE: "mcr.microsoft.com/playwright:v1.55.0-noble"
   DEBIAN_MIRROR: "https://mirrors.bfsu.edu.cn/debian"
   DEBIAN_SECURITY_MIRROR: "https://mirrors.bfsu.edu.cn/debian-security"
@@ -51,9 +50,9 @@ variables:
   DOCKER_DRIVER: "overlay2"
   DOCKER_BUILDKIT: "1"
 
-.tag-release-job:
+.release-candidate-job:
   rules:
-    - if: '$CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$/'
+    - if: '($CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api") && $RELEASE_VERSION =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$/'
   interruptible: false
 
 build-triton-runtime-base:
@@ -100,59 +99,9 @@ build-triton-runtime-base:
         "$runtime_base_image" \
         "$previous_cache_image"
 
-build-web-release:
-  extends: .tag-release-job
-  stage: web-build
-  image: "$RUNNER_PLAYWRIGHT_IMAGE"
-  script:
-    - bash scripts/bash/release_web.sh "$CI_COMMIT_TAG"
-    - npm --prefix web run test:e2e
-    - |
-      browser_tgz="$(find web/dist -maxdepth 1 -type f -name 'xmultimodalinteraction-qwen3tts-browser-*.tgz' -print)"
-      demo_archive="$(find web/dist -maxdepth 1 -type f -name 'qwen3tts-demo-*.tar.gz' -print)"
-      test -n "$browser_tgz" && test -n "$demo_archive"
-      browser_sha256="$(sha256sum "$browser_tgz" | cut -d' ' -f1)"
-      demo_sha256="$(sha256sum "$demo_archive" | cut -d' ' -f1)"
-      printf 'BROWSER_SDK_TARBALL=%s\nBROWSER_SDK_SHA256=%s\nDEMO_ARCHIVE=%s\nDEMO_ARCHIVE_SHA256=%s\n' \
-        "$(basename "$browser_tgz")" "$browser_sha256" "$(basename "$demo_archive")" "$demo_sha256" \
-        >> web/dist/web-release.env
-  artifacts:
-    expire_in: 7 days
-    paths:
-      - web/packages/demo/dist/
-      - web/packages/browser-sdk/dist/
-      - web/dist/
-    reports:
-      dotenv: web/dist/web-release.env
-
-publish-browser-sdk:
-  extends: .tag-release-job
-  stage: sdk-publish
-  image: "$RUNNER_NODE_IMAGE"
-  needs:
-    - job: build-web-release
-      artifacts: true
-  variables:
-    GIT_STRATEGY: clone
-  script:
-    - |
-      npm config set "@xmultimodalinteraction:registry" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/npm/"
-      npm config set -- "//${CI_SERVER_HOST}/api/v4/projects/${CI_PROJECT_ID}/packages/npm/:_authToken" "$CI_JOB_TOKEN"
-      npm publish "web/dist/$BROWSER_SDK_TARBALL" \
-        --registry "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/npm/" \
-        --access public \
-        --tag "$BROWSER_SDK_DIST_TAG"
-      node web/scripts/publish-gitlab-assets.mjs
-  artifacts:
-    expire_in: 7 days
-    paths:
-      - web/dist/published-web.env
-    reports:
-      dotenv: web/dist/published-web.env
-
-build-client-wheel:
-  extends: .tag-release-job
-  stage: sdk-build
+prepare-release-candidate:
+  extends: .release-candidate-job
+  stage: candidate
   image: "$RUNNER_PYTHON_IMAGE"
   variables:
     GIT_STRATEGY: clone
@@ -172,6 +121,81 @@ build-client-wheel:
     - apt-get install --yes --no-install-recommends git
   script:
     - |
+      source_ref="${RELEASE_SOURCE_REF:-$CI_COMMIT_REF_NAME}"
+      bash scripts/bash/prepare_release_checkout.sh "$RELEASE_VERSION" "$source_ref"
+      release_commit="$(git rev-parse HEAD)"
+      short_commit="$(git rev-parse --short=12 HEAD)"
+      mkdir -p build
+      printf 'RELEASE_VERSION=%s\nRELEASE_COMMIT_SHA=%s\nCANDIDATE_ID=%s\n' \
+        "$RELEASE_VERSION" "$release_commit" \
+        "${RELEASE_VERSION#v}-${short_commit}-${CI_PIPELINE_ID}" \
+        > build/release-candidate.env
+  artifacts:
+    expire_in: 14 days
+    paths:
+      - build/release-candidate.env
+    reports:
+      dotenv: build/release-candidate.env
+
+build-web-release:
+  extends: .release-candidate-job
+  stage: web-build
+  image: "$RUNNER_PLAYWRIGHT_IMAGE"
+  needs:
+    - job: prepare-release-candidate
+      artifacts: true
+  variables:
+    GIT_STRATEGY: clone
+    RELEASE_ALLOW_UNTRACKED: "1"
+  script:
+    - bash scripts/bash/prepare_release_checkout.sh "$RELEASE_VERSION" "$RELEASE_COMMIT_SHA"
+    - bash scripts/bash/release_web.sh "$RELEASE_VERSION"
+    - npm --prefix web run test:e2e
+    - |
+      browser_tgz="$(find web/dist -maxdepth 1 -type f -name 'xmultimodalinteraction-qwen3tts-browser-*.tgz' -print)"
+      demo_archive="$(find web/dist -maxdepth 1 -type f -name 'qwen3tts-demo-*.tar.gz' -print)"
+      test -n "$browser_tgz" && test -n "$demo_archive"
+      browser_sha256="$(sha256sum "$browser_tgz" | cut -d' ' -f1)"
+      demo_sha256="$(sha256sum "$demo_archive" | cut -d' ' -f1)"
+      printf 'BROWSER_SDK_TARBALL=%s\nBROWSER_SDK_SHA256=%s\nDEMO_ARCHIVE=%s\nDEMO_ARCHIVE_SHA256=%s\n' \
+        "$(basename "$browser_tgz")" "$browser_sha256" "$(basename "$demo_archive")" "$demo_sha256" \
+        >> web/dist/web-release.env
+  artifacts:
+    expire_in: 14 days
+    paths:
+      - web/packages/demo/dist/
+      - web/packages/browser-sdk/dist/
+      - web/dist/
+    reports:
+      dotenv: web/dist/web-release.env
+
+build-client-wheel:
+  extends: .release-candidate-job
+  stage: sdk-build
+  image: "$RUNNER_PYTHON_IMAGE"
+  needs:
+    - job: prepare-release-candidate
+      artifacts: true
+  variables:
+    GIT_STRATEGY: clone
+    RELEASE_ALLOW_UNTRACKED: "1"
+  before_script:
+    - |
+      for sources_file in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do
+        [ ! -f "$sources_file" ] || sed -i \
+          -e "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+          -e "s|https://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+          -e "s|http://security.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+          -e "s|https://security.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+          -e "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
+          -e "s|https://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
+          "$sources_file"
+      done
+    - apt-get update
+    - apt-get install --yes --no-install-recommends git
+  script:
+    - bash scripts/bash/prepare_release_checkout.sh "$RELEASE_VERSION" "$RELEASE_COMMIT_SHA"
+    - |
       initialized_submodules="$(git submodule status | sed -n '/^[^-]/p')"
       if [ -n "$initialized_submodules" ]; then
         echo "Release checkout unexpectedly contains initialized submodules:" >&2
@@ -187,7 +211,7 @@ build-client-wheel:
       fi
       wheel="$(find build/client-dist -maxdepth 1 -type f -name 'qwen3_tts_client-*.whl' -print)"
       wheel_filename="$(basename "$wheel")"
-      sdk_version="${CI_COMMIT_TAG#v}"
+      sdk_version="${RELEASE_VERSION#v}"
       wheel_sha256="$(sha256sum "$wheel" | cut -d' ' -f1)"
       printf 'SDK_VERSION=%s\nWHEEL_FILENAME=%s\nWHEEL_SHA256=%s\n' \
         "$sdk_version" "$wheel_filename" "$wheel_sha256" \
@@ -196,14 +220,15 @@ build-client-wheel:
       wheel="$(realpath "$(find build/client-dist -maxdepth 1 -type f -name 'qwen3_tts_client-*.whl' -print)")"
       python -m venv /tmp/qwen3tts-wheel-smoke
       /tmp/qwen3tts-wheel-smoke/bin/pip install \
-        "qwen3-tts-client[all] @ file://$wheel" pytest pytest-asyncio
-      EXPECTED_VERSION="${CI_COMMIT_TAG#v}" env -u PYTHONPATH \
+        "qwen3-tts-client[all] @ file://$wheel" pytest pytest-asyncio twine==6.2.0
+      /tmp/qwen3tts-wheel-smoke/bin/python -m twine check "$wheel"
+      EXPECTED_VERSION="${RELEASE_VERSION#v}" env -u PYTHONPATH \
         /tmp/qwen3tts-wheel-smoke/bin/python -c \
         'import os, qwen3tts, qwen3tts_protocol; assert qwen3tts.__version__ == os.environ["EXPECTED_VERSION"]'
       env -u PYTHONPATH /tmp/qwen3tts-wheel-smoke/bin/python \
         -m pytest client/tests -q
   artifacts:
-    expire_in: 7 days
+    expire_in: 14 days
     paths:
       - build/client-dist/*.whl
       - build/client-wheel.env
@@ -214,13 +239,252 @@ build-client-wheel:
     paths:
       - .cache/pip/
 
-publish-client-wheel:
-  extends: .tag-release-job
-  stage: sdk-publish
-  image: "$RUNNER_PYTHON_IMAGE"
+build-engine-image:
+  extends: .release-candidate-job
+  stage: image
+  timeout: 3h
+  resource_group: engine-image-cache
+  image: "$RUNNER_DOCKER_CLI_IMAGE"
+  services:
+    - name: "$RUNNER_DOCKER_DIND_IMAGE"
+      alias: docker
+      command: ["--tls=false"]
   needs:
+    - job: prepare-release-candidate
+      artifacts: true
     - job: build-client-wheel
       artifacts: true
+    - job: build-web-release
+      artifacts: true
+  variables:
+    GIT_STRATEGY: clone
+    GIT_DEPTH: "0"
+  before_script:
+    - sed -i -e "s|http://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" -e "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" /etc/apk/repositories
+    - apk add --no-cache bash curl git
+    - git fetch --no-tags origin "$RELEASE_COMMIT_SHA" || true
+    - git checkout --detach "$RELEASE_COMMIT_SHA"
+    - |
+      test -n "${X2ROBOT_REGISTRY_USER:-}" || {
+        echo "X2ROBOT_REGISTRY_USER is required" >&2
+        exit 1
+      }
+      test -n "${X2ROBOT_REGISTRY_PASSWORD:-}" || {
+        echo "X2ROBOT_REGISTRY_PASSWORD is required" >&2
+        exit 1
+      }
+      candidate_suffix="${X2ROBOT_IMAGE_TAG_PREFIX}candidate-${CI_PIPELINE_ID}"
+      ENGINE_CANDIDATE_IMAGE="${X2ROBOT_IMAGE}:${candidate_suffix}"
+      TRITON_IMAGE_REPOSITORY="${X2ROBOT_TRITON_IMAGE:-${X2ROBOT_IMAGE}-triton}"
+      TRITON_CANDIDATE_IMAGE="${TRITON_IMAGE_REPOSITORY}:${candidate_suffix}"
+      ENGINE_RELEASE_IMAGE="${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}${RELEASE_VERSION}"
+      TRITON_RELEASE_IMAGE="${TRITON_IMAGE_REPOSITORY}:${X2ROBOT_IMAGE_TAG_PREFIX}${RELEASE_VERSION}"
+      ENGINE_BUILD_CACHE_IMAGE="${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}buildcache"
+      TRITON_BUILD_CACHE_IMAGE="${TRITON_IMAGE_REPOSITORY}:${X2ROBOT_IMAGE_TAG_PREFIX}buildcache"
+      TRITON_RUNTIME_BASE_IMAGE="${TRITON_RUNTIME_BASE_IMAGE:-${TRITON_IMAGE_REPOSITORY}:${TRITON_RUNTIME_BASE_TAG}}"
+      export ENGINE_CANDIDATE_IMAGE TRITON_CANDIDATE_IMAGE ENGINE_RELEASE_IMAGE \
+        TRITON_RELEASE_IMAGE ENGINE_BUILD_CACHE_IMAGE TRITON_BUILD_CACHE_IMAGE \
+        TRITON_RUNTIME_BASE_IMAGE
+      mkdir -p build
+      printf 'ENGINE_CANDIDATE_IMAGE=%s\nTRITON_CANDIDATE_IMAGE=%s\nENGINE_RELEASE_IMAGE=%s\nTRITON_RELEASE_IMAGE=%s\n' \
+        "$ENGINE_CANDIDATE_IMAGE" "$TRITON_CANDIDATE_IMAGE" \
+        "$ENGINE_RELEASE_IMAGE" "$TRITON_RELEASE_IMAGE" \
+        > build/candidate-images.env
+      printf '%s\n' "$X2ROBOT_REGISTRY_PASSWORD" | docker login \
+        --username "$X2ROBOT_REGISTRY_USER" \
+        --password-stdin "$X2ROBOT_REGISTRY"
+    - |
+      if [ -n "${NGC_API_KEY:-}" ]; then
+        echo "$NGC_API_KEY" | docker login nvcr.io --username '$oauthtoken' --password-stdin
+      fi
+    - |
+      if ! docker pull "$TRITON_RUNTIME_BASE_IMAGE"; then
+        echo "Required Triton runtime base is missing: $TRITON_RUNTIME_BASE_IMAGE" >&2
+        echo "Run a manual pipeline with BUILD_TRITON_RUNTIME_BASE=1 before preparing a release candidate." >&2
+        exit 1
+      fi
+      docker run --rm --entrypoint python3 "$TRITON_RUNTIME_BASE_IMAGE" -c \
+        "import aiohttp, attr, packaging, pypinyin; print(f'aiohttp={aiohttp.__version__} attrs={attr.__version__} packaging={packaging.__version__} pypinyin={pypinyin.__version__}')"
+      TRITON_RUNTIME_BASE_DIGEST="$(docker image inspect --format '{{ index .RepoDigests 0 }}' "$TRITON_RUNTIME_BASE_IMAGE")"
+      case "$TRITON_RUNTIME_BASE_DIGEST" in
+        *@sha256:*) ;;
+        *)
+          echo "Could not resolve Triton runtime base to an immutable digest" >&2
+          exit 1
+          ;;
+      esac
+      export TRITON_RUNTIME_BASE_DIGEST
+  script:
+    - |
+      rm -rf client/dist
+      mkdir -p client/dist
+      cp "build/client-dist/$WHEEL_FILENAME" "client/dist/$WHEEL_FILENAME"
+      wheel_count="$(find client/dist -maxdepth 1 -type f -name 'qwen3_tts_client-*.whl' | wc -l)"
+      if [ "$wheel_count" -ne 1 ]; then
+        echo "Expected exactly one staged client wheel, found $wheel_count" >&2
+        exit 1
+      fi
+    - |
+      docker pull "$ENGINE_BUILD_CACHE_IMAGE" || true
+      docker build --pull \
+        --file infra/docker/Dockerfile.engine \
+        --cache-from "$ENGINE_BUILD_CACHE_IMAGE" \
+        --build-arg "BUILDKIT_INLINE_CACHE=1" \
+        --build-arg "BASE_IMAGE=$ENGINE_BASE_IMAGE" \
+        --build-arg "PIP_INDEX_URL=$PIP_INDEX_URL" \
+        --build-arg "ENGINE_VERSION=$RELEASE_VERSION" \
+        --build-arg "CLIENT_WHEEL_FILENAME=$WHEEL_FILENAME" \
+        --build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256" \
+        --build-arg "BROWSER_SDK_VERSION=$BROWSER_SDK_SEMVER" \
+        --build-arg "BROWSER_SDK_REGISTRY_URL=${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/qwen3tts-web/${BROWSER_SDK_SEMVER}/${BROWSER_SDK_TARBALL}" \
+        --build-arg "BROWSER_SDK_TARBALL_URL=./downloads/$BROWSER_SDK_TARBALL" \
+        --label "org.opencontainers.image.source=$CI_PROJECT_URL" \
+        --label "org.opencontainers.image.revision=$RELEASE_COMMIT_SHA" \
+        --tag "$ENGINE_CANDIDATE_IMAGE" \
+        --tag "$ENGINE_BUILD_CACHE_IMAGE" \
+        .
+    - |
+      docker build --pull --no-cache \
+        --file infra/docker/Dockerfile.triton \
+        --build-arg "BUILDKIT_INLINE_CACHE=1" \
+        --build-arg "BASE_IMAGE=$TRITON_BASE_IMAGE" \
+        --build-arg "TENSORRT_PYTHON_VERSION=$TRITON_TENSORRT_PYTHON_VERSION" \
+        --build-arg "PYTORCH_CUDA_TAG=$TRITON_PYTORCH_CUDA_TAG" \
+        --build-arg "TRITON_RUNTIME_BASE_IMAGE=$TRITON_RUNTIME_BASE_DIGEST" \
+        --build-arg "TRITON_RUNTIME_BASE_REFERENCE=$TRITON_RUNTIME_BASE_DIGEST" \
+        --build-arg "ENGINE_VERSION=$RELEASE_VERSION" \
+        --build-arg "CLIENT_WHEEL_FILENAME=$WHEEL_FILENAME" \
+        --build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256" \
+        --build-arg "BROWSER_SDK_VERSION=$BROWSER_SDK_SEMVER" \
+        --build-arg "BROWSER_SDK_REGISTRY_URL=${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/qwen3tts-web/${BROWSER_SDK_SEMVER}/${BROWSER_SDK_TARBALL}" \
+        --build-arg "BROWSER_SDK_TARBALL_URL=./downloads/$BROWSER_SDK_TARBALL" \
+        --label "org.opencontainers.image.source=$CI_PROJECT_URL" \
+        --label "org.opencontainers.image.revision=$RELEASE_COMMIT_SHA" \
+        --tag "$TRITON_CANDIDATE_IMAGE" \
+        --tag "$TRITON_BUILD_CACHE_IMAGE" \
+        .
+    - |
+      container_id="$(docker create "$ENGINE_CANDIDATE_IMAGE")"
+      trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+      docker cp "$container_id:/app/sdk/$WHEEL_FILENAME" /tmp/image-client.whl
+      test "$(sha256sum /tmp/image-client.whl | cut -d' ' -f1)" = "$WHEEL_SHA256"
+      test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$ENGINE_CANDIDATE_IMAGE")" = "$RELEASE_VERSION"
+      test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$ENGINE_CANDIDATE_IMAGE")" = "$RELEASE_COMMIT_SHA"
+      test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.filename" }}' "$ENGINE_CANDIDATE_IMAGE")" = "$WHEEL_FILENAME"
+      test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.sha256" }}' "$ENGINE_CANDIDATE_IMAGE")" = "$WHEEL_SHA256"
+      test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.browser-sdk.version" }}' "$ENGINE_CANDIDATE_IMAGE")" = "$BROWSER_SDK_SEMVER"
+      docker cp "$container_id:/app/demo/downloads/$BROWSER_SDK_TARBALL" /tmp/image-browser-sdk.tgz
+      test "$(sha256sum /tmp/image-browser-sdk.tgz | cut -d' ' -f1)" = "$BROWSER_SDK_SHA256"
+      docker cp "$container_id:/app/demo/index.html" /tmp/image-demo-index.html
+      test -s /tmp/image-demo-index.html
+      docker rm "$container_id" >/dev/null
+      trap - EXIT
+      docker run --rm "$ENGINE_CANDIDATE_IMAGE" \
+        python3 -m engine.distribution.container_smoke --runtime standalone
+    - |
+      container_id="$(docker create "$TRITON_CANDIDATE_IMAGE")"
+      trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+      docker cp "$container_id:/app/sdk/$WHEEL_FILENAME" /tmp/triton-image-client.whl
+      test "$(sha256sum /tmp/triton-image-client.whl | cut -d' ' -f1)" = "$WHEEL_SHA256"
+      test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$TRITON_CANDIDATE_IMAGE")" = "$RELEASE_VERSION"
+      test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$TRITON_CANDIDATE_IMAGE")" = "$RELEASE_COMMIT_SHA"
+      test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.filename" }}' "$TRITON_CANDIDATE_IMAGE")" = "$WHEEL_FILENAME"
+      test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.sha256" }}' "$TRITON_CANDIDATE_IMAGE")" = "$WHEEL_SHA256"
+      test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.browser-sdk.version" }}' "$TRITON_CANDIDATE_IMAGE")" = "$BROWSER_SDK_SEMVER"
+      test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.triton-runtime-base.reference" }}' "$TRITON_CANDIDATE_IMAGE")" = "$TRITON_RUNTIME_BASE_DIGEST"
+      docker cp "$container_id:/app/demo/downloads/$BROWSER_SDK_TARBALL" /tmp/triton-image-browser-sdk.tgz
+      test "$(sha256sum /tmp/triton-image-browser-sdk.tgz | cut -d' ' -f1)" = "$BROWSER_SDK_SHA256"
+      docker cp "$container_id:/app/demo/index.html" /tmp/triton-image-demo-index.html
+      test -s /tmp/triton-image-demo-index.html
+      docker rm "$container_id" >/dev/null
+      trap - EXIT
+      docker run --rm --entrypoint python3 "$TRITON_CANDIDATE_IMAGE" -c \
+        "import aiohttp, attr, packaging; print(f'aiohttp={aiohttp.__version__} attrs={attr.__version__} packaging={packaging.__version__}')"
+      docker run --rm "$TRITON_CANDIDATE_IMAGE" \
+        python3 -m engine.distribution.container_smoke --runtime triton
+    - docker push "$ENGINE_CANDIDATE_IMAGE"
+    - docker push "$TRITON_CANDIDATE_IMAGE"
+    - |
+      docker pull "$ENGINE_CANDIDATE_IMAGE" >/dev/null
+      docker pull "$TRITON_CANDIDATE_IMAGE" >/dev/null
+      ENGINE_CANDIDATE_DIGEST="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ENGINE_CANDIDATE_IMAGE" | awk -F@ 'NF == 2 { print $2; exit }')"
+      TRITON_CANDIDATE_DIGEST="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$TRITON_CANDIDATE_IMAGE" | awk -F@ 'NF == 2 { print $2; exit }')"
+      test -n "$ENGINE_CANDIDATE_DIGEST"
+      test -n "$TRITON_CANDIDATE_DIGEST"
+      printf 'ENGINE_CANDIDATE_DIGEST=%s\nTRITON_CANDIDATE_DIGEST=%s\n' \
+        "$ENGINE_CANDIDATE_DIGEST" "$TRITON_CANDIDATE_DIGEST" \
+        >> build/candidate-images.env
+    - |
+      docker push "$ENGINE_BUILD_CACHE_IMAGE" || echo "Warning: could not update optional engine build cache" >&2
+      docker push "$TRITON_BUILD_CACHE_IMAGE" || echo "Warning: could not update optional Triton build cache" >&2
+  artifacts:
+    expire_in: 14 days
+    paths:
+      - build/candidate-images.env
+    reports:
+      dotenv: build/candidate-images.env
+
+promote-engine-images:
+  extends: .release-candidate-job
+  stage: image-promote
+  timeout: 1h
+  resource_group: "release-images-$RELEASE_VERSION"
+  image: "$RUNNER_DOCKER_CLI_IMAGE"
+  services:
+    - name: "$RUNNER_DOCKER_DIND_IMAGE"
+      alias: docker
+      command: ["--tls=false"]
+  needs:
+    - job: prepare-release-candidate
+      artifacts: true
+    - job: build-engine-image
+      artifacts: true
+  variables:
+    GIT_STRATEGY: clone
+    GIT_DEPTH: "0"
+  before_script:
+    - sed -i -e "s|http://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" -e "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" /etc/apk/repositories
+    - apk add --no-cache bash git
+    - git fetch --no-tags origin "$RELEASE_COMMIT_SHA" || true
+    - git checkout --detach "$RELEASE_COMMIT_SHA"
+    - |
+      test -n "${X2ROBOT_REGISTRY_USER:-}" || {
+        echo "X2ROBOT_REGISTRY_USER is required" >&2
+        exit 1
+      }
+      test -n "${X2ROBOT_REGISTRY_PASSWORD:-}" || {
+        echo "X2ROBOT_REGISTRY_PASSWORD is required" >&2
+        exit 1
+      }
+      printf '%s\n' "$X2ROBOT_REGISTRY_PASSWORD" | docker login \
+        --username "$X2ROBOT_REGISTRY_USER" \
+        --password-stdin "$X2ROBOT_REGISTRY"
+  script:
+    - bash scripts/bash/promote_container_image.sh "$ENGINE_CANDIDATE_IMAGE" "$ENGINE_RELEASE_IMAGE" "$ENGINE_CANDIDATE_DIGEST"
+    - bash scripts/bash/promote_container_image.sh "$TRITON_CANDIDATE_IMAGE" "$TRITON_RELEASE_IMAGE" "$TRITON_CANDIDATE_DIGEST"
+    - |
+      printf 'ENGINE_RELEASE_IMAGE=%s\nTRITON_RELEASE_IMAGE=%s\n' \
+        "$ENGINE_RELEASE_IMAGE" "$TRITON_RELEASE_IMAGE" \
+        > build/promoted-images.env
+  artifacts:
+    expire_in: 14 days
+    paths:
+      - build/promoted-images.env
+    reports:
+      dotenv: build/promoted-images.env
+
+promote-client-wheel:
+  extends: .release-candidate-job
+  stage: package-promote
+  image: "$RUNNER_PYTHON_IMAGE"
+  resource_group: "client-package-$RELEASE_VERSION"
+  needs:
+    - job: prepare-release-candidate
+      artifacts: true
+    - job: build-client-wheel
+      artifacts: true
+    - job: promote-engine-images
+      artifacts: false
   variables:
     GIT_STRATEGY: none
   before_script:
@@ -237,10 +501,10 @@ publish-client-wheel:
       done
     - apt-get update
     - apt-get install --yes --no-install-recommends curl
-    - python -m pip install twine==6.2.0
-  resource_group: "client-package-$CI_COMMIT_TAG"
+    - python -m venv /tmp/qwen3tts-release-publish
+    - /tmp/qwen3tts-release-publish/bin/pip install twine==6.2.0
   script:
-    - python -m twine check "build/client-dist/$WHEEL_FILENAME"
+    - /tmp/qwen3tts-release-publish/bin/python -m twine check "build/client-dist/$WHEEL_FILENAME"
     - |
       wheel="build/client-dist/$WHEEL_FILENAME"
       registry_url="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi/files/${WHEEL_SHA256}/${WHEEL_FILENAME}"
@@ -261,7 +525,7 @@ publish-client-wheel:
           ;;
         404)
           TWINE_USERNAME="gitlab-ci-token" TWINE_PASSWORD="$CI_JOB_TOKEN" \
-            python -m twine upload \
+            /tmp/qwen3tts-release-publish/bin/python -m twine upload \
               --repository-url "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi" \
               "$wheel"
           ;;
@@ -277,240 +541,92 @@ publish-client-wheel:
         "$registry_url"
       published_sha256="$(sha256sum /tmp/published-client.whl | cut -d' ' -f1)"
       if [ "$published_sha256" != "$WHEEL_SHA256" ]; then
-        echo "Published wheel checksum does not match the built artifact" >&2
+        echo "Published wheel checksum does not match the candidate artifact" >&2
         exit 1
       fi
-      release_url="${CI_PROJECT_URL}/-/releases/${CI_COMMIT_TAG}/downloads/client-sdk/${WHEEL_FILENAME}"
+      release_url="${CI_PROJECT_URL}/-/releases/${RELEASE_VERSION}/downloads/client-sdk/${WHEEL_FILENAME}"
       pypi_index_url="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi/simple"
       printf 'SDK_VERSION=%s\nWHEEL_FILENAME=%s\nWHEEL_SHA256=%s\nWHEEL_REGISTRY_URL=%s\nWHEEL_RELEASE_URL=%s\nGITLAB_PYPI_INDEX_URL=%s\n' \
         "$SDK_VERSION" "$WHEEL_FILENAME" "$WHEEL_SHA256" \
         "$registry_url" "$release_url" "$pypi_index_url" \
         > build/published-client-wheel.env
   artifacts:
-    expire_in: 7 days
+    expire_in: 14 days
     paths:
       - build/published-client-wheel.env
     reports:
       dotenv: build/published-client-wheel.env
 
-build-engine-image:
-  extends: .tag-release-job
-  stage: image
-  timeout: 3h
-  resource_group: engine-image-cache
-  image: "$RUNNER_DOCKER_CLI_IMAGE"
-  services:
-    - name: "$RUNNER_DOCKER_DIND_IMAGE"
-      alias: docker
-      command: ["--tls=false"]
+promote-browser-sdk:
+  extends: .release-candidate-job
+  stage: package-promote
+  image: "$RUNNER_NODE_IMAGE"
+  resource_group: "browser-package-$RELEASE_VERSION"
   needs:
-    - job: publish-client-wheel
+    - job: prepare-release-candidate
       artifacts: true
     - job: build-web-release
       artifacts: true
-    - job: publish-browser-sdk
-      artifacts: true
+    - job: promote-engine-images
+      artifacts: false
   variables:
     GIT_STRATEGY: clone
-    GIT_DEPTH: "1"
+    GIT_DEPTH: "0"
   before_script:
-    - sed -i -e "s|http://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" -e "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" /etc/apk/repositories
-    - apk add --no-cache curl
-    - |
-      test -n "${X2ROBOT_REGISTRY_USER:-}" || {
-        echo "X2ROBOT_REGISTRY_USER is required" >&2
-        exit 1
-      }
-      test -n "${X2ROBOT_REGISTRY_PASSWORD:-}" || {
-        echo "X2ROBOT_REGISTRY_PASSWORD is required" >&2
-        exit 1
-      }
-      ENGINE_RELEASE_IMAGE="${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}${CI_COMMIT_TAG}"
-      ENGINE_BUILD_CACHE_IMAGE="${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}buildcache"
-      TRITON_IMAGE_REPOSITORY="${X2ROBOT_TRITON_IMAGE:-${X2ROBOT_IMAGE}-triton}"
-      TRITON_RELEASE_IMAGE="${TRITON_IMAGE_REPOSITORY}:${X2ROBOT_IMAGE_TAG_PREFIX}${CI_COMMIT_TAG}"
-      TRITON_BUILD_CACHE_IMAGE="${TRITON_IMAGE_REPOSITORY}:${X2ROBOT_IMAGE_TAG_PREFIX}buildcache"
-      TRITON_RUNTIME_BASE_IMAGE="${TRITON_RUNTIME_BASE_IMAGE:-${TRITON_IMAGE_REPOSITORY}:${TRITON_RUNTIME_BASE_TAG}}"
-      export ENGINE_RELEASE_IMAGE ENGINE_BUILD_CACHE_IMAGE TRITON_RELEASE_IMAGE TRITON_BUILD_CACHE_IMAGE TRITON_RUNTIME_BASE_IMAGE
-      printf '%s\n' "$X2ROBOT_REGISTRY_PASSWORD" | docker login \
-        --username "$X2ROBOT_REGISTRY_USER" \
-        --password-stdin "$X2ROBOT_REGISTRY"
-    - |
-      if [ -n "${NGC_API_KEY:-}" ]; then
-        echo "$NGC_API_KEY" | docker login nvcr.io --username '$oauthtoken' --password-stdin
-      fi
-    - |
-      if ! docker pull "$TRITON_RUNTIME_BASE_IMAGE"; then
-        echo "Required Triton runtime base is missing: $TRITON_RUNTIME_BASE_IMAGE" >&2
-        echo "Run a manual pipeline with BUILD_TRITON_RUNTIME_BASE=1 before creating a release tag." >&2
-        exit 1
-      fi
-      docker run --rm --entrypoint python3 "$TRITON_RUNTIME_BASE_IMAGE" -c \
-        "import aiohttp, attr, packaging, pypinyin; print(f'aiohttp={aiohttp.__version__} attrs={attr.__version__} packaging={packaging.__version__} pypinyin={pypinyin.__version__}')"
-      TRITON_RUNTIME_BASE_DIGEST="$(docker image inspect --format '{{ index .RepoDigests 0 }}' "$TRITON_RUNTIME_BASE_IMAGE")"
-      case "$TRITON_RUNTIME_BASE_DIGEST" in
-        *@sha256:*) ;;
-        *)
-          echo "Could not resolve Triton runtime base to an immutable digest" >&2
-          exit 1
-          ;;
-      esac
-      export TRITON_RUNTIME_BASE_DIGEST
+    - git fetch --no-tags origin "$RELEASE_COMMIT_SHA" || true
+    - git checkout --detach "$RELEASE_COMMIT_SHA"
   script:
     - |
-      rm -f client/dist/*.whl
-      curl --fail --silent --show-error --location \
-        --retry 5 --retry-all-errors \
-        --user "gitlab-ci-token:${CI_JOB_TOKEN}" \
-        --output "client/dist/$WHEEL_FILENAME" \
-        "$WHEEL_REGISTRY_URL"
-      downloaded_sha256="$(sha256sum "client/dist/$WHEEL_FILENAME" | cut -d' ' -f1)"
-      if [ "$downloaded_sha256" != "$WHEEL_SHA256" ]; then
-        echo "Registry wheel checksum does not match the build artifact" >&2
-        exit 1
-      fi
-      wheel_count="$(find client/dist -maxdepth 1 -type f -name 'qwen3_tts_client-*.whl' | wc -l)"
-      if [ "$wheel_count" -ne 1 ]; then
-        echo "Expected exactly one staged client wheel, found $wheel_count" >&2
-        exit 1
-      fi
-    - |
-      # DinD starts with an empty daemon on every job. Pull the last verified
-      # image so BuildKit can reuse its exported dependency layers.
-      docker pull "$ENGINE_BUILD_CACHE_IMAGE" || true
-      docker build --pull \
-        --file infra/docker/Dockerfile.engine \
-        --cache-from "$ENGINE_BUILD_CACHE_IMAGE" \
-        --build-arg "BUILDKIT_INLINE_CACHE=1" \
-        --build-arg "BASE_IMAGE=$ENGINE_BASE_IMAGE" \
-        --build-arg "PIP_INDEX_URL=$PIP_INDEX_URL" \
-        --build-arg "ENGINE_VERSION=$CI_COMMIT_TAG" \
-        --build-arg "CLIENT_WHEEL_FILENAME=$WHEEL_FILENAME" \
-        --build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256" \
-        --build-arg "BROWSER_SDK_VERSION=$BROWSER_SDK_SEMVER" \
-        --build-arg "BROWSER_SDK_REGISTRY_URL=${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/npm/" \
-        --build-arg "BROWSER_SDK_TARBALL_URL=./downloads/$BROWSER_SDK_TARBALL" \
-        --label "org.opencontainers.image.source=$CI_PROJECT_URL" \
-        --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
-        --tag "$ENGINE_RELEASE_IMAGE" \
-        --tag "$ENGINE_BUILD_CACHE_IMAGE" \
-        .
-    - |
-      # The dependency base already contains every expensive layer. Do not
-      # import the mutable full-image cache here: an older cache can otherwise
-      # mask a changed base. Build the small application tail from the exact
-      # Registry digest and verify it below.
-      docker build --pull --no-cache \
-        --file infra/docker/Dockerfile.triton \
-        --build-arg "BUILDKIT_INLINE_CACHE=1" \
-        --build-arg "BASE_IMAGE=$TRITON_BASE_IMAGE" \
-        --build-arg "TENSORRT_PYTHON_VERSION=$TRITON_TENSORRT_PYTHON_VERSION" \
-        --build-arg "PYTORCH_CUDA_TAG=$TRITON_PYTORCH_CUDA_TAG" \
-        --build-arg "TRITON_RUNTIME_BASE_IMAGE=$TRITON_RUNTIME_BASE_DIGEST" \
-        --build-arg "TRITON_RUNTIME_BASE_REFERENCE=$TRITON_RUNTIME_BASE_DIGEST" \
-        --build-arg "ENGINE_VERSION=$CI_COMMIT_TAG" \
-        --build-arg "CLIENT_WHEEL_FILENAME=$WHEEL_FILENAME" \
-        --build-arg "CLIENT_WHEEL_SHA256=$WHEEL_SHA256" \
-        --build-arg "BROWSER_SDK_VERSION=$BROWSER_SDK_SEMVER" \
-        --build-arg "BROWSER_SDK_REGISTRY_URL=${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/npm/" \
-        --build-arg "BROWSER_SDK_TARBALL_URL=./downloads/$BROWSER_SDK_TARBALL" \
-        --label "org.opencontainers.image.source=$CI_PROJECT_URL" \
-        --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
-        --tag "$TRITON_RELEASE_IMAGE" \
-        --tag "$TRITON_BUILD_CACHE_IMAGE" \
-        .
-    - |
-      container_id="$(docker create "$ENGINE_RELEASE_IMAGE")"
-      trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
-      docker cp "$container_id:/app/sdk/$WHEEL_FILENAME" /tmp/image-client.whl
-      image_wheel_sha256="$(sha256sum /tmp/image-client.whl | cut -d' ' -f1)"
-      if [ "$image_wheel_sha256" != "$WHEEL_SHA256" ]; then
-        echo "Wheel embedded in engine image differs from the published wheel" >&2
-        exit 1
-      fi
-      image_version="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$ENGINE_RELEASE_IMAGE")"
-      if [ "$image_version" != "$CI_COMMIT_TAG" ]; then
-        echo "Engine image version $image_version does not match tag $CI_COMMIT_TAG" >&2
-        exit 1
-      fi
-      image_wheel_filename="$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.filename" }}' "$ENGINE_RELEASE_IMAGE")"
-      image_wheel_label_sha256="$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.sha256" }}' "$ENGINE_RELEASE_IMAGE")"
-      if [ "$image_wheel_filename" != "$WHEEL_FILENAME" ] || [ "$image_wheel_label_sha256" != "$WHEEL_SHA256" ]; then
-        echo "Engine image wheel labels do not match the verified Registry artifact" >&2
-        exit 1
-      fi
-      image_browser_version="$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.browser-sdk.version" }}' "$ENGINE_RELEASE_IMAGE")"
-      if [ "$image_browser_version" != "$BROWSER_SDK_SEMVER" ]; then
-        echo "Engine image browser SDK version does not match the web artifact" >&2
-        exit 1
-      fi
-      docker cp "$container_id:/app/demo/downloads/$BROWSER_SDK_TARBALL" /tmp/engine-image-browser-sdk.tgz
-      test "$(sha256sum /tmp/engine-image-browser-sdk.tgz | cut -d' ' -f1)" = "$BROWSER_SDK_SHA256"
-      docker cp "$container_id:/app/demo/index.html" /tmp/engine-image-demo-index.html
-      test -s /tmp/engine-image-demo-index.html
-      docker rm "$container_id" >/dev/null
-      trap - EXIT
-      docker run --rm "$ENGINE_RELEASE_IMAGE" \
-        python3 -m engine.distribution.container_smoke --runtime standalone
-    - |
-      container_id="$(docker create "$TRITON_RELEASE_IMAGE")"
-      trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
-      docker cp "$container_id:/app/sdk/$WHEEL_FILENAME" /tmp/triton-image-client.whl
-      test "$(sha256sum /tmp/triton-image-client.whl | cut -d' ' -f1)" = "$WHEEL_SHA256"
-      test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$TRITON_RELEASE_IMAGE")" = "$CI_COMMIT_TAG"
-      test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.filename" }}' "$TRITON_RELEASE_IMAGE")" = "$WHEEL_FILENAME"
-      test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.client-wheel.sha256" }}' "$TRITON_RELEASE_IMAGE")" = "$WHEEL_SHA256"
-      test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.browser-sdk.version" }}' "$TRITON_RELEASE_IMAGE")" = "$BROWSER_SDK_SEMVER"
-      test "$(docker inspect --format '{{ index .Config.Labels "io.qwen3tts.triton-runtime-base.reference" }}' "$TRITON_RELEASE_IMAGE")" = "$TRITON_RUNTIME_BASE_DIGEST"
-      docker cp "$container_id:/app/demo/downloads/$BROWSER_SDK_TARBALL" /tmp/triton-image-browser-sdk.tgz
-      test "$(sha256sum /tmp/triton-image-browser-sdk.tgz | cut -d' ' -f1)" = "$BROWSER_SDK_SHA256"
-      docker cp "$container_id:/app/demo/index.html" /tmp/triton-image-demo-index.html
-      test -s /tmp/triton-image-demo-index.html
-      docker rm "$container_id" >/dev/null
-      trap - EXIT
-      docker run --rm --entrypoint python3 "$TRITON_RELEASE_IMAGE" -c \
-        "import aiohttp, attr, packaging; print(f'aiohttp={aiohttp.__version__} attrs={attr.__version__} packaging={packaging.__version__}')"
-      docker run --rm "$TRITON_RELEASE_IMAGE" \
-        python3 -m engine.distribution.container_smoke --runtime triton
-    - docker push "$ENGINE_RELEASE_IMAGE"
-    - docker push "$TRITON_RELEASE_IMAGE"
-    - |
-      docker push "$ENGINE_BUILD_CACHE_IMAGE" || echo "Warning: could not update optional engine build cache" >&2
-      docker push "$TRITON_BUILD_CACHE_IMAGE" || echo "Warning: could not update optional Triton build cache" >&2
+      npm_registry_url="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/npm/"
+      npm config set "@xmultimodalinteraction:registry" "$npm_registry_url"
+      npm config set -- "//${CI_SERVER_HOST}/api/v4/projects/${CI_PROJECT_ID}/packages/npm/:_authToken" "$CI_JOB_TOKEN"
+      node web/scripts/publish-gitlab-npm.mjs
+    - node web/scripts/publish-gitlab-assets.mjs
+  artifacts:
+    expire_in: 14 days
+    paths:
+      - web/dist/published-web.env
+    reports:
+      dotenv: web/dist/published-web.env
 
 create-release:
-  extends: .tag-release-job
+  extends: .release-candidate-job
   stage: release
   image: "$RUNNER_GLAB_IMAGE"
+  resource_group: "release-$RELEASE_VERSION"
   needs:
-    - job: publish-client-wheel
+    - job: prepare-release-candidate
       artifacts: true
-    - job: build-engine-image
-      artifacts: false
-    # Artifact names originate in this job's dotenv report; they are not
-    # transitively re-exported by publish-browser-sdk.
     - job: build-web-release
       artifacts: true
-    - job: publish-browser-sdk
+    - job: promote-engine-images
+      artifacts: true
+    - job: promote-client-wheel
+      artifacts: true
+    - job: promote-browser-sdk
       artifacts: true
   variables:
     GIT_STRATEGY: clone
-    GIT_DEPTH: "1"
+    GIT_DEPTH: "0"
     GLAB_ENABLE_CI_AUTOLOGIN: "true"
   before_script:
+    - git fetch --no-tags origin "$RELEASE_COMMIT_SHA" || true
+    - git checkout --detach "$RELEASE_COMMIT_SHA"
     - |
-      ENGINE_RELEASE_IMAGE="${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}${CI_COMMIT_TAG}"
+      ENGINE_RELEASE_IMAGE="${X2ROBOT_IMAGE}:${X2ROBOT_IMAGE_TAG_PREFIX}${RELEASE_VERSION}"
       TRITON_IMAGE_REPOSITORY="${X2ROBOT_TRITON_IMAGE:-${X2ROBOT_IMAGE}-triton}"
-      TRITON_RELEASE_IMAGE="${TRITON_IMAGE_REPOSITORY}:${X2ROBOT_IMAGE_TAG_PREFIX}${CI_COMMIT_TAG}"
+      TRITON_RELEASE_IMAGE="${TRITON_IMAGE_REPOSITORY}:${X2ROBOT_IMAGE_TAG_PREFIX}${RELEASE_VERSION}"
       export ENGINE_RELEASE_IMAGE TRITON_RELEASE_IMAGE
   script:
     - sh scripts/bash/create_gitlab_release.sh
 
 pages:
-  extends: .tag-release-job
-  stage: release
+  extends: .release-candidate-job
+  stage: post-release
   image: "$RUNNER_NODE_IMAGE"
   needs:
+    - job: create-release
+      artifacts: false
     - job: build-web-release
       artifacts: true
   variables:

@@ -68,15 +68,16 @@ Branches form a one-way promotion pipeline:
 
 **Hotfix exception** — the only path into `main` that bypasses `beta`: for an
 urgent fix on a stable release, branch `hotfix/<topic>` off `main`, fix, merge
-back to `main` (tag a patch release `vX.Y.Z`), then immediately sync the fix
-back into `dev` (and into `beta` if a test cycle is running).
+back to `main`, run a patch release candidate for `vX.Y.Z`, then immediately
+sync the fix back into `dev` (and into `beta` if a test cycle is running).
 
 **Version tags** are the pairing key between the engine image and the client
 wheel (see [docs/user/client_sdk.md](docs/user/client_sdk.md)):
 
-- Always `v` + PEP 440: stable `vX.Y.Z` (on `main`), beta `vX.Y.Zb1` /
-  `vX.Y.Zrc1` (on `beta`). Version tags live on `dev` / `beta` / `main`
-  only — **never tag versions on personal branches**.
+- Always `v` + PEP 440: stable `vX.Y.Z` (promoted from `main`), beta
+  `vX.Y.Zb1` / `vX.Y.Zrc1` (promoted from `beta`). Version tags are created by
+  the release promotion pipeline after candidate validation — **never push
+  version tags by hand from personal branches**.
 - Personal branches need no version tags: hatch-vcs derives
   `X.Y.Z.devN+g<hash>` automatically and the engine stamp (`version` in
   versioned capabilities as `engine_version`) carries `git describe`, both
@@ -86,24 +87,29 @@ wheel (see [docs/user/client_sdk.md](docs/user/client_sdk.md)):
   Personal markers must use a namespace, e.g. `rime/some-checkpoint` —
   they are invisible to version derivation.
 
-**Release flow**: converge `dev` → merge to `beta` → tag `vX.Y.Zb1` → tests
-pass → merge to `main` → tag `vX.Y.Z`. GitHub Actions and GitLab CI each check
-out only the top-level repository (no submodules) and build one wheel. GitHub
-publishes it to its Release; GitLab publishes it to its PyPI Package Registry
-and links it from its Release. Each pipeline downloads its exact SHA256 into
-the engine image before publishing to GHCR or GitLab Container Registry. Do
-not build or upload a second wheel manually within either release pipeline.
+**Release flow**: converge `dev` → merge to `beta` → run the manual release
+workflow with `RELEASE_VERSION=vX.Y.Zb1` / `release_version=vX.Y.Zb1` and the
+intended source ref → test the promoted beta → merge to `main` → run the same
+manual workflow for `vX.Y.Z`. GitHub Actions and GitLab CI first build a
+candidate from the selected commit without submodules, publish only candidate
+artifacts/images, and create the formal tag/Release only in the final promotion
+job. Re-run the same failed candidate jobs for CI, script, or runner failures;
+do not mint a new version unless the source commit or release contents actually
+change.
+
+To start one, use GitHub Actions → **Release** → **Run workflow** with
+`release_version` and `source_ref`, or run a GitLab pipeline from the intended
+ref with `RELEASE_VERSION` and optional `RELEASE_SOURCE_REF` variables. The
+GitLab and GitHub candidates are independent; promote only the forge whose
+artifacts and credentials are ready.
 
 The Triton image consumes a separately published, immutable dependency base so
-release tags never download the multi-gigabyte TensorRT wheel from PyPI. Before
-the first release for a runtime matrix, run GitLab's manual pipeline with
+release candidates never download the multi-gigabyte TensorRT wheel from PyPI.
+Before the first release for a runtime matrix, run GitLab's manual pipeline with
 `BUILD_TRITON_RUNTIME_BASE=1` and/or GitHub's **Build Triton Runtime Base**
-workflow. Maintainers can equivalently pass
-`-o ci.variable=BUILD_TRITON_RUNTIME_BASE=1` while pushing a protected release
-tag to GitLab. The `runtime-base` stage then gates the rest of that release
-pipeline. Bump `TRITON_RUNTIME_BASE_TAG` whenever the `triton-deps` stage or its
-CUDA/TensorRT/PyTorch matrix changes. A missing base fails the release
-immediately by design.
+workflow. Bump `TRITON_RUNTIME_BASE_TAG` whenever the `triton-deps` stage or its
+CUDA/TensorRT/PyTorch matrix changes. A missing base fails during candidate
+preparation by design, before any formal version tag is created.
 
 ## Submitting a PR
 

@@ -263,7 +263,7 @@ Demo 沿用 React、Vite、TypeScript；使用 hash history 和相对 asset base
 - Pages 没有 `/demo/config.json` 时进入 docs-only 模式，禁用体验、下载和实例代码
   生成；交互体验通过用户自己的实例 `/demo/` 完成。
 
-同一 tag 的发布产物遵守“只构建一次、后续复用”：
+同一候选发布的产物遵守“只构建一次、后续复用”，正式 tag 只在 promotion 末尾创建：
 
 - CI 使用固定 Node 22 builder，依次执行 typecheck、lint、Vitest、站点构建、
   Playwright 和 `npm pack`；运行时镜像不包含 Node/npm；

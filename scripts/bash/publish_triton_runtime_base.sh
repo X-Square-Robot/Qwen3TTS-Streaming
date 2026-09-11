@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build, verify, and publish the slow-changing Triton Python dependency base.
-# Release-tag pipelines consume this image and never install dependencies.
+# Release candidate pipelines consume this image and never install dependencies.
 
 set -euo pipefail
 

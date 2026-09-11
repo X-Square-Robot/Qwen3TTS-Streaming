@@ -13,8 +13,8 @@ require_env() {
 }
 
 require_release_environment() {
-  require_env CI_COMMIT_SHA "${CI_COMMIT_SHA-}"
-  require_env CI_COMMIT_TAG "${CI_COMMIT_TAG-}"
+  require_env RELEASE_TAG "${release_tag-}"
+  require_env RELEASE_COMMIT_SHA "${release_sha-}"
   require_env CI_PROJECT_ID "${CI_PROJECT_ID-}"
   require_env CI_PROJECT_PATH "${CI_PROJECT_PATH-}"
   require_env CI_PROJECT_URL "${CI_PROJECT_URL-}"
@@ -113,7 +113,7 @@ create_or_validate_link() {
       ;;
   esac
 
-  expected_direct_url="${CI_PROJECT_URL}/-/releases/${CI_COMMIT_TAG}/downloads${release_link_path}"
+  expected_direct_url="${CI_PROJECT_URL}/-/releases/${release_tag}/downloads${release_link_path}"
   if [ "$(printf '%s' "$release_link_json" | jq -r '.name')" != "$release_link_name" ] || \
      [ "$(printf '%s' "$release_link_json" | jq -r '.url')" != "$release_link_url" ] || \
      [ "$(printf '%s' "$release_link_json" | jq -r '.direct_asset_url')" != "$expected_direct_url" ] || \
@@ -124,12 +124,16 @@ create_or_validate_link() {
 }
 
 main() {
+  release_tag="${RELEASE_VERSION:-${CI_COMMIT_TAG-}}"
+  release_sha="${RELEASE_COMMIT_SHA:-${CI_COMMIT_SHA-}}"
+  release_candidate="${CANDIDATE_ID-}"
+  export release_tag release_sha
   require_release_environment
 
   wheel_path="/client-sdk/$WHEEL_FILENAME"
   browser_path="/browser-sdk/$BROWSER_SDK_TARBALL"
   demo_path="/demo/$DEMO_ARCHIVE"
-  expected_wheel_release_url="${CI_PROJECT_URL}/-/releases/${CI_COMMIT_TAG}/downloads${wheel_path}"
+  expected_wheel_release_url="${CI_PROJECT_URL}/-/releases/${release_tag}/downloads${wheel_path}"
   validate_url WHEEL_REGISTRY_URL "$WHEEL_REGISTRY_URL"
   validate_url WHEEL_RELEASE_URL "$WHEEL_RELEASE_URL"
   if [ "$WHEEL_RELEASE_URL" != "$expected_wheel_release_url" ]; then
@@ -158,15 +162,45 @@ main() {
   glab config set api_protocol "$CI_SERVER_PROTOCOL" --host "$CI_SERVER_FQDN"
   glab api --hostname "$CI_SERVER_FQDN" job --silent
 
-  release_notes="$(printf 'SDK wheel: `%s`\n\nSDK SHA256: `%s`\n\nStandalone image: `%s`\n\nTriton image: `%s`\n' \
-    "$WHEEL_FILENAME" "$WHEEL_SHA256" "$ENGINE_RELEASE_IMAGE" "$TRITON_RELEASE_IMAGE")"
-  glab release create "$CI_COMMIT_TAG" \
-    --repo "$CI_PROJECT_PATH" \
-    --ref "$CI_COMMIT_SHA" \
-    --name "Qwen3TTS-Streaming $CI_COMMIT_TAG" \
-    --notes "$release_notes"
+  # Candidate pipelines are not tag pipelines. Let the Releases API create the
+  # formal tag only after every build, image promotion, and package promotion
+  # has succeeded. Existing releases are accepted only as an idempotent retry.
+  if [ -n "${RELEASE_VERSION-}" ]; then
+    tag_endpoint="projects/${CI_PROJECT_ID}/repository/tags/${release_tag}"
+    tag_json="$(glab api --hostname "$CI_SERVER_FQDN" "$tag_endpoint" 2>/dev/null || true)"
+    if [ -n "$tag_json" ]; then
+      actual_tag_sha="$(printf '%s' "$tag_json" | jq -r '.commit.id // empty')"
+      if [ "$actual_tag_sha" != "$release_sha" ]; then
+        printf 'GitLab tag %s already points to %s, expected %s\n' \
+          "$release_tag" "$actual_tag_sha" "$release_sha" >&2
+        return 1
+      fi
+    fi
+  fi
 
-  links_endpoint="projects/${CI_PROJECT_ID}/releases/${CI_COMMIT_TAG}/assets/links"
+  release_notes="$(printf 'Source commit: `%s`\n\nCandidate: `%s`\n\nSDK wheel: `%s`\n\nSDK SHA256: `%s`\n\nStandalone image: `%s`\n\nTriton image: `%s`\n' \
+    "$release_sha" "$release_candidate" "$WHEEL_FILENAME" "$WHEEL_SHA256" \
+    "$ENGINE_RELEASE_IMAGE" "$TRITON_RELEASE_IMAGE")"
+  release_endpoint="projects/${CI_PROJECT_ID}/releases/${release_tag}"
+  release_json="$(glab api --hostname "$CI_SERVER_FQDN" "$release_endpoint" 2>/dev/null || true)"
+  release_json_type="$(printf '%s' "$release_json" | jq -r 'type' 2>/dev/null || true)"
+  existing_release_tag="$(printf '%s' "$release_json" | jq -r '.tag_name // empty' 2>/dev/null || true)"
+  if [ "$release_json_type" != object ] || [ -z "$existing_release_tag" ]; then
+    glab release create "$release_tag" \
+      --repo "$CI_PROJECT_PATH" \
+      --ref "$release_sha" \
+      --name "Qwen3TTS-Streaming $release_tag" \
+      --notes "$release_notes"
+  else
+    if [ "$existing_release_tag" != "$release_tag" ]; then
+      printf 'GitLab Release response has unexpected tag: %s\n' \
+        "$existing_release_tag" >&2
+      return 1
+    fi
+    printf 'GitLab Release already exists: %s\n' "$release_tag"
+  fi
+
+  links_endpoint="projects/${CI_PROJECT_ID}/releases/${release_tag}/assets/links"
   readonly links_endpoint
   create_or_validate_link "$WHEEL_FILENAME" "$WHEEL_REGISTRY_URL" "$wheel_path"
   create_or_validate_link "$BROWSER_SDK_TARBALL" "$BROWSER_SDK_GENERIC_URL" "$browser_path"
