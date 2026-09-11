@@ -82,6 +82,17 @@ validate_link_spec() {
   validate_direct_asset_path "$spec_direct_path"
 }
 
+is_gitlab_not_found_response() {
+  response=$1
+
+  if printf '%s' "$response" | jq -e \
+      'type == "object" and ((.message // .error // "") | tostring | test("404|not found"; "i"))' \
+      >/dev/null 2>&1; then
+    return 0
+  fi
+  printf '%s' "$response" | grep -Eiq '(^|[^0-9])404([^0-9]|$)|not found'
+}
+
 create_or_validate_link() {
   release_link_name=$1
   release_link_url=$2
@@ -156,8 +167,8 @@ main() {
   GLAB_CHECK_UPDATE=false
   GLAB_SEND_TELEMETRY=false
   GLAB_SHOW_WHATS_NEW=false
-  NO_PROMPT=true
-  export GLAB_CHECK_UPDATE GLAB_SEND_TELEMETRY GLAB_SHOW_WHATS_NEW NO_PROMPT
+  GLAB_NO_PROMPT=true
+  export GLAB_CHECK_UPDATE GLAB_SEND_TELEMETRY GLAB_SHOW_WHATS_NEW GLAB_NO_PROMPT
 
   glab config set api_protocol "$CI_SERVER_PROTOCOL" --host "$CI_SERVER_FQDN"
   glab api --hostname "$CI_SERVER_FQDN" job --silent
@@ -167,14 +178,23 @@ main() {
   # has succeeded. Existing releases are accepted only as an idempotent retry.
   if [ -n "${RELEASE_VERSION-}" ]; then
     tag_endpoint="projects/${CI_PROJECT_ID}/repository/tags/${release_tag}"
-    tag_json="$(glab api --hostname "$CI_SERVER_FQDN" "$tag_endpoint" 2>/dev/null || true)"
-    if [ -n "$tag_json" ]; then
-      actual_tag_sha="$(printf '%s' "$tag_json" | jq -r '.commit.id // empty')"
+    tag_lookup_output=
+    if tag_lookup_output="$(glab api --hostname "$CI_SERVER_FQDN" "$tag_endpoint" 2>&1)"; then
+      actual_tag_sha="$(printf '%s' "$tag_lookup_output" | jq -r '.commit.id // empty' 2>/dev/null || true)"
+      if [ -z "$actual_tag_sha" ]; then
+        printf 'GitLab tag lookup returned an unexpected response for %s: %s\n' \
+          "$release_tag" "$tag_lookup_output" >&2
+        return 1
+      fi
       if [ "$actual_tag_sha" != "$release_sha" ]; then
         printf 'GitLab tag %s already points to %s, expected %s\n' \
           "$release_tag" "$actual_tag_sha" "$release_sha" >&2
         return 1
       fi
+    elif ! is_gitlab_not_found_response "$tag_lookup_output"; then
+      printf 'Could not determine whether GitLab tag exists: %s\n' \
+        "$tag_lookup_output" >&2
+      return 1
     fi
   fi
 

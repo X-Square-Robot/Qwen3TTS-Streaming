@@ -103,7 +103,22 @@ case "${1:-}" in
       esac
     done
     case "$endpoint" in
-      projects/*/repository/tags/*|projects/*/releases/*)
+      projects/*/repository/tags/*)
+        case "${GLAB_TAG_LOOKUP_MODE:-missing}" in
+          missing)
+            printf '{"message":"404 Tag Not Found"}\n'
+            exit 1
+            ;;
+          error)
+            printf '{"message":"500 GitLab unavailable"}\n'
+            exit 1
+            ;;
+          *)
+            exit 2
+            ;;
+        esac
+        ;;
+      projects/*/releases/*)
         case "$endpoint" in
           */assets/links) ;;
           *) exit 1 ;;
@@ -177,6 +192,43 @@ def test_release_links_use_nonempty_multipart_form_contract(tmp_path: Path):
     assert f"ARG=name={environment['BROWSER_SDK_TARBALL']}" in calls
     assert f"ARG=name={environment['DEMO_ARCHIVE']}" in calls
     assert "ARG=release\nARG=create" in calls
+
+
+def test_missing_tag_404_response_is_treated_as_absent(tmp_path: Path):
+    _write_fake_glab(tmp_path)
+    environment = _release_environment(tmp_path)
+
+    result = subprocess.run(
+        ["sh", str(SCRIPT)],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "ARG=release\nARG=create" in Path(
+        environment["GLAB_CALL_LOG"]
+    ).read_text(encoding="utf-8")
+
+
+def test_unexpected_tag_lookup_error_fails_closed(tmp_path: Path):
+    _write_fake_glab(tmp_path)
+    environment = _release_environment(tmp_path)
+    environment["GLAB_TAG_LOOKUP_MODE"] = "error"
+
+    result = subprocess.run(
+        ["sh", str(SCRIPT)],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "Could not determine whether GitLab tag exists" in result.stderr
 
 
 def test_release_job_downloads_each_originating_dotenv_artifact():
