@@ -147,6 +147,17 @@ class NativeCursorLabelizer:
                 append_label(f"en:{ch.lower()}", span)
             elif ch.isspace() or unicodedata.category(ch).startswith("P"):
                 continue
+            elif unicodedata.category(ch).startswith("S"):
+                # Symbols are spoken-form punctuation/markup owned by the
+                # primary TN.  The released cursor vocabulary has no symbol
+                # labels, so leave them out of label space while preserving
+                # the surrounding spoken labels.  Emoji remain an explicit
+                # unsupported input below because they are not punctuation.
+                if "EMOJI" in unicodedata.name(ch, "") or ord(ch) in range(0x1F000, 0x1FAFF):
+                    raise NativeCursorLabelizerError(
+                        f"unsupported spoken character for cursor labels: {ch!r}"
+                    )
+                continue
             else:
                 raise NativeCursorLabelizerError(
                     f"unsupported spoken character for cursor labels: {ch!r}"

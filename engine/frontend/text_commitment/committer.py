@@ -62,6 +62,7 @@ _EMBEDDED_NUMERIC_PERCENT = re.compile(
 _OPEN_MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\([^)]*$")
 _TIME = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?(?:[AaPp][Mm])?$")
 _RANGE = re.compile(r"^\d+(?:\.\d+)?\s*(?:-|~)\s*\d+(?:\.\d+)?$")
+_VULGAR_FRACTION_CHARS = "½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞⅐⅑⅒"
 # ``x``/``X`` are accepted as multiplication signs only when they occur
 # between numeric operands.  They are intentionally not treated as a generic
 # alphabetic operator: an isolated English ``x`` must remain an ordinary word.
@@ -70,7 +71,8 @@ _MATH_BINARY_OPERATORS = "+*/=^×÷<>≤≥≠xX"
 _RIGHT_BOUNDARY_CHARS = ")]}" + "）】》」』〉»”’"
 _MATH_CLOSERS = ')]}'
 _QUALIFIED_NUMBER = re.compile(
-    r"(?:[$€￥£¥]|A\$|HKD)|(?:\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?)|"
+    r"(?:[$€￥£¥]|A\$|HKD)|(?:\d{4}(?:[-/.]\d{1,2}(?:[-/.]\d{1,2})?|年\d{1,2}月(?:\d{1,2}日?)?))|"
+    rf"(?:\d*[{_VULGAR_FRACTION_CHARS}])|"
     r"(?:\d{1,2}:\d{2}(?::\d{2})?(?:[AaPp][Mm])?|"
     r"\d+(?:\.\d+)?\s*(?:-|~)\s*\d+(?:\.\d+)?|"
     r"m²|km/h|km|kg|ms|°C|℃|m|mm|cm|[μµ]g/m³)$"
@@ -128,7 +130,7 @@ def _compatibility_spelling(text: str) -> str:
 
     # Superscript/subscript digits carry unit/exponent semantics (``m³``,
     # ``x²``); mapping them to ordinary digits would destroy those patterns.
-    preserve = set("⁰¹²³⁴⁵⁶⁷⁸⁹₀₁₂₃₄₅₆₇₈₉")
+    preserve = set("⁰¹²³⁴⁵⁶⁷⁸⁹₀₁₂₃₄₅₆₇₈₉½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞⅐⅑⅒")
     return "".join(
         ch if ch in preserve else unicodedata.normalize("NFKC", ch)
         for ch in text
@@ -1096,6 +1098,21 @@ class IncrementalTextCommitter:
                     self._pending = self._open_pending(
                         ch, source_pos, source_pos + 1, SpanKind.NUMBER, now
                     )
+                elif ch in _VULGAR_FRACTION_CHARS:
+                    self._flush_plain()
+                    self._pending = self._open_pending(
+                        ch, source_pos, source_pos + 1, SpanKind.NUMBER, now
+                    )
+                elif ch in "≤≥≠":
+                    self._flush_plain()
+                    self._pending = self._open_pending(
+                        ch, source_pos, source_pos + 1, SpanKind.MATH, now
+                    )
+                elif ch == "℃":
+                    self._flush_plain()
+                    self._pending = self._open_pending(
+                        ch, source_pos, source_pos + 1, SpanKind.NUMBER, now
+                    )
                 elif ch == "&":
                     # Keep an HTML character reference together until its
                     # semicolon so ``&#x20;`` can be decoded as a space rather
@@ -1301,6 +1318,20 @@ class IncrementalTextCommitter:
                     self._pending.end = source_pos + 1
                     self._pending.last_at = now
                     self._pending.kind = self._detector.classify(self._pending.raw)
+                    continue
+                if self._pending.kind is SpanKind.NUMBER and ch in "年月日":
+                    candidate = self._pending.raw + ch
+                    if re.fullmatch(r"\d{4}年(?:\d{1,2}月?)?|\d{4}年\d{1,2}月\d{1,2}日?", candidate):
+                        self._pending.raw = candidate
+                        self._pending.end = source_pos + 1
+                        self._pending.last_at = now
+                        self._pending.kind = SpanKind.NUMBER
+                        continue
+                if self._pending.kind is SpanKind.NUMBER and ch in _VULGAR_FRACTION_CHARS:
+                    self._pending.raw += ch
+                    self._pending.end = source_pos + 1
+                    self._pending.last_at = now
+                    self._pending.kind = SpanKind.NUMBER
                     continue
                 if _is_han(ch):
                     # Let the pending span's own script win.  Passing a hard
@@ -2062,7 +2093,11 @@ class IncrementalTextCommitter:
             return SpanKind.NUMBER
         if _TIME.fullmatch(raw) or _RANGE.fullmatch(raw):
             return SpanKind.NUMBER
-        if re.fullmatch(r"\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?", raw):
+        if re.fullmatch(r"\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?", raw) or re.fullmatch(
+            r"\d{4}年\d{1,2}月(?:\d{1,2}日?)?", raw
+        ):
+            return SpanKind.NUMBER
+        if re.fullmatch(r"\d{4}年\d{0,2}月?", raw):
             return SpanKind.NUMBER
         # Keep a numeric range ahead of the arithmetic detector.  A partial
         # trailing hyphen is also held as NUMBER until a right operand or an
@@ -2075,11 +2110,19 @@ class IncrementalTextCommitter:
         # ``2026-07-28`` is a date, not ``2026 minus 7 minus 28``.
         if _looks_like_math(raw):
             return SpanKind.MATH
+        if raw in "≤≥≠":
+            return SpanKind.MATH
         # Calendar forms win over the generic dotted/hyphenated version
         # grammar.  Otherwise ``2026-07-28`` is treated as a product ID.
         if _VERSION.fullmatch(raw):
             return SpanKind.VERSION
         if re.fullmatch(r"[+\-]?\d+(?:\.\d+)?(?:m²|km/h|km|kg|ms|°C|℃|m|mm|cm|[μµ]g/m³)", raw):
+            return SpanKind.NUMBER
+        if raw == "℃":
+            return SpanKind.NUMBER
+        if re.fullmatch(rf"\d*[\d{_VULGAR_FRACTION_CHARS}]", raw) and any(
+            ch in _VULGAR_FRACTION_CHARS for ch in raw
+        ):
             return SpanKind.NUMBER
         if _ORDINAL.fullmatch(raw):
             return SpanKind.ORDINAL

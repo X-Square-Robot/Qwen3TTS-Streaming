@@ -87,6 +87,12 @@ def test_labelizer_rejects_unspoken_or_unmapped_characters(text: str) -> None:
         labelizer.encode_with_spans(text)
 
 
+def test_labelizer_ignores_math_and_unit_symbols():
+    labelizer = NativeCursorLabelizer({"en:a": 1, "en:b": 2})
+
+    assert labelizer.encode_with_spans("A ≥ B ℃") == ((1, 2), ((0, 1), (4, 5)))
+
+
 @pytest.mark.parametrize(
     "vocab",
     [

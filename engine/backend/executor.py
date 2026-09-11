@@ -3808,7 +3808,12 @@ class Executor:
         if ids.numel() and bool((ids < 0).any().item()):
             raise ValueError("cursor label plan must contain non-negative labels")
         vocab_size = int(getattr(self, "_cursor_vocab_size", 0) or 0)
-        if vocab_size and ids.numel() and bool((ids >= vocab_size).any().item()):
+        # The model-owned vocabulary contains ``vocab_size`` non-blank labels
+        # numbered 1..N; id 0 is reserved for padding/blank.  Therefore the
+        # upper bound is inclusive.  Rejecting ``id == vocab_size`` would
+        # incorrectly reject the final valid label (as happened with the
+        # 503-label cursor vocabulary).
+        if vocab_size and ids.numel() and bool((ids > vocab_size).any().item()):
             raise ValueError(
                 f"cursor label plan contains an id outside vocabulary size {vocab_size}"
             )

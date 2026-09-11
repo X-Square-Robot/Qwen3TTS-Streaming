@@ -116,6 +116,24 @@ def test_ascii_and_unicode_multiplication_stay_in_one_formula_span():
         assert result.commits[0].tts_text == expected
 
 
+def test_vulgar_fraction_is_normalized_as_a_number():
+    result = IncrementalTextCommitter().feed("½", final=True)
+
+    assert len(result.commits) == 1
+    assert result.commits[0].span_kind is SpanKind.NUMBER
+    assert result.commits[0].tts_text == "二分之一"
+
+
+def test_standalone_math_and_temperature_symbols_are_spoken():
+    assert "".join(item.tts_text for item in IncrementalTextCommitter().feed("≤ ≥ ℃", final=True).commits) == "小于等于 大于等于 摄氏度"
+
+
+def test_chinese_calendar_date_uses_digit_by_digit_year():
+    result = IncrementalTextCommitter().feed("1999年10月10日\u00a0  ", final=True)
+
+    assert "".join(item.tts_text for item in result.commits).strip() == "一九九九年十月十日"
+
+
 def test_formula_parentheses_are_kept_until_balanced():
     raw = "3 * (2 + 1) = 9"
     result = IncrementalTextCommitter().feed(raw, final=True)

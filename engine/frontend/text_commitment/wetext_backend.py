@@ -19,6 +19,12 @@ logger = logging.getLogger(__name__)
 _MODEL_CODE = re.compile(r"^[A-Za-z]+-(\d+)$")
 _TIME = re.compile(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?([AaPp][Mm])?$")
 _RANGE = re.compile(r"^(\d+(?:\.\d+)?)\s*([-~])\s*(\d+(?:\.\d+)?)$")
+_VULGAR_FRACTIONS = {
+    "½": (1, 2), "⅓": (1, 3), "⅔": (2, 3), "¼": (1, 4), "¾": (3, 4),
+    "⅕": (1, 5), "⅖": (2, 5), "⅗": (3, 5), "⅘": (4, 5),
+    "⅙": (1, 6), "⅚": (5, 6), "⅛": (1, 8), "⅜": (3, 8),
+    "⅝": (5, 8), "⅞": (7, 8), "⅐": (1, 7), "⅑": (1, 9), "⅒": (1, 10),
+}
 
 
 def _compatibility_spelling(text: str) -> str:
@@ -27,7 +33,7 @@ def _compatibility_spelling(text: str) -> str:
     # Whole-string NFKC would compose ``e`` + a combining acute into ``é``.
     # Per-codepoint mapping handles full-width digits/operators while retaining
     # the grapheme/source boundaries used by streaming diagnostics.
-    preserve = set("⁰¹²³⁴⁵⁶⁷⁸⁹₀₁₂₃₄₅₆₇₈₉")
+    preserve = set("⁰¹²³⁴⁵⁶⁷⁸⁹₀₁₂₃₄₅₆₇₈₉½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞⅐⅑⅒")
     return "".join(
         ch if ch in preserve else unicodedata.normalize("NFKC", ch)
         for ch in text
@@ -560,6 +566,11 @@ def _math_fallback(text: str, *, lang: str = "zh") -> str:
             "^": "的幂",
             "≠": "不等于",
         }
+    if text in operators:
+        return operators[text].strip()
+    operator_tokens = text.split()
+    if operator_tokens and all(token in operators for token in operator_tokens):
+        return " ".join(operators[token].strip() for token in operator_tokens)
     # Scan operands/operators instead of splitting on ``-``.  A minus can be
     # either a binary subtraction operator or a unary sign on the following
     # operand (``3*-2``), and a regular ``re.split`` cannot distinguish those
@@ -621,6 +632,23 @@ def _math_fallback(text: str, *, lang: str = "zh") -> str:
 
 
 def _structured_number_fallback(text: str, *, lang: str) -> str:
+    if text in ("℃", "°C"):
+        return "摄氏度" if lang == "zh" else "degrees Celsius"
+    fraction = _VULGAR_FRACTIONS.get(text)
+    if fraction:
+        numerator, denominator = fraction
+        if lang == "zh":
+            return f"{_zh_cardinal(str(denominator))}分之{_zh_cardinal(str(numerator))}"
+        names = {
+            (1, 2): "one half", (1, 3): "one third", (2, 3): "two thirds",
+            (1, 4): "one quarter", (3, 4): "three quarters",
+        }
+        return names.get(fraction, f"{_en_cardinal(str(numerator))} over {_en_cardinal(str(denominator))}")
+    mixed_fraction = re.fullmatch(r"(\d+)([½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞⅐⅑⅒])", text)
+    if mixed_fraction:
+        whole, marker = mixed_fraction.groups()
+        tail = _structured_number_fallback(marker, lang=lang)
+        return f"{_zh_cardinal(whole)}又{tail}" if lang == "zh" else f"{_en_cardinal(whole)} and {tail}"
     currency = re.fullmatch(r"(A\$|HKD|[$€￥£¥])([+\-]?\d+(?:\.\d+)?)", text)
     if currency:
         if lang == "zh":
@@ -637,9 +665,11 @@ def _structured_number_fallback(text: str, *, lang: str) -> str:
         names = {"m²": "square meters", "km/h": "kilometers per hour", "km": "kilometers", "kg": "kilograms", "ms": "milliseconds", "°C": "degrees Celsius", "℃": "degrees Celsius", "m": "meters", "mm": "millimeters", "cm": "centimeters", "μg/m³": "micrograms per cubic meter", "µg/m³": "micrograms per cubic meter"}
         value = _en_cardinal(unit.group(1))
         return value + " " + names[unit.group(2)] if value else ""
-    date = re.fullmatch(r"(\d{4})[-/.](\d{1,2})(?:[-/.](\d{1,2}))?", text)
+    date = re.fullmatch(r"(\d{4})(?:[-/.](\d{1,2})(?:[-/.](\d{1,2}))?|年(\d{1,2})月(?:日|(?:(\d{1,2})日?))?)", text)
     if date:
-        year, month, day = date.groups()
+        year, month_ascii, day_ascii, month_zh, day_zh = date.groups()
+        month = month_ascii or month_zh
+        day = day_ascii or day_zh
         if lang == "zh":
             result = "".join(_ZH_DIGITS[int(d)] for d in year) + "年" + _zh_cardinal(month) + "月"
             return result + (_zh_cardinal(day) + "日" if day else "")

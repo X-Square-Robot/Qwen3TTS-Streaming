@@ -35,7 +35,16 @@ def test_cursor_plan_reuses_buffers_clears_tail_and_preserves_neural_state():
     assert int(slot.cursor_text_start_frame.item()) == 3
 
 
-@pytest.mark.parametrize("labels", [torch.tensor([-1]), torch.tensor([16])])
+def test_cursor_plan_accepts_final_inclusive_vocabulary_id():
+    executor = _executor(vocab_size=503)
+    slot = SlotKVState(slot_id=0, is_free=False)
+
+    executor.set_cursor_text_plan(slot, torch.tensor([503]))
+
+    assert slot.cursor_label_ids.tolist() == [[503, 0, 0, 0, 0, 0, 0, 0]]
+
+
+@pytest.mark.parametrize("labels", [torch.tensor([-1]), torch.tensor([17])])
 def test_cursor_plan_rejects_invalid_label_ids_without_mutating_slot(labels):
     executor = _executor(vocab_size=16)
     slot = SlotKVState(slot_id=0, is_free=False)
