@@ -582,19 +582,11 @@ promote-browser-sdk:
     GIT_STRATEGY: clone
     GIT_DEPTH: "0"
   before_script:
-    - |
-      for sources_file in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do
-        [ ! -f "$sources_file" ] || sed -i \
-          -e "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
-          -e "s|https://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
-          -e "s|http://security.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
-          -e "s|https://security.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
-          -e "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
-          -e "s|https://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
-          "$sources_file"
-      done
+    # node:22-bookworm-slim has no CA bundle. Its default Debian sources are
+    # HTTP, so bootstrap the trust store before any HTTPS-only operations.
     - apt-get update
-    - apt-get install --yes --no-install-recommends git
+    - apt-get install --yes --no-install-recommends ca-certificates git
+    - update-ca-certificates
     - git fetch --no-tags origin "$RELEASE_COMMIT_SHA" || true
     - git checkout --detach "$RELEASE_COMMIT_SHA"
   script:
