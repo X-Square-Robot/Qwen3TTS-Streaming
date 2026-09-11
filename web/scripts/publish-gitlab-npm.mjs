@@ -2,9 +2,13 @@ import {createHash} from "node:crypto";
 import {mkdtemp, readFile, readdir, rm} from "node:fs/promises";
 import {basename, dirname, resolve} from "node:path";
 import {execFile} from "node:child_process";
+import {setTimeout as sleep} from "node:timers/promises";
 import {promisify} from "node:util";
 
 const exec = promisify(execFile);
+const VERIFY_ATTEMPTS = readInteger("NPM_PUBLISH_VERIFY_ATTEMPTS", 8, 1);
+const VERIFY_INITIAL_DELAY_MS = readInteger("NPM_PUBLISH_VERIFY_INITIAL_DELAY_MS", 2000, 0);
+const VERIFY_MAX_DELAY_MS = readInteger("NPM_PUBLISH_VERIFY_MAX_DELAY_MS", 15000, 0);
 const required = [
   "CI_API_V4_URL",
   "CI_PROJECT_ID",
@@ -43,12 +47,24 @@ if (existing.status === 0) {
     throw new Error(`GitLab npm registry already contains different bytes for ${basename(archive)}`);
   }
   console.log(`Browser SDK npm package is already present: ${packageName}@${version}`);
-} else if (!/(E404|404|not found)/i.test(`${existing.stdout}\n${existing.stderr}`)) {
+} else if (!/(E404|ETARGET|404|no matching version found|not found)/i.test(`${existing.stdout}\n${existing.stderr}`)) {
   throw new Error(
     `GitLab npm registry lookup failed: ${existing.stderr || existing.stdout}`.trim(),
   );
 } else {
-  await runNpm(["publish", archive, "--registry", registry, "--tag", distTag]);
+  const published = await runNpm(
+    ["publish", archive, "--registry", registry, "--tag", distTag],
+    true,
+  );
+  const publishOutput = `${published.stdout}\n${published.stderr}`;
+  if (published.status !== 0 && !isAlreadyPublishedError(publishOutput)) {
+    throw new Error(`GitLab npm publish failed: ${publishOutput}`.trim());
+  }
+  if (published.status === 0) {
+    console.log(`Published ${packageName}@${version}; waiting for registry visibility`);
+  } else {
+    console.log(`Package publish was already acknowledged; verifying ${packageName}@${version}`);
+  }
   const downloaded = await downloadPublishedArchive();
   if (downloaded.sha256 !== localSha256) {
     throw new Error(`Published npm package does not match ${basename(archive)}`);
@@ -57,9 +73,33 @@ if (existing.status === 0) {
 await verifyOrCreateDistTag();
 
 async function downloadPublishedArchive() {
+  let lastError = "unknown npm registry error";
+  for (let attempt = 1; attempt <= VERIFY_ATTEMPTS; attempt += 1) {
+    const result = await tryDownloadPublishedArchive();
+    if (result.archive) return result.archive;
+    lastError = result.error;
+    if (attempt < VERIFY_ATTEMPTS) {
+      const delayMs = Math.min(
+        VERIFY_MAX_DELAY_MS,
+        VERIFY_INITIAL_DELAY_MS * 2 ** (attempt - 1),
+      );
+      console.log(
+        `Published npm package is not visible yet (attempt ${attempt}/${VERIFY_ATTEMPTS}); ` +
+          `retrying in ${delayMs}ms`,
+      );
+      await sleep(delayMs);
+    }
+  }
+  throw new Error(
+    `Published npm package ${packageName}@${version} was not visible after ` +
+      `${VERIFY_ATTEMPTS} attempts: ${lastError}`,
+  );
+}
+
+async function tryDownloadPublishedArchive() {
   const tempDir = await mkdtemp("/tmp/qwen3tts-npm-");
   try {
-    await runNpm(
+    const packed = await runNpm(
       [
         "pack",
         `${packageName}@${version}`,
@@ -68,14 +108,22 @@ async function downloadPublishedArchive() {
         "--pack-destination",
         tempDir,
       ],
-      false,
+      true,
     );
+    if (packed.status !== 0) {
+      return {
+        error:
+          `${packed.stderr || packed.stdout}`.trim() ||
+          `npm pack exited with ${packed.status}`,
+      };
+    }
     const files = (await readdir(tempDir)).filter((name) => name.endsWith(".tgz"));
     if (files.length !== 1) {
-      throw new Error(`Expected exactly one downloaded npm archive, found ${files.length}`);
+      return {error: `Expected exactly one downloaded npm archive, found ${files.length}`};
     }
     const path = resolve(tempDir, files[0]);
-    return {path, sha256: await sha256File(path)};
+    const archive = {path, sha256: await sha256File(path)};
+    return {archive};
   } finally {
     await rm(tempDir, {recursive: true, force: true});
   }
@@ -100,6 +148,20 @@ async function runNpm(args, allowFailure = false) {
       stderr: error.stderr ?? "",
     };
   }
+}
+
+function isAlreadyPublishedError(output) {
+  return /(?:EPUBLISHCONFLICT|E409|409|already exists|cannot publish over|previously published)/i.test(
+    output,
+  );
+}
+
+function readInteger(name, fallback, minimum) {
+  const value = Number.parseInt(process.env[name] ?? `${fallback}`, 10);
+  if (!Number.isInteger(value) || value < minimum) {
+    throw new Error(`${name} must be an integer >= ${minimum}`);
+  }
+  return value;
 }
 
 async function verifyOrCreateDistTag() {
