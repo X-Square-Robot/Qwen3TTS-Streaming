@@ -246,6 +246,10 @@ def test_release_links_are_durable_and_docs_never_use_vcs_installs():
     assert "promote_container_image.sh" in github
     assert "promote-client-wheel:" in gitlab
     assert "promote-browser-sdk:" in gitlab
+    browser_job = gitlab.split("\npromote-browser-sdk:\n", 1)[1].split(
+        "\ncreate-release:\n", 1
+    )[0]
+    assert "apt-get install --yes --no-install-recommends git" in browser_job
     assert "publish-gitlab-npm.mjs" in gitlab
     assert '--tag "$RELEASE_VERSION"' in _read(
         "web/scripts/publish-gitlab-npm.mjs"
