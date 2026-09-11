@@ -1894,7 +1894,6 @@ class FrontendInterface:
                 result: EngineResult = await session.result_queue.get()
 
                 if result.type == ResultType.AUDIO_CHUNK:
-                    session.record_first_audio()
                     audio = result.audio_bytes or b""
                     session.total_audio_bytes += len(audio)
                     if session.audio_credit_estimator is not None and audio:
@@ -1903,14 +1902,18 @@ class FrontendInterface:
                             max(1, round(len(audio) / frame_bytes))
                         )
 
-                    # Propagate raw audio timestamp from engine thread
+                    # Propagate the first raw-audio timestamp from the engine
+                    # thread.  A session can contain multiple segments; later
+                    # segment metrics must not replace the session's first.
+                    first_raw_audio_at = None
                     if result.metrics and "first_raw_audio_at" in result.metrics:
                         try:
-                            session.first_raw_audio_at = float(
+                            first_raw_audio_at = float(
                                 result.metrics["first_raw_audio_at"]
                             )
                         except (ValueError, TypeError):
                             pass
+                    session.record_first_audio(first_raw_audio_at)
 
                     reorder = session.reorder
                     meta = session.segment_order.get(

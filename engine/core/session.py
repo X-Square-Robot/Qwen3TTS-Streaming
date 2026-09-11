@@ -183,10 +183,17 @@ class Session:
     def input_complete(self) -> bool:
         return self._input_complete
 
-    def record_first_audio(self) -> None:
-        """Record the first raw audio arrival (phase ``engine.audio.first_raw``)."""
+    def record_first_audio(self, timestamp: Optional[float] = None) -> None:
+        """Record the first raw audio arrival.
+
+        ``timestamp`` may be supplied by the engine result so the session
+        keeps the engine's timestamp.  Subsequent segment audio is ignored;
+        this is a session-level first-event metric.
+        """
         if self.first_raw_audio_at is None:
-            self.first_raw_audio_at = time.monotonic()
+            self.first_raw_audio_at = (
+                time.monotonic() if timestamp is None else timestamp
+            )
 
     @property
     def first_audio_at(self) -> Optional[float]:

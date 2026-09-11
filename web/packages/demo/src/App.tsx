@@ -349,6 +349,9 @@ function Experience({loaded, onCapabilities, onSettings, settings}: {
       setReceivedSamples(Number(event.endSample));
       setAudioEnvelope((current) => appendAudioEnvelope(current, event.pcm, event.startSample, event.endSample));
       setTiming((current) => current.firstAudio ? current : {...current, firstAudio: performance.now() - requestStartedAt.current});
+      if (event.server?.ttft_ms !== undefined) {
+        setServerTiming((current) => ({...current, ttft: event.server?.ttft_ms ?? current.ttft}));
+      }
       const collector = collectorRef.current;
       collector?.append(event.pcm);
       if (collector?.snapshot().limitReached && !wavLimitWarned.current) {

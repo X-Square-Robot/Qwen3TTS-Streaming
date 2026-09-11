@@ -198,6 +198,7 @@ async def test_standard_realtime_tts_lifecycle_and_usage():
                 if event["type"] == "response.output_audio.delta"
             )
             assert len(base64.b64decode(delta["delta"])) == 2400
+            assert float(delta["qwen_server_ttft_ms"]) >= 0
             progress = next(
                 event for event in events if event["type"] == "qwen.text_progress"
             )

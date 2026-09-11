@@ -70,6 +70,16 @@ class ServerTimingAccumulator:
     total_segments: int = 0
     total_audio_ms: float = 0.0
 
+    def record_prefill_completed(self, timestamp: float) -> None:
+        """Record the session's first completed prefill boundary only."""
+        if self.prefill_completed_monotonic is None:
+            self.prefill_completed_monotonic = timestamp
+
+    def record_first_raw_audio(self, timestamp: float) -> None:
+        """Record the session's first raw-audio boundary only."""
+        if self.first_raw_audio_monotonic is None:
+            self.first_raw_audio_monotonic = timestamp
+
     def monotonic_to_epoch_ms(self, monotonic: float) -> int:
         """Convert a monotonic timestamp to epoch milliseconds."""
         return int(self.base_epoch_ms + (monotonic - self.base_monotonic) * 1000)

@@ -310,7 +310,14 @@ export class RealtimeTTSClient {
         return;
       }
       this.active.sampleCursor = end;
-      this.emit({type: "audio", pcm: pcm16(bytes), startSample: start, endSample: end});
+      const server = serverDiagnostics({qwen_server_ttft_ms: event.qwen_server_ttft_ms});
+      this.emit({
+        type: "audio",
+        pcm: pcm16(bytes),
+        startSample: start,
+        endSample: end,
+        ...(server === undefined ? {} : {server}),
+      });
       return;
     }
     if (type === "qwen.text_progress") {

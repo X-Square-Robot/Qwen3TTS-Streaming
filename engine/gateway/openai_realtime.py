@@ -385,6 +385,7 @@ class _ResponseState:
     terminal_metrics: dict[str, Any] = field(default_factory=dict)
     created_monotonic_ns: int = field(default_factory=time.monotonic_ns)
     first_audio_monotonic_ns: int = 0
+    first_audio_timing_sent: bool = False
     finished_monotonic_ns: int = 0
 
 
@@ -880,16 +881,16 @@ class _RealtimeConnection:
                             state.first_audio_monotonic_ns = time.monotonic_ns()
                         state.audio_samples += len(pcm) // (2 * channels)
                         self._voice_locked = True
-                        await self._send(
-                            {
-                                "type": "response.output_audio.delta",
-                                "response_id": state.response_id,
-                                "item_id": state.item_id,
-                                "output_index": 0,
-                                "content_index": 0,
-                                "delta": base64.b64encode(pcm).decode("ascii"),
-                            }
-                        )
+                        delta = {
+                            "type": "response.output_audio.delta",
+                            "response_id": state.response_id,
+                            "item_id": state.item_id,
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": base64.b64encode(pcm).decode("ascii"),
+                        }
+                        delta.update(self._first_audio_timing(state))
+                        await self._send(delta)
                     continue
                 event = frame.get("event") or {}
                 event_type = str(event.get("type") or "")
@@ -1009,19 +1010,19 @@ class _RealtimeConnection:
                     continue
                 if isinstance(output, AudioOutput):
                     self._voice_locked = True
-                    await self._send(
-                        {
-                            "type": "response.output_audio.delta",
-                            "response_id": state.response_id,
-                            "item_id": state.item_id,
-                            "output_index": 0,
-                            "content_index": 0,
-                            "delta": base64.b64encode(output.pcm_bytes).decode("ascii"),
-                            "qwen_delivery_seq": message.delivery_seq,
-                            "qwen_output_sample_start": message.start_sample,
-                            "qwen_output_sample_end": message.end_sample,
-                        }
-                    )
+                    delta = {
+                        "type": "response.output_audio.delta",
+                        "response_id": state.response_id,
+                        "item_id": state.item_id,
+                        "output_index": 0,
+                        "content_index": 0,
+                        "delta": base64.b64encode(output.pcm_bytes).decode("ascii"),
+                        "qwen_delivery_seq": message.delivery_seq,
+                        "qwen_output_sample_start": message.start_sample,
+                        "qwen_output_sample_end": message.end_sample,
+                    }
+                    delta.update(self._first_audio_timing(state))
+                    await self._send(delta)
                     continue
                 if isinstance(output, EventOutput):
                     if output.event_type in {
@@ -1633,6 +1634,19 @@ class _RealtimeConnection:
                 "qwen_output_sample_rate": str(state.sample_rate),
                 **self._response_diagnostics_metadata(state),
             },
+        }
+
+    @staticmethod
+    def _first_audio_timing(state: _ResponseState) -> dict[str, str]:
+        """Return the one-shot server TTFT attached to the first audio delta."""
+
+        if state.first_audio_timing_sent or not state.first_audio_monotonic_ns:
+            return {}
+        state.first_audio_timing_sent = True
+        return {
+            "qwen_server_ttft_ms": (
+                f"{(state.first_audio_monotonic_ns - state.created_monotonic_ns) / 1_000_000:.3f}"
+            )
         }
 
     @staticmethod

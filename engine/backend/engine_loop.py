@@ -2012,7 +2012,15 @@ class EngineLoop:
                 and seg.prefill_started_at is not None
             ):
                 acc.prefill_started_monotonic = seg.prefill_started_at
-            acc.prefill_completed_monotonic = prefill_end
+            # Later segments (and retries) have their own timing, but must not
+            # overwrite the session's initial prefill boundary.
+            record_prefill_completed = getattr(acc, "record_prefill_completed", None)
+            if callable(record_prefill_completed):
+                record_prefill_completed(prefill_end)
+            elif acc.prefill_completed_monotonic is None:
+                # Keep compatibility with legacy timing accumulator-like
+                # objects supplied by adapters.
+                acc.prefill_completed_monotonic = prefill_end
             acc.cache_hit = cache_hit
             acc.cache_tokens_reused = seg.cache_tokens_reused
 
@@ -3033,11 +3041,14 @@ class EngineLoop:
                         now_mono = time.monotonic()
                         # Write to ServerTimingAccumulator if available
                         group_acc = self._get_group_timing_accumulator(group)
-                        if (
-                            group_acc is not None
-                            and group_acc.first_raw_audio_monotonic is None
-                        ):
-                            group_acc.first_raw_audio_monotonic = now_mono
+                        if group_acc is not None:
+                            record_first_raw_audio = getattr(
+                                group_acc, "record_first_raw_audio", None
+                            )
+                            if callable(record_first_raw_audio):
+                                record_first_raw_audio(now_mono)
+                            elif group_acc.first_raw_audio_monotonic is None:
+                                group_acc.first_raw_audio_monotonic = now_mono
                         LifecycleLogger.emit(
                             session_id=seg.session_id,
                             phase="engine.audio.first_raw",

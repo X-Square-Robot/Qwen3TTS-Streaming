@@ -2,6 +2,7 @@ import {z} from "zod";
 
 const baseEvent = z.object({type: z.string().min(1)}).passthrough();
 const cursor = z.union([z.number().int().nonnegative(), z.string().regex(/^\d+$/)]);
+const optionalServerTiming = z.union([z.number().finite(), z.string()]).optional();
 const response = z.object({id: z.string().min(1)}).passthrough();
 
 const businessEvents: Record<string, z.ZodTypeAny> = {
@@ -13,6 +14,7 @@ const businessEvents: Record<string, z.ZodTypeAny> = {
     delta: z.string(),
     qwen_output_sample_start: cursor,
     qwen_output_sample_end: cursor,
+    qwen_server_ttft_ms: optionalServerTiming,
   }).passthrough(),
   "response.done": z.object({
     type: z.literal("response.done"),

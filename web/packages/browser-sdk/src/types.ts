@@ -153,7 +153,7 @@ export interface Capabilities {
 export type TTSEvent =
   | {type: "connected"}
   | {type: "response_started"; responseId: string}
-  | {type: "audio"; pcm: Int16Array; startSample: bigint; endSample: bigint}
+  | {type: "audio"; pcm: Int16Array; startSample: bigint; endSample: bigint; server?: ServerDiagnostics}
   | {type: "progress"; text: string; sample: bigint; meta?: Record<string, unknown>}
   | {type: "warning"; message: string}
   | {type: "completed"; responseId: string; usage?: Record<string, number>; server?: ServerDiagnostics}

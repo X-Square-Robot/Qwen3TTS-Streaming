@@ -9,6 +9,7 @@ describe("Realtime business event contract", () => {
       delta: "AAA=",
       qwen_output_sample_start: "9007199254740993",
       qwen_output_sample_end: "9007199254740994",
+      qwen_server_ttft_ms: "12.5",
     }).type).toBe("response.output_audio.delta");
   });
 

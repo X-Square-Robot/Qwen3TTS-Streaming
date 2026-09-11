@@ -150,7 +150,11 @@ describe("RealtimeTTSClient", () => {
   it("runs full-text synthesis and decodes contiguous PCM16", async () => {
     const {client, socket} = setup();
     const events: string[] = [];
-    client.onEvent((event) => events.push(event.type));
+    let firstAudioServerTtft: number | undefined;
+    client.onEvent((event) => {
+      events.push(event.type);
+      if (event.type === "audio") firstAudioServerTtft = event.server?.ttft_ms;
+    });
     await client.connect();
     const run = await client.synthesize("你好", options);
     await Promise.resolve();
@@ -170,6 +174,7 @@ describe("RealtimeTTSClient", () => {
       qwen_delivery_seq: 1,
       qwen_output_sample_start: 0,
       qwen_output_sample_end: 2,
+      qwen_server_ttft_ms: "12.5",
     });
     socket.receive({
       type: "response.done",
@@ -193,6 +198,7 @@ describe("RealtimeTTSClient", () => {
     });
     const terminal = await run.done;
 
+    expect(firstAudioServerTtft).toBe(12.5);
     expect(terminal).toMatchObject({
       type: "completed",
       responseId: "resp_1",
