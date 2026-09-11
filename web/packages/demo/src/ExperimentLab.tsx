@@ -4,7 +4,7 @@ import {type Capabilities} from "@xmultimodalinteraction/qwen3tts-browser";
 import {DEFAULT_DEMO_SETTINGS, type DemoSynthesisSettings} from "./demo-settings";
 import type {LoadedDemoConfig} from "./config";
 import {concurrencyStats, MAX_CONCURRENCY, safeConcurrency, type LaneSnapshot} from "./lab/experiment-model";
-import {discoverExperimentCapabilities, startExperiment, startPkExperiment, type ActiveExperiment, type RunOutput} from "./lab/experiments";
+import {createExperimentStartBarrier, discoverExperimentCapabilities, startExperiment, startPkExperiment, type ActiveExperiment, type RunOutput} from "./lab/experiments";
 import {MediaPlayer, type MediaPlayerHandle} from "./components/MediaPlayer";
 import "./lab/experiments.css";
 
@@ -67,6 +67,7 @@ export function ExperimentLab({loaded, embedded = false, capabilities: providedC
     const initial = Array.from({length: count}, (_, id) => ({id, status: "connecting" as const}));
     setLanes(initial);
     const commonStart = performance.now();
+    const startBarrier = createExperimentStartBarrier(count);
     const launched = Array.from({length: count}, (_, laneId) => {
       const run = startExperiment(opts, "streaming", commonStart, (update) => {
         if (generation !== concurrencyGeneration.current) return;
@@ -78,7 +79,7 @@ export function ExperimentLab({loaded, embedded = false, capabilities: providedC
           ...(update.serverTtftMs === undefined ? {} : {serverTtftMs: update.serverTtftMs}),
           ...(update.error ? {error: update.error} : {}),
         } : item));
-      });
+      }, {barrier: startBarrier, laneId});
       active.current.push(run);
       return {laneId, run};
     });

@@ -41,11 +41,77 @@ export interface RunUpdate {
 }
 export interface ActiveExperiment { readonly cancel: () => void; readonly done: Promise<RunOutput>; }
 
+export interface ExperimentStartBarrier {
+  readonly wait: () => Promise<void>;
+  readonly ready: (laneId: number) => void;
+  readonly fail: (laneId: number, error: unknown) => void;
+  readonly cancel: (laneId: number) => void;
+}
+
+export class ExperimentConnectionError extends Error {
+  readonly laneId: number;
+  readonly cause: unknown;
+  constructor(laneId: number, cause: unknown) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    super(`第 ${laneId + 1} 路连接失败：${message}`);
+    this.name = "ExperimentConnectionError";
+    this.laneId = laneId;
+    this.cause = cause;
+  }
+}
+
+export class ExperimentStartAbortedError extends Error {
+  readonly failedLaneId: number;
+  readonly cause: ExperimentConnectionError;
+  constructor(failure: ExperimentConnectionError) {
+    super(`连接屏障已中止（第 ${failure.laneId + 1} 路失败）：${failure.message}`);
+    this.name = "ExperimentStartAbortedError";
+    this.failedLaneId = failure.laneId;
+    this.cause = failure;
+  }
+}
+
+/** Coordinates the common response/text start without owning any client. */
+export function createExperimentStartBarrier(count: number): ExperimentStartBarrier {
+  if (!Number.isInteger(count) || count < 1) throw new RangeError("连接屏障至少需要一路");
+  let readyCount = 0;
+  const readyLanes = new Set<number>();
+  let failure: ExperimentConnectionError | undefined;
+  let settled = false;
+  let resolveWait: (() => void) | undefined;
+  let rejectWait: ((error: unknown) => void) | undefined;
+  const waitPromise = new Promise<void>((resolve, reject) => { resolveWait = resolve; rejectWait = reject; });
+  return {
+    wait: () => waitPromise,
+    ready: (laneId) => {
+      if (settled) return;
+      if (readyLanes.has(laneId)) return;
+      readyLanes.add(laneId);
+      readyCount += 1;
+      if (readyCount === count) { settled = true; resolveWait?.(); }
+    },
+    fail: (laneId, error) => {
+      if (settled) return;
+      settled = true;
+      failure = error instanceof ExperimentConnectionError ? error : new ExperimentConnectionError(laneId, error);
+      rejectWait?.(new ExperimentStartAbortedError(failure));
+    },
+    cancel: (laneId) => {
+      if (settled) return;
+      settled = true;
+      const cancellation = new ExperimentConnectionError(laneId, new Error("实验已取消"));
+      rejectWait?.(new ExperimentStartAbortedError(cancellation));
+    },
+  };
+}
+
+interface ExperimentCoordination { barrier: ExperimentStartBarrier; laneId: number; }
+
 function endpoints(options: ExperimentOptions) { const capabilitiesUrl = resolveRelativeUrl(options.loaded.config.endpoints.capabilities_url, options.loaded.responseUrl); const websocketUrl = new URL(resolveRelativeUrl(options.loaded.config.endpoints.openai_realtime_url, options.loaded.responseUrl)); websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:"; return {capabilitiesUrl, websocketUrl}; }
 export async function discoverExperimentCapabilities(loaded: LoadedDemoConfig): Promise<Capabilities> { return discoverCapabilities(resolveRelativeUrl(loaded.config.endpoints.capabilities_url, loaded.responseUrl)); }
 function delay(ms: number, cancelled: () => boolean): Promise<void> { return new Promise((resolve, reject) => { const timer = setTimeout(resolve, Math.max(0, ms)); const poll = setInterval(() => { if (cancelled()) { clearTimeout(timer); clearInterval(poll); reject(new Error("实验已取消")); } }, 10); setTimeout(() => clearInterval(poll), Math.max(0, ms) + 20); }); }
 
-export function startExperiment(options: ExperimentOptions, mode: "streaming" | "offline", startAt = performance.now(), onUpdate?: (update: RunUpdate) => void): ActiveExperiment {
+export function startExperiment(options: ExperimentOptions, mode: "streaming" | "offline", startAt = performance.now(), onUpdate?: (update: RunUpdate) => void, coordination?: ExperimentCoordination): ActiveExperiment {
   let client: RealtimeTTSClient | undefined; let synthesis: SynthesisRun | undefined; let cancelled = false;
   const done = (async (): Promise<RunOutput> => {
     const {capabilitiesUrl, websocketUrl} = endpoints(options);
@@ -81,7 +147,22 @@ export function startExperiment(options: ExperimentOptions, mode: "streaming" | 
       }
     });
     onUpdate?.({phase: "connecting"});
-    await client.connect();
+    try {
+      await client.connect();
+    } catch (error) {
+      if (cancelled) {
+        coordination?.barrier.cancel(coordination.laneId);
+        throw new Error("实验已取消");
+      }
+      if (coordination) coordination.barrier.fail(coordination.laneId, error);
+      throw coordination ? new ExperimentConnectionError(coordination.laneId, error) : error;
+    }
+    if (cancelled) {
+      coordination?.barrier.cancel(coordination.laneId);
+      throw new Error("实验已取消");
+    }
+    coordination?.barrier.ready(coordination.laneId);
+    await coordination?.barrier.wait();
     if (cancelled) throw new Error("实验已取消");
     const capabilities = client.capabilities;
     if (!capabilities) throw new Error("实例未返回 capabilities");
@@ -121,6 +202,7 @@ export function startExperiment(options: ExperimentOptions, mode: "streaming" | 
     done,
     cancel: () => {
       cancelled = true;
+      coordination?.barrier.cancel(coordination.laneId);
       try { synthesis?.cancel(); } catch { /* the socket may already be closed */ }
       client?.close();
     },
