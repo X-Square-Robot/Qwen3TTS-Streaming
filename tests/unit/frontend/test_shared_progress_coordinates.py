@@ -49,6 +49,13 @@ def test_ema_native_share_codec_token_raw_contract_at_every_frontier():
         assert right["meta"]["raw_codepoint_end"] == ("2" if frame < 6 else "5")
 
 
+def test_precise_native_events_publish_owner_display_interpolation():
+    result = event(session(True), 1, 1.0)
+
+    assert result["meta"]["raw_codepoint_end"] == "2"
+    assert float(result["meta"]["display_raw_position"]) == 2.5
+
+
 def test_native_lookahead_holds_and_bad_estimate_fallback_does_not_retract():
     state = session(True)
     first = event(state, 1, 4.0)

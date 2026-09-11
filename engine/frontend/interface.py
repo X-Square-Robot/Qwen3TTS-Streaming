@@ -32,6 +32,7 @@ from ..core.text_progress import (
     NativeCursorProgressProjector,
     NATIVE_CURSOR_PROGRESS_BASIS,
     TEXT_PROGRESS_BASIS,
+    cursor_display_position,
 )
 from ..core.types import (
     EngineResult,
@@ -2654,6 +2655,7 @@ class FrontendInterface:
                         if valid else projection.token_end
                     )
                     mapped = project(token_end)
+                    display = cursor_display_position(plan, mu)
                     if valid and not final:
                         stall_frames = getattr(
                             session, "native_cursor_stall_frames", None
@@ -2720,6 +2722,14 @@ class FrontendInterface:
                                 **mapped,
                                 "text_input_final": "true" if session.input_complete else "false",
                                 "alignment_final": "true" if final else "false",
+                                **(
+                                    {
+                                        "display_normalized_position": f"{display[0]:.6f}",
+                                        "display_raw_position": f"{display[1]:.6f}",
+                                    }
+                                    if display is not None
+                                    else {}
+                                ),
                             },
                         }
                 except (TypeError, ValueError, OverflowError):

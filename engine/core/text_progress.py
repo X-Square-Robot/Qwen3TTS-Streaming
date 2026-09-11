@@ -19,6 +19,28 @@ TEXT_PROGRESS_BASIS = "ema_frame_ratio_v1"
 NATIVE_CURSOR_PROGRESS_BASIS = "native_cursor_v1"
 
 
+def cursor_display_position(
+    plan: CursorLabelPlan, position: float
+) -> tuple[float, float] | None:
+    """Interpolate a UI position inside the owner containing ``position``."""
+    if not plan.owner_spans:
+        return None
+    value = max(0.0, min(float(plan.label_count), float(position)))
+    owner = next(
+        (item for item in plan.owner_spans if value < item.label_end),
+        plan.owner_spans[-1],
+    )
+    width = owner.label_end - owner.label_start
+    fraction = 1.0 if value >= owner.label_end else (
+        max(0.0, value - owner.label_start) / max(1, width)
+    )
+    return (
+        owner.normalized_start
+        + fraction * (owner.normalized_end - owner.normalized_start),
+        owner.raw_start + fraction * (owner.raw_end - owner.raw_start),
+    )
+
+
 @dataclass(frozen=True)
 class TextProgressEstimate:
     """A monotonic, segment-local text progress estimate.
@@ -194,18 +216,11 @@ class NativeCursorProgressProjector:
         self._last_normalized_end = normalized_end
         self._last_raw_end = raw_end
 
-        owner = self._owner_at(position)
+        display = cursor_display_position(self.plan, position)
         display_normalized = None
         display_raw = None
-        if owner is not None:
-            width = owner.label_end - owner.label_start
-            fraction = 1.0 if position >= owner.label_end else (
-                max(0.0, position - owner.label_start) / width
-            )
-            display_normalized = owner.normalized_start + fraction * (
-                owner.normalized_end - owner.normalized_start
-            )
-            display_raw = owner.raw_start + fraction * (owner.raw_end - owner.raw_start)
+        if display is not None:
+            display_normalized, display_raw = display
             # Display interpolation is UI-only, but it must not visibly move
             # backwards when a mutable tail is re-anchored or an owner closes.
             # The integer protocol high-water above remains authoritative.
