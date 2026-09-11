@@ -60,7 +60,7 @@ export function startExperiment(options: ExperimentOptions, mode: "streaming" | 
     let clientFirstAudioMs = 0;
     let serverTtftMs = 0;
     let requestStartedAt = startAt;
-    const collector: WavCollector | undefined;
+    const collectorRef: {current?: WavCollector} = {};
     const at = () => performance.now() - startAt;
     const clientAt = () => performance.now() - requestStartedAt;
     client.onRawEvent((event) => { trace.push({at_ms: Number(at().toFixed(2)), type: event.type, sample_start: event.qwen_output_sample_start, sample_end: event.qwen_output_sample_end, text: event.text}); if (trace.length > 300) trace.shift(); });
@@ -70,6 +70,7 @@ export function startExperiment(options: ExperimentOptions, mode: "streaming" | 
         serverTtftMs = event.server?.ttft_ms ?? 0;
       }
       if (event.type === "progress") trace.push({at_ms: Number(at().toFixed(2)), type: event.type, sample_end: event.sample.toString(), meta: event.meta});
+      const collector = collectorRef.current;
       if (event.type === "audio" && collector) {
         if (!firstAudioMs) {
           firstAudioMs = at();
@@ -87,7 +88,7 @@ export function startExperiment(options: ExperimentOptions, mode: "streaming" | 
     const audio = capabilities.audio_formats.find((value) => value.encoding === AudioEncoding.PcmS16Le) ?? capabilities.audio_formats[0];
     if (!audio) throw new Error("实例没有可用音频格式");
     if (!capabilities.tasks.includes(options.task)) throw new Error(`task ${options.task} 不在实例能力中`);
-    collector = new WavCollector({sampleRate: audio.sample_rate, maxBytes: options.maxAudioBytes ?? 32 * 1024 * 1024});
+    collectorRef.current = new WavCollector({sampleRate: audio.sample_rate, maxBytes: options.maxAudioBytes ?? 32 * 1024 * 1024});
     const inputMode = mode === "streaming" ? InputMode.Token : InputMode.FullText; const speaker = options.speaker ?? capabilities.speakers?.[0] ?? "Serena"; const language = options.language ?? capabilities.languages?.[0] ?? "auto";
     const request: SynthesisOptions = {task: options.task, speaker, language, inputMode, audio, vad: {enabled: false, strategy: VadStrategy.Disabled}};
     const chunks = options.text.match(new RegExp(`.{1,${Math.max(1, options.chunkSize)}}`, "gu")) ?? [options.text];
@@ -98,6 +99,8 @@ export function startExperiment(options: ExperimentOptions, mode: "streaming" | 
     const terminal = await synthesis.done;
     if (terminal.type === "error") throw new Error(`${terminal.code}: ${terminal.message}`);
     if (terminal.type === "cancelled") throw new Error("实验已取消");
+    const collector = collectorRef.current;
+    if (!collector) throw new Error("音频收集器未初始化");
     const snapshot = collector.snapshot();
     const audioUrl = snapshot.samples > 0 ? URL.createObjectURL(collector.toBlob()) : undefined;
     const output = {
