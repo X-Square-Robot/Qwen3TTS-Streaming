@@ -44,6 +44,11 @@ from ..core.types import (
     SessionState,
     TokenizedText,
 )
+
+# At 12 Hz this is roughly 1.3 seconds of source audio.  A short period of
+# unchanged native output is expected around lookahead and chunk boundaries,
+# but a longer stall must not block the session's text progress forever.
+_NATIVE_CURSOR_STALL_FRAME_LIMIT = 16
 from .text_commitment import AudioCreditEstimator, IncrementalTextCommitter, SemanticStartGate
 from .text_commitment.x2_adapter import X2CommitmentAdapter
 from .text_commitment.types import (
@@ -1064,18 +1069,7 @@ class FrontendInterface:
             # label/plan must never abort text ingestion or acoustic state;
             # freeze this route for the session and let the shared publisher
             # continue with its conservative EMA estimator.
-            session.native_cursor_disabled = True
-            session.native_cursor_fallback_reason = type(exc).__name__
-            session.cursor_segment_plans.clear()
-            LifecycleLogger.emit(
-                session_id=session.session_id,
-                phase="progress.native_fallback",
-                request_id=session.config.timing.request_id or None,
-                turn_id=session.config.timing.turn_id or None,
-                session_level=session.config.observability_level,
-                route="ema",
-                reason=type(exc).__name__,
-            )
+            self._disable_native_cursor(session, type(exc).__name__)
             logger.warning(
                 "Native cursor disabled for session %s; falling back to EMA: %s",
                 session.session_id,
@@ -1086,6 +1080,32 @@ class FrontendInterface:
         session.cursor_plan_revision = revision
         session.cursor_label_plan = plan
         await self._dispatcher.submit_cursor_plan(session)
+
+    @staticmethod
+    def _disable_native_cursor(session: "Session", reason: str) -> None:
+        """Disable only the optional progress route and keep the session alive."""
+        if getattr(session, "native_cursor_disabled", False):
+            return
+        session.native_cursor_disabled = True
+        session.native_cursor_fallback_reason = reason
+        plans = getattr(session, "cursor_segment_plans", None)
+        if plans is not None:
+            plans.clear()
+        config = getattr(session, "config", None)
+        timing = getattr(config, "timing", None)
+        LifecycleLogger.emit(
+            session_id=session.session_id,
+            phase="progress.native_fallback",
+            request_id=getattr(timing, "request_id", None) or None,
+            turn_id=getattr(timing, "turn_id", None) or None,
+            session_level=getattr(
+                config,
+                "observability_level",
+                getattr(session, "observability_level", None),
+            ),
+            route="ema",
+            reason=reason,
+        )
 
     def _emit_text_commit_events(self, session: "Session", events: tuple[str, ...]) -> None:
         callback = getattr(session, "event_callback", None)
@@ -2633,22 +2653,74 @@ class FrontendInterface:
                         if valid else projection.token_end
                     )
                     mapped = project(token_end)
-                    projection.basis = NATIVE_CURSOR_PROGRESS_BASIS
-                    return {
-                        "type": "text_progress", "segment_idx": segment_idx, "text": "",
-                        "meta": {
-                            "segment_id": str(segment_idx),
-                            "progress_basis": NATIVE_CURSOR_PROGRESS_BASIS,
-                            "progress_quality": "native",
-                            "cursor_mu": f"{mu:.6f}",
-                            "cursor_confidence": f"{max(0.0, min(1.0, confidence)):.6f}",
-                            "text_progress": f"{projection.token_end / len(spans):.6f}",
-                            "progress_final": "true" if final else "false",
-                            **mapped,
-                            "text_input_final": "true" if session.input_complete else "false",
-                            "alignment_final": "true" if final else "false",
-                        },
-                    }
+                    if valid and not final:
+                        stall_frames = getattr(
+                            session, "native_cursor_stall_frames", None
+                        )
+                        if stall_frames is None:
+                            stall_frames = session.native_cursor_stall_frames = {}
+                        last_token_end = getattr(
+                            session, "native_cursor_last_token_end", None
+                        )
+                        if last_token_end is None:
+                            last_token_end = session.native_cursor_last_token_end = {}
+                        last_frame_end = getattr(
+                            session, "native_cursor_last_frame_end", None
+                        )
+                        if last_frame_end is None:
+                            last_frame_end = session.native_cursor_last_frame_end = {}
+                        previous_frame_end = last_frame_end.get(segment_idx)
+                        previous_token_end = last_token_end.get(segment_idx)
+                        if (
+                            previous_frame_end is not None
+                            and frame_end > previous_frame_end
+                            and previous_token_end is not None
+                            and token_end <= previous_token_end
+                        ):
+                            stall_frames[segment_idx] = (
+                                stall_frames.get(segment_idx, 0)
+                                + frame_end
+                                - previous_frame_end
+                            )
+                        elif previous_token_end is None or token_end > previous_token_end:
+                            stall_frames[segment_idx] = 0
+                        last_frame_end[segment_idx] = frame_end
+                        last_token_end[segment_idx] = max(
+                            token_end, previous_token_end or 0
+                        )
+                        if (
+                            stall_frames.get(segment_idx, 0)
+                            >= _NATIVE_CURSOR_STALL_FRAME_LIMIT
+                        ):
+                            logger.warning(
+                                "Native cursor stalled for %s/%d; falling back to EMA",
+                                session.session_id,
+                                segment_idx,
+                            )
+                            FrontendInterface._disable_native_cursor(session, "stalled")
+                            native_allowed = False
+                    if not native_allowed:
+                        # The watchdog may have disabled native progress after
+                        # this event was decoded.  Fall through to EMA while
+                        # retaining the shared projection high-water mark.
+                        pass
+                    else:
+                        projection.basis = NATIVE_CURSOR_PROGRESS_BASIS
+                        return {
+                            "type": "text_progress", "segment_idx": segment_idx, "text": "",
+                            "meta": {
+                                "segment_id": str(segment_idx),
+                                "progress_basis": NATIVE_CURSOR_PROGRESS_BASIS,
+                                "progress_quality": "native",
+                                "cursor_mu": f"{mu:.6f}",
+                                "cursor_confidence": f"{max(0.0, min(1.0, confidence)):.6f}",
+                                "text_progress": f"{projection.token_end / len(spans):.6f}",
+                                "progress_final": "true" if final else "false",
+                                **mapped,
+                                "text_input_final": "true" if session.input_complete else "false",
+                                "alignment_final": "true" if final else "false",
+                            },
+                        }
                 except (TypeError, ValueError, OverflowError):
                     logger.warning("Invalid native token estimate for %s/%d",
                                    session.session_id, segment_idx)

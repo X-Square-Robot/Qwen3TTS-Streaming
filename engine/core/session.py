@@ -99,6 +99,12 @@ class Session:
     # publisher uses EMA for the remainder of the session.
     native_cursor_disabled: bool = False
     native_cursor_fallback_reason: str = ""
+    # Frontend-side watchdog state.  A native cursor that keeps returning the
+    # same token frontier must not hold text progress forever; after the
+    # bounded grace period the session uses the shared EMA route.
+    native_cursor_stall_frames: dict[int, int] = field(default_factory=dict)
+    native_cursor_last_token_end: dict[int, int] = field(default_factory=dict)
+    native_cursor_last_frame_end: dict[int, int] = field(default_factory=dict)
     cursor_segment_plans: dict[int, CursorLabelPlan] = field(default_factory=dict)
     cursor_segment_bounds: dict[int, tuple[int, int]] = field(default_factory=dict)
     def cursor_plan_for_segment(self, segment_idx: int) -> CursorLabelPlan | None:

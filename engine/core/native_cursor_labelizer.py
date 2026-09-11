@@ -153,9 +153,13 @@ class NativeCursorLabelizer:
                 # Symbols are spoken-form punctuation/markup owned by the
                 # primary TN.  The released cursor vocabulary has no symbol
                 # labels, so leave them out of label space while preserving
-                # the surrounding spoken labels.  Emoji remain an explicit
-                # unsupported input below because they are not punctuation.
-                if "EMOJI" in unicodedata.name(ch, "") or ord(ch) in range(0x1F000, 0x1FAFF):
+                # the surrounding spoken labels.  Strict callers still get an
+                # explicit error for emoji; the streaming fallback mode skips
+                # them like any other unsupported symbol.
+                if strict and (
+                    "EMOJI" in unicodedata.name(ch, "")
+                    or ord(ch) in range(0x1F000, 0x1FAFF)
+                ):
                     raise NativeCursorLabelizerError(
                         f"unsupported spoken character for cursor labels: {ch!r}"
                     )

@@ -76,6 +76,20 @@ def test_valid_neural_observation_requires_a_position():
     assert result["meta"]["progress_basis"] == "ema_frame_ratio_v1"
 
 
+def test_stalled_native_cursor_downgrades_to_ema_without_retracting_progress():
+    state = session(True)
+    events = [event(state, frame, 0.0) for frame in range(1, 18)]
+
+    assert all(item["meta"]["progress_basis"] == "native_cursor_v1"
+               for item in events[:16])
+    assert events[-1]["meta"]["progress_basis"] == "ema_frame_ratio_v1"
+    assert state.native_cursor_disabled is True
+    assert state.native_cursor_fallback_reason == "stalled"
+    assert int(events[-1]["meta"]["text_token_end"]) >= int(
+        events[-2]["meta"]["text_token_end"]
+    )
+
+
 def test_codec_and_text_coordinates_travel_with_pcm_through_reorder():
     progress = event(session(True), 1, 1.0)
     successor = AttributedAudioChunk(
