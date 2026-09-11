@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 
@@ -169,4 +170,30 @@ def project_readable(text: str) -> str:
     return _strip_inline_markers(text)
 
 
-__all__ = ["is_markdown_structured", "project_readable"]
+def project_readable_with_mapping(
+    text: str,
+) -> tuple[str, tuple[tuple[int, int, int, int], ...]]:
+    """Project Markdown and retain conservative raw/output intervals.
+
+    The projector may delete delimiters or URLs, so a plain source union would
+    pin every spoken character to the left edge of a large structured span.
+    SequenceMatcher gives unchanged characters exact ownership and groups
+    deletions/replacements into bounded intervals for the journal.
+    """
+    value = project_readable(text)
+    if not value:
+        return value, ()
+    matcher = SequenceMatcher(None, text, value, autojunk=False)
+    mappings: list[tuple[int, int, int, int]] = []
+    for tag, source_start, source_end, output_start, output_end in matcher.get_opcodes():
+        if tag == "equal":
+            mappings.extend(
+                (index, index + 1, output_start + offset, output_start + offset + 1)
+                for offset, index in enumerate(range(source_start, source_end))
+            )
+        elif tag in ("replace", "insert") and output_start < output_end:
+            mappings.append((source_start, max(source_start, source_end), output_start, output_end))
+    return value, tuple(mappings)
+
+
+__all__ = ["is_markdown_structured", "project_readable", "project_readable_with_mapping"]

@@ -44,6 +44,7 @@ def test_closed_span_reuses_spoken_result_mapping_without_another_backend_pass()
     word = next(commit for commit in result.commits if commit.raw_text == "abc")
     assert word.tts_text == "ABC"
     assert word.mapping == ((1, 2), (2, 4))
+    assert word.output_mapping == ((1, 2, 0, 1), (2, 4, 1, 3))
 
 
 def test_percent_waits_for_suffix_and_commits_append_only():
@@ -105,6 +106,15 @@ def test_markdown_and_math_projection_do_not_leak_structure():
     c = IncrementalTextCommitter()
     out = c.feed("3*2=6", final=True)
     assert "三乘二等于六" == "".join(x.tts_text for x in out.commits)
+
+
+def test_markdown_projection_carries_output_alignment():
+    from engine.frontend.text_commitment.projector import project_readable_with_mapping
+
+    value, mapping = project_readable_with_mapping("**标题**")
+    assert value == "标题"
+    assert mapping[-1][2:] == (1, 2)
+    assert mapping[0][0:2] == (2, 3)
 
 
 def test_ascii_and_unicode_multiplication_stay_in_one_formula_span():
@@ -218,6 +228,19 @@ def test_markdown_line_prefix_markers_are_not_spoken():
     for raw, body in (("- item", "item"), ("+ item", "item"), ("> quote", "quote"), (">quote", "quote")):
         result = IncrementalTextCommitter().feed(raw, final=True)
         assert "".join(x.tts_text for x in result.commits) == body
+
+
+def test_inline_hash_is_literal_punctuation_and_does_not_open_pending_markdown():
+    raw = "比如# 一级标题，后面继续"
+    result = IncrementalTextCommitter().feed(raw, final=True)
+
+    assert all(item.raw_text != "#" for item in result.commits)
+    assert result.commits[-1].raw_end == len(raw)
+
+    streamed = IncrementalTextCommitter()
+    streamed.feed("比如#")
+    split = streamed.feed(" 一级标题，后面继续", final=True)
+    assert "".join(item.tts_text for item in split.commits) == "一级标题，后面继续"
 
 
 def test_json_array_projects_scalar_values_and_survives_packet_splits():

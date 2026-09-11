@@ -28,7 +28,11 @@ from .semantic_spans import SpanDetector
 from .commit_policy import CommitPolicy
 from .domain_resolver import DomainResolver
 from .wetext_backend import WetextAdapter
-from .projector import is_markdown_structured, project_readable
+from .projector import (
+    is_markdown_structured,
+    project_readable,
+    project_readable_with_mapping,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -116,7 +120,7 @@ def _at_inline_ordered_list_start(text: str, position: int) -> bool:
     if _at_line_start(text, position):
         return True
     prefix = text[:position].rstrip(" \t")
-    return bool(prefix and prefix[-1] in "：:。！？!?；;")
+    return bool(prefix and prefix[-1] in "：:，,。！？!?；;")
 
 
 def _compatibility_spelling(text: str) -> str:
@@ -309,6 +313,7 @@ class IncrementalTextCommitter:
         self._bracket_candidate = False
         self._bracket_closed_candidate = False
         self._markdown_line_marker = False
+        self._inline_hash_gap = False
         self._ordered_marker_candidate = False
         self._leading_paren_candidate = False
         self._image_candidate = False
@@ -639,6 +644,13 @@ class IncrementalTextCommitter:
             # unusual case retaining the original is the safe choice.
             normalized_ch = unicodedata.normalize("NFKC", ch)
             lex_ch = normalized_ch if len(normalized_ch) == 1 else ch
+            if self._inline_hash_gap:
+                self._inline_hash_gap = False
+                if lex_ch.isspace():
+                    self.committed_raw_end = max(
+                        self.committed_raw_end, source_pos + 1
+                    )
+                    continue
             if _is_emoji(ch) or is_emoji_char(ch):
                 # Emoji are filtered at grapheme level by the transport too;
                 # keep this guard here so direct committer users cannot leak a
@@ -1082,12 +1094,25 @@ class IncrementalTextCommitter:
                         ch, source_pos, source_pos + 1, SpanKind.MARKDOWN, now
                     )
                     self._autolink_candidate = True
-                elif lex_ch in "*_~`#":
+                elif lex_ch in "*_~`" or (
+                    lex_ch == "#" and _at_line_start(self._raw, source_pos)
+                ):
                     self._flush_plain()
                     self._pending = self._open_pending(
                         ch, source_pos, source_pos + 1, SpanKind.MARKDOWN, now
                     )
-                elif lex_ch in "-+>" and _at_line_start(self._raw, source_pos):
+                elif lex_ch == "#":
+                    # ATX headings are line-oriented.  An inline hash is a
+                    # formatting character in prose, so consume it as a raw
+                    # gap instead of opening an unbounded Markdown span.
+                    self._flush_plain()
+                    self.committed_raw_end = max(
+                        self.committed_raw_end, source_pos + 1
+                    )
+                    self._inline_hash_gap = True
+                elif lex_ch in "-+>" and (
+                    _at_line_start(self._raw, source_pos) or lex_ch == "-"
+                ):
                     self._flush_plain()
                     self._pending = self._open_pending(
                         ch, source_pos, source_pos + 1, SpanKind.MARKDOWN, now
@@ -1513,6 +1538,7 @@ class IncrementalTextCommitter:
         if p.kind is SpanKind.URL:
             backend_raw = _sanitize_url_for_tn(backend_raw)
         mapping: tuple[tuple[int, int], ...] | None = None
+        output_mapping: tuple[tuple[int, int, int, int], ...] = ()
         closed_result = None
         candidate_count = 0
         best_cost = None
@@ -1628,7 +1654,7 @@ class IncrementalTextCommitter:
             ordered_marker = re.fullmatch(r"(\d{1,4})[.)]\s*", p.raw)
             inline_ordered = ordered_marker is not None and not _at_line_start(
                 self._raw, p.start
-            )
+            ) and not self._raw[:p.start].rstrip().endswith((",", "，"))
             if inline_ordered:
                 # Compact enumerations in generated prose (``：1. ...。2. ...``)
                 # carry semantic numbering.  Preserve that information while
@@ -1656,6 +1682,20 @@ class IncrementalTextCommitter:
             # when it arrived behind a prior fence, making the degradation
             # observable without ever rewriting the old commit.
             kind = CommitKind.FALLBACK if force_literal else CommitKind.LITERAL
+            if p.kind is SpanKind.MARKDOWN and value:
+                projected_value, relative_mapping = project_readable_with_mapping(
+                    p.raw
+                )
+                if projected_value == value:
+                    output_mapping = tuple(
+                        (p.start + left, p.start + right, output_start, output_end)
+                        for left, right, output_start, output_end in relative_mapping
+                    )
+                    if output_mapping:
+                        mapping = tuple(
+                            (left, right)
+                            for left, right, _, _ in output_mapping
+                        )
         elif force_literal:
             value = p.raw
             kind = CommitKind.FALLBACK
@@ -1779,6 +1819,15 @@ class IncrementalTextCommitter:
                     raw_end=p.end,
                     result=closed_result,
                 )
+                output_mapping = self._mapping_details_for(
+                    backend_raw,
+                    p.start,
+                    value,
+                    lang=route_lang,
+                    kind=p.kind,
+                    raw_end=p.end,
+                    result=closed_result,
+                )
         if value is None:
             value = (
                 self._safe_fallback(
@@ -1803,6 +1852,7 @@ class IncrementalTextCommitter:
             LanguageKind.EN if lang == "en" else LanguageKind.ZH if lang == "zh" else LanguageKind.UNKNOWN,
             raw_end=p.end or p.start + len(p.raw),
             mapping=mapping,
+            output_mapping=output_mapping,
             semantic_family=semantic_family,
             decision_source=decision_source,
             candidate_count=candidate_count,
@@ -1932,29 +1982,56 @@ class IncrementalTextCommitter:
         coarse = ((start, source_end),)
         if source_end < start:
             return coarse
+        detailed = self._mapping_details_for(
+            raw,
+            start,
+            value,
+            lang=lang,
+            kind=kind,
+            raw_end=raw_end,
+            result=result,
+        )
+        return tuple((left, right) for left, right, _, _ in detailed) or coarse
+
+    def _mapping_details_for(
+        self,
+        raw: str,
+        start: int,
+        value: str,
+        *,
+        lang: str,
+        kind: SpanKind,
+        raw_end: int | None = None,
+        result: object | None = None,
+    ) -> tuple[tuple[int, int, int, int], ...]:
+        """Return source/output alignment without collapsing token mappings."""
+
+        source_end = start + len(raw) if raw_end is None else int(raw_end)
+        if source_end < start:
+            return ()
         # ``raw`` is the backend spelling, which may be longer than the
         # original source span after compatibility expansion (for example
         # ``℃`` -> ``°C``).  Detailed backend offsets cannot be projected back
         # to Unicode source coordinates without an explicit alignment map.
         # Keep the owner span conservative in the original raw domain.
         if raw_end is not None and source_end - start != len(raw):
-            return coarse
+            return ()
         if result is None:
             try:
                 result = self.adapter.normalize_with_mapping(raw, lang=lang, kind=kind)
             except Exception:
-                return coarse
+                return ()
         if isinstance(result, (list, tuple)):
             result = result[0] if result else None
         output = getattr(result, "output_text", None)
         if output is None:
             output = getattr(result, "text", None)
         if output is not None and str(output) != value:
-            return coarse
+            return ()
         mappings = getattr(result, "mappings", None)
         if mappings is None:
             mappings = getattr(result, "mapping", None)
-        converted: list[tuple[int, int]] = []
+        converted: list[tuple[int, int, int, int]] = []
         if mappings is not None:
             try:
                 for item in mappings:
@@ -1963,17 +2040,35 @@ class IncrementalTextCommitter:
                     if isinstance(item, dict):
                         input_start = item.get("input_start", input_start)
                         input_end = item.get("input_end", input_end)
-                    if input_start is None or input_end is None:
+                    output_start = getattr(item, "output_start", None)
+                    output_end = getattr(item, "output_end", None)
+                    if isinstance(item, dict):
+                        output_start = item.get("output_start", output_start)
+                        output_end = item.get("output_end", output_end)
+                    if (
+                        input_start is None
+                        or input_end is None
+                        or output_start is None
+                        or output_end is None
+                    ):
                         continue
-                    converted.append((start + int(input_start), start + int(input_end)))
+                    converted.append(
+                        (
+                            start + int(input_start),
+                            start + int(input_end),
+                            int(output_start),
+                            int(output_end),
+                        )
+                    )
             except (TypeError, ValueError):
                 converted = []
         if converted and all(
             start <= item_start <= item_end <= source_end
-            for item_start, item_end in converted
+            and 0 <= output_start <= output_end <= len(value)
+            for item_start, item_end, output_start, output_end in converted
         ):
             return tuple(converted)
-        return coarse
+        return ()
 
     def _emit_plain(self, ch: str, source_start: int | None = None) -> None:
         if not self._plain_buffer:
@@ -2019,6 +2114,7 @@ class IncrementalTextCommitter:
         language: LanguageKind | None = None,
         raw_end: int | None = None,
         mapping: tuple[tuple[int, int], ...] | None = None,
+        output_mapping: tuple[tuple[int, int, int, int], ...] = (),
         semantic_family: SemanticFamily = SemanticFamily.PROSE,
         decision_source: str = "",
         candidate_count: int = 0,
@@ -2042,6 +2138,7 @@ class IncrementalTextCommitter:
             commit_kind=commit_kind,
             fence=self.commit_fence,
             mapping=mapping if mapping is not None else ((start, end),),
+            output_mapping=output_mapping,
             raw_text=raw,
             language=language or {
                 "en": LanguageKind.EN,

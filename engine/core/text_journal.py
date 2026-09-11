@@ -113,6 +113,9 @@ class CanonicalTextJournal:
         spoken_text: str,
         *,
         mapping: list[tuple[int, int]] | tuple[tuple[int, int], ...] | None = None,
+        output_mapping: list[tuple[int, int, int, int]]
+        | tuple[tuple[int, int, int, int], ...]
+        | None = None,
     ) -> tuple[str, int]:
         """Append an already-decided TN commit and retain raw coordinates.
 
@@ -165,7 +168,15 @@ class CanonicalTextJournal:
         self.raw_text = source
         if delta:
             join = max(old_boundaries[-1], start)
-            if value == source[start:end] and len(delta) == len(value):
+            detailed_boundaries = self._boundaries_from_output_mapping(
+                delta,
+                join,
+                end,
+                output_mapping,
+            )
+            if detailed_boundaries is not None:
+                suffix = detailed_boundaries
+            elif value == source[start:end] and len(delta) == len(value):
                 # Literal commits retain exact character provenance.  This is
                 # especially important after session-leading whitespace has
                 # been trimmed: the first spoken character must span its own
@@ -189,6 +200,40 @@ class CanonicalTextJournal:
             self.normalized_to_raw,
         )
         return delta, len(old_normalized)
+
+    @staticmethod
+    def _boundaries_from_output_mapping(
+        delta: str,
+        join: int,
+        end: int,
+        output_mapping: list[tuple[int, int, int, int]]
+        | tuple[tuple[int, int, int, int], ...]
+        | None,
+    ) -> list[int] | None:
+        """Expand detailed output spans into conservative raw boundaries."""
+        if not output_mapping or not delta:
+            return None
+        boundaries: list[int | None] = [None] * (len(delta) + 1)
+        boundaries[0] = join
+        for item in output_mapping:
+            try:
+                raw_start, raw_end, output_start, output_end = map(int, item)
+            except (TypeError, ValueError):
+                return None
+            if not (
+                0 <= output_start < output_end <= len(delta)
+                and join <= raw_start <= raw_end <= end
+            ):
+                return None
+            boundaries[output_start] = raw_start
+            boundaries[output_end] = raw_end
+        current = join
+        for index, boundary in enumerate(boundaries):
+            if boundary is not None:
+                current = max(current, boundary)
+            boundaries[index] = current
+        boundaries[-1] = max(boundaries[-1] or join, end)
+        return [int(value) for value in boundaries]
 
     def finalize_projection(self) -> None:
         """Mark an incremental TN projection complete without re-normalizing.

@@ -959,6 +959,7 @@ class FrontendInterface:
                 commit.raw_end,
                 commit.tts_text,
                 mapping=commit.mapping,
+                output_mapping=getattr(commit, "output_mapping", ()),
             )
             session.cursor_commits.append(commit)
             session.cursor_spoken_texts.append(spoken)

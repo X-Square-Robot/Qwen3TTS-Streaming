@@ -242,6 +242,9 @@ class TextCommit:
     calibrated_confidence: float | None = None
     closure_reason: str = ""
     fallback_reason: str = ""
+    # Optional detailed alignment: absolute raw start/end followed by output
+    # (spoken-text) start/end.  ``mapping`` remains the legacy raw-only view.
+    output_mapping: tuple[tuple[int, int, int, int], ...] = ()
 
 
 @dataclass(frozen=True)
