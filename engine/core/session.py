@@ -86,6 +86,10 @@ class Session:
     _emoji_carry: str = ""
     text_journal: Optional[CanonicalTextJournal] = None
     text_committer: Any = None
+    # Table-driven TN span controller wrapping the committer.  Kept separate
+    # from the raw committer so lifecycle state and lexical normalization do
+    # not share one mutable object.
+    tn_driver: Any = None
     audio_credit_estimator: Any = None
     # Optional CPU-owned native-cursor plan.  It is populated only when the
     # frontend is given a model-compatible labelizer; the default path remains

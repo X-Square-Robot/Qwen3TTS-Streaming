@@ -845,6 +845,8 @@ class Spliter:
         *,
         force_boundary: bool = False,
         force_boundary_before: bool = False,
+        force_boundary_indices: Optional[Iterable[int]] = None,
+        force_boundary_before_indices: Optional[Iterable[int]] = None,
     ) -> List[SegmentAction]:
         """Queue one complete long-segment unit for group-level pre-splitting.
 
@@ -863,6 +865,12 @@ class Spliter:
         if added and force_boundary:
             added[-1].boundary = True
             added[-1].forced_boundary = True
+        self._mark_streaming_boundaries(
+            pending_start,
+            len(added),
+            force_boundary_indices,
+            force_boundary_before_indices,
+        )
         return self._drive_events()
 
     # ------------------------------------------------------------------
@@ -1072,6 +1080,8 @@ class Spliter:
         *,
         force_boundary: bool = False,
         force_boundary_before: bool = False,
+        force_boundary_indices: Optional[Iterable[int]] = None,
+        force_boundary_before_indices: Optional[Iterable[int]] = None,
     ) -> List[SegmentAction]:
         """Streaming mode: queue tokens (each its own group) and drive.
 
@@ -1080,13 +1090,20 @@ class Spliter:
         the shared pending queue. The driver decides flush points (no boundary).
         """
         coerced = self._coerce_tokens(tokens)
+        pending_start = len(self._pending)
         for tok in coerced:
             self._pending.append(_PendingToken(tok, None, boundary=False))
         if coerced and force_boundary_before:
-            self._pending[-len(coerced)].boundary_before = True
+            self._pending[pending_start].boundary_before = True
         if coerced and force_boundary:
             self._pending[-1].boundary = True
             self._pending[-1].forced_boundary = True
+        self._mark_streaming_boundaries(
+            pending_start,
+            len(coerced),
+            force_boundary_indices,
+            force_boundary_before_indices,
+        )
         return self._drive_events()
 
     def feed_auto(
@@ -1095,6 +1112,8 @@ class Spliter:
         *,
         force_boundary: bool = False,
         force_boundary_before: bool = False,
+        force_boundary_indices: Optional[Iterable[int]] = None,
+        force_boundary_before_indices: Optional[Iterable[int]] = None,
     ) -> List[SegmentAction]:
         """Auto mode: route a packet by size; Stage 1 engages only when long.
 
@@ -1113,6 +1132,7 @@ class Spliter:
         coerced = self._coerce_tokens(tokens)
         if not coerced:
             return []
+        pending_start = len(self._pending)
         # Route against the active segment's frozen capacity.  A delayed EMA
         # update may change the capacity for future segments, but must not make
         # this gate disagree with the already-open driver's hard limit.
@@ -1132,11 +1152,44 @@ class Spliter:
             for tok in coerced:  # fits: transparent stream (coalesce)
                 self._pending.append(_PendingToken(tok, None, boundary=False))
         if coerced and force_boundary_before:
-            self._pending[-len(coerced)].boundary_before = True
+            self._pending[pending_start].boundary_before = True
         if coerced and force_boundary:
             self._pending[-1].boundary = True
             self._pending[-1].forced_boundary = True
+        self._mark_streaming_boundaries(
+            pending_start,
+            len(coerced),
+            force_boundary_indices,
+            force_boundary_before_indices,
+        )
         return self._drive_events()
+
+    def _mark_streaming_boundaries(
+        self,
+        pending_start: int,
+        token_count: int,
+        force_boundary_indices: Optional[Iterable[int]],
+        force_boundary_before_indices: Optional[Iterable[int]],
+    ) -> None:
+        """Mark per-token boundaries for one streaming input batch.
+
+        Indices are relative to the supplied token list.  The scalar boundary
+        arguments remain the common fast path; indexed marks let the frontend
+        ingest several TN commits through one tokenizer/splitter call while
+        retaining each commit's forced boundary semantics.
+        """
+        if token_count <= 0:
+            return
+        for raw_index in force_boundary_before_indices or ():
+            index = int(raw_index)
+            if 0 <= index < token_count:
+                self._pending[pending_start + index].boundary_before = True
+        for raw_index in force_boundary_indices or ():
+            index = int(raw_index)
+            if 0 <= index < token_count:
+                pending = self._pending[pending_start + index]
+                pending.boundary = True
+                pending.forced_boundary = True
 
     def input_done(self) -> List[SegmentAction]:
         """Signal that no more tokens will arrive; flush the open segment."""

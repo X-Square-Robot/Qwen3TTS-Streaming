@@ -23,9 +23,9 @@ from .types import (
     TextCommit,
     TextNormalizationConfig,
 )
-from .candidate_resolver import CandidateResolver
+from .candidate_resolver import CandidateResolver, CandidateSet
 from .semantic_spans import SpanDetector
-from .commit_policy import CommitPolicy
+from .commit_policy import CommitAction, CommitPolicy
 from .domain_resolver import DomainResolver
 from .wetext_backend import WetextAdapter
 from .projector import (
@@ -1469,8 +1469,30 @@ class IncrementalTextCommitter:
                     self._close_pending(reason="max_pending")
 
     def _close_stable(self, now: float) -> list[TextCommit]:
-        # A completed number with a suffix is closed when a CJK boundary arrives;
-        # ordinary ASCII words remain pending until whitespace/final.
+        # The policy owns the distinction between an open span and a span that
+        # is safe to publish.  The lexer still decides *when* a lexical
+        # boundary was observed; this hook prevents a future recognizer from
+        # accidentally publishing an unresolved tail merely because a packet
+        # ended.  ``CommitPolicy`` deliberately returns WAIT for an open span.
+        if not self._pending.raw:
+            return []
+        family = self._detector.family(self._pending.kind)
+        decision = self._commit_policy.decide(
+            family=family,
+            closed=False,
+            final=False,
+            candidates=CandidateSet(source="open_span"),
+            margin_threshold=self._margin_threshold(family),
+        )
+        if decision.action is CommitAction.WAIT:
+            return []
+        # COMMIT is useful for a recognizer that can prove closure without
+        # going through the legacy character loop.  Keep the default path
+        # conservative: current lexical boundaries call _close_pending
+        # directly and therefore remain byte-for-byte compatible.
+        if decision.action is CommitAction.COMMIT:
+            commit = self._close_pending(reason="stable")
+            return [commit] if commit is not None else []
         return []
 
     def _flush_pending(self, *, reason: str) -> list[TextCommit]:
@@ -1543,6 +1565,7 @@ class IncrementalTextCommitter:
         best_cost = None
         cost_margin = None
         decision_source = "rule"
+        policy_action = CommitAction.COMMIT
         semantic_family = self._detector.family(p.kind)
         if route_lang and p.kind in (SpanKind.NUMBER, SpanKind.ORDINAL):
             try:
@@ -1573,6 +1596,7 @@ class IncrementalTextCommitter:
                     candidates=candidates,
                     margin_threshold=self._margin_threshold(semantic_family),
                 )
+                policy_action = policy_decision.action
                 decision_source = f"{candidates.source}:{policy_decision.reason}"
             except Exception:
                 decision_source = "resolver_error"
@@ -1827,6 +1851,19 @@ class IncrementalTextCommitter:
                     raw_end=p.end,
                     result=closed_result,
                 )
+        # Candidate resolution is advisory, but its action is authoritative at
+        # the commit fence.  COMMIT keeps the selected normalized value;
+        # FALLBACK routes through the deterministic domain fallback so an
+        # empty/ambiguous WFST result cannot silently look like a successful
+        # normalization.  WAIT is only returned for an open span and is
+        # handled by _close_stable before this method is entered.
+        if policy_action is CommitAction.FALLBACK:
+            value = self._safe_fallback(
+                backend_raw,
+                lang=route_lang or "zh",
+                kind=p.kind,
+            )
+            kind = CommitKind.FALLBACK
         if value is None:
             value = (
                 self._safe_fallback(

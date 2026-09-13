@@ -48,6 +48,7 @@ from ..core.types import (
 
 from .text_commitment import AudioCreditEstimator, IncrementalTextCommitter, SemanticStartGate
 from .text_commitment.x2_adapter import X2CommitmentAdapter
+from .tn import SpanDriver
 from .text_commitment.types import (
     FallbackPolicy,
     TextInputMetadata,
@@ -635,6 +636,7 @@ class FrontendInterface:
                 family_margin_thresholds=getattr(tn_cfg, "family_margin_thresholds", ()),
             )
         )
+        session.tn_driver = SpanDriver(session.text_committer)
         session.audio_credit_estimator = AudioCreditEstimator(codec_frame_rate=12.5)
         session.text_journal = CanonicalTextJournal(
             _normalize_tts_text,
@@ -871,6 +873,22 @@ class FrontendInterface:
             + str(getattr(session, "_emoji_carry", "") or "")
         )
 
+    @staticmethod
+    def _tn_feed(session: "Session", text: str, **kwargs):
+        """Drive the table-based TN lifecycle for one input packet."""
+        driver = getattr(session, "tn_driver", None)
+        if driver is not None:
+            return driver.feed(text, **kwargs)
+        return session.text_committer.feed(text, **kwargs)
+
+    @staticmethod
+    def _tn_poll(session: "Session", **kwargs):
+        """Drive a deadline poll through the same TN lifecycle controller."""
+        driver = getattr(session, "tn_driver", None)
+        if driver is not None:
+            return driver.poll(**kwargs)
+        return session.text_committer.poll(**kwargs)
+
     async def _push_text_input_locked(
         self,
         session: "Session",
@@ -880,7 +898,7 @@ class FrontendInterface:
     ) -> None:
         mode = session.config.input_mode
         # A timeout is a semantic commit decision, not a tokenizer concern.
-        timeout_decision = session.text_committer.poll()
+        timeout_decision = self._tn_poll(session)
         if timeout_decision.commits:
             self._log_tn_commits(session, timeout_decision.commits)
             await self._ingest_commits(session, timeout_decision.commits)
@@ -904,7 +922,8 @@ class FrontendInterface:
             # grapheme/emoji filtering itself so TextCommit raw offsets remain
             # coordinates in the transport input; stripping here would shift
             # every span that follows a deleted emoji.
-            decision = session.text_committer.feed(
+            decision = self._tn_feed(
+                session,
                 routed_text,
                 metadata=metadata,
             )
@@ -934,7 +953,7 @@ class FrontendInterface:
                 async with lock:
                     if session.state == SessionState.DONE or session.input_complete:
                         return
-                    decision = session.text_committer.poll()
+                    decision = self._tn_poll(session)
                     if decision.commits:
                         self._log_tn_commits(session, decision.commits)
                         await self._ingest_commits(session, decision.commits)
@@ -971,21 +990,43 @@ class FrontendInterface:
         if commits:
             await self._refresh_cursor_plan(session)
 
-        for spoken, normalized_base, observation in pending_spoken:
-            await self._ingest_streaming_text(
-                session,
-                spoken,
-                journaled=True,
-                normalized_base=normalized_base,
-                force_boundary=bool(
-                    observation is not None
-                    and getattr(observation, "force_boundary", False)
-                ),
-                force_boundary_before=bool(
-                    observation is not None
-                    and getattr(observation, "force_boundary_before", False)
-                ),
-            )
+        pending_spoken = [item for item in pending_spoken if item[0]]
+        if not pending_spoken:
+            return
+
+        # Tokenize the entire TN feed batch once.  ``append_spoken`` already
+        # returned canonical deltas, so concatenating them is exactly the
+        # suffix installed in the journal.  Keep per-commit boundary offsets
+        # in normalized coordinates; ``_ingest_streaming_text`` translates
+        # those offsets to token indices after this single tokenizer call.
+        spoken_batch = "".join(spoken for spoken, _, _ in pending_spoken)
+        normalized_base = pending_spoken[0][1]
+        boundary_offsets: list[int] = []
+        boundary_before_offsets: list[int] = []
+        for spoken, base, observation in pending_spoken:
+            if not spoken or observation is None:
+                continue
+            if getattr(observation, "force_boundary", False):
+                boundary_offsets.append(base + len(spoken))
+            if getattr(observation, "force_boundary_before", False):
+                boundary_before_offsets.append(base)
+
+        await self._ingest_streaming_text(
+            session,
+            spoken_batch,
+            journaled=True,
+            normalized_base=normalized_base,
+            force_boundary=(
+                bool(boundary_offsets)
+                and boundary_offsets[-1] == normalized_base + len(spoken_batch)
+            ),
+            force_boundary_before=(
+                bool(boundary_before_offsets)
+                and boundary_before_offsets[0] == normalized_base
+            ),
+            force_boundary_offsets=boundary_offsets,
+            force_boundary_before_offsets=boundary_before_offsets,
+        )
 
     def _observe_commitment(
         self,
@@ -1183,6 +1224,10 @@ class FrontendInterface:
         normalized_base: int | None = None,
         force_boundary: bool = False,
         force_boundary_before: bool = False,
+        force_boundary_indices: Optional[list[int]] = None,
+        force_boundary_before_indices: Optional[list[int]] = None,
+        force_boundary_offsets: Optional[list[int]] = None,
+        force_boundary_before_offsets: Optional[list[int]] = None,
     ) -> None:
         """Normalize a streaming text body, tokenize, route to the spliter per
         input mode, and dispatch. Shared by push_text_input and the end-of-input
@@ -1220,12 +1265,47 @@ class FrontendInterface:
         if not tokens:
             return
 
+        # A TN batch may contain multiple independent SpanCommits while the
+        # tokenizer is intentionally called only once.  Convert each commit's
+        # normalized boundary to the corresponding token mark.  Tokenizers
+        # normally expose contiguous offsets; if a boundary falls inside a
+        # merged token, conservatively mark the nearest token so the forced
+        # split is never silently lost.
+        if force_boundary_offsets:
+            indexed = list(force_boundary_indices or ())
+            for boundary in force_boundary_offsets:
+                candidates = [
+                    index
+                    for index, token in enumerate(tokens)
+                    if token.normalized_end <= int(boundary)
+                ]
+                if candidates:
+                    indexed.append(candidates[-1])
+                else:
+                    indexed.append(0)
+            force_boundary_indices = indexed
+        if force_boundary_before_offsets:
+            indexed_before = list(force_boundary_before_indices or ())
+            for boundary in force_boundary_before_offsets:
+                candidates = [
+                    index
+                    for index, token in enumerate(tokens)
+                    if token.normalized_start >= int(boundary)
+                ]
+                if candidates:
+                    indexed_before.append(candidates[0])
+                else:
+                    indexed_before.append(len(tokens) - 1)
+            force_boundary_before_indices = indexed_before
+
         spliter: Spliter = session.spliter
         if mode == InputMode.AUTO:
             seg_actions = spliter.feed_auto(
                 tokens,
                 force_boundary=force_boundary,
                 force_boundary_before=force_boundary_before,
+                force_boundary_indices=force_boundary_indices,
+                force_boundary_before_indices=force_boundary_before_indices,
             )
         elif (
             mode == InputMode.LONG_SEGMENT
@@ -1235,12 +1315,16 @@ class FrontendInterface:
                 tokens,
                 force_boundary=force_boundary,
                 force_boundary_before=force_boundary_before,
+                force_boundary_indices=force_boundary_indices,
+                force_boundary_before_indices=force_boundary_before_indices,
             )
         else:
             seg_actions = spliter.feed_tokens(
                 tokens,
                 force_boundary=force_boundary,
                 force_boundary_before=force_boundary_before,
+                force_boundary_indices=force_boundary_indices,
+                force_boundary_before_indices=force_boundary_before_indices,
             )
         await self._dispatch_segment_actions(session, seg_actions)
 
@@ -1291,7 +1375,7 @@ class FrontendInterface:
             self._engine_model_version,
             self._version_query_text,
         )
-        decision = session.text_committer.feed(tn_input, final=True)
+        decision = self._tn_feed(session, tn_input, final=True)
         self._log_tn_commits(session, decision.commits)
         self._log_tn_pending(session, decision)
         self._emit_text_commit_events(session, decision.events)
@@ -1430,7 +1514,7 @@ class FrontendInterface:
                 # become a second normalization path.
                 session._emoji_carry = ""
                 for routed_text in resolution.chunks:
-                    decision = session.text_committer.feed(routed_text)
+                    decision = self._tn_feed(session, routed_text)
                     self._log_tn_commits(session, decision.commits)
                     self._log_tn_pending(session, decision)
                     await self._ingest_commits(session, decision.commits)
@@ -1442,7 +1526,7 @@ class FrontendInterface:
                     body, session._emoji_carry = split_pending_emoji(raw)
                     if not body:
                         continue
-                    decision = session.text_committer.feed(body)
+                    decision = self._tn_feed(session, body)
                     self._log_tn_commits(session, decision.commits)
                     self._log_tn_pending(session, decision)
                     await self._ingest_commits(session, decision.commits)
@@ -1454,14 +1538,14 @@ class FrontendInterface:
         if session._emoji_carry:
             body = session._emoji_carry
             session._emoji_carry = ""
-            decision = session.text_committer.feed(body)
+            decision = self._tn_feed(session, body)
             self._log_tn_commits(session, decision.commits)
             self._log_tn_pending(session, decision)
             await self._ingest_commits(session, decision.commits)
             session.text_journal.update_raw_source(self._tn_raw_source(session))
             self._emit_text_commit_events(session, decision.events)
 
-        final_decision = session.text_committer.feed("", final=True)
+        final_decision = self._tn_feed(session, "", final=True)
         self._log_tn_commits(session, final_decision.commits)
         self._log_tn_pending(session, final_decision)
         await self._ingest_commits(session, final_decision.commits)

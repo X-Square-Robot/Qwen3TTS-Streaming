@@ -109,3 +109,53 @@ def test_rebuilt_plan_cannot_rewrite_published_prefix():
         await interface.cancel_session("s")
 
     asyncio.run(run())
+
+
+def test_tn_commit_batch_tokenized_once_with_per_commit_boundary_offsets():
+    async def run():
+        inbox = asyncio.Queue(maxsize=64)
+        interface = FrontendInterface(
+            engine_inbox=inbox,
+            tokenizer=_Tokenizer(),
+        )
+        session = await interface.create_session("s")
+        await inbox.get()
+        # Seed the committer's raw source without emitting a second TN batch;
+        # the method under test receives the already-resolved commits below.
+        session.text_committer._raw = "ab"
+        session.text_committer.raw_cursor = 2
+
+        class _Adapter:
+            disabled = False
+
+            def consume_commit(self, commit, **kwargs):
+                return SimpleNamespace(
+                    force_boundary=commit.commit_id == 1,
+                    force_boundary_before=False,
+                    accepted=True,
+                )
+
+        session.commitment_adapter = _Adapter()
+        calls = []
+
+        async def ingest(_session, body, **kwargs):
+            calls.append((body, kwargs))
+
+        interface._ingest_streaming_text = ingest
+        first = _commit("a", raw_start=0, raw_end=1, commit_id=1)
+        second = _commit("b", raw_start=1, raw_end=2, commit_id=2, span_id=2)
+        second.mapping = ((1, 2),)
+        await interface._ingest_commits(session, [first, second])
+
+        assert len(calls) == 1
+        body, kwargs = calls[0]
+        assert body == "ab"
+        assert kwargs["normalized_base"] == 0
+        assert kwargs["force_boundary_offsets"] == [1]
+        assert kwargs["force_boundary_before_offsets"] == []
+        assert session.text_journal.normalized_text == "ab"
+        assert session.cursor_spoken_texts == ["a", "b"]
+
+        await interface.cancel_session("s")
+
+    asyncio.run(run())
