@@ -92,6 +92,7 @@ from ..core.types import (
 from ..core.lifecycle import LifecycleLogger
 from ..core import observability as obs
 from ..core.native_cursor import CursorLabelPlan, reanchor_cursor_mu
+from ..core.cursor_debug import dump_cursor_event
 from .executor import Executor, StepOutput
 from .speech_state import SpeechStateSnapshotBundle
 from .speech_state import SpeechStateContractError
@@ -1077,6 +1078,26 @@ class EngineLoop:
                         previous_mu=float(current_mu.detach().item()),
                     )
                     reanchor_setter(slot, reanchor_mu)
+                    dump_cursor_event(
+                        "plan.reanchor",
+                        session_id=seg.session_id,
+                        segment_idx=seg.segment_idx,
+                        previous_revision=previous_plan.revision,
+                        revision=plan.revision,
+                        previous_mu=float(current_mu.detach().item()),
+                        reanchor_mu=reanchor_mu,
+                        label_count=plan.label_count,
+                        owner_count=len(plan.owner_spans),
+                    )
+            dump_cursor_event(
+                "plan.apply",
+                session_id=seg.session_id,
+                segment_idx=seg.segment_idx,
+                revision=plan.revision,
+                label_count=plan.label_count,
+                owner_count=len(plan.owner_spans),
+                previous_revision=previous_plan.revision if previous_plan else None,
+            )
         except Exception:
             # Cursor progress is an optional route.  A malformed or stale plan
             # must not terminate the audio segment or reset acoustic state.
@@ -1273,6 +1294,15 @@ class EngineLoop:
             plan = getattr(seg, "cursor_label_plan", None)
             if seg.segment_idx > 0 and plan is not None and plan.active and callable(reanchor):
                 reanchor(seg.slot, 0.0)
+                dump_cursor_event(
+                    "continuation.reanchor",
+                    session_id=seg.session_id,
+                    segment_idx=seg.segment_idx,
+                    plan_revision=plan.revision,
+                    label_count=plan.label_count,
+                    owner_count=len(getattr(plan, "owner_spans", ())),
+                    reanchor_mu=0.0,
+                )
         return True
 
     def _disable_cursor_plan(self, seg: EngineSegment) -> None:

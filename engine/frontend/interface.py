@@ -56,6 +56,7 @@ from .text_commitment.types import (
 )
 from ..core.lifecycle import LifecycleLogger
 from ..core import observability as obs
+from ..core.cursor_debug import dump_cursor_event
 from ..core.timing import ServerTimingAccumulator
 from ..session import SessionCapacityError
 from ..text_normalization import strip_emoji, split_pending_emoji
@@ -2780,6 +2781,23 @@ class FrontendInterface:
                     confidence = float(metrics.get("cursor_confidence", 0.0) or 0.0)
                     if not math.isfinite(mu) or not math.isfinite(confidence):
                         raise ValueError("nonfinite native cursor observation")
+                    dump_cursor_event(
+                        "progress.observation",
+                        session_id=session.session_id,
+                        segment_idx=segment_idx,
+                        frame_start=frame_start,
+                        frame_end=frame_end,
+                        valid=valid,
+                        final=final,
+                        mu=mu,
+                        confidence=confidence,
+                        plan_revision=plan.revision,
+                        label_count=plan.label_count,
+                        owner_count=len(plan.owner_spans),
+                        model_frames_since_advance=metrics.get(
+                            "cursor_frames_since_advance"
+                        ),
+                    )
                     token_end = len(spans) if final else (
                         coordinates.token_end_from_labels(mu, plan.label_normalized_spans)
                         if valid else projection.token_end

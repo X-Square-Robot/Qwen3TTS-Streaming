@@ -17,6 +17,7 @@ from ..core.lifecycle import LifecycleLogger
 from ..core.session import Session, SegmentOrderMeta
 from ..core.timing import ServerTimingAccumulator
 from ..core.types import EngineRequest, RequestPriority, RequestType
+from ..core.cursor_debug import dump_cursor_event
 from .spliter import SegmentAction
 from .spliter.driver import ActionType
 
@@ -77,6 +78,33 @@ class Dispatcher:
             if plan is None:
                 continue
             session.cursor_segment_plans[segment_idx] = plan
+            dump_cursor_event(
+                "plan.publish",
+                session_id=session.session_id,
+                segment_idx=segment_idx,
+                revision=plan.revision,
+                label_count=plan.label_count,
+                owner_count=len(plan.owner_spans),
+                bounds=session.cursor_segment_bounds.get(segment_idx),
+                first_owner=(
+                    {
+                        "id": plan.owner_spans[0].owner_id,
+                        "labels": [plan.owner_spans[0].label_start, plan.owner_spans[0].label_end],
+                        "normalized": [plan.owner_spans[0].normalized_start, plan.owner_spans[0].normalized_end],
+                        "raw": [plan.owner_spans[0].raw_start, plan.owner_spans[0].raw_end],
+                    }
+                    if plan.owner_spans else None
+                ),
+                last_owner=(
+                    {
+                        "id": plan.owner_spans[-1].owner_id,
+                        "labels": [plan.owner_spans[-1].label_start, plan.owner_spans[-1].label_end],
+                        "normalized": [plan.owner_spans[-1].normalized_start, plan.owner_spans[-1].normalized_end],
+                        "raw": [plan.owner_spans[-1].raw_start, plan.owner_spans[-1].raw_end],
+                    }
+                    if plan.owner_spans else None
+                ),
+            )
             await self._engine_inbox.put(
                 EngineRequest(
                     type=RequestType.UPDATE_CURSOR_PLAN,
