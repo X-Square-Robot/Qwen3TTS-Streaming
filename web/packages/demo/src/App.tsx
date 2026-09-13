@@ -36,6 +36,16 @@ import {PlaybackWaveform} from "./components/PlaybackWaveform";
 import {MediaPlayer} from "./components/MediaPlayer";
 import {ProgressTrack} from "./components/ProgressTrack";
 import {appendAudioEnvelope, type AudioEnvelope} from "./components/audio-envelope";
+import {
+  latestProgressEvent,
+  monotonicSampleRatio,
+  monotonicRawEnd,
+  progressRawEnd,
+  progressSample,
+  progressSampleBigInt,
+  sortProgressEvents,
+  type ProgressEvent,
+} from "./progress";
 import {SdkPage} from "./SdkPage";
 import {
   DEFAULT_DEMO_SETTINGS,
@@ -451,7 +461,9 @@ function Experience({loaded, onCapabilities, onSettings, settings}: {
     && (inputMode === "full" ? fullTextAvailable : inputMode === "long" ? longTextAvailable : incrementalAvailable),
   );
   const audioDuration = receivedSamples / synthesisSampleRate;
-  const textProgress = [...events].reverse().find((event) => event.type === "progress");
+  const textProgress = latestProgressEvent(
+    progressHistory.filter((event): event is ProgressEvent => event.type === "progress"),
+  );
   const selectedTaskStatus = caps?.task_status.find((status) => status.task === task);
 
   function selectVadStrategy(strategy: VadStrategy) {
@@ -666,13 +678,14 @@ function EngineStatus({capabilities, events, busy}: {
 }) {
   const native = capabilities?.native_cursor;
   const speechState = capabilities?.speech_state;
-  const progressEvents = events.filter((event) => event.type === "progress");
+  const progressEvents = events.filter((event): event is ProgressEvent => event.type === "progress");
   // Native is the session route once admitted. A conservative EMA sample can
   // appear before lookahead is valid or during final flush; it must not make
   // the UI misreport an otherwise native session as EMA.
-  const progress = [...progressEvents].reverse().find(
+  const orderedProgress = sortProgressEvents(progressEvents);
+  const progress = [...orderedProgress].reverse().find(
     (event) => String(event.meta?.progress_basis ?? "") === "native_cursor_v1",
-  ) ?? progressEvents.at(-1);
+  ) ?? orderedProgress.at(-1);
   const basis = progress?.type === "progress" ? String(progress.meta?.progress_basis ?? "") : "";
   const sessionMode = basis === "native_cursor_v1" ? "native" : basis === "ema_frame_ratio_v1" ? "ema" : "unknown";
   const modeLabel = sessionMode === "native" ? "原生游标" : sessionMode === "ema" ? "EMA" : busy ? "等待进度" : "未开始";
@@ -709,17 +722,18 @@ function CursorProgressPanel({text, events, capabilities, busy, playback}: {
   busy: boolean;
   playback: {played: bigint};
 }) {
-  const progressEvents = events.filter((event): event is Extract<TTSEvent, {type: "progress"}> => event.type === "progress");
+  const progressEvents = events.filter((event): event is ProgressEvent => event.type === "progress");
+  const orderedProgress = sortProgressEvents(progressEvents);
   const textLength = Array.from(text).length;
-  const native = progressEvents.filter((event) => String(event.meta?.progress_basis ?? "") === "native_cursor_v1");
-  const ema = progressEvents.filter((event) => String(event.meta?.progress_basis ?? "") === "ema_frame_ratio_v1");
-  const generated = progressEvents.at(-1);
-  const heard = [...progressEvents].reverse().find((event) => event.sample <= playback.played);
+  const native = orderedProgress.filter((event) => String(event.meta?.progress_basis ?? "") === "native_cursor_v1");
+  const ema = orderedProgress.filter((event) => String(event.meta?.progress_basis ?? "") === "ema_frame_ratio_v1");
+  const generated = orderedProgress.at(-1);
+  const heard = [...orderedProgress].reverse().find((event) => progressSampleBigInt(event) <= playback.played);
   const latest = playback.played > 0n ? heard : undefined;
-  const latestIndex = latest ? progressEvents.lastIndexOf(latest) : -1;
-  const generatedIndex = generated ? progressEvents.length - 1 : -1;
+  const latestIndex = latest ? orderedProgress.lastIndexOf(latest) : -1;
+  const generatedIndex = generated ? orderedProgress.length - 1 : -1;
   const rawEnd = latestIndex >= 0
-    ? monotonicRawEnd(progressEvents, latestIndex, textLength)
+    ? monotonicRawEnd(orderedProgress, latestIndex, textLength)
     : 0;
   const progress = textLength ? rawEnd / textLength : 0;
   const nativeReady = Boolean(capabilities?.native_cursor?.progress_available);
@@ -729,47 +743,31 @@ function CursorProgressPanel({text, events, capabilities, busy, playback}: {
     <p className="cursor-panel-copy">高亮跟随正在播放的声音。实色表示已听到的位置，浅色表示已生成的文本。</p>
     <div className="cursor-text-stage"><div className="cursor-text-meta"><span>RAW TEXT</span><span>{rawEnd.toFixed(1)}/{textLength} codepoints</span></div>
       <div className="cursor-text" aria-live="polite">{Array.from(text).map((character, index) => <span key={`${index}-${character}`} className={index < Math.floor(rawEnd) ? "is-read" : index === Math.floor(rawEnd) ? "is-current" : ""}>{character === " " ? " " : character}</span>)}</div>
-      <ProgressTrack className="cursor-progress-track" label="文本已播放进度" value={progress} buffered={generatedIndex >= 0 ? monotonicRawEnd(progressEvents, generatedIndex, textLength) / Math.max(1, textLength) : 0}/>
+      <ProgressTrack className="cursor-progress-track" label="文本已播放进度" value={progress} buffered={generatedIndex >= 0 ? monotonicRawEnd(orderedProgress, generatedIndex, textLength) / Math.max(1, textLength) : 0}/>
     </div>
     <div className="cursor-trajectory"><div className="cursor-trajectory-head"><span>TRAJECTORY</span><span>{busy ? "LIVE" : progressEvents.length ? "CAPTURED" : "WAITING FOR AUDIO"}</span></div>
       <CursorChart native={native} ema={ema} textLength={textLength}/>
-      <div className="cursor-legend"><span className="native-key"><i/>原生游标 {native.length ? `${native.length} points` : "等待"}</span><span className="ema-key"><i/>EMA {ema.length ? `${ema.length} points` : "降级时显示"}</span><span>已听 {latestIndex >= 0 ? `${rawEnd.toFixed(1)}/${textLength}` : "—"} · 生成 {generatedIndex >= 0 ? `${monotonicRawEnd(progressEvents, generatedIndex, textLength).toFixed(1)}/${textLength}` : "—"}</span></div>
+      <div className="cursor-legend"><span className="native-key"><i/>原生游标 {native.length ? `${native.length} points` : "等待"}</span><span className="ema-key"><i/>EMA {ema.length ? `${ema.length} points` : "降级时显示"}</span><span>已听 {latestIndex >= 0 ? `${rawEnd.toFixed(1)}/${textLength}` : "—"} · 生成 {generatedIndex >= 0 ? `${monotonicRawEnd(orderedProgress, generatedIndex, textLength).toFixed(1)}/${textLength}` : "—"}</span></div>
     </div>
   </section>;
 }
 
-function CursorChart({native, ema, textLength}: {native: Extract<TTSEvent, {type: "progress"}>[]; ema: Extract<TTSEvent, {type: "progress"}>[]; textLength: number}) {
+function CursorChart({native, ema, textLength}: {native: ProgressEvent[]; ema: ProgressEvent[]; textLength: number}) {
   const points = [...native, ...ema];
   const maxSample = Math.max(1, ...points.map((event) => progressSample(event)));
-  const path = (series: Extract<TTSEvent, {type: "progress"}>[]) => series.map((event, index) => {
+  const timeline = sortProgressEvents(points);
+  const path = (series: ProgressEvent[]) => series.map((event, index) => {
     const x = 8 + progressSample(event) / maxSample * 484;
-    const prior = series.slice(0, index).reduce(
-      (highWater, item) => Math.max(highWater, progressRawEnd(item, textLength)),
-      0,
-    );
-    const y = 72 - Math.max(prior, progressRawEnd(event, textLength)) / Math.max(1, textLength) * 58;
+    const timelineIndex = timeline.indexOf(event);
+    const highWater = timelineIndex < 0
+      ? progressRawEnd(event, textLength)
+      : monotonicRawEnd(timeline, timelineIndex, textLength);
+    const y = 72 - highWater / Math.max(1, textLength) * 58;
     return `${index ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(" ");
   return <svg className="cursor-chart" viewBox="0 0 500 84" role="img" aria-label="原生游标和 EMA 文本进度轨迹"><path className="chart-grid" d="M8 14H492M8 43H492M8 72H492"/>{native.length > 0 && <path className="chart-native" d={path(native)}/>} {ema.length > 0 && <path className="chart-ema" d={path(ema)}/>}<text x="8" y="82">0</text><text x="476" y="82">audio samples</text></svg>;
 }
 
-function progressSample(event: Extract<TTSEvent, {type: "progress"}>): number { return Number(event.sample > 0n ? event.sample : event.meta?.output_sample_end ?? 0) || 0; }
-function progressRawEnd(event: Extract<TTSEvent, {type: "progress"}>, length: number): number {
-  const meta = event.meta ?? {};
-  const display = Number(meta.display_raw_position);
-  const committed = Number(meta.raw_codepoint_end);
-  // EMA's frame ratio is intentionally not converted into a raw character
-  // offset. Only the server's owner-span coordinate (or its display-only
-  // interpolation) may move the text highlight.
-  const value = Number.isFinite(display) ? display : Number.isFinite(committed) ? committed : 0;
-  return Math.max(0, Math.min(length, Number.isFinite(value) ? value : 0));
-}
-function monotonicRawEnd(events: Extract<TTSEvent, {type: "progress"}>[], index: number, length: number): number {
-  return events.slice(0, index + 1).reduce(
-    (highWater, event) => Math.max(highWater, progressRawEnd(event, length)),
-    0,
-  );
-}
 function StatusItem({icon, label, value, detail, className = ""}: {
   icon: React.ReactNode;
   label: string;
@@ -801,19 +799,54 @@ function NumberInput({label, value, min, max, step = 1, disabled = false, onChan
 }
 
 function AudioTextCursor({text, events, playback, sampleRate, showTrack}: {text: string; events: TTSEvent[]; playback: {played: bigint; buffered: bigint}; sampleRate: number; showTrack: boolean}) {
+  const displayedPlayedRatio = useRef(0);
+  const displayedBufferedRatio = useRef(0);
   const textLength = Array.from(text).length;
-  const anchors = events.filter((event): event is Extract<TTSEvent, {type: "progress"}> => event.type === "progress");
-  const latest = anchors.at(-1);
-  const progress = [...anchors].reverse().find((event) => event.sample <= playback.played);
+  const anchors = sortProgressEvents(events.filter((event): event is ProgressEvent => event.type === "progress"));
+  let progressIndex = -1;
+  for (let index = anchors.length - 1; index >= 0; index -= 1) {
+    const anchor = anchors[index];
+    if (anchor && progressSampleBigInt(anchor) <= playback.played) {
+      progressIndex = index;
+      break;
+    }
+  }
+  const progress = progressIndex >= 0 ? anchors[progressIndex] : undefined;
   const audio = events.filter((event): event is Extract<TTSEvent, {type: "audio"}> => event.type === "audio");
-  const generatedEnd = audio.at(-1)?.endSample ?? 0n;
+  const generatedEnd = audio.reduce(
+    (highWater, event) => event.endSample > highWater ? event.endSample : highWater,
+    0n,
+  );
   const sourceSample = playback.played;
-  const generatedRatio = Number(generatedEnd > 0n ? (latest?.sample ?? 0n) * 100n / generatedEnd : 0n) / 100;
-  const playedRatio = Number(generatedEnd > 0n ? playback.played * 100n / generatedEnd : 0n) / 100;
-  const rawEnd = progress ? progressRawEnd(progress, textLength) : 0;
+  if (audio.length === 0 && anchors.length === 0) {
+    // A new live request starts with an empty timeline. Reset the display
+    // high-water while retaining monotonicity within the active request.
+    displayedPlayedRatio.current = 0;
+    displayedBufferedRatio.current = 0;
+  }
+  // During live synthesis the denominator grows as more PCM arrives. A raw
+  // fraction would therefore move backwards even though playback is
+  // monotonic. Keep the rendered high-water conservative until the request
+  // completes; the text cursor still exposes the exact sample-to-text route.
+  displayedPlayedRatio.current = monotonicSampleRatio(
+    displayedPlayedRatio.current,
+    playback.played,
+    generatedEnd,
+  );
+  const bufferedRatio = monotonicSampleRatio(
+    displayedBufferedRatio.current,
+    playback.buffered,
+    generatedEnd,
+  );
+  displayedBufferedRatio.current = Math.max(
+    displayedBufferedRatio.current,
+    bufferedRatio,
+    displayedPlayedRatio.current,
+  );
+  const rawEnd = progress ? monotonicRawEnd(anchors, progressIndex, textLength) : 0;
   const route = progress ? String(progress.meta?.progress_basis ?? "").replace("_v1", "") : "waiting";
   return <div className="audio-text-cursor"><div className="audio-cursor-labels"><span>TEXT POSITION <b>{rawEnd.toFixed(1)}/{textLength}</b></span><span>PCM SAMPLE <b>{sourceSample.toString()}</b></span></div>
-    {showTrack && <ProgressTrack className="audio-text-line progress-track--dark" label="监听音频播放进度" value={playedRatio} buffered={generatedRatio}/>}
+    {showTrack && <ProgressTrack className="audio-text-line progress-track--dark" label="监听音频播放进度" value={displayedPlayedRatio.current} buffered={displayedBufferedRatio.current}/>}
     <div className="audio-text-preview">{Array.from(text).map((character, index) => <span key={`${index}-${character}`} className={index < Math.floor(rawEnd) ? "is-read" : index === Math.floor(rawEnd) ? "is-current" : ""}>{character === " " ? " " : character}</span>)}</div>
     <div className="audio-cursor-foot"><span>{route} · codec frame {String(progress?.meta?.source_frame_end ?? "—")}</span><span>{sampleRate ? `${(Number(sourceSample) / sampleRate).toFixed(2)}s` : "—"} played</span></div>
   </div>;

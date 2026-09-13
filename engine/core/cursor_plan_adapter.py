@@ -59,6 +59,33 @@ def _raw_span(commit: Any) -> tuple[int, int]:
     return min(start for start, _ in mapped), max(end for _, end in mapped)
 
 
+def _is_literal_commit(commit: Any, spoken: str, raw_start: int, raw_end: int) -> bool:
+    """Return whether a commit can safely be split into raw-aligned owners.
+
+    TN semantic commits (numbers, dates, URLs, and fallbacks) may expand or
+    rewrite their source and therefore keep one stable owner.  A literal
+    commit whose source and spoken text are identical has a one-to-one raw /
+    normalized coordinate relationship, so its label spans can be exposed at
+    finer granularity without guessing coordinates.
+    """
+
+    kind = getattr(commit, "commit_kind", None)
+    kind_value = getattr(kind, "value", kind)
+    raw_text = getattr(commit, "raw_text", None)
+    return (
+        kind_value == "literal"
+        and isinstance(raw_text, str)
+        and raw_text == spoken
+        and raw_end - raw_start == len(spoken)
+    )
+
+
+def _literal_owner_id(owner_id: int, ordinal: int) -> int:
+    """Derive a stable, collision-free id for a literal sub-owner."""
+
+    return (owner_id << 32) | (ordinal + 1)
+
+
 def _check_committed_prefix(
     plan: CursorLabelPlan,
     previous: CursorLabelPlan | None,
@@ -148,6 +175,7 @@ class CursorLabelPlanAdapter:
                 raise ValueError(f"duplicate cursor owner id {owner_id}")
             seen_owner_ids.add(owner_id)
             raw_start, raw_end = _raw_span(commit)
+            commit_label_spans: list[tuple[int, int]] = []
             try:
                 if callable(encode_with_spans):
                     try:
@@ -169,7 +197,7 @@ class CursorLabelPlanAdapter:
                         right = _integer(right, name="label span end")
                         if not 0 <= left < right <= len(spoken):
                             raise ValueError("labelizer offset outside spoken text")
-                        label_spans.append((normalized_cursor + left, normalized_cursor + right))
+                        commit_label_spans.append((left, right))
                 else:
                     labels = tuple(self._labelize(spoken))
             except Exception as exc:
@@ -180,22 +208,57 @@ class CursorLabelPlanAdapter:
                     raise ValueError("cursor label ids must be non-negative")
                 label_ids.append(label_value)
 
+            label_spans.extend(
+                (normalized_cursor + left, normalized_cursor + right)
+                for left, right in commit_label_spans
+            )
+
             normalized_end = normalized_cursor + len(spoken)
             if not labels:
                 normalized_cursor = normalized_end
                 continue
             label_start = len(label_ids) - len(labels)
-            owners.append(
-                CursorOwnerSpan(
-                    owner_id=owner_id,
-                    label_start=label_start,
-                    label_end=len(label_ids),
-                    normalized_start=normalized_cursor,
-                    normalized_end=normalized_end,
-                    raw_start=raw_start,
-                    raw_end=raw_end,
+            if _is_literal_commit(commit, spoken, raw_start, raw_end) and commit_label_spans:
+                # A literal commit is the only case with a trustworthy
+                # one-to-one raw/normalized relationship.  Keep semantic
+                # expansions as one owner, but let the native cursor advance
+                # through ordinary prose without waiting for the sentence's
+                # final punctuation.  Unsupported punctuation/whitespace is
+                # absorbed by the adjacent owner boundaries.
+                for sub_ordinal, (left, right) in enumerate(commit_label_spans):
+                    sub_owner_id = _literal_owner_id(owner_id, sub_ordinal)
+                    if sub_owner_id in seen_owner_ids:
+                        raise ValueError(f"duplicate cursor owner id {sub_owner_id}")
+                    seen_owner_ids.add(sub_owner_id)
+                    sub_raw_start = raw_start + left
+                    sub_raw_end = raw_start + right
+                    if sub_ordinal == 0:
+                        sub_raw_start = raw_start
+                    if sub_ordinal == len(commit_label_spans) - 1:
+                        sub_raw_end = raw_end
+                    owners.append(
+                        CursorOwnerSpan(
+                            owner_id=sub_owner_id,
+                            label_start=label_start + sub_ordinal,
+                            label_end=label_start + sub_ordinal + 1,
+                            normalized_start=normalized_cursor + left,
+                            normalized_end=normalized_cursor + right,
+                            raw_start=sub_raw_start,
+                            raw_end=sub_raw_end,
+                        )
+                    )
+            else:
+                owners.append(
+                    CursorOwnerSpan(
+                        owner_id=owner_id,
+                        label_start=label_start,
+                        label_end=len(label_ids),
+                        normalized_start=normalized_cursor,
+                        normalized_end=normalized_end,
+                        raw_start=raw_start,
+                        raw_end=raw_end,
+                    )
                 )
-            )
             normalized_cursor = normalized_end
 
         plan = CursorLabelPlan(

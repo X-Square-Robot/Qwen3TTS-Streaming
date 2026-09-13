@@ -41,6 +41,69 @@ def cursor_display_position(
     )
 
 
+def cursor_display_position_for_segment(
+    global_plan: CursorLabelPlan | None,
+    segment_plan: CursorLabelPlan,
+    position: float,
+) -> tuple[float, float] | None:
+    """Project a segment-local label position in the session-global plan.
+
+    A segment may cut through one TN owner. Its sliced plan rebases labels to
+    zero but retains the owner's complete raw span. Passing that local
+    position directly to :func:`cursor_display_position` therefore treats the
+    segment tail as the end of the owner and causes a visible jump at every
+    clause boundary. Exact normalized label spans recover the global offset
+    without guessing from text lengths.
+    """
+    try:
+        local_position = float(position)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(local_position):
+        return None
+    local_position = max(0.0, min(float(segment_plan.label_count), local_position))
+    if not segment_plan.label_normalized_spans:
+        return cursor_display_position(segment_plan, local_position)
+    if global_plan is None or not global_plan.label_normalized_spans:
+        return None
+
+    segment_spans = segment_plan.label_normalized_spans
+    global_spans = global_plan.label_normalized_spans
+    width = len(segment_spans)
+    offset: int | None = None
+    if width <= len(global_spans):
+        # The normalized starts are ordered. Locate the first matching start
+        # in O(log n), then verify the (usually short) segment window instead
+        # of scanning the whole long-form plan for every audio frame.
+        target_start = segment_spans[0][0]
+        left, right = 0, len(global_spans)
+        while left < right:
+            middle = (left + right) // 2
+            if global_spans[middle][0] < target_start:
+                left = middle + 1
+            else:
+                right = middle
+        candidate = left
+        while candidate + width <= len(global_spans):
+            if global_spans[candidate][0] != target_start:
+                break
+            if (
+                global_spans[candidate : candidate + width] == segment_spans
+                and global_plan.label_ids[candidate : candidate + width]
+                == segment_plan.label_ids
+            ):
+                offset = candidate
+                break
+            candidate += 1
+    if offset is None:
+        # A malformed or concurrently replaced plan must not make progress
+        # fatal. Returning no display coordinate is safer than treating this
+        # local slice as a complete owner and jumping to its raw end.
+        return None
+    global_position = float(offset) + local_position
+    return cursor_display_position(global_plan, global_position)
+
+
 @dataclass(frozen=True)
 class TextProgressEstimate:
     """A monotonic, segment-local text progress estimate.
@@ -330,6 +393,7 @@ class EmaTextProgressEstimator:
 
 
 __all__ = [
+    "cursor_display_position_for_segment",
     "EmaTextProgressEstimator",
     "NativeCursorProgressEstimate",
     "NativeCursorProgressProjector",

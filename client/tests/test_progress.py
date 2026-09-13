@@ -92,6 +92,50 @@ def test_tracker_accepts_exact_replay_after_newer_anchor():
     assert [anchor.anchor_seq for anchor in tracker.anchors] == [1, 2]
 
 
+def test_tracker_merges_late_anchor_without_using_arrival_order():
+    """A replayed earlier segment must not disable or rewind the cursor."""
+    tracker = PlaybackProgressTracker()
+    tracker.add_anchor(_anchor(2, 100, 200, 10, 10))
+    tracker.add_anchor(_anchor(1, 0, 100, 5, 5))
+
+    assert [anchor.anchor_seq for anchor in tracker.anchors] == [1, 2]
+    state = tracker.update_playback_progress(
+        played_through_sample=150,
+        buffered_through_sample=200,
+    )
+    assert state.confirmed.raw_codepoint == 5
+    assert state.estimated.raw_codepoint == 8
+
+
+def test_tracker_merges_out_of_order_stream_events_after_audio_is_received():
+    tracker = PlaybackProgressTracker()
+    tracker.observe(
+        AudioChunk(
+            pcm_bytes=b"\0" * 800,
+            audio=AudioFormat(encoding="pcm_f32", sample_rate=24000, channels=1),
+            output_sample_start=0,
+            output_sample_end=200,
+        )
+    )
+    for anchor in (_anchor(2, 100, 200, 10, 10), _anchor(1, 0, 100, 5, 5)):
+        tracker.observe(
+            StreamEvent(
+                type="text_progress",
+                meta={
+                    "anchor_seq": str(anchor.anchor_seq),
+                    "output_sample_start": str(anchor.output_sample_start),
+                    "output_sample_end": str(anchor.output_sample_end),
+                    "output_sample_rate": str(anchor.output_sample_rate),
+                    "raw_codepoint_start": str(anchor.raw_codepoint_start),
+                    "raw_codepoint_end": str(anchor.raw_codepoint_end),
+                    "normalized_codepoint_start": str(anchor.normalized_codepoint_start),
+                    "normalized_codepoint_end": str(anchor.normalized_codepoint_end),
+                },
+            )
+        )
+    assert [anchor.anchor_seq for anchor in tracker.anchors] == [1, 2]
+
+
 def test_tracker_rejects_partial_anchor_meta_instead_of_defaulting_spans():
     tracker = PlaybackProgressTracker()
     with pytest.raises(ProtocolError, match="malformed text progress anchor"):

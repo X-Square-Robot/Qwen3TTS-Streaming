@@ -1,4 +1,5 @@
-# syntax=docker/dockerfile:1.7
+# Keep the frontend implicit so local BuildKit does not need to resolve a
+# docker/dockerfile image from Docker Hub before the actual build starts.
 
 # Reproducible local builder for the embedded Demo and Browser SDK. Release
 # pipelines use the same Node major and publish their already-built artifacts;

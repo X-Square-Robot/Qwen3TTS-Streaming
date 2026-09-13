@@ -288,7 +288,7 @@ def test_full_long_and_token_inputs_share_tn_cursor_result_set():
     asyncio.run(run())
 
 
-def test_splitter_boundary_inside_tn_owner_preserves_native_global_coordinates():
+def test_splitter_boundaries_preserve_native_global_coordinates():
     """Ordinary segmentation must not disable a precisely mapped label plan."""
 
     async def run() -> None:
@@ -318,9 +318,9 @@ def test_splitter_boundary_inside_tn_owner_preserves_native_global_coordinates()
         await _drain(inbox)
 
         # The first semantic owner expands 99% to six spoken characters.  The
-        # small real splitter budget forces later punctuation segments while
-        # the remaining committed text is still one owner.  Several segment
-        # bounds therefore cut through that owner.
+        # small real splitter budget forces later punctuation segments. Plain
+        # prose is exposed as fine-grained literal owners, while the numeric
+        # expansion remains one semantic owner.
         await frontend.push_text_input(
             session.session_id,
             "99%和甲乙。丙丁。戊己。庚辛。壬癸。子丑。寅卯。辰巳。午未。申酉。",
@@ -332,15 +332,6 @@ def test_splitter_boundary_inside_tn_owner_preserves_native_global_coordinates()
         assert session.cursor_label_plan is not None
         assert session.cursor_label_plan.owner_spans[0].normalized_end == len(
             "百分之九十九"
-        )
-        assert any(
-            start < session.cursor_label_plan.owner_spans[-1].normalized_end
-            and end > session.cursor_label_plan.owner_spans[-1].normalized_start
-            and not (
-                start <= session.cursor_label_plan.owner_spans[-1].normalized_start
-                and end >= session.cursor_label_plan.owner_spans[-1].normalized_end
-            )
-            for start, end in session.cursor_segment_bounds.values()
         )
         # Exact label offsets preserve native computation across partial
         # owners; only the journal decides the conservative raw frontier.

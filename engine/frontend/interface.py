@@ -32,7 +32,7 @@ from ..core.text_progress import (
     NativeCursorProgressProjector,
     NATIVE_CURSOR_PROGRESS_BASIS,
     TEXT_PROGRESS_BASIS,
-    cursor_display_position,
+    cursor_display_position_for_segment,
 )
 from ..core.types import (
     EngineResult,
@@ -46,10 +46,6 @@ from ..core.types import (
     TokenizedText,
 )
 
-# At 12 Hz this is roughly 1.3 seconds of source audio.  A short period of
-# unchanged native output is expected around lookahead and chunk boundaries,
-# but a longer stall must not block the session's text progress forever.
-_NATIVE_CURSOR_STALL_FRAME_LIMIT = 16
 from .text_commitment import AudioCreditEstimator, IncrementalTextCommitter, SemanticStartGate
 from .text_commitment.x2_adapter import X2CommitmentAdapter
 from .text_commitment.types import (
@@ -81,6 +77,11 @@ if TYPE_CHECKING:
     from .spliter.tokenizer import LightQwen3TTSTokenizer
 
 logger = logging.getLogger(__name__)
+
+# At 12 Hz this is roughly 1.3 seconds of source audio.  A short period of
+# unchanged native output is expected around lookahead and chunk boundaries,
+# but a longer stall must not block the session's text progress forever.
+_NATIVE_CURSOR_STALL_FRAME_LIMIT = 16
 
 _WHITESPACE_TO_STRIP = str.maketrans(
     {
@@ -2655,42 +2656,56 @@ class FrontendInterface:
                         if valid else projection.token_end
                     )
                     mapped = project(token_end)
-                    display = cursor_display_position(plan, mu)
+                    # A lookahead-invalid sample still carries the last
+                    # conservative token frontier, but its neural ``mu`` is
+                    # not an observation we may interpolate for the UI.  In
+                    # particular, an invalid value at a segment boundary can
+                    # be the end of the local slice and would otherwise make
+                    # the display jump across the whole owner.
+                    display = None
+                    if valid or final:
+                        display = cursor_display_position_for_segment(
+                            getattr(session, "cursor_label_plan", None) or plan,
+                            plan,
+                            mu,
+                        )
                     if valid and not final:
                         stall_frames = getattr(
                             session, "native_cursor_stall_frames", None
                         )
                         if stall_frames is None:
                             stall_frames = session.native_cursor_stall_frames = {}
-                        last_token_end = getattr(
-                            session, "native_cursor_last_token_end", None
-                        )
-                        if last_token_end is None:
-                            last_token_end = session.native_cursor_last_token_end = {}
+                        # ``token_end`` is a discrete owner frontier.  It may
+                        # stay unchanged for many audio frames while the
+                        # neural cursor advances inside the current token;
+                        # using it as the watchdog signal falsely downgrades
+                        # normal Chinese syllables to EMA.  Watch the
+                        # continuous neural position instead.
+                        last_mu = getattr(session, "native_cursor_last_mu", None)
+                        if last_mu is None:
+                            last_mu = session.native_cursor_last_mu = {}
                         last_frame_end = getattr(
                             session, "native_cursor_last_frame_end", None
                         )
                         if last_frame_end is None:
                             last_frame_end = session.native_cursor_last_frame_end = {}
                         previous_frame_end = last_frame_end.get(segment_idx)
-                        previous_token_end = last_token_end.get(segment_idx)
+                        previous_mu = last_mu.get(segment_idx)
                         if (
                             previous_frame_end is not None
                             and frame_end > previous_frame_end
-                            and previous_token_end is not None
-                            and token_end <= previous_token_end
+                            and previous_mu is not None
+                            and mu <= previous_mu
                         ):
                             stall_frames[segment_idx] = (
                                 stall_frames.get(segment_idx, 0)
                                 + frame_end
                                 - previous_frame_end
                             )
-                        elif previous_token_end is None or token_end > previous_token_end:
+                        elif previous_mu is None or mu > previous_mu:
                             stall_frames[segment_idx] = 0
                         last_frame_end[segment_idx] = frame_end
-                        last_token_end[segment_idx] = max(
-                            token_end, previous_token_end or 0
-                        )
+                        last_mu[segment_idx] = max(mu, previous_mu or 0.0)
                         if (
                             stall_frames.get(segment_idx, 0)
                             >= _NATIVE_CURSOR_STALL_FRAME_LIMIT

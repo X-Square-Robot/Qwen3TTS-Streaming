@@ -178,6 +178,9 @@ def test_local_compose_uses_reproducible_node_builder_for_web_artifacts():
     dockerfile = _read("infra/docker/Dockerfile.web-builder")
 
     assert "Dockerfile.web-builder" in compose_script
+    # Keep Phase C independent from Docker Hub's Dockerfile frontend registry.
+    # The local BuildKit frontend supports the cache mount used below.
+    assert "docker/dockerfile:" not in dockerfile
     assert "--target web-artifacts" in compose_script
     assert '--output "type=local,dest=$staged_web"' in compose_script
     assert "FROM ${NODE_IMAGE} AS web-builder" in dockerfile

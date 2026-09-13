@@ -5,10 +5,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from engine.core.native_cursor import CursorLabelPlan, CursorOwnerSpan
+from engine.core.native_cursor import (
+    CursorLabelPlan,
+    CursorOwnerSpan,
+    slice_cursor_label_plan,
+)
 from engine.core.text_progress import (
     NATIVE_CURSOR_PROGRESS_BASIS,
     NativeCursorProgressProjector,
+    cursor_display_position_for_segment,
 )
 from engine.frontend.interface import FrontendInterface
 from engine.backend.engine_loop import EngineLoop
@@ -91,6 +96,57 @@ def test_display_interpolation_never_recedes_after_tail_reanchor() -> None:
     second = projector.update(mu=1.25, valid=True)
     assert second is not None
     assert second.display_raw_position >= first.display_raw_position
+
+
+def test_segment_display_uses_global_owner_position_after_label_rebase() -> None:
+    global_plan = CursorLabelPlan(
+        label_ids=(1, 2, 3, 4, 5, 6),
+        owner_spans=(CursorOwnerSpan(7, 0, 6, 0, 6, 0, 60),),
+        revision=1,
+        label_normalized_spans=tuple((index, index + 1) for index in range(6)),
+    )
+    first = slice_cursor_label_plan(global_plan, normalized_start=0, normalized_end=2)
+    second = slice_cursor_label_plan(global_plan, normalized_start=2, normalized_end=4)
+    assert first is not None and second is not None
+
+    # The local plans both end at mu=2, but they represent global labels 2 and
+    # 4 respectively. The display projection must retain that distinction.
+    assert cursor_display_position_for_segment(global_plan, first, 2.0) == pytest.approx((2.0, 20.0))
+    assert cursor_display_position_for_segment(global_plan, second, 0.0) == pytest.approx((2.0, 20.0))
+    assert cursor_display_position_for_segment(global_plan, second, 2.0) == pytest.approx((4.0, 40.0))
+
+
+def test_segment_display_does_not_guess_when_global_plan_window_is_missing() -> None:
+    global_plan = CursorLabelPlan(
+        label_ids=(1, 2),
+        owner_spans=(CursorOwnerSpan(7, 0, 2, 0, 4, 0, 20),),
+        revision=2,
+        label_normalized_spans=((0, 1), (3, 4)),
+    )
+    segment = CursorLabelPlan(
+        label_ids=(1,),
+        owner_spans=(CursorOwnerSpan(7, 0, 1, 1, 2, 0, 20),),
+        revision=1,
+        label_normalized_spans=((1, 2),),
+    )
+
+    # A stale/replaced global plan must not turn this local one-label slice
+    # into the complete raw owner. The integer journal boundary remains the
+    # only safe coordinate in that situation.
+    assert cursor_display_position_for_segment(global_plan, segment, 1.0) is None
+    assert cursor_display_position_for_segment(None, segment, 1.0) is None
+
+
+def test_segment_display_clamps_local_position_before_global_projection() -> None:
+    global_plan = CursorLabelPlan(
+        label_ids=(1, 2, 3),
+        owner_spans=(CursorOwnerSpan(7, 0, 3, 0, 3, 0, 30),),
+        revision=1,
+        label_normalized_spans=((0, 1), (1, 2), (2, 3)),
+    )
+    segment = slice_cursor_label_plan(global_plan, normalized_start=1, normalized_end=2)
+    assert segment is not None
+    assert cursor_display_position_for_segment(global_plan, segment, 99.0) == pytest.approx((2.0, 20.0))
 
 
 def test_high_water_never_recedes_on_mu_regression_or_tail_revision() -> None:

@@ -81,6 +81,15 @@ class StreamingOutputProcessor:
         self._candidate_targets: dict[int, int] = {}
         self._candidate_input_ends: dict[int, int] = {}
         self._last_anchor_output_end = 0
+        # Text progress is produced by per-segment projectors before audio
+        # reorder.  These high-water marks are applied only here, when an
+        # anchor is actually released on the ordered output timeline.  Doing
+        # it earlier would let a lookahead segment advance the public cursor
+        # before its predecessor's audio had been delivered.
+        self._last_anchor_raw_end = 0
+        self._last_anchor_normalized_end = 0
+        self._last_anchor_display_raw = 0.0
+        self._last_anchor_display_normalized = 0.0
         self._source_native_cursor = 0
 
     @property
@@ -349,6 +358,7 @@ class StreamingOutputProcessor:
         start: int | None = None,
     ) -> dict[str, Any]:
         meta = dict(event.get("meta") or {})
+        self._clamp_text_coordinates(meta)
         if start is None:
             start = int(meta.get("output_sample_start", end) or end)
         supplied_seq = _optional_int(meta.get("anchor_seq"))
@@ -365,6 +375,61 @@ class StreamingOutputProcessor:
         )
         return {**event, "meta": meta}
 
+    def _clamp_text_coordinates(self, meta: dict[str, Any]) -> None:
+        """Keep released text anchors monotonic across segment boundaries.
+
+        Segment-local TN/cursor state is intentionally allowed to reset.  The
+        output processor is the first point where those events have crossed
+        ``AudioReorder`` and therefore have a single public playback order.
+        Clamp only the protocol/display coordinates here; token and cursor
+        diagnostics remain the values reported by the backend.
+        """
+        raw_start = _optional_int(meta.get("raw_codepoint_start"))
+        raw_end = _optional_int(meta.get("raw_codepoint_end"))
+        if raw_start is not None and raw_end is not None:
+            raw_start = max(0, raw_start, self._last_anchor_raw_end)
+            raw_end = max(raw_start, raw_end, self._last_anchor_raw_end)
+            meta["raw_codepoint_start"] = str(raw_start)
+            meta["raw_codepoint_end"] = str(raw_end)
+            self._last_anchor_raw_end = raw_end
+
+        normalized_start = _optional_int(meta.get("normalized_codepoint_start"))
+        normalized_end = _optional_int(meta.get("normalized_codepoint_end"))
+        if normalized_start is not None and normalized_end is not None:
+            normalized_start = max(
+                0, normalized_start, self._last_anchor_normalized_end
+            )
+            normalized_end = max(
+                normalized_start,
+                normalized_end,
+                self._last_anchor_normalized_end,
+            )
+            meta["normalized_codepoint_start"] = str(normalized_start)
+            meta["normalized_codepoint_end"] = str(normalized_end)
+            self._last_anchor_normalized_end = normalized_end
+
+        display_raw = _optional_float(meta.get("display_raw_position"))
+        if display_raw is not None:
+            display_raw = max(
+                self._last_anchor_display_raw,
+                self._last_anchor_raw_end,
+                display_raw,
+            )
+            meta["display_raw_position"] = f"{display_raw:.6f}"
+            self._last_anchor_display_raw = display_raw
+
+        display_normalized = _optional_float(
+            meta.get("display_normalized_position")
+        )
+        if display_normalized is not None:
+            display_normalized = max(
+                self._last_anchor_display_normalized,
+                self._last_anchor_normalized_end,
+                display_normalized,
+            )
+            meta["display_normalized_position"] = f"{display_normalized:.6f}"
+            self._last_anchor_display_normalized = display_normalized
+
     def _allocate_anchor_seq(self) -> int:
         seq = self._next_anchor_seq
         self._next_anchor_seq += 1
@@ -376,6 +441,14 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if np.isfinite(result) else None
 
 
 def _is_true(value: Any) -> bool:

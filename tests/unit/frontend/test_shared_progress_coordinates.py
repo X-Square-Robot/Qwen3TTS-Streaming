@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from engine.core.native_cursor import CursorLabelPlan, CursorOwnerSpan
+from engine.core.native_cursor import CursorLabelPlan, CursorOwnerSpan, slice_cursor_label_plan
 from engine.core.text_journal import CanonicalTextJournal
 from engine.core.types import AttributedAudioChunk
 from engine.frontend.interface import FrontendInterface
@@ -49,6 +49,48 @@ def test_ema_native_share_codec_token_raw_contract_at_every_frontier():
         assert right["meta"]["raw_codepoint_end"] == ("2" if frame < 6 else "5")
 
 
+def test_native_display_stays_on_global_owner_when_clauses_share_one_owner():
+    global_plan = CursorLabelPlan(
+        label_ids=(1, 2, 3, 4, 5, 6),
+        owner_spans=(CursorOwnerSpan(9, 0, 6, 0, 6, 0, 60),),
+        revision=1,
+        label_normalized_spans=tuple((index, index + 1) for index in range(6)),
+    )
+    first = slice_cursor_label_plan(global_plan, normalized_start=0, normalized_end=2)
+    second = slice_cursor_label_plan(global_plan, normalized_start=2, normalized_end=4)
+    assert first is not None and second is not None
+    state = SimpleNamespace(
+        spliter=SimpleNamespace(ema_ratio_for_segment=lambda _: 1.0),
+        segment_progress_frames={},
+        segment_token_emitted_count={},
+        text_progress_estimators={},
+        native_cursor_projectors={},
+        cursor_label_plan=global_plan,
+        cursor_segment_plans={0: first, 1: second},
+        segment_token_spans={
+            0: [dict(normalized_start=i, normalized_end=i + 1, raw_start=i, raw_end=i + 1) for i in range(2)],
+            1: [dict(normalized_start=i, normalized_end=i + 1, raw_start=i, raw_end=i + 1) for i in range(2, 4)],
+        },
+        text_journal=None,
+        input_complete=True,
+        session_id="shared-owner",
+    )
+
+    first_event = FrontendInterface._make_text_progress_event(
+        None, state, 0,
+        {"source_frame_start": 0, "source_frame_end": 1, "cursor_plan_revision": 1,
+         "cursor_valid": 1, "cursor_mu": 2.0},
+    )
+    second_event = FrontendInterface._make_text_progress_event(
+        None, state, 1,
+        {"source_frame_start": 0, "source_frame_end": 1, "cursor_plan_revision": 1,
+         "cursor_valid": 1, "cursor_mu": 2.0},
+    )
+    assert first_event is not None and second_event is not None
+    assert float(first_event["meta"]["display_raw_position"]) == 20.0
+    assert float(second_event["meta"]["display_raw_position"]) == 40.0
+
+
 def test_precise_native_events_publish_owner_display_interpolation():
     result = event(session(True), 1, 1.0)
 
@@ -62,6 +104,9 @@ def test_native_lookahead_holds_and_bad_estimate_fallback_does_not_retract():
     held = event(state, 2, 6.0, valid=0)
     assert held["meta"]["progress_basis"] == "native_cursor_v1"
     assert held["meta"]["text_token_end"] == first["meta"]["text_token_end"] == "4"
+    # An invalid lookahead must not use its stale/local mu for UI interpolation
+    # and jump to the end of the current clause.
+    assert "display_raw_position" not in held["meta"]
     fallback = event(state, 3, float("nan"))
     assert fallback["meta"]["progress_basis"] == "ema_frame_ratio_v1"
     assert fallback["meta"]["text_token_end"] == "4"
@@ -95,6 +140,15 @@ def test_stalled_native_cursor_downgrades_to_ema_without_retracting_progress():
     assert int(events[-1]["meta"]["text_token_end"]) >= int(
         events[-2]["meta"]["text_token_end"]
     )
+
+
+def test_native_cursor_does_not_stall_while_mu_advances_inside_one_token():
+    state = session(True)
+    events = [event(state, frame, frame * 0.05) for frame in range(1, 40)]
+
+    assert all(item["meta"]["progress_basis"] == "native_cursor_v1" for item in events)
+    assert getattr(state, "native_cursor_disabled", False) is False
+    assert state.native_cursor_stall_frames.get(1, 0) == 0
 
 
 def test_codec_and_text_coordinates_travel_with_pcm_through_reorder():

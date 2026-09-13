@@ -23,14 +23,13 @@ from .types import (
     TextCommit,
     TextNormalizationConfig,
 )
-from .candidate_resolver import CandidateResolver, family_for_kind
+from .candidate_resolver import CandidateResolver
 from .semantic_spans import SpanDetector
 from .commit_policy import CommitPolicy
 from .domain_resolver import DomainResolver
 from .wetext_backend import WetextAdapter
 from .projector import (
     is_markdown_structured,
-    project_readable,
     project_readable_with_mapping,
 )
 

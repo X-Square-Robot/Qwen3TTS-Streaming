@@ -100,11 +100,13 @@ class Session:
     native_cursor_disabled: bool = False
     native_cursor_fallback_reason: str = ""
     # Frontend-side watchdog state.  A native cursor that keeps returning the
-    # same token frontier must not hold text progress forever; after the
-    # bounded grace period the session uses the shared EMA route.
+    # same neural position must not hold text progress forever; after the
+    # bounded grace period the session uses the shared EMA route.  The
+    # continuous position is separate from the discrete token frontier because
+    # a token may span many audio frames before its public boundary advances.
     native_cursor_stall_frames: dict[int, int] = field(default_factory=dict)
-    native_cursor_last_token_end: dict[int, int] = field(default_factory=dict)
     native_cursor_last_frame_end: dict[int, int] = field(default_factory=dict)
+    native_cursor_last_mu: dict[int, float] = field(default_factory=dict)
     cursor_segment_plans: dict[int, CursorLabelPlan] = field(default_factory=dict)
     cursor_segment_bounds: dict[int, tuple[int, int]] = field(default_factory=dict)
     def cursor_plan_for_segment(self, segment_idx: int) -> CursorLabelPlan | None:

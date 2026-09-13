@@ -14,9 +14,14 @@ def _commit(
     mapping=(),
     commit_id: int = 0,
     span_id: int = 0,
+    raw_text: str | None = None,
+    commit_kind: str | None = None,
 ):
+    source = text if raw_text is None else raw_text
     return SimpleNamespace(
         tts_text=text,
+        raw_text=source,
+        commit_kind=commit_kind,
         raw_start=raw_start,
         raw_end=len(text) if raw_end is None else raw_end,
         mapping=mapping,
@@ -63,6 +68,105 @@ def test_mapping_uses_conservative_union_without_length_guessing():
         revision=0,
     )
     assert (plan.owner_spans[0].raw_start, plan.owner_spans[0].raw_end) == (10, 15)
+
+
+def test_literal_commit_exposes_fine_grained_raw_owners():
+    class Labelizer:
+        def __call__(self, text):
+            return tuple(range(len(text)))
+
+        def encode_with_spans(self, text, *, strict=False):
+            return tuple(range(len(text))), tuple((i, i + 1) for i in range(len(text)))
+
+    adapter = CursorLabelPlanAdapter(Labelizer())
+    plan = adapter.build(
+        [_commit("你好，世界。", raw_start=10, raw_end=16, commit_id=7, commit_kind="literal")],
+        revision=0,
+    )
+
+    # The labelizer emits no gaps in this focused contract test.  Each label
+    # has a stable owner, while the final owner absorbs the sentence-ending
+    # boundary so raw high-water can finish at the commit end.
+    assert len(plan.owner_spans) == 6
+    assert [owner.raw_start for owner in plan.owner_spans] == [10, 11, 12, 13, 14, 15]
+    assert plan.owner_spans[-1].raw_end == 16
+    assert plan.owner_spans[0].owner_id == (7 << 32) | 1
+    assert plan.owner_spans[-1].owner_id == (7 << 32) | 6
+
+
+def test_long_literal_owner_does_not_freeze_progress_at_its_first_character():
+    class Labelizer:
+        def __call__(self, text):
+            return tuple(range(len(text)))
+
+        def encode_with_spans(self, text, *, strict=False):
+            return tuple(range(len(text))), tuple((i, i + 1) for i in range(len(text)))
+
+    text = "，都是学生自己用加工工具造出来的，这个工程化的实操能力。" + (
+        "有些核心车队的成员在毕业以后甚至在比亚迪、蔚来这类主机厂的"
+        "工程开发部拿到了正式的"
+    )
+    start = 703
+    adapter = CursorLabelPlanAdapter(Labelizer())
+    plan = adapter.build(
+        [_commit(
+            text,
+            raw_start=start,
+            raw_end=start + len(text),
+            commit_id=27,
+            commit_kind="literal",
+        )],
+        revision=0,
+    )
+
+    target = text.index("有些")
+    target_owner = next(
+        owner for owner in plan.owner_spans if owner.raw_start == start + target
+    )
+    assert target_owner.raw_end == start + target + 1
+    assert plan.owner_spans[-1].raw_end == start + len(text)
+
+
+def test_expanded_commit_remains_one_semantic_owner():
+    adapter = CursorLabelPlanAdapter(lambda text: list(range(len(text))))
+    plan = adapter.build(
+        [_commit(
+            "99%",
+            raw_start=0,
+            raw_end=3,
+            commit_id=5,
+            commit_kind="normalized",
+            raw_text="99%",
+        )],
+        spoken_texts=["百分之九十九"],
+        revision=0,
+    )
+    assert len(plan.owner_spans) == 1
+
+
+def test_literal_sub_owner_ids_remain_stable_across_plan_revisions():
+    class Labelizer:
+        def __call__(self, text):
+            return tuple(range(len(text)))
+
+        def encode_with_spans(self, text, *, strict=False):
+            return tuple(range(len(text))), tuple((i, i + 1) for i in range(len(text)))
+
+    adapter = CursorLabelPlanAdapter(Labelizer())
+    first = adapter.build(
+        [_commit("你好", raw_start=4, raw_end=6, commit_id=11, commit_kind="literal")],
+        revision=0,
+    )
+    second = adapter.build(
+        [
+            _commit("你好", raw_start=4, raw_end=6, commit_id=11, commit_kind="literal"),
+            _commit("99%", raw_start=6, raw_end=9, commit_id=12, commit_kind="normalized"),
+        ],
+        revision=1,
+        previous=first,
+        committed_label_count=2,
+    )
+    assert second.owner_spans[:2] == first.owner_spans
 
 
 def test_adapter_can_consume_the_journaled_spoken_projection():

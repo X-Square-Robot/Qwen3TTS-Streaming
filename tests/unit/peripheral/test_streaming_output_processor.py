@@ -168,6 +168,123 @@ def test_segment_final_marker_stays_before_next_segment_anchor():
     assert anchors[1]["meta"]["output_sample_end"] == "240"
 
 
+def test_released_cross_segment_anchor_coordinates_keep_global_high_water():
+    processor = _processor(24000)
+
+    first = processor.process(
+        AttributedAudioChunk(
+            np.ones(240, dtype=np.float32).tobytes(),
+            {
+                "type": "text_progress",
+                "segment_idx": 0,
+                "meta": {
+                    "raw_codepoint_start": "0",
+                    "raw_codepoint_end": "10",
+                    "normalized_codepoint_start": "0",
+                    "normalized_codepoint_end": "10",
+                    "display_raw_position": "10.0",
+                    "display_normalized_position": "10.0",
+                },
+            },
+            segment_idx=0,
+        )
+    )
+    second = processor.process(
+        AttributedAudioChunk(
+            np.ones(240, dtype=np.float32).tobytes(),
+            {
+                "type": "text_progress",
+                "segment_idx": 1,
+                "meta": {
+                    # A segment-local projector may restart at a lower
+                    # boundary. Once released, the public anchor must not.
+                    "raw_codepoint_start": "5",
+                    "raw_codepoint_end": "6",
+                    "normalized_codepoint_start": "5",
+                    "normalized_codepoint_end": "6",
+                    "display_raw_position": "6.0",
+                    "display_normalized_position": "6.0",
+                },
+            },
+            segment_idx=1,
+        )
+    )
+    final = processor.process_event(
+        {
+            "type": "text_progress",
+            "segment_idx": 1,
+            "meta": {
+                "alignment_final": "true",
+                "raw_codepoint_start": "5",
+                "raw_codepoint_end": "6",
+                "normalized_codepoint_start": "5",
+                "normalized_codepoint_end": "6",
+                "display_raw_position": "6.0",
+                "display_normalized_position": "6.0",
+            },
+        }
+    )
+
+    anchors = [*first.anchors, *second.anchors, *final.anchors]
+    assert [item["meta"]["raw_codepoint_end"] for item in anchors] == [
+        "10",
+        "10",
+        "10",
+    ]
+    assert [item["meta"]["normalized_codepoint_end"] for item in anchors] == [
+        "10",
+        "10",
+        "10",
+    ]
+    assert [item["meta"]["display_raw_position"] for item in anchors] == [
+        "10.000000",
+        "10.000000",
+        "10.000000",
+    ]
+
+
+def test_display_coordinate_cannot_fall_below_confirmed_integer_boundary():
+    processor = _processor(24000)
+    first = processor.process(
+        AttributedAudioChunk(
+            np.ones(240, dtype=np.float32).tobytes(),
+            {
+                "type": "text_progress",
+                "segment_idx": 0,
+                "meta": {
+                    "raw_codepoint_start": "0",
+                    "raw_codepoint_end": "20",
+                    "normalized_codepoint_start": "0",
+                    "normalized_codepoint_end": "20",
+                },
+            },
+            segment_idx=0,
+        )
+    )
+    second = processor.process(
+        AttributedAudioChunk(
+            np.ones(240, dtype=np.float32).tobytes(),
+            {
+                "type": "text_progress",
+                "segment_idx": 1,
+                "meta": {
+                    "raw_codepoint_start": "20",
+                    "raw_codepoint_end": "20",
+                    "normalized_codepoint_start": "20",
+                    "normalized_codepoint_end": "20",
+                    "display_raw_position": "6.0",
+                    "display_normalized_position": "6.0",
+                },
+            },
+            segment_idx=1,
+        )
+    )
+
+    anchors = [*first.anchors, *second.anchors]
+    assert anchors[1]["meta"]["display_raw_position"] == "20.000000"
+    assert anchors[1]["meta"]["display_normalized_position"] == "20.000000"
+
+
 def test_vad_attributed_frame_spans_are_rebased_and_monotonic():
     vad = EnergyVADProcessor(
         TTSVADConfig(mode=VADMode.ENERGY, begin_threshold=0.0, begin_count=1),

@@ -269,23 +269,39 @@ class PlaybackProgressTracker:
             # Keep audio transport validation fatal, while allowing the
             # session adapter to isolate a malformed text-progress anchor.
             raise TextProgressProtocolError(str(exc)) from exc
-        for old in self._anchors.values():
-            if old.anchor_seq == anchor.anchor_seq:
-                continue
-            if anchor.anchor_seq < old.anchor_seq:
-                raise TextProgressProtocolError("text progress anchor sequence moved backwards")
-            if anchor.output_sample_start < old.output_sample_start:
-                raise TextProgressProtocolError("text progress sample range moved backwards")
-            if anchor.output_sample_end < old.output_sample_end:
-                raise TextProgressProtocolError("text progress sample end moved backwards")
-            if anchor.raw_codepoint_start < old.raw_codepoint_start:
-                raise TextProgressProtocolError("text progress raw range moved backwards")
-            if anchor.raw_codepoint_end < old.raw_codepoint_end:
-                raise TextProgressProtocolError("text progress raw range moved backwards")
-            if anchor.normalized_codepoint_start < old.normalized_codepoint_start:
-                raise TextProgressProtocolError("text progress normalized range moved backwards")
-            if anchor.normalized_codepoint_end < old.normalized_codepoint_end:
-                raise TextProgressProtocolError("text progress normalized range moved backwards")
+
+        # Transport replay and multiplexed segment delivery can make anchors
+        # arrive out of order.  Validate the complete set in protocol order
+        # instead of comparing the new item with the last arrival.  This keeps
+        # malformed coordinate regressions fatal while allowing a late anchor
+        # from an earlier segment to be merged without disabling tracking.
+        anchors = [*self._anchors.values(), anchor]
+        by_seq = sorted(anchors, key=lambda item: item.anchor_seq)
+        by_sample = sorted(
+            anchors,
+            key=lambda item: (item.output_sample_start, item.output_sample_end, item.anchor_seq),
+        )
+
+        def validate_monotonic(ordered: list[TextProgressAnchor]) -> None:
+            for old, current in zip(ordered, ordered[1:]):
+                if current.output_sample_start < old.output_sample_start:
+                    raise TextProgressProtocolError("text progress sample range moved backwards")
+                if current.output_sample_end < old.output_sample_end:
+                    raise TextProgressProtocolError("text progress sample end moved backwards")
+                if current.raw_codepoint_start < old.raw_codepoint_start:
+                    raise TextProgressProtocolError("text progress raw range moved backwards")
+                if current.raw_codepoint_end < old.raw_codepoint_end:
+                    raise TextProgressProtocolError("text progress raw range moved backwards")
+                if current.normalized_codepoint_start < old.normalized_codepoint_start:
+                    raise TextProgressProtocolError("text progress normalized range moved backwards")
+                if current.normalized_codepoint_end < old.normalized_codepoint_end:
+                    raise TextProgressProtocolError("text progress normalized range moved backwards")
+
+        validate_monotonic(by_seq)
+        # Sample coordinates are the playback ordering used by interpolation;
+        # validate them independently because two segments may be delivered
+        # concurrently while their sequence numbers are still session-global.
+        validate_monotonic(by_sample)
 
     def _recompute_locked(self) -> PlaybackTextProgress:
         ordered = sorted(self._anchors.values(), key=lambda item: (item.output_sample_end, item.anchor_seq))
