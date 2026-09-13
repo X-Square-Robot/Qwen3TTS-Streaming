@@ -1096,6 +1096,23 @@ class EngineLoop:
                 revision=plan.revision,
                 label_count=plan.label_count,
                 owner_count=len(plan.owner_spans),
+                label_spans=[
+                    {
+                        "normalized_start": int(span[0]),
+                        "normalized_end": int(span[1]),
+                    }
+                    for span in getattr(plan, "label_normalized_spans", ())
+                ],
+                owner_spans=[
+                    {
+                        "owner_id": int(span.owner_id),
+                        "normalized_start": int(span.normalized_start),
+                        "normalized_end": int(span.normalized_end),
+                        "raw_start": int(span.raw_start),
+                        "raw_end": int(span.raw_end),
+                    }
+                    for span in getattr(plan, "owner_spans", ())
+                ],
                 previous_revision=previous_plan.revision if previous_plan else None,
             )
         except Exception:

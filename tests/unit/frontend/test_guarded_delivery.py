@@ -719,13 +719,14 @@ class TestReorderMarkDoneEx:
 class TestConsumeResultsOutOfOrder:
     """Segments complete out of order; verdicts must hit their own audio."""
 
-    def test_segment_final_progress_is_published_before_next_segment_audio(self):
-        """Merge local segment cursors only at the ordered audio boundary.
+    def test_segment_audio_is_published_before_its_final_progress(self):
+        """Drain a segment's audio progress before publishing its final marker.
 
         Segment 1 can finish decoding while segment 0 is still the reorder
         playhead.  Its final marker must stay pending until segment 0's final
-        marker has been published; otherwise a client that validates the
-        session-global raw coordinate high-water sees a false backwards move.
+        marker has been published and its own buffered audio has drained;
+        otherwise a client sees a false end-of-segment jump followed by late
+        local progress.
         """
         session = _two_segment_session()
         session.config.output_policy.config = {"delivery": "firehose"}
@@ -781,8 +782,8 @@ class TestConsumeResultsOutOfOrder:
 
         assert order == [
             "segment_0_final",
-            "segment_1_final",
             "segment_1_audio",
+            "segment_1_final",
         ]
 
     def test_lookahead_eos_does_not_flush_playhead_held_tail(self):

@@ -74,8 +74,10 @@ class StreamingOutputProcessor:
         self._candidates: dict[int, TextProgressCandidate] = {}
         self._retained_candidate_ids: set[int] = set()
         self._emitted_candidate_ids: set[int] = set()
-        self._pending_final: list[tuple[dict[str, Any], int | None, int]] = []
+        self._pending_final: list[tuple[dict[str, Any], int | None, int, int]] = []
         self._segment_output_end: dict[int, int] = {}
+        self._segment_source_frame_end: dict[int, int] = {}
+        self._segment_expected_frames: dict[int, int] = {}
         self._last_retained_segment = -1
         self._retained_native_cursor = 0
         self._candidate_targets: dict[int, int] = {}
@@ -100,6 +102,12 @@ class StreamingOutputProcessor:
         """Process one native float32 chunk and return one atomic batch."""
         progress_event = getattr(chunk, "progress_event", None)
         segment_idx = int(getattr(chunk, "segment_idx", -1))
+        source_frame_end = int(getattr(chunk, "source_frame_end", 0) or 0)
+        if source_frame_end > 0:
+            self._segment_source_frame_end[segment_idx] = max(
+                source_frame_end,
+                self._segment_source_frame_end.get(segment_idx, 0),
+            )
         pcm_bytes = getattr(chunk, "pcm_bytes", chunk)
         pcm_bytes = bytes(pcm_bytes or b"")
         raw = np.frombuffer(pcm_bytes, dtype=np.float32)
@@ -163,6 +171,16 @@ class StreamingOutputProcessor:
         """Accept a lifecycle event without inventing audio coordinates."""
         if not isinstance(event, dict):
             return OutputBatch(events=[event])
+        if event.get("type") == "segment_end":
+            meta = dict(event.get("meta") or {})
+            segment_idx = int(event.get("segment_idx", -1))
+            try:
+                expected = int(meta.get("segment_decode_steps", 0) or 0)
+            except (TypeError, ValueError):
+                expected = 0
+            if expected > 0:
+                self._segment_expected_frames[segment_idx] = expected
+            return OutputBatch(events=[event])
         if event.get("type") != "text_progress":
             return OutputBatch(events=[event])
         meta = dict(event.get("meta") or {})
@@ -174,7 +192,14 @@ class StreamingOutputProcessor:
                 return OutputBatch(events=[_without_anchor_seq(event)])
             segment_idx = int(event.get("segment_idx", -1))
             target = self._segment_output_end.get(segment_idx)
-            self._pending_final.append((event, target, segment_idx))
+            self._pending_final.append(
+                (
+                    event,
+                    target,
+                    segment_idx,
+                    self._segment_expected_frames.get(segment_idx, 0),
+                )
+            )
             # Native output usually reaches the segment boundary before this
             # lifecycle event. A streaming resampler may need one more chunk;
             # leave the marker pending until its target is observable.
@@ -302,7 +327,16 @@ class StreamingOutputProcessor:
             input_decided = input_end <= decided_cursor
             if input_decided and (target <= output_end or force_all):
                 ready.append((min(target, output_end), 0, "candidate", candidate_id))
-        for index, (event, target, segment_idx) in enumerate(self._pending_final):
+        for index, (event, target, segment_idx, expected_frames) in enumerate(
+            self._pending_final
+        ):
+            observed_frames = self._segment_source_frame_end.get(segment_idx, 0)
+            if (
+                expected_frames > 0
+                and observed_frames > 0
+                and observed_frames < expected_frames
+            ):
+                continue
             target = self._segment_output_end.get(segment_idx, target)
             if target is None:
                 continue
@@ -329,7 +363,7 @@ class StreamingOutputProcessor:
                 self._candidates.pop(candidate_id, None)
             else:
                 index = int(marker_id)
-                event, pending_target, segment_idx = self._pending_final[index]
+                event, pending_target, segment_idx, _expected_frames = self._pending_final[index]
                 final_target = self._segment_output_end.get(
                     segment_idx,
                     output_end if pending_target is None else pending_target,

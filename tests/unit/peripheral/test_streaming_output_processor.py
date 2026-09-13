@@ -168,6 +168,70 @@ def test_segment_final_marker_stays_before_next_segment_anchor():
     assert anchors[1]["meta"]["output_sample_end"] == "240"
 
 
+def test_segment_final_waits_for_late_audio_frame_anchor():
+    processor = _processor(24000)
+    first = processor.process(
+        AttributedAudioChunk(
+            np.ones(240, dtype=np.float32).tobytes(),
+            {
+                "type": "text_progress",
+                "segment_idx": 0,
+                "meta": {
+                    "raw_codepoint_start": "0",
+                    "raw_codepoint_end": "1",
+                    "normalized_codepoint_start": "0",
+                    "normalized_codepoint_end": "1",
+                },
+            },
+            segment_idx=0,
+            source_frame_end=1,
+        )
+    )
+    # SEGMENT_END may be observed before the last audio chunk reaches the
+    # output processor. The final anchor must remain pending at that point.
+    processor.process_event(
+        {
+            "type": "segment_end",
+            "segment_idx": 0,
+            "meta": {"segment_decode_steps": "2"},
+        }
+    )
+    pending = processor.process_event(
+        {
+            "type": "text_progress",
+            "segment_idx": 0,
+            "meta": {
+                "alignment_final": "true",
+                "raw_codepoint_start": "0",
+                "raw_codepoint_end": "1",
+                "normalized_codepoint_start": "0",
+                "normalized_codepoint_end": "1",
+            },
+        }
+    )
+    second = processor.process(
+        AttributedAudioChunk(
+            np.ones(240, dtype=np.float32).tobytes(),
+            {
+                "type": "text_progress",
+                "segment_idx": 0,
+                "meta": {
+                    "raw_codepoint_start": "1",
+                    "raw_codepoint_end": "2",
+                    "normalized_codepoint_start": "1",
+                    "normalized_codepoint_end": "2",
+                },
+            },
+            segment_idx=0,
+            source_frame_end=2,
+        )
+    )
+    anchors = [*first.anchors, *pending.anchors, *second.anchors]
+    finals = [item for item in anchors if item["meta"].get("alignment_final") == "true"]
+    assert len(finals) == 1
+    assert finals[0]["meta"]["output_sample_end"] == "480"
+
+
 def test_released_cross_segment_anchor_coordinates_keep_global_high_water():
     processor = _processor(24000)
 

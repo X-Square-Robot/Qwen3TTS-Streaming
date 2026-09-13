@@ -1699,6 +1699,7 @@ class FrontendInterface:
         pending_segment_end_events: dict[
             tuple[int, int], tuple[dict, Optional[dict]]
         ] = {}
+        pending_segment_end_meta: dict[int, tuple[tuple[int, int], int]] = {}
         if not isinstance(prefix_gate_guard_bypass, PrefixGateGuardBypass):
             prefix_gate_guard_bypass = None
         # Guarded delivery bookkeeping: verdicts recorded at SEGMENT_END for
@@ -1964,7 +1965,31 @@ class FrontendInterface:
             pending = pending_segment_end_events.pop(key, None)
             if pending is None:
                 return
+            for segment_idx, (pending_key, _expected_frames) in list(
+                pending_segment_end_meta.items()
+            ):
+                if pending_key == key:
+                    pending_segment_end_meta.pop(segment_idx, None)
             await _emit_segment_end_events(pending)
+
+        async def _publish_ready_segment_end(segment_idx: int, frame_end: int) -> None:
+            pending = pending_segment_end_meta.get(segment_idx)
+            if pending is None:
+                return
+            key, expected_frames = pending
+            # Test/legacy transports may omit source-frame metadata (zero).
+            # Production engine chunks carry a positive frame end, which is
+            # the completion fence for the segment's final marker.
+            if expected_frames > 0 and frame_end > 0 and frame_end < expected_frames:
+                return
+            await _publish_segment_end_event(key)
+
+        async def _publish_ready_chunk_end_markers(chunks: list) -> None:
+            for chunk in chunks:
+                await _publish_ready_segment_end(
+                    int(getattr(chunk, "segment_idx", -1)),
+                    int(getattr(chunk, "source_frame_end", 0) or 0),
+                )
 
         if hold is not None:
 
@@ -2093,6 +2118,7 @@ class FrontendInterface:
                     )
                     ready = reorder.push(meta.group_idx, meta.local_idx, attributed)
                     await _deliver(ready)
+                    await _publish_ready_chunk_end_markers(ready)
 
                 elif result.type == ResultType.PREFILL_DONE:
                     # Propagate prefill timing from engine thread
@@ -2274,11 +2300,10 @@ class FrontendInterface:
                     )
                     if prepared_end_events is not None:
                         pending_segment_end_events[segment_key] = prepared_end_events
-                    if (
-                        prepared_end_events is not None
-                        and reorder.next_emit_segment == segment_key
-                    ):
-                        await _publish_segment_end_event(segment_key)
+                        pending_segment_end_meta[seg_idx] = (
+                            segment_key,
+                            max(0, int(rm.get("audio_steps", 0) or 0)),
+                        )
 
                     if hold is None:
                         for key, chunks, _fully_passed in reorder.mark_done_ex(
@@ -2286,10 +2311,23 @@ class FrontendInterface:
                             meta.local_idx,
                             group_final=meta.group_final,
                         ):
-                            if key in pending_segment_end_events:
-                                await _publish_segment_end_event(key)
                             if chunks:
                                 await _deliver(chunks)
+                                await _publish_ready_chunk_end_markers(chunks)
+                            if key in pending_segment_end_events:
+                                pending_idx = next(
+                                    (
+                                        idx
+                                        for idx, (pending_key, _expected) in pending_segment_end_meta.items()
+                                        if pending_key == key
+                                    ),
+                                    -1,
+                                )
+                                if pending_idx >= 0:
+                                    await _publish_ready_segment_end(
+                                        pending_idx,
+                                        session.segment_progress_frames.get(pending_idx, 0),
+                                    )
                     else:
                         # Segment-attributed drain: push each drained
                         # segment's chunks and settle it as soon as it has
@@ -2303,10 +2341,23 @@ class FrontendInterface:
                             meta.local_idx,
                             group_final=meta.group_final,
                         ):
-                            if key in pending_segment_end_events:
-                                await _publish_segment_end_event(key)
                             if chunks:
                                 await _deliver(chunks)
+                                await _publish_ready_chunk_end_markers(chunks)
+                            if key in pending_segment_end_events:
+                                pending_idx = next(
+                                    (
+                                        idx
+                                        for idx, (pending_key, _expected) in pending_segment_end_meta.items()
+                                        if pending_key == key
+                                    ),
+                                    -1,
+                                )
+                                if pending_idx >= 0:
+                                    await _publish_ready_segment_end(
+                                        pending_idx,
+                                        session.segment_progress_frames.get(pending_idx, 0),
+                                    )
                             if fully_passed and key in hold_verdicts:
                                 await _settle_hold(hold_verdicts.pop(key))
 
@@ -2803,6 +2854,17 @@ class FrontendInterface:
                         if valid else projection.token_end
                     )
                     mapped = project(token_end)
+                    dump_cursor_event(
+                        "progress.projection",
+                        session_id=session.session_id,
+                        segment_idx=segment_idx,
+                        frame_start=frame_start,
+                        frame_end=frame_end,
+                        token_end=token_end,
+                        raw_codepoint_end=mapped.get("raw_codepoint_end"),
+                        normalized_codepoint_end=mapped.get("normalized_codepoint_end"),
+                        text_progress=mapped.get("text_progress"),
+                    )
                     # A lookahead-invalid sample still carries the last
                     # conservative token frontier, but its neural ``mu`` is
                     # not an observation we may interpolate for the UI.  In
