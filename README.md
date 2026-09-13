@@ -36,7 +36,7 @@ Qwen3TTS-Streaming is a **v0.2 stability-focused open-source inference system**:
   The primary streaming TN layer owns raw Unicode, mutable tails, and monotonic
   `TextCommit` records. WeText and mixed-language routing decide the spoken form on CPU, while
   already committed spoken prefixes remain append-only across transport packetization.
-- **2026-09-10: `custom-1.7b` supports the cursor-enabled TRT progress route.** The native cursor
+- **2026-09-10: The engine contains a cursor-enabled TRT progress route for staging artifacts; public capability remains disabled until the release-evidence gate passes.** The native cursor
   observes the fused graph's sampled codec codebook-0 and projects its continuous label position
   back to normalized/raw text coordinates through stable owner spans. The public extension is
   `qwen.text_progress.v1`, with `native`, `ema`, and `disabled` progress routes.
@@ -92,7 +92,7 @@ conservative integer high-water marks. `display_*_position` values are display-o
 for highlighting and must not be used for billing, resume, or audio-release decisions.
 
 Clients should read `/v1/capabilities` first. Select native progress only when
-`native_cursor.progress_available=true`; otherwise use EMA or disable text progress. Progress is
+`native_cursor.progress_available=true` (the public release keeps this `false` until the release-evidence gate passes); otherwise use EMA or disable text progress. Progress is
 published through `qwen.text_progress.v1` / `qwen.text_progress`. See
 [Realtime endpoints and events](docs/user/realtime_api.md) for field and playback-ack semantics.
 

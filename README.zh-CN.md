@@ -34,7 +34,7 @@ Qwen3TTS-Streaming 是一个**以稳定性为重点的 v0.2 开源推理系统**
 - **2026-09-10：流式 TN 与原生文本进度已接入当前引擎。** 主 streaming TN 现在维护
   raw Unicode、可变尾部和单调 `TextCommit`；WeText/混合语言路由只在 CPU 侧决定 spoken
   form，已经提交的 spoken prefix 不会被后续 transport 分包改写。
-- **2026-09-10：`custom-1.7b` 支持 cursor-enabled TRT progress route。** 原生游标观察
+- **2026-09-10：引擎已包含供验收使用的 `custom-1.7b` cursor-enabled TRT progress route；在 release evidence gate 完成前，公共 capability 保持关闭。** 原生游标观察
   融合图内采样的 codec codebook-0，并把连续 label 坐标通过稳定 owner spans 投影回
   normalized/raw 文本坐标；当前公开扩展为 `qwen.text_progress.v1`，并支持
   `native`、`ema`、`disabled` 三种 progress route。
@@ -85,7 +85,7 @@ raw Unicode delta
 对外的 `raw_codepoint_end`、`normalized_codepoint_end` 是保守、整数、单调的确认边界；
 owner 内的 `display_*_position` 只适合高亮等展示，不应被用于计费、断点恢复或音频 release。
 
-客户端先读取 `/v1/capabilities`：只有 `native_cursor.progress_available=true` 时才选择
+客户端先读取 `/v1/capabilities`：只有 `native_cursor.progress_available=true` (当前发布默认保持 `false`，除非部署方提供完整 release evidence) 时才选择
 native progress；否则使用 EMA 或关闭文本进度。文本进度通过
 `qwen.text_progress.v1` / `qwen.text_progress` 事件发布，具体字段和播放确认规则见
 [Realtime 接口与事件](docs/user/realtime_api.zh-CN.md)。

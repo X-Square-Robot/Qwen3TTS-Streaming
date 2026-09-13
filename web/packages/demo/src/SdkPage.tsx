@@ -59,6 +59,10 @@ export function SdkPage({loaded, capabilities, settings, docsOnly}: SdkPageProps
       {!docsOnly && !loaded?.config.browser_sdk.available && <p className="alert">Browser SDK 尚未由当前实例或 Registry 提供。</p>}
       <p className="hint">协议 {capabilities?.schema_version ?? "连接实例后显示"}</p>
     </div>
+    <div className="panel"><div className="panel-heading"><div><p className="panel-kicker">TEXT PROGRESS</p><h2>文本游标</h2></div></div>
+      <p className="hint">先读取 capabilities，再根据 <code>native_cursor.progress_available</code> 选择路线。当前公开实例通常为 EMA fallback；不要自行加载游标权重。</p>
+      <p className="hint">监听 <code>qwen.text_progress</code> 使用 <code>raw_codepoint_end</code> 更新高亮；播放确认请使用 Browser SDK 的 playback ACK。</p>
+    </div>
     {!docsOnly && loaded && <div className="panel"><div className="panel-heading"><div><p className="panel-kicker">RELEASE PAIRING</p><h2>Release 一致性</h2></div></div>
       <p className={coherent ? "hint" : "alert"}>{coherent ? "Engine、Python SDK、Browser SDK 与文档来自同一 release。" : "版本不一致，请勿混用当前产物。"}</p>
       <pre>{Object.entries(versions).map(([name, version]) => `${name.padEnd(8)} ${version || "unavailable"}`).join("\n")}</pre>

@@ -101,3 +101,12 @@ client = TTSClient.connect(
 
 第一次合成成功后，继续阅读[高级配置](advanced_configuration.zh-CN.md)。只有在需要自己处理
 底层事件时，才阅读[接口与事件](realtime_api.zh-CN.md)。
+
+## 文本进度（可选）
+
+调用前先请求 `/v1/capabilities`。当返回的
+`native_cursor.progress_available` 为 `true` 时，Realtime WebSocket 会发布
+`qwen.text_progress` 事件，可用其中的 `raw_codepoint_end` 和
+`normalized_codepoint_end` 更新文本高亮；当前公开发布通常返回 `false`，此时客户端应
+接受 `ema` 进度或关闭文本进度，不要自行加载游标权重。进度事件只描述文本对齐，音频播放
+确认仍需通过 `qwen.playback.ack` 发送 `played_through_sample`。

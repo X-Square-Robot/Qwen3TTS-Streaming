@@ -55,7 +55,7 @@ for message in session.iter_messages():
 中英混排等开放片段可能暂时等待后续字符；这不是音频暂停错误，而是为了避免把尚未确定
 的读法不可逆地送入 TTS。
 
-对于声明 `native_cursor.progress_available=true` 的 `custom-1.7b` 部署，文本进度来自
+对于声明 `native_cursor.progress_available=true` (当前发布默认保持 `false`，除非部署方提供完整 release evidence) 的 `custom-1.7b` 部署，文本进度来自
 cursor-enabled TRT 图，并通过 `qwen.text_progress` 事件发布。其他部署会使用 EMA 或
 关闭文本进度。应用应先读取 `/v1/capabilities`，不要根据模型名自行假设 native route。
 

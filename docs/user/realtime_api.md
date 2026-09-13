@@ -74,7 +74,7 @@ records before tokenizer/Spliter dispatch. Later characters can change the spoke
 dates, URLs, model identifiers, or mixed-language spans, so an open span may be held briefly;
 already committed spoken prefixes are not changed by transport packetization.
 
-When `/v1/capabilities` advertises `native_cursor.progress_available=true`, a validated
+When `/v1/capabilities` advertises `native_cursor.progress_available=true` (the public release keeps this `false` until the release-evidence gate passes), a validated
 `custom-1.7b` cursor-enabled TRT route can publish:
 
 ```json

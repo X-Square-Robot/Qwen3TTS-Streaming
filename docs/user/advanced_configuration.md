@@ -57,7 +57,7 @@ monotonic `TextCommit` records, and owner mappings from raw text to normalized/s
 spans such as `99%`, dates, URLs, model identifiers, and mixed-language text may wait for later
 characters; this is semantic safety, not an audio failure.
 
-On a deployment advertising `native_cursor.progress_available=true`, `custom-1.7b` text progress
+On a deployment advertising `native_cursor.progress_available=true` (the public release keeps this `false` until the release-evidence gate passes), `custom-1.7b` text progress
 comes from the cursor-enabled TRT graph and is published as `qwen.text_progress` events. Other
 deployments use EMA or disable text progress. Read `/v1/capabilities` first; do not infer native
 support from the model name.
