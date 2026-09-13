@@ -27,10 +27,11 @@ def session(native):
     )
 
 
-def event(state, frame, mu=None, final=False, valid=1):
+def event(state, frame, mu=None, final=False, valid=1, **extra):
     metrics = dict(source_frame_start=frame - 1, source_frame_end=frame, text_tokens=6)
     if mu is not None:
         metrics.update(cursor_mu=mu, cursor_valid=valid, cursor_plan_revision=1)
+    metrics.update(extra)
     return FrontendInterface._make_text_progress_event(None, state, 1, metrics, final=final)
 
 
@@ -135,8 +136,8 @@ def test_stalled_native_cursor_downgrades_to_ema_without_retracting_progress():
     assert all(item["meta"]["progress_basis"] == "native_cursor_v1"
                for item in events[:16])
     assert events[-1]["meta"]["progress_basis"] == "ema_frame_ratio_v1"
-    assert state.native_cursor_disabled is True
-    assert state.native_cursor_fallback_reason == "stalled"
+    assert getattr(state, "native_cursor_disabled", False) is False
+    assert state.native_cursor_stalled_segments == {1}
     assert int(events[-1]["meta"]["text_token_end"]) >= int(
         events[-2]["meta"]["text_token_end"]
     )
@@ -149,6 +150,17 @@ def test_native_cursor_does_not_stall_while_mu_advances_inside_one_token():
     assert all(item["meta"]["progress_basis"] == "native_cursor_v1" for item in events)
     assert getattr(state, "native_cursor_disabled", False) is False
     assert state.native_cursor_stall_frames.get(1, 0) == 0
+
+
+def test_model_owned_stall_counter_is_used_for_watchdog():
+    state = session(True)
+    events = [
+        event(state, frame, 0.0, cursor_frames_since_advance=0)
+        for frame in range(1, 40)
+    ]
+
+    assert all(item["meta"]["progress_basis"] == "native_cursor_v1" for item in events)
+    assert getattr(state, "native_cursor_stalled_segments", set()) == set()
 
 
 def test_codec_and_text_coordinates_travel_with_pcm_through_reorder():

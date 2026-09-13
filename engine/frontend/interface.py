@@ -1151,6 +1151,34 @@ class FrontendInterface:
             reason=reason,
         )
 
+    @staticmethod
+    def _mark_native_cursor_segment_stalled(
+        session: "Session", segment_idx: int
+    ) -> None:
+        """Downgrade one stalled segment without tearing down the session route."""
+        stalled = getattr(session, "native_cursor_stalled_segments", None)
+        if stalled is None:
+            stalled = session.native_cursor_stalled_segments = set()
+        if segment_idx in stalled:
+            return
+        stalled.add(segment_idx)
+        config = getattr(session, "config", None)
+        timing = getattr(config, "timing", None)
+        LifecycleLogger.emit(
+            session_id=session.session_id,
+            phase="progress.native_fallback",
+            segment_idx=segment_idx,
+            request_id=getattr(timing, "request_id", None) or None,
+            turn_id=getattr(timing, "turn_id", None) or None,
+            session_level=getattr(
+                config,
+                "observability_level",
+                getattr(session, "observability_level", None),
+            ),
+            route="ema",
+            reason="stalled",
+        )
+
     def _emit_text_commit_events(self, session: "Session", events: tuple[str, ...]) -> None:
         callback = getattr(session, "event_callback", None)
         if not callable(callback):
@@ -2570,7 +2598,8 @@ class FrontendInterface:
         self._emit_split_decisions(session)
         self._record_segment_text(actions, session)
         if session.cursor_label_plan is not None and any(
-            session.cursor_plan_for_segment(index) != previous
+            self._cursor_plan_payload(session.cursor_plan_for_segment(index))
+            != self._cursor_plan_payload(previous)
             for index, previous in session.cursor_segment_plans.items()
             if index in session.segment_order
         ):
@@ -2585,6 +2614,18 @@ class FrontendInterface:
         await self._dispatcher.dispatch_segment_actions(session, actions)
         await self._emit_text_token_events(session, actions)
         await self._emit_text_boundary_events(session, actions)
+
+    @staticmethod
+    def _cursor_plan_payload(plan):
+        """Compare plan content without treating a revision counter as data."""
+        if plan is None:
+            return None
+        return (
+            plan.label_ids,
+            plan.owner_spans,
+            plan.label_normalized_spans,
+            plan.final,
+        )
 
     def _emit_split_decisions(self, session: Session) -> None:
         """Drain the spliter's buffered L2 split-decision records and emit them
@@ -2720,7 +2761,11 @@ class FrontendInterface:
             projectors = {}
         projector = projectors.get(segment_idx)
         native_revision_ready = cursor_revision == (plan.revision if plan else None)
-        native_allowed = not getattr(session, "native_cursor_disabled", False)
+        native_allowed = (
+            not getattr(session, "native_cursor_disabled", False)
+            and segment_idx
+            not in getattr(session, "native_cursor_stalled_segments", set())
+        )
         if native_allowed and plan is not None and plan.active and plan.label_normalized_spans:
             # The model estimates label progress. Only this adapter knows that
             # vocabulary; all protocol coordinates below use tokenizer spans.
@@ -2790,16 +2835,34 @@ class FrontendInterface:
                             stall_frames[segment_idx] = 0
                         last_frame_end[segment_idx] = frame_end
                         last_mu[segment_idx] = max(mu, previous_mu or 0.0)
+                        model_stall = metrics.get("cursor_frames_since_advance")
+                        if model_stall is not None:
+                            try:
+                                stall_frames[segment_idx] = max(
+                                    0, int(round(float(model_stall)))
+                                )
+                            except (TypeError, ValueError, OverflowError):
+                                model_stall = None
                         if (
                             stall_frames.get(segment_idx, 0)
                             >= _NATIVE_CURSOR_STALL_FRAME_LIMIT
                         ):
                             logger.warning(
-                                "Native cursor stalled for %s/%d; falling back to EMA",
+                                "Native cursor stalled for %s/%d; falling back to EMA "
+                                "(mu=%.3f frames=%d model_frames=%s labels=%d owners=%d "
+                                "plan_revision=%s)",
                                 session.session_id,
                                 segment_idx,
+                                mu,
+                                stall_frames.get(segment_idx, 0),
+                                metrics.get("cursor_frames_since_advance"),
+                                plan.label_count,
+                                len(plan.owner_spans),
+                                plan.revision,
                             )
-                            FrontendInterface._disable_native_cursor(session, "stalled")
+                            FrontendInterface._mark_native_cursor_segment_stalled(
+                                session, segment_idx
+                            )
                             native_allowed = False
                     if not native_allowed:
                         # The watchdog may have disabled native progress after

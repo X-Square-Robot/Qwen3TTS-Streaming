@@ -111,6 +111,7 @@ class Session:
     native_cursor_stall_frames: dict[int, int] = field(default_factory=dict)
     native_cursor_last_frame_end: dict[int, int] = field(default_factory=dict)
     native_cursor_last_mu: dict[int, float] = field(default_factory=dict)
+    native_cursor_stalled_segments: set[int] = field(default_factory=set)
     cursor_segment_plans: dict[int, CursorLabelPlan] = field(default_factory=dict)
     cursor_segment_bounds: dict[int, tuple[int, int]] = field(default_factory=dict)
     def cursor_plan_for_segment(self, segment_idx: int) -> CursorLabelPlan | None:

@@ -3211,6 +3211,10 @@ class EngineLoop:
                 "cursor_mu": float(scalar("cursor_mu")),
                 "cursor_confidence": float(scalar("cursor_confidence")),
             }
+            if enabled.get("cursor_frames_since_advance") is not None:
+                result["cursor_frames_since_advance"] = int(
+                    max(0, round(float(scalar("cursor_frames_since_advance"))))
+                )
             if enabled.get("cursor_candidate_label") is not None:
                 result["cursor_candidate_label"] = int(
                     scalar("cursor_candidate_label")

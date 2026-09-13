@@ -8,6 +8,7 @@ import torch
 from engine.core.native_cursor import (
     CursorLabelPlan,
     CursorOwnerSpan,
+    reanchor_cursor_mu,
     slice_cursor_label_plan,
 )
 from engine.core.text_progress import (
@@ -147,6 +148,24 @@ def test_segment_display_clamps_local_position_before_global_projection() -> Non
     segment = slice_cursor_label_plan(global_plan, normalized_start=1, normalized_end=2)
     assert segment is not None
     assert cursor_display_position_for_segment(global_plan, segment, 99.0) == pytest.approx((2.0, 20.0))
+
+
+def test_reanchor_preserves_intra_owner_position_without_label_spans() -> None:
+    previous = CursorLabelPlan(
+        label_ids=(1, 2, 3),
+        owner_spans=(CursorOwnerSpan(7, 0, 3, 0, 3, 0, 3),),
+        revision=1,
+    )
+    current = CursorLabelPlan(
+        label_ids=(1, 2, 3, 4),
+        owner_spans=(
+            CursorOwnerSpan(7, 0, 3, 0, 3, 0, 3),
+            CursorOwnerSpan(8, 3, 4, 3, 4, 3, 4),
+        ),
+        revision=2,
+    )
+
+    assert reanchor_cursor_mu(previous, current, previous_mu=1.5) == pytest.approx(1.5)
 
 
 def test_high_water_never_recedes_on_mu_regression_or_tail_revision() -> None:

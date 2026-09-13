@@ -174,20 +174,39 @@ def reanchor_cursor_mu(
     if not current.active:
         return 0.0
 
-    # Pure appends preserve a label coordinate only when both numerical ids
-    # and exact source provenance through the live position are unchanged.
+    # Pure appends preserve a label coordinate when the live prefix and its
+    # owner identities are unchanged. Exact label provenance strengthens this
+    # check, but legacy injected labelizers may not provide it; resetting an
+    # in-flight position to zero in that case creates an artificial stall.
     prefix = math.ceil(position)
-    if (previous.label_normalized_spans and current.label_normalized_spans
-            and prefix <= current.label_count
-            and previous.label_ids[:prefix] == current.label_ids[:prefix]
-            and previous.label_normalized_spans[:prefix]
+    prefix_owners_unchanged = all(
+        any(
+            new.owner_id == old.owner_id
+            and (new.raw_start, new.raw_end) == (old.raw_start, old.raw_end)
+            and new.label_start == old.label_start
+            and new.label_end >= old.label_end
+            for new in current.owner_spans
+        )
+        for old in previous.owner_spans
+        if old.label_start < prefix
+    )
+    completed_owner = any(
+        old.label_end <= position
+        for old in previous.owner_spans
+        if old.label_start < prefix
+    )
+    if (
+        prefix <= current.label_count
+        and previous.label_ids[:prefix] == current.label_ids[:prefix]
+        and prefix_owners_unchanged
+        and not completed_owner
+        and (
+            not previous.label_normalized_spans
+            or not current.label_normalized_spans
+            or previous.label_normalized_spans[:prefix]
             == current.label_normalized_spans[:prefix]
-            and all(
-                any(new.owner_id == old.owner_id
-                    and (new.raw_start, new.raw_end) == (old.raw_start, old.raw_end)
-                    for new in current.owner_spans)
-                for old in previous.owner_spans if old.label_start < prefix
-            )):
+        )
+    ):
         return position
 
     completed_ids = {

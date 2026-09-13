@@ -62,19 +62,16 @@ def _raw_span(commit: Any) -> tuple[int, int]:
 def _is_literal_commit(commit: Any, spoken: str, raw_start: int, raw_end: int) -> bool:
     """Return whether a commit can safely be split into raw-aligned owners.
 
-    TN semantic commits (numbers, dates, URLs, and fallbacks) may expand or
-    rewrite their source and therefore keep one stable owner.  A literal
-    commit whose source and spoken text are identical has a one-to-one raw /
-    normalized coordinate relationship, so its label spans can be exposed at
-    finer granularity without guessing coordinates.
+    Any commit whose source and spoken text are identical has a one-to-one
+    raw / normalized coordinate relationship, regardless of the semantic enum
+    attached by an upstream recognizer.  Keeping this check content-based is
+    important because a plain span can be reclassified during a streaming
+    tail rewrite while its coordinates remain perfectly safe to split.
     """
 
-    kind = getattr(commit, "commit_kind", None)
-    kind_value = getattr(kind, "value", kind)
     raw_text = getattr(commit, "raw_text", None)
     return (
-        kind_value == "literal"
-        and isinstance(raw_text, str)
+        isinstance(raw_text, str)
         and raw_text == spoken
         and raw_end - raw_start == len(spoken)
     )

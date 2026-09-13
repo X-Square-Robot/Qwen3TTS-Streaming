@@ -144,6 +144,22 @@ def test_expanded_commit_remains_one_semantic_owner():
     assert len(plan.owner_spans) == 1
 
 
+def test_identity_commit_is_split_even_if_upstream_kind_is_normalized():
+    class Labelizer:
+        def __call__(self, text):
+            return tuple(range(len(text)))
+
+        def encode_with_spans(self, text, *, strict=False):
+            return tuple(range(len(text))), tuple((i, i + 1) for i in range(len(text)))
+
+    adapter = CursorLabelPlanAdapter(Labelizer())
+    plan = adapter.build(
+        [_commit("普通文本", raw_start=10, raw_end=14, commit_id=8, commit_kind="normalized")],
+        revision=0,
+    )
+    assert len(plan.owner_spans) == len("普通文本")
+
+
 def test_literal_sub_owner_ids_remain_stable_across_plan_revisions():
     class Labelizer:
         def __call__(self, text):
