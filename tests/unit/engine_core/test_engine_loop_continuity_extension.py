@@ -546,6 +546,8 @@ def test_successor_with_cursor_context_restores_recurrent_state_and_keeps_native
     restored = []
     executor.apply_c2w_warm_state = lambda *_args: True
     executor.restore_cursor_state = lambda slot, state: restored.append((slot, state))
+    reanchors = []
+    executor.set_cursor_reanchor = lambda slot, mu: reanchors.append((slot, mu))
     group = _make_group("session", extensions)
     loop._groups[group.session_id] = group
     _add_done_predecessor(group, 1)
@@ -559,6 +561,7 @@ def test_successor_with_cursor_context_restores_recurrent_state_and_keeps_native
     assert loop._try_prefill_one() is True
     assert successor.cursor_progress_disabled is False
     assert restored == [(successor.slot, cursor_state)]
+    assert reanchors == [(successor.slot, 0.0)]
     assert successor.state == "active"
     assert pool.free_count == 0
 

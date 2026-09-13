@@ -160,6 +160,31 @@ def test_identity_commit_is_split_even_if_upstream_kind_is_normalized():
     assert len(plan.owner_spans) == len("普通文本")
 
 
+def test_character_aligned_identifier_is_split_into_raw_digit_owners():
+    class Labelizer:
+        def __call__(self, text):
+            return tuple(range(len(text)))
+
+        def encode_with_spans(self, text, *, strict=False):
+            return tuple(range(len(text))), tuple((i, i + 1) for i in range(len(text)))
+
+    adapter = CursorLabelPlanAdapter(Labelizer())
+    commit = _commit(
+        "四三零九X",
+        raw_start=20,
+        raw_end=25,
+        raw_text="4309X",
+        commit_id=9,
+        commit_kind="normalized",
+    )
+    commit.span_kind = "id_card"
+    plan = adapter.build([commit], revision=0)
+    assert len(plan.owner_spans) == 5
+    assert [(owner.raw_start, owner.raw_end) for owner in plan.owner_spans] == [
+        (20, 21), (21, 22), (22, 23), (23, 24), (24, 25)
+    ]
+
+
 def test_literal_sub_owner_ids_remain_stable_across_plan_revisions():
     class Labelizer:
         def __call__(self, text):

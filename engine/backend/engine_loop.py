@@ -1263,6 +1263,16 @@ class EngineLoop:
                 )
                 seg.cursor_progress_disabled = True
                 return False
+            # Cursor recurrent features continue across an acoustic segment,
+            # but ``cursor_mu`` is local to the segment's sliced label plan.
+            # The transferred state therefore needs one explicit coordinate
+            # reanchor before decode; otherwise a predecessor position larger
+            # than the successor plan is clamped to its label_count and the
+            # whole final sentence appears completed at its first frame.
+            reanchor = getattr(self._executor, "set_cursor_reanchor", None)
+            plan = getattr(seg, "cursor_label_plan", None)
+            if seg.segment_idx > 0 and plan is not None and plan.active and callable(reanchor):
+                reanchor(seg.slot, 0.0)
         return True
 
     def _disable_cursor_plan(self, seg: EngineSegment) -> None:

@@ -8,6 +8,7 @@ injected at this boundary and returns numeric cursor-vocabulary ids.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
+import re
 from typing import Any
 
 from .native_cursor import CursorLabelPlan, CursorOwnerSpan
@@ -81,6 +82,27 @@ def _literal_owner_id(owner_id: int, ordinal: int) -> int:
     """Derive a stable, collision-free id for a literal sub-owner."""
 
     return (owner_id << 32) | (ordinal + 1)
+
+
+def _is_character_aligned_identifier(
+    commit: Any, spoken: str, raw_start: int, raw_end: int
+) -> bool:
+    """Return whether an identifier can be aligned one source character at a time.
+
+    ID-card and digit/letter identifier TN expansions preserve one spoken label
+    per source character (for example ``4309X`` → ``四三零九X``).  Exposing
+    those boundaries keeps progress visible through the identifier while
+    avoiding length guesses for quantities, dates, and other semantic spans.
+    """
+
+    kind = getattr(getattr(commit, "span_kind", None), "value", getattr(commit, "span_kind", None))
+    raw_text = getattr(commit, "raw_text", None)
+    return (
+        kind in {"id_card", "identifier"}
+        and isinstance(raw_text, str)
+        and bool(re.fullmatch(r"[0-9A-Za-z]+", raw_text))
+        and raw_end - raw_start == len(raw_text) == len(spoken)
+    )
 
 
 def _check_committed_prefix(
@@ -215,7 +237,13 @@ class CursorLabelPlanAdapter:
                 normalized_cursor = normalized_end
                 continue
             label_start = len(label_ids) - len(labels)
-            if _is_literal_commit(commit, spoken, raw_start, raw_end) and commit_label_spans:
+            split_character_owners = (
+                _is_literal_commit(commit, spoken, raw_start, raw_end)
+                or _is_character_aligned_identifier(
+                    commit, spoken, raw_start, raw_end
+                )
+            )
+            if split_character_owners and commit_label_spans:
                 # A literal commit is the only case with a trustworthy
                 # one-to-one raw/normalized relationship.  Keep semantic
                 # expansions as one owner, but let the native cursor advance
