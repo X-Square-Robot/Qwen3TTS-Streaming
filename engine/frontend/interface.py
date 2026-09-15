@@ -12,7 +12,6 @@ It delegates backend request emission to ``frontend.dispatcher.Dispatcher``.
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import math
@@ -485,10 +484,6 @@ class FrontendInterface:
         self._tn_locks: Dict[str, asyncio.Lock] = {}
         self._diagnostic_text_routers: Dict[str, DiagnosticTextRouter] = {}
         self._cursor_plan_adapters: Dict[str, Any] = {}
-        # TN is stateful per session, so callers hold ``_tn_locks`` while
-        # submitting work here.  A small shared pool keeps normalization off
-        # the event loop without creating one thread per connection.
-        self._tn_executor: ThreadPoolExecutor | None = None
 
     @property
     def active_count(self) -> int:
@@ -805,9 +800,6 @@ class FrontendInterface:
         if task and not task.done():
             task.cancel()
         self._cleanup_session(session_id)
-        if not self._sessions and self._tn_executor is not None:
-            self._tn_executor.shutdown(wait=False, cancel_futures=True)
-            self._tn_executor = None
 
     async def push_text_input(
         self,
@@ -1004,18 +996,12 @@ class FrontendInterface:
         return session.text_committer.poll(**kwargs)
 
     async def _tn_feed_async(self, session: "Session", text: str, **kwargs):
-        """Run stateful TN work off the asyncio event-loop thread.
-
-        The caller must hold the session TN lock for the complete await.  TN
-        state remains single-owner and ordered, while the event loop can keep
-        reading upstream tokens and relaying audio callbacks during a costly
-        normalization decision.
-        """
+        """Run one ordered TN feed and record its processing cost."""
         started = time.monotonic()
-        decision = await self._run_tn(self._tn_feed, session, text, **kwargs)
+        decision = self._tn_feed(session, text, **kwargs)
         LifecycleLogger.emit(
             session_id=session.session_id,
-            phase="text.tn_worker",
+            phase="text.tn_timing",
             op="feed",
             input_chars=len(text or ""),
             final=bool(kwargs.get("final", False)),
@@ -1026,12 +1012,12 @@ class FrontendInterface:
         return decision
 
     async def _tn_poll_async(self, session: "Session", **kwargs):
-        """Run a deadline poll in the same worker boundary as ``_tn_feed``."""
+        """Run one ordered TN deadline poll and record its processing cost."""
         started = time.monotonic()
-        decision = await self._run_tn(self._tn_poll, session, **kwargs)
+        decision = self._tn_poll(session, **kwargs)
         LifecycleLogger.emit(
             session_id=session.session_id,
-            phase="text.tn_worker",
+            phase="text.tn_timing",
             op="poll",
             input_chars=0,
             final=False,
@@ -1040,20 +1026,6 @@ class FrontendInterface:
             min_level=obs.ObsLevel.DEBUG,
         )
         return decision
-
-    async def _run_tn(self, function: Callable, *args, **kwargs):
-        """Submit one serialized TN operation to the shared worker pool."""
-        if self._tn_executor is None:
-            self._tn_executor = ThreadPoolExecutor(
-                max_workers=4,
-                thread_name_prefix="tn-worker",
-            )
-        loop = asyncio.get_running_loop()
-        if kwargs:
-            from functools import partial
-
-            function = partial(function, **kwargs)
-        return await loop.run_in_executor(self._tn_executor, function, *args)
 
     async def _push_text_input_locked(
         self,

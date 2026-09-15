@@ -669,16 +669,6 @@ class TTSEngine:
                     task.cancel()
             if frontend_tasks:
                 await asyncio.gather(*frontend_tasks, return_exceptions=True)
-            tn_executor = getattr(frontend, "_tn_executor", None)
-            if tn_executor is not None:
-                # TN calls are serialized by the per-session lock; once all
-                # frontend tasks are cancelled there can be no new submit.
-                # Release the shared worker pool during partial-startup and
-                # normal shutdown alike.
-                with contextlib.suppress(Exception):
-                    tn_executor.shutdown(wait=False, cancel_futures=True)
-                with contextlib.suppress(Exception):
-                    frontend._tn_executor = None
 
         relay_task = self._relay_task
         if relay_task is not None and not relay_task.done():
