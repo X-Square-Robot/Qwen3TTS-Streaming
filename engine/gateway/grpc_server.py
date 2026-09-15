@@ -146,6 +146,11 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                 )
 
         first_effective_logged = False
+        # Debug-only prefix/VAD timing probe.  Keep the wire contract unchanged
+        # while exposing the first 64 raw chunks to diagnose synthesis-vs-VAD
+        # gating (e.g. 500 ms prefixes under firehose/guarded delivery).
+        vad_probe_count = 0
+        vad_probe_prev_at = 0.0
         vad_enabled = vad_processor.config.enabled
         prefix_gate_guard_bypass = (
             PrefixGateGuardBypass(vad_processor.discard_pending)
@@ -209,10 +214,58 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
             )
 
         async def on_audio(sid, data):
+            nonlocal vad_probe_count, vad_probe_prev_at
+            probe_idx = vad_probe_count
+            vad_probe_count += 1
+            probe_enabled = (
+                obs.is_enabled(obs.ObsLevel.DEBUG, config.observability_level)
+                and probe_idx < 64
+            )
+            probe_start = time.monotonic() if probe_enabled else 0.0
+            inter_arrival_ms = (
+                (probe_start - vad_probe_prev_at) * 1000.0
+                if probe_enabled and vad_probe_prev_at
+                else 0.0
+            )
+            if probe_enabled:
+                vad_probe_prev_at = probe_start
+            raw_payload = getattr(data, "pcm_bytes", data)
+            raw_ms = len(raw_payload or b"") / (ENGINE_SAMPLE_RATE * 4) * 1000.0
             batch = output_processor.process(data)
+            probe_after_vad = time.monotonic() if probe_enabled else 0.0
             _drain_vad_transitions()
             if batch.audio is not None and batch.audio.pcm_bytes:
                 log_first_effective_audio(len(batch.audio.pcm_bytes))
+                retained_ms = (
+                    len(batch.audio.pcm_bytes) / (ENGINE_SAMPLE_RATE * 4) * 1000.0
+                )
+            else:
+                retained_ms = 0.0
+            if probe_enabled:
+                logger.debug(
+                    "VAD probe grpc session=%s idx=%d delivery=%s raw_ms=%.3f inter_ms=%.3f retained_ms=%.3f "
+                    "vad_ms=%.3f state=%s begin_count=%d begin_counter=%d end_counter=%d "
+                    "begin_triggers=%d bypass=%s",
+                    internal_session_id,
+                    probe_idx,
+                    str((config.output_policy.config or {}).get("delivery", "guarded")),
+                    raw_ms,
+                    inter_arrival_ms,
+                    retained_ms,
+                    (probe_after_vad - probe_start) * 1000.0,
+                    vad_processor.state.value,
+                    vad_processor.config.begin_count,
+                    int(getattr(vad_processor, "_begin_counter", 0)),
+                    int(getattr(vad_processor, "_end_counter", 0)),
+                    vad_processor.metrics.begin_trigger_count,
+                    bool(prefix_gate_guard_bypass and prefix_gate_guard_bypass.should_bypass),
+                )
+            queue_start = (
+                time.monotonic()
+                if probe_enabled and batch.audio is not None and batch.audio.pcm_bytes
+                else 0.0
+            )
+            if batch.audio is not None and batch.audio.pcm_bytes:
                 await audio_queue.put(
                     (
                         "audio",
@@ -222,6 +275,13 @@ class TTSServicer(tts_pb2_grpc.TTSServiceServicer):
                             meta=batch.audio.meta,
                         ),
                     )
+                )
+            if probe_enabled and queue_start:
+                logger.debug(
+                    "VAD probe grpc session=%s idx=%d queue_wait_ms=%.3f",
+                    internal_session_id,
+                    probe_idx,
+                    (time.monotonic() - queue_start) * 1000.0,
                 )
             for event in (*batch.anchors, *batch.events):
                 await audio_queue.put(

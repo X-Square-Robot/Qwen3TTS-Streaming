@@ -129,6 +129,7 @@ class EngineSegment:
         "decode_start_frame",
         "mlfq_meta",
         "pending_token_ids",
+        "deferred_token_ids",
         "eos_trailing_added",
         "first_raw_audio_sent",
         "loop_token",
@@ -175,6 +176,10 @@ class EngineSegment:
         self.decode_start_frame: int = 0
         self.mlfq_meta: MLFQMeta = MLFQMeta()
         self.pending_token_ids: list[int] = []
+        # APPEND requests are accumulated during one engine inbox slice and
+        # embedded in one call.  This keeps a token burst from paying one
+        # text_embed launch per token while preserving request FIFO.
+        self.deferred_token_ids: list[int] = []
         self.eos_trailing_added: bool = False
         self.first_raw_audio_sent: bool = False
         # Two-stage token-loop guard state. Short codebook-0 runs are suspects,
@@ -343,6 +348,8 @@ class EngineLoop:
         token_loop_max_retries: int = 1,
         length_runaway_ratio: float = 10.0,
         max_slots_per_session: int = 2,
+        inbox_drain_max_requests: int = 32,
+        inbox_drain_budget_ms: float = 1.0,
         extensions: Optional[EngineExtensions] = None,
     ):
         self._inbox = engine_inbox
@@ -381,6 +388,8 @@ class EngineLoop:
         self._token_loop_max_retries = max(0, int(token_loop_max_retries))
         self._length_runaway_ratio = max(1.0, float(length_runaway_ratio))
         self._max_slots_per_session = max(1, int(max_slots_per_session))
+        self._inbox_drain_max_requests = max(1, int(inbox_drain_max_requests))
+        self._inbox_drain_budget_sec = max(0.0, float(inbox_drain_budget_ms)) / 1000.0
 
         self._groups: Dict[str, EngineSessionGroup] = {}
         self._seg_by_slot: Dict[int, EngineSegment] = {}
@@ -640,7 +649,10 @@ class EngineLoop:
             # --- Phase 1.5: Drain inbox EARLY so newly arrived requests
             # are immediately available for prefill/decode in this
             # iteration, instead of waiting until the next one. ---
-            self._drain_inbox()
+            self._drain_inbox(
+                max_requests=self._inbox_drain_max_requests,
+                budget_sec=self._inbox_drain_budget_sec,
+            )
             t1 = time.monotonic()
 
             # --- Phase 2: Prefill pending sessions FIRST.
@@ -673,7 +685,10 @@ class EngineLoop:
             # default-stream blocks and falls back to device-synchronizing
             # cudaMalloc.  At the boundary the GPU is idle and the allocator
             # hits its cache (~16-30ms per full wave post log-diet). ---
-            self._drain_inbox()
+            self._drain_inbox(
+                max_requests=self._inbox_drain_max_requests,
+                budget_sec=self._inbox_drain_budget_sec,
+            )
             self._try_evict_idle_slots()
             self._try_timeout_sessions()
             self._maybe_emit_health()
@@ -782,51 +797,75 @@ class EngineLoop:
             total_timeouts=self._total_timeouts,
         )
 
-    def _drain_inbox(self) -> None:
+    def _drain_inbox(
+        self,
+        *,
+        max_requests: int | None = None,
+        budget_sec: float | None = None,
+    ) -> int:
+        """Process a bounded FIFO slice of engine requests.
+
+        The unbounded drain used to let a burst of text requests postpone the
+        next prefill/decode cycle.  A bounded slice preserves FIFO ordering
+        while giving ready audio and GPU work a scheduling opportunity.  The
+        no-argument form remains an unbounded drain for compatibility with
+        focused tests and shutdown callers.
+        """
         drained = 0
         queue_depth = 0
-        while True:
-            try:
-                req: EngineRequest = self._inbox.get_nowait()
-            except queue.Empty:
-                break
-            # Record dequeued timestamp
-            now = time.monotonic()
-            req.dequeued_at = now
-            # Emit lifecycle event for first text dequeue (START_TOKENS only)
-            if req.type == RequestType.START_TOKENS:
-                wait_ms = 0.0
-                if req.enqueued_at is not None:
-                    wait_ms = (now - req.enqueued_at) * 1000.0
-                group = self._groups.get(req.session_id)
-                if group is not None and group.first_text_dequeued_at is None:
-                    group.first_text_dequeued_at = now
-                    # Write to ServerTimingAccumulator if available. `req` here
-                    # is the bare START_TOKENS request, which never carries
-                    # session_config (see Dispatcher.dispatch_segment_actions),
-                    # so the accumulator must be resolved via the session
-                    # group's original NEW_SESSION request instead.
-                    acc = self._get_group_timing_accumulator(group)
-                    if acc is not None:
-                        acc.first_text_dequeued_monotonic = now
-                    LifecycleLogger.emit(
-                        session_id=req.session_id,
-                        phase="text.first_dequeued",
-                        segment_idx=req.segment_idx,
-                        request_id=(
-                            req.session_config.timing.request_id
-                            if req.session_config
-                            else None
+        started = time.monotonic()
+        self._defer_active_appends = True
+        try:
+            while True:
+                if max_requests is not None and drained >= max(0, int(max_requests)):
+                    break
+                if (
+                    budget_sec is not None
+                    and budget_sec > 0.0
+                    and drained > 0
+                    and time.monotonic() - started >= budget_sec
+                ):
+                    break
+                try:
+                    req: EngineRequest = self._inbox.get_nowait()
+                except queue.Empty:
+                    break
+                # Record dequeued timestamp
+                now = time.monotonic()
+                req.dequeued_at = now
+                # Emit lifecycle event for first text dequeue (START_TOKENS only)
+                if req.type == RequestType.START_TOKENS:
+                    wait_ms = 0.0
+                    if req.enqueued_at is not None:
+                        wait_ms = (now - req.enqueued_at) * 1000.0
+                    group = self._groups.get(req.session_id)
+                    if group is not None and group.first_text_dequeued_at is None:
+                        group.first_text_dequeued_at = now
+                        acc = self._get_group_timing_accumulator(group)
+                        if acc is not None:
+                            acc.first_text_dequeued_monotonic = now
+                        LifecycleLogger.emit(
+                            session_id=req.session_id,
+                            phase="text.first_dequeued",
+                            segment_idx=req.segment_idx,
+                            request_id=(
+                                req.session_config.timing.request_id
+                                if req.session_config
+                                else None
+                            )
+                            or None,
+                            monotonic_ts=now,
+                            wait_ms=round(wait_ms),
+                            queue_depth_at_dequeue=self._inbox.qsize(),
                         )
-                        or None,
-                        monotonic_ts=now,
-                        wait_ms=round(wait_ms),
-                        queue_depth_at_dequeue=self._inbox.qsize(),
-                    )
-            self._handle_request(req)
-            drained += 1
+                self._handle_request(req)
+                drained += 1
+        finally:
+            self._defer_active_appends = False
+            self._flush_deferred_appends()
         if drained > 0:
             logger.debug("Drained %d requests (queue_depth=%d)", drained, queue_depth)
+        return drained
 
     def _handle_request(self, req: EngineRequest) -> None:
         if req.type == RequestType.NEW_SESSION:
@@ -964,8 +1003,11 @@ class EngineLoop:
                 and seg.slot is not None
                 and self._prefill_builder is not None
             ):
-                self._append_trailing_tokens(seg.slot, req.token_ids)
-                self._resume_streaming_segment_if_ready(seg)
+                if getattr(self, "_defer_active_appends", False):
+                    seg.deferred_token_ids.extend(req.token_ids)
+                else:
+                    self._append_trailing_tokens(seg.slot, req.token_ids)
+                    self._resume_streaming_segment_if_ready(seg)
             else:
                 logger.debug(
                     "APPEND_TOKENS %d tokens for %s seg=%d state=%s (pre-prefill accumulate)",
@@ -981,6 +1023,7 @@ class EngineLoop:
                 return
             seg = group.segments.get(req.segment_idx)
             if seg:
+                self._flush_deferred_appends_for_segment(seg)
                 seg.input_complete = True
                 if (
                     req.append_eos
@@ -2496,6 +2539,15 @@ class EngineLoop:
             candidate = kv_pool.find_eviction_candidate(self._max_idle_sec)
             if candidate is None:
                 break
+            # A streaming segment with no trailing text is intentionally
+            # paused.  It is still a live session owned by the upstream and
+            # must not be evicted merely because the pause lasted longer than
+            # the ordinary compute-idle lease.  Touch it and let the next
+            # oldest candidate (if any) be considered.
+            waiting_seg = self._seg_by_slot.get(candidate.slot_id)
+            if self._is_waiting_for_text(waiting_seg):
+                candidate.touch()
+                continue
             evicted_session_key = kv_pool.force_evict(candidate.slot_id)
             if evicted_session_key is None:
                 break
@@ -2526,6 +2578,16 @@ class EngineLoop:
                 seg.segment_idx,
             )
             self._remove_session(seg.session_id)
+
+    @staticmethod
+    def _is_waiting_for_text(seg: EngineSegment | None) -> bool:
+        """Whether an active slot is paused awaiting upstream text."""
+        if seg is None or seg.state != "active" or seg.input_complete:
+            return False
+        slot = seg.slot
+        if slot is None or slot.last_codec_sum is None or slot.next_embed is not None:
+            return False
+        return not slot.trailing or slot.text_idx >= len(slot.trailing)
 
     # ------------------------------------------------------------------
     # Result processing (runs while GPU does next step)
@@ -3936,7 +3998,11 @@ class EngineLoop:
 
     def _has_work(self) -> bool:
         return any(
-            seg.state in ("pending_prefill", "active")
+            seg.state == "pending_prefill"
+            or (
+                seg.state == "active"
+                and not self._is_waiting_for_text(seg)
+            )
             for group in self._groups.values()
             for seg in group.segments.values()
         )
@@ -3972,6 +4038,20 @@ class EngineLoop:
             len(slot.trailing),
             slot.text_idx,
         )
+
+    def _flush_deferred_appends_for_segment(self, seg: EngineSegment) -> None:
+        """Embed one accumulated active-segment suffix and resume once."""
+        if not seg.deferred_token_ids or seg.slot is None:
+            return
+        token_ids = seg.deferred_token_ids
+        seg.deferred_token_ids = []
+        self._append_trailing_tokens(seg.slot, token_ids)
+        self._resume_streaming_segment_if_ready(seg)
+
+    def _flush_deferred_appends(self) -> None:
+        for group in getattr(self, "_groups", {}).values():
+            for seg in group.segments.values():
+                self._flush_deferred_appends_for_segment(seg)
 
     def _append_eos_trailing(self, seg: EngineSegment) -> None:
         """Append tts_eos_embed to trailing when SEGMENT_TOKENS_DONE arrives post-prefill."""

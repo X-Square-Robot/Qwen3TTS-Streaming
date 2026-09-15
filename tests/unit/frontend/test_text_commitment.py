@@ -279,6 +279,50 @@ def test_ordered_markdown_list_marker_is_suppressed_but_decimal_survives():
     assert "".join(item.tts_text for item in decimal.commits) == "1.5"
 
 
+def test_leading_decimal_is_atomic_across_packet_boundary():
+    one_shot = IncrementalTextCommitter().feed("值为：.5", final=True)
+    streamed = IncrementalTextCommitter()
+    commits = list(streamed.feed("值为：.").commits)
+    commits.extend(streamed.feed("5", final=True).commits)
+    expected = "".join(item.tts_text for item in one_shot.commits)
+    assert "".join(item.tts_text for item in commits) == expected
+    assert any(item.raw_text == ".5" for item in commits)
+
+    full_width = IncrementalTextCommitter()
+    full_width_commits = list(full_width.feed("．").commits)
+    full_width_commits.extend(full_width.feed("５", final=True).commits)
+    assert any(item.raw_text == "．５" for item in full_width_commits)
+
+
+def test_terminator_run_is_coalesced_across_packet_boundaries():
+    streamed = IncrementalTextCommitter()
+    commits = list(streamed.feed("你好!").commits)
+    commits.extend(streamed.feed("?!", final=True).commits)
+    assert "".join(item.tts_text for item in commits) == "你好!?!"
+    assert any(item.raw_text == "?!" for item in commits)
+
+    streamed = IncrementalTextCommitter()
+    dots = list(streamed.feed(".").commits)
+    dots.extend(streamed.feed("..", final=True).commits)
+    assert any(item.raw_text == "..." for item in dots)
+
+
+def test_newline_blocks_spaced_numeric_unit_lookahead():
+    streamed = IncrementalTextCommitter()
+    commits = list(streamed.feed("5\n").commits)
+    commits.extend(streamed.feed("kg", final=True).commits)
+    assert "".join(item.raw_text for item in commits) == "5\nkg"
+    assert not any(item.raw_text == "5\nkg" for item in commits)
+
+    crlf = IncrementalTextCommitter()
+    crlf_commits = list(crlf.feed("5\r").commits)
+    crlf_commits.extend(crlf.feed("\nkg", final=True).commits)
+    assert not any(item.raw_text == "5\r\nkg" for item in crlf_commits)
+
+    ordinary = IncrementalTextCommitter().feed("5 kg", final=True)
+    assert any(item.raw_text == "5 kg" for item in ordinary.commits)
+
+
 def test_inline_ordered_markers_are_suppressed_across_streaming_packets():
     """Compact model enumerations are lists even when they have no newlines.
 

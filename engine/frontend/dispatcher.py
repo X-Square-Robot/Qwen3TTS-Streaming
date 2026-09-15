@@ -78,6 +78,16 @@ class Dispatcher:
             if plan is None:
                 continue
             session.cursor_segment_plans[segment_idx] = plan
+            payload = (
+                plan.label_ids,
+                plan.owner_spans,
+                plan.label_normalized_spans,
+                plan.final,
+            )
+            published = session.cursor_segment_published_payloads
+            if published.get(segment_idx) == payload:
+                continue
+            published[segment_idx] = payload
             dump_cursor_event(
                 "plan.publish",
                 session_id=session.session_id,
@@ -121,7 +131,9 @@ class Dispatcher:
         actions: List[SegmentAction],
     ) -> None:
         """Translate Spliter actions into EngineRequests and submit them."""
-        for sa in actions:
+        index = 0
+        while index < len(actions):
+            sa = actions[index]
             seg_idx = sa.segment_idx
             action = sa.action
             priority = self._segment_priority(session, sa)
@@ -172,15 +184,33 @@ class Dispatcher:
                 await self._engine_inbox.put(req)
 
             elif action.type == ActionType.DECODE:
+                # Adjacent decode actions for one segment are safe to batch:
+                # they carry no lifecycle boundary and the backend embeds the
+                # whole suffix in one call.  This avoids one text_embed call
+                # per token during an upstream burst while preserving FIFO.
+                token_ids = [action.token]
+                next_index = index + 1
+                while next_index < len(actions):
+                    candidate = actions[next_index]
+                    if (
+                        candidate.segment_idx != seg_idx
+                        or candidate.group_idx != sa.group_idx
+                        or candidate.action.type != ActionType.DECODE
+                    ):
+                        break
+                    token_ids.append(candidate.action.token)
+                    next_index += 1
                 req = EngineRequest(
                     type=RequestType.APPEND_TOKENS,
                     session_id=session.session_id,
                     segment_idx=seg_idx,
                     priority=priority,
-                    token_ids=[action.token],
+                    token_ids=token_ids,
                     enqueued_at=time.monotonic(),
                 )
                 await self._engine_inbox.put(req)
+                index = next_index
+                continue
 
             elif action.type in (ActionType.FLUSH_EOS, ActionType.FLUSH_NOP):
                 req = EngineRequest(
@@ -191,6 +221,8 @@ class Dispatcher:
                     enqueued_at=time.monotonic(),
                 )
                 await self._engine_inbox.put(req)
+
+            index += 1
 
     async def maybe_send_session_tokens_done(self, session: Session) -> None:
         """Signal session-level token completion when no more groups remain."""

@@ -971,3 +971,22 @@ def test_cache_hit_batch_excludes_successor_with_continuation_context():
     assert successor.slot is None
     assert loop._prefill_builder.batch_calls == 0
     assert policy.context_calls == [1]
+
+
+def test_wait_text_segment_is_not_reported_as_engine_work():
+    slot = SimpleNamespace(
+        last_codec_sum=torch.zeros(1),
+        next_embed=None,
+        trailing=[],
+        text_idx=0,
+    )
+    segment = SimpleNamespace(
+        state="active",
+        input_complete=False,
+        slot=slot,
+    )
+
+    assert EngineLoop._is_waiting_for_text(segment)
+    assert not EngineLoop._is_waiting_for_text(
+        SimpleNamespace(state="active", input_complete=True, slot=slot)
+    )

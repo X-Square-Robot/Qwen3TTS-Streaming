@@ -111,6 +111,35 @@ def test_rebuilt_plan_cannot_rewrite_published_prefix():
     asyncio.run(run())
 
 
+def test_cursor_plan_revision_without_payload_change_is_not_republished():
+    async def run():
+        inbox = asyncio.Queue(maxsize=64)
+        interface = FrontendInterface(
+            engine_inbox=inbox,
+            tokenizer=_Tokenizer(),
+            cursor_plan_adapter_factory=lambda: CursorLabelPlanAdapter(
+                lambda text: [ord(char) for char in text]
+            ),
+        )
+        session = await interface.create_session("s")
+        await inbox.get()
+        session.segment_order[0] = SegmentOrderMeta(0, 0)
+        session.cursor_segment_bounds[0] = (0, 1)
+
+        await interface._ingest_commits(session, [_commit("a")])
+        initial = [inbox.get_nowait() for _ in range(inbox.qsize())]
+        assert any(item.type is RequestType.UPDATE_CURSOR_PLAN for item in initial)
+
+        await interface._refresh_cursor_plan(session)
+        assert not any(
+            item.type is RequestType.UPDATE_CURSOR_PLAN
+            for item in (inbox.get_nowait() for _ in range(inbox.qsize()))
+        )
+        await interface.cancel_session("s")
+
+    asyncio.run(run())
+
+
 def test_tn_commit_batch_tokenized_once_with_per_commit_boundary_offsets():
     async def run():
         inbox = asyncio.Queue(maxsize=64)

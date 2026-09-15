@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import hashlib
 import logging
 import os
@@ -188,6 +189,10 @@ class TTSEngine:
         self._supported_languages: tuple[str, ...] = ()
         self._cursor_plan_adapter_factory = None
         self._cursor_plan_unavailable_reason = "cursor_labelizer_not_loaded"
+        # ``stop`` may be reached after a partial startup (for example when
+        # loading a plan or prewarming fails).  Keep shutdown idempotent and
+        # prevent a second caller from racing the first teardown.
+        self._stopping = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -250,6 +255,8 @@ class TTSEngine:
 
     async def start(self) -> None:
         """Initialize all components, warm up, and start the engine thread."""
+        if self._stopping:
+            raise RuntimeError("TTS engine cannot be restarted after stop")
         self._loop = asyncio.get_event_loop()
         self._async_inbox = asyncio.Queue(maxsize=4096)
 
@@ -568,12 +575,124 @@ class TTSEngine:
                 )
 
     async def stop(self) -> None:
-        if self._relay_task:
-            self._relay_task.cancel()
-        if self._engine_loop:
-            self._engine_loop.stop()
-        if self._executor:
-            self._executor.shutdown()
+        """Stop frontend workers before tearing down the backend resources.
+
+        The frontend owns per-session consumer, TN ticker, and text-actor
+        tasks.  Cancelling only the relay task leaves those tasks alive (and
+        can leave callers waiting on actor queue futures), while stopping the
+        engine first strands cancellation requests in the relay.  Drain the
+        frontend while the engine is still accepting requests, then await the
+        relay and finally stop the engine thread/GPU executor.  This method is
+        deliberately tolerant of partial startup and repeated calls.
+        """
+        if self._stopping:
+            return
+        if (
+            self._frontend is None
+            and self._relay_task is None
+            and self._engine_loop is None
+            and self._executor is None
+        ):
+            # A no-op stop before startup must not prevent a later start (and
+            # is common in embedding hosts that unconditionally stop in a
+            # ``finally`` block).
+            return
+        self._stopping = True
+
+        frontend = self._frontend
+        # Snapshot task objects before cancel_session() removes them from the
+        # frontend registries; awaiting the snapshot ensures no actor/TN task
+        # survives the event-loop turn in which stop() returns.
+        frontend_tasks: list[asyncio.Task] = []
+        relay_alive = bool(self._relay_task is not None and not self._relay_task.done())
+        backend_alive = bool(
+            self._engine_loop is not None
+            and callable(getattr(self._engine_loop, "thread_alive", None))
+            and self._engine_loop.thread_alive()
+            and relay_alive
+        )
+        if frontend is not None:
+            for attr in ("_consumer_tasks", "_tn_tasks", "_text_actor_tasks"):
+                mapping = getattr(frontend, attr, {})
+                frontend_tasks.extend(
+                    task
+                    for task in tuple(mapping.values())
+                    if isinstance(task, asyncio.Task) and not task.done()
+                )
+
+            # Resolve futures queued behind a text actor.  Actor cancellation
+            # alone would discard these tuples and leave ``push_text_input``
+            # callers blocked forever.
+            for actor_queue in tuple(
+                getattr(frontend, "_text_actor_queues", {}).values()
+            ):
+                while True:
+                    try:
+                        item = actor_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if isinstance(item, tuple) and item:
+                        future = item[-1]
+                        if isinstance(future, asyncio.Future) and not future.done():
+                            future.cancel()
+
+            session_ids = tuple(getattr(frontend, "_sessions", {}).keys())
+            if backend_alive:
+                # Keep the relay alive while CANCEL_SESSION requests are
+                # submitted, otherwise Dispatcher.submit_cancel can block on
+                # a full async inbox and sessions remain registered in TRT.
+                results = await asyncio.gather(
+                    *(frontend.cancel_session(session_id) for session_id in session_ids),
+                    return_exceptions=True,
+                )
+                for session_id, result in zip(session_ids, results):
+                    if isinstance(result, BaseException):
+                        logger.warning(
+                            "Frontend session %s cancellation failed during shutdown: %s",
+                            session_id,
+                            result,
+                        )
+            else:
+                # No engine thread is available to consume cancellation
+                # requests after a partial startup failure.  Clean frontend
+                # registries directly in that case.
+                cleanup = getattr(frontend, "_cleanup_session", None)
+                if callable(cleanup):
+                    for session_id in session_ids:
+                        with contextlib.suppress(Exception):
+                            cleanup(session_id)
+
+            # A malformed/injected frontend may retain task entries after
+            # cancellation.  Cancel those as a final defensive sweep.
+            for task in frontend_tasks:
+                if not task.done():
+                    task.cancel()
+            if frontend_tasks:
+                await asyncio.gather(*frontend_tasks, return_exceptions=True)
+            tn_executor = getattr(frontend, "_tn_executor", None)
+            if tn_executor is not None:
+                # TN calls are serialized by the per-session lock; once all
+                # frontend tasks are cancelled there can be no new submit.
+                # Release the shared worker pool during partial-startup and
+                # normal shutdown alike.
+                with contextlib.suppress(Exception):
+                    tn_executor.shutdown(wait=False, cancel_futures=True)
+                with contextlib.suppress(Exception):
+                    frontend._tn_executor = None
+
+        relay_task = self._relay_task
+        if relay_task is not None and not relay_task.done():
+            relay_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await relay_task
+        self._relay_task = None
+
+        try:
+            if self._engine_loop is not None:
+                self._engine_loop.stop()
+        finally:
+            if self._executor is not None:
+                self._executor.shutdown()
         logger.info("TTS Engine stopped")
 
     # ------------------------------------------------------------------
@@ -648,9 +767,11 @@ class TTSEngine:
             on_event=on_event,
         )
 
-    async def push_text_input(self, session_id: str, text: str) -> None:
+    async def push_text_input(
+        self, session_id: str, text: str, *, wait: bool = True
+    ) -> None:
         """Transport-facing text ingress; frontend converts it to tokens."""
-        await self._frontend.push_text_input(session_id, text)
+        await self._frontend.push_text_input(session_id, text, wait=wait)
 
     async def feed_full_text(self, session_id: str, text: str) -> None:
         """Offline mode: set complete text, pre-split, drive all segments."""
@@ -1697,6 +1818,12 @@ def main():
         try:
             await engine.start()
         except BaseException:
+            # ``start`` can fail after allocating the executor or creating
+            # frontend workers (for example during a prewarm).  Run the same
+            # ordered teardown used for signal-driven shutdown so a failed
+            # startup cannot leak actor/TN tasks or GPU resources.
+            with contextlib.suppress(Exception):
+                await engine.stop()
             if health_server:
                 health_server.stop()
             raise

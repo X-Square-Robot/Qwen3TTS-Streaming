@@ -269,3 +269,37 @@ def test_invalid_mapping_is_rejected_before_plan_is_published():
             [_commit("x", raw_start=3, raw_end=4, mapping=((2, 4),))],
             revision=0,
         )
+
+
+def test_append_only_build_labelizes_only_new_commit_suffix():
+    calls = []
+
+    def labelize(text):
+        calls.append(text)
+        return list(range(len(text)))
+
+    first = _commit("你好", raw_start=0, raw_end=2, commit_id=1)
+    second = _commit("世界", raw_start=2, raw_end=4, commit_id=2)
+    adapter = CursorLabelPlanAdapter(labelize)
+    previous = adapter.build([first], revision=0)
+
+    plan = adapter.build([first, second], revision=1, previous=previous)
+
+    assert calls == ["你好", "世界"]
+    assert plan.label_ids == (0, 1, 0, 1)
+    assert plan.owner_spans[-1].raw_start == 2
+    assert plan.owner_spans[-1].normalized_start == 2
+
+
+def test_append_only_build_preserves_nonzero_normalized_origin():
+    first = _commit("a", raw_start=0, raw_end=1, commit_id=1)
+    second = _commit("b", raw_start=1, raw_end=2, commit_id=2)
+    adapter = CursorLabelPlanAdapter(lambda text: [1 for _ in text])
+    previous = adapter.build([first], normalized_base=7, revision=0)
+
+    plan = adapter.build([first, second], revision=1, previous=previous)
+
+    assert [(owner.normalized_start, owner.normalized_end) for owner in plan.owner_spans] == [
+        (7, 8),
+        (8, 9),
+    ]

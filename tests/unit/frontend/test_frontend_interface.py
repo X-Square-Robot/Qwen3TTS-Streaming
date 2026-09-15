@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -104,6 +105,40 @@ def test_count_text_tokens_uses_synthesis_normalization_and_tokenizer():
 
     assert interface.count_text_tokens(" 你好😊\n世界 ") == len("你好世界")
     assert interface.count_text_tokens("😊🚀") == 0
+
+
+@pytest.mark.asyncio
+async def test_streaming_tn_runs_off_event_loop(monkeypatch):
+    """A slow TN decision must not pause transport/audio callbacks."""
+    inbox = asyncio.Queue(maxsize=32)
+    interface = FrontendInterface(
+        engine_inbox=inbox,
+        tokenizer=_CharTokenizer(),
+        max_sessions=1,
+        engine_max_decode_len=64,
+    )
+    session = await interface.create_session(
+        "tn-worker",
+        config=SessionConfig(input_mode=InputMode.TOKEN),
+    )
+    original_feed = FrontendInterface._tn_feed
+
+    def slow_feed(current_session, text, **kwargs):
+        time.sleep(0.05)
+        return original_feed(current_session, text, **kwargs)
+
+    monkeypatch.setattr(FrontendInterface, "_tn_feed", staticmethod(slow_feed))
+    heartbeat = asyncio.Event()
+
+    async def mark_heartbeat():
+        await asyncio.sleep(0.005)
+        heartbeat.set()
+
+    heartbeat_task = asyncio.create_task(mark_heartbeat())
+    await interface.push_text_input(session.session_id, "甲")
+    await asyncio.wait_for(heartbeat.wait(), timeout=0.03)
+    await heartbeat_task
+    await interface.cancel_session(session.session_id)
 
 
 def test_direct_frontend_constructor_inherits_legacy_ratio_for_safety() -> None:

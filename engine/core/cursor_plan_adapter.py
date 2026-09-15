@@ -8,6 +8,7 @@ injected at this boundary and returns numeric cursor-vocabulary ids.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import replace
 import re
 from typing import Any
 
@@ -142,6 +143,14 @@ class CursorLabelPlanAdapter:
             raise TypeError("labelize must be callable")
         self._labelize = labelize
         self._last_revision = -1
+        # TextCommit records are append-only between TN rewrites.  Keep the
+        # last projection so a new commit only labelizes its suffix; the full
+        # rebuild remains the correctness fallback for a changed prefix.
+        self._cached_commits: tuple[Any, ...] = ()
+        self._cached_spoken_texts: tuple[str, ...] = ()
+        self._cached_plan: CursorLabelPlan | None = None
+        self._cached_normalized_origin = 0
+        self._cached_normalized_length = 0
 
     @property
     def last_revision(self) -> int:
@@ -149,6 +158,11 @@ class CursorLabelPlanAdapter:
 
     def reset(self) -> None:
         self._last_revision = -1
+        self._cached_commits = ()
+        self._cached_spoken_texts = ()
+        self._cached_plan = None
+        self._cached_normalized_origin = 0
+        self._cached_normalized_length = 0
 
     def build(
         self,
@@ -172,6 +186,21 @@ class CursorLabelPlanAdapter:
         if spoken_texts is not None and len(spoken_texts) != len(commit_list):
             raise ValueError("spoken_texts must align one-to-one with commits")
 
+        effective_spoken = tuple(
+            str((spoken_texts[i] if spoken_texts is not None else getattr(commit, "tts_text", "")) or "")
+            for i, commit in enumerate(commit_list)
+        )
+        incremental = self._build_incremental(
+            commit_list,
+            effective_spoken,
+            revision=revision_value,
+            final=final,
+            previous=previous,
+            committed_label_count=committed_label_count,
+        )
+        if incremental is not None:
+            return incremental
+
         label_ids: list[int] = []
         label_spans: list[tuple[int, int]] = []
         encode_with_spans = getattr(self._labelize, "encode_with_spans", None)
@@ -179,14 +208,7 @@ class CursorLabelPlanAdapter:
         seen_owner_ids: set[int] = set()
         normalized_cursor = base
         for ordinal, commit in enumerate(commit_list):
-            spoken = str(
-                (
-                    spoken_texts[ordinal]
-                    if spoken_texts is not None
-                    else getattr(commit, "tts_text", "")
-                )
-                or ""
-            )
+            spoken = effective_spoken[ordinal]
             if not spoken:
                 continue
             owner_id = _owner_id(commit, ordinal)
@@ -295,7 +317,93 @@ class CursorLabelPlanAdapter:
         )
         _check_committed_prefix(plan, previous, committed_label_count)
         self._last_revision = revision_value
+        self._cache_projection(
+            commit_list,
+            effective_spoken,
+            plan,
+            normalized_origin=base,
+        )
         return plan
+
+    def _build_incremental(
+        self,
+        commits: tuple[Any, ...],
+        spoken_texts: tuple[str, ...],
+        *,
+        revision: int,
+        final: bool,
+        previous: CursorLabelPlan | None,
+        committed_label_count: int,
+    ) -> CursorLabelPlan | None:
+        """Extend the previous plan when the TN commit prefix is unchanged."""
+        cached = self._cached_plan
+        prefix_len = len(self._cached_commits)
+        if (
+            cached is None
+            or previous is not cached
+            or len(commits) < prefix_len
+            or commits[:prefix_len] != self._cached_commits
+            or spoken_texts[:prefix_len] != self._cached_spoken_texts
+        ):
+            return None
+
+        suffix = commits[prefix_len:]
+        suffix_spoken = spoken_texts[prefix_len:]
+        suffix_builder = CursorLabelPlanAdapter(self._labelize)
+        suffix_plan = suffix_builder.build(
+            suffix,
+            spoken_texts=suffix_spoken,
+            normalized_base=self._cached_normalized_length,
+            revision=revision,
+            final=final,
+        )
+        label_offset = len(cached.label_ids)
+        owner_ids = {owner.owner_id for owner in cached.owner_spans}
+        if owner_ids.intersection(owner.owner_id for owner in suffix_plan.owner_spans):
+            return None
+        plan = CursorLabelPlan(
+            label_ids=cached.label_ids + suffix_plan.label_ids,
+            owner_spans=tuple(
+                cached.owner_spans
+                + tuple(
+                    replace(
+                        owner,
+                        label_start=owner.label_start + label_offset,
+                        label_end=owner.label_end + label_offset,
+                    )
+                    for owner in suffix_plan.owner_spans
+                )
+            ),
+            revision=revision,
+            final=bool(final),
+            label_normalized_spans=cached.label_normalized_spans
+            + suffix_plan.label_normalized_spans,
+        )
+        _check_committed_prefix(plan, previous, committed_label_count)
+        self._last_revision = revision
+        self._cache_projection(
+            commits,
+            spoken_texts,
+            plan,
+            normalized_origin=self._cached_normalized_origin,
+        )
+        return plan
+
+    def _cache_projection(
+        self,
+        commits: tuple[Any, ...],
+        spoken_texts: tuple[str, ...],
+        plan: CursorLabelPlan,
+        *,
+        normalized_origin: int,
+    ) -> None:
+        self._cached_commits = commits
+        self._cached_spoken_texts = spoken_texts
+        self._cached_plan = plan
+        self._cached_normalized_origin = normalized_origin
+        self._cached_normalized_length = normalized_origin + sum(
+            map(len, spoken_texts)
+        )
 
 
 __all__ = ("CursorLabelPlanAdapter", "Labelizer")

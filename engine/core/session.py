@@ -113,6 +113,10 @@ class Session:
     native_cursor_last_mu: dict[int, float] = field(default_factory=dict)
     native_cursor_stalled_segments: set[int] = field(default_factory=set)
     cursor_segment_plans: dict[int, CursorLabelPlan] = field(default_factory=dict)
+    # Payloads already handed to the engine, keyed by segment.  Revisions that
+    # only advance the CPU-side plan counter do not require another GPU buffer
+    # copy when the label/provenance payload is unchanged.
+    cursor_segment_published_payloads: dict[int, tuple] = field(default_factory=dict)
     cursor_segment_bounds: dict[int, tuple[int, int]] = field(default_factory=dict)
     def cursor_plan_for_segment(self, segment_idx: int) -> CursorLabelPlan | None:
         """Build an owner-safe session-global plan for one segment."""

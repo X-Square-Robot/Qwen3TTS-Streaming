@@ -12,9 +12,11 @@ It delegates backend request emission to ``frontend.dispatcher.Dispatcher``.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import math
+import time
 from dataclasses import replace
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
@@ -477,9 +479,16 @@ class FrontendInterface:
         self._sessions: Dict[str, Session] = {}
         self._consumer_tasks: Dict[str, asyncio.Task] = {}
         self._tn_tasks: Dict[str, asyncio.Task] = {}
+        self._text_actor_tasks: Dict[str, asyncio.Task] = {}
+        self._text_actor_queues: Dict[str, asyncio.Queue] = {}
+        self._text_actor_idle: Dict[str, asyncio.Event] = {}
         self._tn_locks: Dict[str, asyncio.Lock] = {}
         self._diagnostic_text_routers: Dict[str, DiagnosticTextRouter] = {}
         self._cursor_plan_adapters: Dict[str, Any] = {}
+        # TN is stateful per session, so callers hold ``_tn_locks`` while
+        # submitting work here.  A small shared pool keeps normalization off
+        # the event loop without creating one thread per connection.
+        self._tn_executor: ThreadPoolExecutor | None = None
 
     @property
     def active_count(self) -> int:
@@ -796,6 +805,9 @@ class FrontendInterface:
         if task and not task.done():
             task.cancel()
         self._cleanup_session(session_id)
+        if not self._sessions and self._tn_executor is not None:
+            self._tn_executor.shutdown(wait=False, cancel_futures=True)
+            self._tn_executor = None
 
     async def push_text_input(
         self,
@@ -803,10 +815,111 @@ class FrontendInterface:
         text: str,
         *,
         metadata: TextInputMetadata | None = None,
+        wait: bool = True,
     ) -> None:
         """Feed transport text according to the session's declared input mode."""
         session = self._sessions.get(session_id)
         if session is None or session.state == SessionState.DONE or session.input_complete:
+            return
+        # Streaming transports may enqueue token deltas without waiting for
+        # the previous TN decision.  The per-session actor below coalesces a
+        # short burst and remains the sole owner of the mutable committer.
+        queue = self._text_actor_queues.get(session_id)
+        if queue is None:
+            queue = asyncio.Queue(maxsize=256)
+            self._text_actor_queues[session_id] = queue
+            idle = asyncio.Event()
+            idle.set()
+            self._text_actor_idle[session_id] = idle
+            self._text_actor_tasks[session_id] = asyncio.create_task(
+                self._text_actor(session_id, queue)
+            )
+        result = asyncio.get_running_loop().create_future()
+        await queue.put((text, metadata, result))
+        if not wait:
+            # Fire-and-forget transport callers still need exceptions to be
+            # observed; otherwise an invalid TN decision is reported as an
+            # unhandled Future exception after the websocket has moved on.
+            result.add_done_callback(self._consume_text_actor_result)
+            return
+        await result
+
+    @staticmethod
+    def _consume_text_actor_result(result: asyncio.Future) -> None:
+        if result.cancelled():
+            return
+        try:
+            error = result.exception()
+            if error is not None:
+                logger.error("text actor failed: %s", error)
+        except Exception:
+            logger.exception("text actor result retrieval failed")
+
+    async def _text_actor(self, session_id: str, queue: asyncio.Queue) -> None:
+        """Serialize TN updates and coalesce transport token bursts."""
+        active_futures: set[asyncio.Future] = set()
+        try:
+            while True:
+                text, metadata, result = await queue.get()
+                idle = self._text_actor_idle.get(session_id)
+                if idle is not None:
+                    idle.clear()
+                batch = [(text, metadata, result)]
+                # Let the websocket reader enqueue the rest of this burst.
+                await asyncio.sleep(0.001)
+                while True:
+                    try:
+                        batch.append(queue.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+                active_futures.update(item[2] for item in batch)
+                session = self._sessions.get(session_id)
+                if session is None or session.state == SessionState.DONE:
+                    for _, _, future in batch:
+                        if not future.done():
+                            future.set_result(None)
+                    return
+                # Metadata is packet-scoped.  Only combine chunks when their
+                # metadata is identical; otherwise preserve the caller's
+                # explicit boundary semantics.
+                groups: list[list[tuple[str, Any, asyncio.Future]]] = []
+                for item in batch:
+                    if groups and item[1] == groups[-1][0][1]:
+                        groups[-1].append(item)
+                    else:
+                        groups.append([item])
+                lock = self._tn_locks.setdefault(session_id, asyncio.Lock())
+                for group in groups:
+                    try:
+                        async with lock:
+                            await self._push_text_input_locked(
+                                session,
+                                "".join(item[0] for item in group),
+                                metadata=group[0][1],
+                            )
+                    except Exception as exc:
+                        for _, _, future in group:
+                            if not future.done():
+                                future.set_exception(exc)
+                            active_futures.discard(future)
+                        continue
+                    for _, _, future in group:
+                        if not future.done():
+                            future.set_result(None)
+                        active_futures.discard(future)
+                if idle is not None and queue.empty():
+                    idle.set()
+        except asyncio.CancelledError:
+            for future in active_futures:
+                if not future.done():
+                    future.cancel()
+            while True:
+                try:
+                    _, _, future = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if not future.done():
+                    future.cancel()
             return
         lock = self._tn_locks.get(session_id)
         if lock is None:
@@ -890,6 +1003,58 @@ class FrontendInterface:
             return driver.poll(**kwargs)
         return session.text_committer.poll(**kwargs)
 
+    async def _tn_feed_async(self, session: "Session", text: str, **kwargs):
+        """Run stateful TN work off the asyncio event-loop thread.
+
+        The caller must hold the session TN lock for the complete await.  TN
+        state remains single-owner and ordered, while the event loop can keep
+        reading upstream tokens and relaying audio callbacks during a costly
+        normalization decision.
+        """
+        started = time.monotonic()
+        decision = await self._run_tn(self._tn_feed, session, text, **kwargs)
+        LifecycleLogger.emit(
+            session_id=session.session_id,
+            phase="text.tn_worker",
+            op="feed",
+            input_chars=len(text or ""),
+            final=bool(kwargs.get("final", False)),
+            duration_ms=round((time.monotonic() - started) * 1000.0, 3),
+            session_level=session.config.observability_level,
+            min_level=obs.ObsLevel.DEBUG,
+        )
+        return decision
+
+    async def _tn_poll_async(self, session: "Session", **kwargs):
+        """Run a deadline poll in the same worker boundary as ``_tn_feed``."""
+        started = time.monotonic()
+        decision = await self._run_tn(self._tn_poll, session, **kwargs)
+        LifecycleLogger.emit(
+            session_id=session.session_id,
+            phase="text.tn_worker",
+            op="poll",
+            input_chars=0,
+            final=False,
+            duration_ms=round((time.monotonic() - started) * 1000.0, 3),
+            session_level=session.config.observability_level,
+            min_level=obs.ObsLevel.DEBUG,
+        )
+        return decision
+
+    async def _run_tn(self, function: Callable, *args, **kwargs):
+        """Submit one serialized TN operation to the shared worker pool."""
+        if self._tn_executor is None:
+            self._tn_executor = ThreadPoolExecutor(
+                max_workers=4,
+                thread_name_prefix="tn-worker",
+            )
+        loop = asyncio.get_running_loop()
+        if kwargs:
+            from functools import partial
+
+            function = partial(function, **kwargs)
+        return await loop.run_in_executor(self._tn_executor, function, *args)
+
     async def _push_text_input_locked(
         self,
         session: "Session",
@@ -899,10 +1064,15 @@ class FrontendInterface:
     ) -> None:
         mode = session.config.input_mode
         # A timeout is a semantic commit decision, not a tokenizer concern.
-        timeout_decision = self._tn_poll(session)
+        timeout_decision = await self._tn_poll_async(session)
         if timeout_decision.commits:
             self._log_tn_commits(session, timeout_decision.commits)
             await self._ingest_commits(session, timeout_decision.commits)
+            # Queue.put() does not suspend while capacity is available.  Give
+            # the server relay and audio callbacks a turn after each resolved
+            # TN batch so a long stream of tiny commits cannot monopolize the
+            # event loop.
+            await asyncio.sleep(0)
         if mode != InputMode.FULL_TEXT:
             session.text_journal.update_raw_source(self._tn_raw_source(session))
         self._emit_text_commit_events(session, timeout_decision.events)
@@ -923,7 +1093,7 @@ class FrontendInterface:
             # grapheme/emoji filtering itself so TextCommit raw offsets remain
             # coordinates in the transport input; stripping here would shift
             # every span that follows a deleted emoji.
-            decision = self._tn_feed(
+            decision = await self._tn_feed_async(
                 session,
                 routed_text,
                 metadata=metadata,
@@ -931,6 +1101,7 @@ class FrontendInterface:
             self._log_tn_commits(session, decision.commits)
             self._log_tn_pending(session, decision)
             await self._ingest_commits(session, decision.commits)
+            await asyncio.sleep(0)
             session.text_journal.update_raw_source(self._tn_raw_source(session))
             self._emit_text_commit_events(session, decision.events)
 
@@ -938,7 +1109,14 @@ class FrontendInterface:
         """Wake on semantic deadlines even when the upstream stalls."""
         try:
             while session.state != SessionState.DONE and not session.input_complete:
-                deadline = session.text_committer.next_deadline
+                lock = self._tn_locks.get(session.session_id)
+                if lock is None:
+                    return
+                # The committer is mutated by the worker thread while the
+                # same lock is held by the actor. Read its deadline under the
+                # lock so the ticker never races a feed/poll operation.
+                async with lock:
+                    deadline = session.text_committer.next_deadline
                 if deadline is None:
                     await asyncio.sleep(0.02)
                     continue
@@ -948,16 +1126,14 @@ class FrontendInterface:
                 # closed and must not receive a late raw-source refresh.
                 if session.state == SessionState.DONE or session.input_complete:
                     return
-                lock = self._tn_locks.get(session.session_id)
-                if lock is None:
-                    return
                 async with lock:
                     if session.state == SessionState.DONE or session.input_complete:
                         return
-                    decision = self._tn_poll(session)
+                    decision = await self._tn_poll_async(session)
                     if decision.commits:
                         self._log_tn_commits(session, decision.commits)
                         await self._ingest_commits(session, decision.commits)
+                        await asyncio.sleep(0)
                     session.text_journal.update_raw_source(self._tn_raw_source(session))
                     self._log_tn_pending(session, decision)
                     self._emit_text_commit_events(session, decision.events)
@@ -1404,7 +1580,7 @@ class FrontendInterface:
             self._engine_model_version,
             self._version_query_text,
         )
-        decision = self._tn_feed(session, tn_input, final=True)
+        decision = await self._tn_feed_async(session, tn_input, final=True)
         self._log_tn_commits(session, decision.commits)
         self._log_tn_pending(session, decision)
         self._emit_text_commit_events(session, decision.events)
@@ -1507,6 +1683,12 @@ class FrontendInterface:
         session = self._sessions.get(session_id)
         if session is None:
             return
+        actor = self._text_actor_tasks.get(session_id)
+        if actor is not None:
+            queue = self._text_actor_queues.get(session_id)
+            idle = self._text_actor_idle.get(session_id)
+            if queue is not None and idle is not None:
+                await idle.wait()
         lock = self._tn_locks.get(session_id)
         if lock is None:
             lock = asyncio.Lock()
@@ -1543,10 +1725,11 @@ class FrontendInterface:
                 # become a second normalization path.
                 session._emoji_carry = ""
                 for routed_text in resolution.chunks:
-                    decision = self._tn_feed(session, routed_text)
+                    decision = await self._tn_feed_async(session, routed_text)
                     self._log_tn_commits(session, decision.commits)
                     self._log_tn_pending(session, decision)
                     await self._ingest_commits(session, decision.commits)
+                    await asyncio.sleep(0)
                     session.text_journal.update_raw_source(self._tn_raw_source(session))
                     self._emit_text_commit_events(session, decision.events)
             else:
@@ -1555,10 +1738,11 @@ class FrontendInterface:
                     body, session._emoji_carry = split_pending_emoji(raw)
                     if not body:
                         continue
-                    decision = self._tn_feed(session, body)
+                    decision = await self._tn_feed_async(session, body)
                     self._log_tn_commits(session, decision.commits)
                     self._log_tn_pending(session, decision)
                     await self._ingest_commits(session, decision.commits)
+                    await asyncio.sleep(0)
                     session.text_journal.update_raw_source(self._tn_raw_source(session))
                     self._emit_text_commit_events(session, decision.events)
         # Flush any held partial-emoji carry as final streaming text before
@@ -1567,17 +1751,19 @@ class FrontendInterface:
         if session._emoji_carry:
             body = session._emoji_carry
             session._emoji_carry = ""
-            decision = self._tn_feed(session, body)
+            decision = await self._tn_feed_async(session, body)
             self._log_tn_commits(session, decision.commits)
             self._log_tn_pending(session, decision)
             await self._ingest_commits(session, decision.commits)
+            await asyncio.sleep(0)
             session.text_journal.update_raw_source(self._tn_raw_source(session))
             self._emit_text_commit_events(session, decision.events)
 
-        final_decision = self._tn_feed(session, "", final=True)
+        final_decision = await self._tn_feed_async(session, "", final=True)
         self._log_tn_commits(session, final_decision.commits)
         self._log_tn_pending(session, final_decision)
         await self._ingest_commits(session, final_decision.commits)
+        await asyncio.sleep(0)
         if session.cursor_label_plan is not None:
             await self._refresh_cursor_plan(session, final=True)
         if not query_matched:
@@ -1709,6 +1895,7 @@ class FrontendInterface:
         # once-only guard for prefill_done events (a rerun re-prefills, but
         # the retry is not client-visible).
         hold_verdicts: dict = {}
+        firehose_vad_resets: set[tuple[int, int]] = set()
         prefill_done_seen: set = set()
 
         async def _send_now(chunks: list) -> None:
@@ -2268,6 +2455,23 @@ class FrontendInterface:
                                     discard_all=verdict["discard_all"],
                                     discard_bytes=verdict["discard_bytes"],
                                 )
+                        # Firehose has no hold window, but downstream prefix
+                        # VAD still owns onset/end buffers.  Clear those at an
+                        # abort boundary so candidates cannot straddle into a
+                        # chained segment (the guarded path does this in
+                        # _settle_hold before draining the next segment).
+                        if prefix_gate_guard_bypass is not None:
+                            verdict = _hold_verdict(seg_idx, result.metrics or {})
+                            if (
+                                verdict["discard_all"]
+                                or verdict["discard_bytes"] > 0
+                                or str(verdict["eos_reason"]).endswith("_abort")
+                            ):
+                                # Match guarded delivery's segment-attributed
+                                # fence: lookahead audio may still be in
+                                # reorder, so defer reset until fully passed.
+                                segment_key = (meta.group_idx, meta.local_idx)
+                                firehose_vad_resets.add(segment_key)
 
                     if result.metrics:
                         audio_steps = result.metrics.get("audio_steps", 0)
@@ -2306,7 +2510,7 @@ class FrontendInterface:
                         )
 
                     if hold is None:
-                        for key, chunks, _fully_passed in reorder.mark_done_ex(
+                        for key, chunks, fully_passed in reorder.mark_done_ex(
                             meta.group_idx,
                             meta.local_idx,
                             group_final=meta.group_final,
@@ -2314,6 +2518,13 @@ class FrontendInterface:
                             if chunks:
                                 await _deliver(chunks)
                                 await _publish_ready_chunk_end_markers(chunks)
+                            if (
+                                fully_passed
+                                and key in firehose_vad_resets
+                                and prefix_gate_guard_bypass is not None
+                            ):
+                                prefix_gate_guard_bypass.discard_pending()
+                                firehose_vad_resets.discard(key)
                             if key in pending_segment_end_events:
                                 pending_idx = next(
                                     (
@@ -2382,6 +2593,7 @@ class FrontendInterface:
                     session.native_cursor_projectors.pop(seg_idx, None)
                     session.text_coordinate_projectors.pop(seg_idx, None)
                     session.cursor_segment_plans.pop(seg_idx, None)
+                    session.cursor_segment_published_payloads.pop(seg_idx, None)
                     session.cursor_segment_bounds.pop(seg_idx, None)
                     session.segment_token_spans.pop(seg_idx, None)
                     session.segment_token_keys.pop(seg_idx, None)
@@ -2573,6 +2785,11 @@ class FrontendInterface:
         tn_task = tn_tasks.pop(session_id, None)
         if tn_task and not tn_task.done():
             tn_task.cancel()
+        text_actor = getattr(self, "_text_actor_tasks", {}).pop(session_id, None)
+        if text_actor and not text_actor.done():
+            text_actor.cancel()
+        getattr(self, "_text_actor_queues", {}).pop(session_id, None)
+        getattr(self, "_text_actor_idle", {}).pop(session_id, None)
         getattr(self, "_tn_locks", {}).pop(session_id, None)
         diagnostic_routers = getattr(self, "_diagnostic_text_routers", None)
         if diagnostic_routers is not None:

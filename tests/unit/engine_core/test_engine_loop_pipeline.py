@@ -24,6 +24,41 @@ from engine.core.types import (
 )
 
 
+class TestEngineInboxDrain:
+    def test_bounded_drain_preserves_fifo_and_leaves_tail(self):
+        loop = EngineLoop.__new__(EngineLoop)
+        loop._inbox = queue.Queue()
+        seen = []
+        loop._handle_request = seen.append
+        requests = [
+            EngineRequest(type=RequestType.CANCEL_SESSION, session_id=f"s{i}")
+            for i in range(3)
+        ]
+        for request in requests:
+            loop._inbox.put(request)
+
+        assert loop._drain_inbox(max_requests=2) == 2
+        assert seen == requests[:2]
+        assert loop._inbox.qsize() == 1
+        assert loop._drain_inbox(max_requests=2) == 1
+        assert seen == requests
+
+    def test_unbounded_compatibility_form_drains_all(self):
+        loop = EngineLoop.__new__(EngineLoop)
+        loop._inbox = queue.Queue()
+        seen = []
+        loop._handle_request = seen.append
+        requests = [
+            EngineRequest(type=RequestType.CANCEL_SESSION, session_id=f"s{i}")
+            for i in range(4)
+        ]
+        for request in requests:
+            loop._inbox.put(request)
+
+        assert loop._drain_inbox() == len(requests)
+        assert seen == requests
+
+
 @pytest.fixture
 def model_config():
     return ModelConfig(

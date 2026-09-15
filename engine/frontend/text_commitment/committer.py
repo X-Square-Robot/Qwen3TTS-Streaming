@@ -72,6 +72,11 @@ _VULGAR_FRACTION_CHARS = "½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞⅐⅑⅒"
 _MATH_CHARS = set("0123456789.+-*/=^×÷()<>≤≥!≠xX")
 _MATH_BINARY_OPERATORS = "+*/=^×÷<>≤≥≠xX"
 _RIGHT_BOUNDARY_CHARS = ")]}" + "）】》」』〉»”’"
+_TERMINATOR_CHARS = frozenset(".!?。！？；;…")
+_LEADING_DECIMAL_BOUNDARIES = frozenset(" \t\r\n,，。！？!?；;：:")
+_SPACED_UNITS = (
+    "m", "mm", "cm", "km", "kg", "ms", "°c", "℃", "μg/m³", "µg/m³"
+)
 _MATH_CLOSERS = ')]}'
 _QUALIFIED_NUMBER = re.compile(
     r"(?:[$€￥£¥]|A\$|HKD)|(?:\d{4}(?:[-/.]\d{1,2}(?:[-/.]\d{1,2})?|年\d{1,2}月(?:\d{1,2}日?)?))|"
@@ -320,6 +325,9 @@ class IncrementalTextCommitter:
         self._bang_candidate = False
         self._plain_buffer = ""
         self._plain_start = 0
+        self._terminator_buffer = ""
+        self._terminator_start = 0
+        self._leading_decimal_candidate = False
         # Defer a space after a number until we see whether an operator
         # follows (e.g. ``5 > 3``).  It is emitted as plain text otherwise.
         self._pending_gap: list[tuple[str, int]] = []
@@ -482,6 +490,8 @@ class IncrementalTextCommitter:
         else:
             commits.extend(self._close_stable(now))
         self._flush_plain()
+        if final:
+            self._flush_terminator_run()
         if self._limit_fallback:
             # A structural span that reaches the configured bound is closed
             # deterministically.  It must be observable even when the close
@@ -619,6 +629,9 @@ class IncrementalTextCommitter:
             if self._force_literal_next:
                 self._force_literal_next = False
                 self._late_extension_anchor = None
+        # A new semantic span starts after any punctuation-only run.  Flush
+        # that run first so output order remains stable across packet seams.
+        self._flush_terminator_run()
         span = _Pending(
             raw,
             start,
@@ -680,6 +693,33 @@ class IncrementalTextCommitter:
                 else:
                     self._close_pending()
                 self._flush_plain()
+                continue
+            if self._leading_decimal_candidate:
+                if ch.isdigit() or lex_ch.isdigit():
+                    self._pending.raw += ch
+                    self._pending.end = source_pos + 1
+                    self._pending.last_at = now
+                    self._pending.kind = SpanKind.NUMBER
+                    self._leading_decimal_candidate = False
+                    continue
+                self._leading_decimal_candidate = False
+                if ch in _TERMINATOR_CHARS:
+                    # A dot followed by another terminator is punctuation
+                    # (for example ``...``), not a malformed decimal.  Move
+                    # the provisional dot into the same run before rescanning
+                    # the current character.
+                    pending_start = self._pending.start
+                    pending_text = self._pending.raw
+                    self._pending = _Pending()
+                    self._terminator_start = pending_start
+                    self._terminator_buffer += pending_text
+                    self.committed_raw_end = max(
+                        self.committed_raw_end, pending_start + len(pending_text)
+                    )
+                    self.committed_spoken_text += pending_text
+                else:
+                    self._close_pending()
+                self._append(ch, now, source_pos)
                 continue
             # Hold an exclamation mark following an ordinary Latin run for
             # one code point: ``word![alt](...)`` is an image construct, while
@@ -1081,7 +1121,7 @@ class IncrementalTextCommitter:
                         ch, source_pos, source_pos + 1, SpanKind.MARKDOWN, now
                     )
                     self._bracket_candidate = True
-                elif lex_ch == "!":
+                elif lex_ch == "!" and not self._terminator_buffer:
                     self._flush_plain()
                     self._pending = self._open_pending(
                         ch, source_pos, source_pos + 1, SpanKind.MARKDOWN, now
@@ -1117,6 +1157,15 @@ class IncrementalTextCommitter:
                         ch, source_pos, source_pos + 1, SpanKind.MARKDOWN, now
                     )
                     self._markdown_line_marker = True
+                elif lex_ch == "." and (
+                    source_pos == 0
+                    or self._raw[source_pos - 1] in _LEADING_DECIMAL_BOUNDARIES
+                ):
+                    self._flush_plain()
+                    self._pending = self._open_pending(
+                        ch, source_pos, source_pos + 1, SpanKind.NUMBER, now
+                    )
+                    self._leading_decimal_candidate = True
                 elif lex_ch in "$€￥£¥+-":
                     self._flush_plain()
                     self._pending = self._open_pending(
@@ -1221,6 +1270,32 @@ class IncrementalTextCommitter:
                     self._pending_gap.append((ch, source_pos))
                     self._pending.last_at = now
                     continue
+                # Preserve ordinary space/tab-separated units (``5 kg``)
+                # while treating any newline-containing gap as a hard lexical
+                # boundary.  A unit prefix may arrive one character at a time,
+                # so keep it provisional until it no longer matches a known
+                # unit spelling.
+                gap_text = "".join(item[0] for item in self._pending_gap)
+                if (
+                    self._pending.kind is SpanKind.NUMBER
+                    and gap_text
+                    and "\n" not in gap_text
+                    and "\r" not in gap_text
+                    and gap_text.strip(" \t") == ""
+                    and (ch.isalpha() or lex_ch.isalpha() or ch in "°μµ")
+                ):
+                    suffix = "".join(
+                        (self._pending.raw + gap_text + ch).split()
+                    ).lower()
+                    unit_suffix = suffix.lstrip("+-0123456789.,")
+                    if any(unit.startswith(unit_suffix) for unit in _SPACED_UNITS):
+                        self._pending.raw += gap_text + ch
+                        self._pending.end = source_pos + 1
+                        self._pending_gap = []
+                        self._pending.last_at = now
+                        self._pending.kind = self._detector.classify(self._pending.raw)
+                        continue
+
                 can_extend_math = (
                     self._pending.kind == SpanKind.NUMBER
                     and (
@@ -1446,6 +1521,21 @@ class IncrementalTextCommitter:
                     self._pending.last_at = now
                     self._pending.kind = SpanKind.MARKDOWN
                     self._ordered_marker_candidate = True
+                    continue
+                # A decimal point is part of the numeric span even when the
+                # number is followed by a unit (for example ``28.8摄氏度``).
+                # Keeping it attached across packet boundaries prevents the
+                # integer prefix from being committed and spoken digit by
+                # digit before the fractional suffix arrives.
+                if (
+                    lex_ch == "."
+                    and self._pending.kind is SpanKind.NUMBER
+                    and _compatibility_spelling(self._pending.raw)[-1:].isdigit()
+                ):
+                    self._pending.raw += ch
+                    self._pending.end = source_pos + 1
+                    self._pending.last_at = now
+                    self._leading_decimal_candidate = True
                     continue
                 if lex_ch == "." and self._pending.kind in (SpanKind.ENGLISH_WORD, SpanKind.EMAIL, SpanKind.IDENTIFIER, SpanKind.VERSION):
                     self._pending.raw += ch
@@ -2107,6 +2197,28 @@ class IncrementalTextCommitter:
         return ()
 
     def _emit_plain(self, ch: str, source_start: int | None = None) -> None:
+        if ch in _TERMINATOR_CHARS and not self._plain_buffer:
+            # An exclamation mark is also a markdown/image opener.  When a
+            # following packet starts a new ``?!`` run, keep that run intact
+            # while preserving the already committed standalone ``!``.
+            if self._terminator_buffer.endswith("!") and ch == "?":
+                self._flush_terminator_run()
+            if not self._terminator_buffer:
+                self._terminator_start = (
+                    self.committed_raw_end
+                    if source_start is None
+                    else source_start
+                )
+            self._terminator_buffer += ch
+            if source_start is None:
+                self.committed_raw_end += len(ch)
+            else:
+                self.committed_raw_end = max(
+                    self.committed_raw_end, source_start + len(ch)
+                )
+            self.committed_spoken_text += ch
+            return
+        self._flush_terminator_run()
         if not self._plain_buffer:
             self._plain_start = self.committed_raw_end if source_start is None else source_start
         self._plain_buffer += ch
@@ -2134,6 +2246,19 @@ class IncrementalTextCommitter:
             )
         )
         self._plain_buffer = ""
+
+    def _flush_terminator_run(self) -> None:
+        if not self._terminator_buffer:
+            return
+        self._outbox.append(
+            self._make_commit(
+                self._terminator_buffer,
+                self._terminator_start,
+                SpanKind.PLAIN,
+                CommitKind.LITERAL,
+            )
+        )
+        self._terminator_buffer = ""
 
     def _drain_outbox(self) -> list[TextCommit]:
         out = self._outbox
@@ -2245,6 +2370,11 @@ class IncrementalTextCommitter:
             return SpanKind.MATH
         if raw in "≤≥≠":
             return SpanKind.MATH
+        # A single-dot, digits-only decimal is a quantity.  Classifying it
+        # as VERSION makes Chinese fallback spell every digit separately
+        # (``28.8`` -> ``二八点八``) instead of using cardinal reading.
+        if re.fullmatch(r"[+\-]?\d+\.\d+", raw):
+            return SpanKind.NUMBER
         # Calendar forms win over the generic dotted/hyphenated version
         # grammar.  Otherwise ``2026-07-28`` is treated as a product ID.
         if _VERSION.fullmatch(raw):
