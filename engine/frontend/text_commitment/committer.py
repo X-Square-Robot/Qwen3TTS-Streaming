@@ -1785,15 +1785,11 @@ class IncrementalTextCommitter:
             kind = CommitKind.NORMALIZED if value != p.raw else CommitKind.FALLBACK
         elif p.kind is SpanKind.JSON or projected_markdown:
             ordered_marker = re.fullmatch(r"(\d{1,4})[.)]\s*", p.raw)
-            inline_ordered = ordered_marker is not None and not _at_line_start(
-                self._raw, p.start
-            ) and not self._raw[:p.start].rstrip().endswith((",", "，"))
-            if inline_ordered:
-                # Compact enumerations in generated prose (``：1. ...。2. ...``)
-                # carry semantic numbering.  Preserve that information while
-                # replacing the Markdown dot with a Chinese enumeration pause.
-                # True line-start Markdown markers remain formatting-only and
-                # continue to be suppressed by ``project_readable``.
+            if ordered_marker is not None:
+                # Ordered-list numbers carry semantic structure in spoken
+                # instructions, including ordinary line-start Markdown lists.
+                # Preserve the number while replacing the formatting dot with
+                # a Chinese enumeration pause.
                 number = ordered_marker.group(1)
                 marker_lang = lang if lang in ("zh", "en") else "zh"
                 if marker_lang == "zh":

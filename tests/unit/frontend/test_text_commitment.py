@@ -268,12 +268,12 @@ def test_right_closing_delimiters_do_not_extend_numeric_or_formula_spans():
         assert result.commits[-1].raw_text in (")", "）")
 
 
-def test_ordered_markdown_list_marker_is_suppressed_but_decimal_survives():
-    listed = IncrementalTextCommitter().feed("1. item", final=True)
-    assert "".join(item.tts_text for item in listed.commits) == "item"
+def test_ordered_markdown_list_numbers_are_spoken_but_decimal_survives():
+    listed = IncrementalTextCommitter().feed("1. 项目", final=True)
+    assert "".join(item.tts_text for item in listed.commits) == "一、项目"
 
-    listed_many_digits = IncrementalTextCommitter().feed("12. item", final=True)
-    assert "".join(item.tts_text for item in listed_many_digits.commits) == "item"
+    listed_many_digits = IncrementalTextCommitter().feed("12. 项目", final=True)
+    assert "".join(item.tts_text for item in listed_many_digits.commits) == "十二、项目"
 
     decimal = IncrementalTextCommitter().feed("1.5", final=True)
     assert "".join(item.tts_text for item in decimal.commits) == "1.5"
@@ -323,13 +323,13 @@ def test_newline_blocks_spaced_numeric_unit_lookahead():
     assert any(item.raw_text == "5 kg" for item in ordinary.commits)
 
 
-def test_inline_ordered_markers_are_suppressed_across_streaming_packets():
-    """Compact model enumerations are lists even when they have no newlines.
+def test_ordered_markers_are_spoken_across_streaming_packets():
+    """Model enumerations remain audible even when they have no newlines.
 
     The common ``：1. ...。2. ...`` form used in generated prose must have the
     same result for one-shot and split transport input.  The dot is list
-    formatting and must not be sent to the synthesizer; a decimal remains
-    numeric because its next character is a digit.
+    formatting, while the number remains a spoken enumeration marker; a
+    decimal remains numeric because its next character is a digit.
     """
 
     raw = "以下几类：1. **日常家务**。2. **宠物照顾**。3. **信息查询**"
@@ -355,7 +355,7 @@ def test_inline_markdown_markers_in_chinese_prose_do_not_reach_cursor_labels():
     result = IncrementalTextCommitter().feed(raw, final=True)
 
     assert "".join(item.tts_text for item in result.commits) == (
-        "标题的话，比如一级标题，二级标题。比如项目一，项目二。"
+        "标题的话，比如一级标题，二级标题。比如项目一，一、项目二。"
     )
 
 
