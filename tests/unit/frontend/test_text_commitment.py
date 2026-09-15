@@ -385,6 +385,23 @@ def test_structured_numeric_fallbacks_cover_decimal_units_currency_and_inequalit
         assert output in expected, (raw, output)
 
 
+def test_chinese_decimal_currency_keeps_amount_together_and_uses_decimal_reading():
+    """A dotted amount must not be reinterpreted as a month/day pair."""
+
+    raw = "今天花了12.5元。"
+    one_shot = IncrementalTextCommitter().feed(raw, final=True)
+    expected = "今天花了十二点五元。"
+    assert "".join(item.tts_text for item in one_shot.commits) == expected
+    amount = next(item for item in one_shot.commits if item.raw_text == "12.5元")
+    assert amount.span_kind is SpanKind.NUMBER
+
+    streamed = IncrementalTextCommitter()
+    commits = list(streamed.feed("今天花了12.").commits)
+    commits.extend(streamed.feed("5元。", final=True).commits)
+    assert "".join(item.tts_text for item in commits) == expected
+    assert any(item.raw_text == "12.5元" for item in commits)
+
+
 def test_phone_numbers_are_not_parsed_as_math_and_split_composite_calls():
     cases = {
         "010-1234-9876": "零一零一二三四九八七六",

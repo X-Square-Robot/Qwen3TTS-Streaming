@@ -77,6 +77,10 @@ _LEADING_DECIMAL_BOUNDARIES = frozenset(" \t\r\n,，。！？!?；;：:")
 _SPACED_UNITS = (
     "m", "mm", "cm", "km", "kg", "ms", "°c", "℃", "μg/m³", "µg/m³"
 )
+# Chinese currency suffixes are semantic numeric material.  Keep the set
+# deliberately narrow: ``分`` and ``日`` also occur as ordinary time/date
+# words, so absorbing them here would change existing span boundaries.
+_CURRENCY_SUFFIXES = ("元", "块", "块钱", "人民币")
 _MATH_CLOSERS = ')]}'
 _QUALIFIED_NUMBER = re.compile(
     r"(?:[$€￥£¥]|A\$|HKD)|(?:\d{4}(?:[-/.]\d{1,2}(?:[-/.]\d{1,2})?|年\d{1,2}月(?:\d{1,2}日?)?))|"
@@ -1426,6 +1430,22 @@ class IncrementalTextCommitter:
                         self._pending.last_at = now
                         self._pending.kind = SpanKind.NUMBER
                         continue
+                if self._pending.kind is SpanKind.NUMBER:
+                    # Keep decimal amounts such as ``12.5元`` in one semantic
+                    # span.  If ``元`` is emitted separately, the Chinese
+                    # WeText graph sees bare ``12.5`` and applies its compact
+                    # date heuristic (``十二月五日``).
+                    candidate = self._pending.raw + ch
+                    numeric_prefix = re.match(r"^[+\-]?\d+(?:[.,]\d+)?", candidate)
+                    suffix = candidate[numeric_prefix.end() :] if numeric_prefix else ""
+                    if suffix and any(
+                        currency.startswith(suffix) for currency in _CURRENCY_SUFFIXES
+                    ):
+                        self._pending.raw = candidate
+                        self._pending.end = source_pos + 1
+                        self._pending.last_at = now
+                        self._pending.kind = SpanKind.NUMBER
+                        continue
                 if self._pending.kind is SpanKind.NUMBER and ch in _VULGAR_FRACTION_CHARS:
                     self._pending.raw += ch
                     self._pending.end = source_pos + 1
@@ -2348,6 +2368,8 @@ class IncrementalTextCommitter:
         if _MODEL_CODE.fullmatch(raw):
             return SpanKind.IDENTIFIER
         if re.fullmatch(r"(?:A\$|HKD|[$€￥£¥])\d+(?:\.\d+)?", raw):
+            return SpanKind.NUMBER
+        if re.fullmatch(r"[+\-]?\d+(?:\.\d+)?(?:元|块钱?|人民币)", raw):
             return SpanKind.NUMBER
         if _TIME.fullmatch(raw) or _RANGE.fullmatch(raw):
             return SpanKind.NUMBER

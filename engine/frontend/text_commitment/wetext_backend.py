@@ -8,10 +8,11 @@ from typing import Optional
 
 from .normalizer_backend import (
     MappedNormalization,
+    NormalizationMapping,
     NormalizerBackend,
     WetextNormalizerBackend,
 )
-from .types import FallbackPolicy, SpanKind
+from .types import FallbackPolicy, LanguageKind, SpanKind
 from .wetext_stream import WetextStream
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,39 @@ class WetextAdapter:
         if not text:
             return None
         text = _compatibility_spelling(text)
+        # WeText's Chinese graph treats a short dotted number such as
+        # ``12.5`` as a compact date and returns ``十二月五日``.  In a
+        # numeric span a single dot is overwhelmingly a decimal quantity, so
+        # protect it from that date heuristic.  Explicit four-digit calendar
+        # forms are left to WeText below.  This is done before the backend
+        # call to keep one-shot and streamed paths consistent and to avoid
+        # accepting a semantically wrong result.
+        if lang == "zh" and kind in (SpanKind.NUMBER, SpanKind.ORDINAL):
+            # Four-digit dotted forms are commonly compact YYYY.M[D] dates;
+            # leave those to WeText's calendar grammar.
+            if re.fullmatch(r"[+\-]?(?!\d{4}\.\d{1,2}$)\d+\.\d+", text):
+                value = _structured_number_fallback(text, lang=lang)
+                if not value:
+                    value = _zh_cardinal(text)
+                if value and value != text:
+                    return MappedNormalization(
+                        input_text=text,
+                        output_text=value,
+                        mappings=(
+                            NormalizationMapping(
+                                "replace",
+                                "number",
+                                0,
+                                len(text),
+                                0,
+                                len(value),
+                                text,
+                                value,
+                            ),
+                        ),
+                        language=LanguageKind.ZH,
+                        backend="deterministic_numeric_fallback",
+                    )
         try:
             return self.backend.normalize_closed(
                 text,
@@ -657,6 +691,19 @@ def _structured_number_fallback(text: str, *, lang: str) -> str:
         names = {"A$": "Australian dollars", "HKD": "Hong Kong dollars", "$": "dollars", "€": "euros", "￥": "Chinese yuan", "¥": "Chinese yuan", "£": "pounds"}
         value = _en_cardinal(currency.group(2))
         return value + " " + names[currency.group(1)] if value else ""
+    # Chinese currency suffixes are kept inside NUMBER spans by the
+    # committer (for example ``12.5元``).  Provide the same deterministic
+    # route when the optional WeText runtime is unavailable.
+    suffix_currency = re.fullmatch(
+        r"([+\-]?\d+(?:\.\d+)?)(元|块钱?|人民币)", text
+    )
+    if suffix_currency:
+        number, suffix = suffix_currency.groups()
+        if lang == "zh":
+            return _zh_cardinal(number) + suffix
+        names = {"元": "yuan", "块": "yuan", "块钱": "yuan", "人民币": "Chinese yuan"}
+        value = _en_cardinal(number)
+        return value + " " + names[suffix] if value else ""
     unit = re.fullmatch(r"([+\-]?\d+(?:\.\d+)?)(m²|km/h|km|kg|ms|°C|℃|m|mm|cm|[μµ]g/m³|%)", text)
     if unit and unit.group(2) != "%":
         if lang == "zh":
